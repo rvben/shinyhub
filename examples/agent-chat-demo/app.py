@@ -23,6 +23,7 @@ AGENT_URL = os.environ.get("AGENT_DEMO_AGUI_URL", "").strip()
 AGENT_TOKEN = os.environ.get("AGENT_DEMO_AGUI_TOKEN", "").strip()
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.environ.get("AGENT_DEMO_OPENAI_MODEL", "gpt-4.1-mini").strip()
+SCRIPTED_ONLY = os.environ.get("AGENT_DEMO_SCRIPTED_ONLY", "false").lower() in ("true", "1", "yes")
 CHAT_ENABLED = os.environ.get("AGENT_DEMO_ENABLE_CHAT", "true").lower() in ("true", "1", "yes")
 WEBMCP_ENABLED = os.environ.get("AGENT_DEMO_ENABLE_WEBMCP", "true").lower() in ("true", "1", "yes")
 MAX_EVENT_BYTES = 64 * 1024
@@ -292,7 +293,7 @@ async def stream_openai(body: ChatRequest):
 
 
 async def stream_agent(body: ChatRequest):
-    if not AGENT_URL and OPENAI_API_KEY:
+    if not SCRIPTED_ONLY and not AGENT_URL and OPENAI_API_KEY:
         try:
             yield sse({"type": "status", "text": "Reading your question"})
             async for event in stream_openai(body):
@@ -303,11 +304,20 @@ async def stream_agent(body: ChatRequest):
         yield sse({"type": "done"})
         return
 
-    if not AGENT_URL:
+    if SCRIPTED_ONLY or not AGENT_URL:
         period = requested_view(body.message)
         if period:
+            data = DASHBOARD["views"][period]
             yield sse({"type": "view_changed", "period": period})
-            yield sse({"type": "delta", "text": f"Showing {period} with illustrative data."})
+            yield sse({
+                "type": "delta",
+                "text": (
+                    f"The dashboard now shows {period}. The illustrative view has "
+                    f"{data['requests'].replace('M', ' million')} requests, p95 latency "
+                    f"{data['latency']}, and an error rate of {data['errors']}. "
+                    f"{data['peak']} has the highest request volume in the displayed series."
+                ),
+            })
             yield sse({"type": "done"})
             return
         answer = demo_answer(body.message, body.view)
@@ -359,7 +369,7 @@ async def agent_status():
     return {
         "chat_enabled": CHAT_ENABLED,
         "webmcp_enabled": WEBMCP_ENABLED,
-        "mode": "Connected AG-UI agent" if AGENT_URL else "OpenAI agent" if OPENAI_API_KEY else "Demo agent",
+        "mode": "Demo agent" if SCRIPTED_ONLY else "Connected AG-UI agent" if AGENT_URL else "OpenAI agent" if OPENAI_API_KEY else "Demo agent",
     }
 
 

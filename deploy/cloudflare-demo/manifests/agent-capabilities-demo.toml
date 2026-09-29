@@ -1,0 +1,5 @@
+[app]
+command = ["python", "-m", "uvicorn", "public:app", "--host", "{host}", "--port", "{port}"]
+memory_limit_mb = 256
+cpu_quota_percent = 100
+render_seconds = 0.1

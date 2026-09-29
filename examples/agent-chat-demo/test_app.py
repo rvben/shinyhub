@@ -1,6 +1,8 @@
 import asyncio
 import importlib.util
 import json
+import os
+import runpy
 import sys
 import unittest
 from pathlib import Path
@@ -15,6 +17,13 @@ spec.loader.exec_module(demo)
 
 
 class AgentChatTests(unittest.TestCase):
+    def test_public_entrypoint_refuses_provider_credentials(self):
+        entrypoint = Path(__file__).parents[2] / "deploy/cloudflare-demo/apps/agent-capabilities-demo/public.py"
+        for name in ("OPENAI_API_KEY", "AGENT_DEMO_AGUI_URL", "AGENT_DEMO_AGUI_TOKEN"):
+            with self.subTest(name=name), patch.dict(os.environ, {name: "test-credential"}):
+                with self.assertRaisesRegex(RuntimeError, name):
+                    runpy.run_path(str(entrypoint))
+
     def test_chat_and_webmcp_can_be_configured_independently(self):
         async def check():
             async with httpx.AsyncClient(
@@ -75,6 +84,22 @@ class AgentChatTests(unittest.TestCase):
             events = asyncio.run(collect())
         self.assertEqual([event["type"] for event in events], ["view_changed", "delta", "done"])
         self.assertEqual(events[0]["period"], "This year")
+        self.assertIn("11.4 million requests", events[1]["text"])
+
+    def test_scripted_only_ignores_provider_settings(self):
+        with patch.object(demo, "SCRIPTED_ONLY", True), patch.object(
+            demo, "OPENAI_API_KEY", "test-model-key"
+        ), patch.object(demo, "AGENT_URL", "https://example.invalid/agent"), patch.object(
+            demo.httpx, "AsyncClient", side_effect=AssertionError("outbound agent call")
+        ):
+            body = demo.ChatRequest(message="Set the view to this year", thread_id="t")
+            async def collect_scripted():
+                return [json.loads(event[6:]) async for event in demo.stream_agent(body)]
+
+            events = asyncio.run(collect_scripted())
+            status = asyncio.run(demo.agent_status())
+        self.assertEqual(events[0], {"type": "view_changed", "period": "This year"})
+        self.assertEqual(status["mode"], "Demo agent")
 
     def test_openai_period_tool_emits_view_change_and_uses_new_period(self):
         requests = []

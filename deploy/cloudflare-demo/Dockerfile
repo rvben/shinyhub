@@ -28,11 +28,14 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir \
+    "fastapi>=0.115,<1" \
+    "httpx>=0.27,<1" \
     "dash>=4.4,<5" \
     "PyJWT>=2.13,<3" \
     "shiny>=1.6,<2" \
     "shinyhub-bookmarks==0.5.2" \
-    "streamlit>=1.60,<2"
+    "streamlit>=1.60,<2" \
+    "uvicorn>=0.30,<1"
 
 COPY --from=builder /out/shinyhub /usr/local/bin/shinyhub
 COPY --from=caddy /usr/bin/caddy /usr/local/bin/caddy
@@ -56,6 +59,9 @@ COPY examples/identity-demo/app.py /opt/shinyhub-demo/apps/identity-demo/app.py
 COPY deploy/cloudflare-demo/manifests/identity-demo.toml /opt/shinyhub-demo/apps/identity-demo/shinyhub.toml
 COPY examples/bookmarking-demo/app.py /opt/shinyhub-demo/apps/bookmarking-demo/app.py
 COPY deploy/cloudflare-demo/manifests/bookmarking-demo.toml /opt/shinyhub-demo/apps/bookmarking-demo/shinyhub.toml
+COPY examples/agent-chat-demo/app.py examples/agent-chat-demo/dashboard.json examples/agent-chat-demo/index.html /opt/shinyhub-demo/apps/agent-capabilities-demo/
+COPY deploy/cloudflare-demo/apps/agent-capabilities-demo/public.py /opt/shinyhub-demo/apps/agent-capabilities-demo/public.py
+COPY deploy/cloudflare-demo/manifests/agent-capabilities-demo.toml /opt/shinyhub-demo/apps/agent-capabilities-demo/shinyhub.toml
 
 RUN chmod 0755 /usr/local/bin/cloudflare-demo-entrypoint \
     && mkdir -p /data/apps /data/app-data \

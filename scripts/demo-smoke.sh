@@ -207,6 +207,24 @@ check "$app_url/app/dash-demo/" 200
 check "$app_url/app/streamlit-demo/" 200
 check "$app_url/app/identity-demo/" 200
 check "$app_url/app/bookmarking-demo/" 200
+check "$app_url/app/agent-capabilities-demo/" 200
+
+agent_status=$(curl --silent --show-error --fail \
+  "$app_url/app/agent-capabilities-demo/agent-status")
+case "$agent_status" in
+  *'"mode":"Demo agent"'*) printf '%s -> scripted agent\n' "$app_url/app/agent-capabilities-demo/agent-status" ;;
+  *) echo "public agent demo is not in scripted mode" >&2; exit 1 ;;
+esac
+
+agent_reply=$(curl --silent --show-error --fail \
+  --header 'Content-Type: application/json' \
+  --data '{"message":"Set the view to this year","thread_id":"public-smoke","view":"This week"}' \
+  "$app_url/app/agent-capabilities-demo/chat")
+case "$agent_reply" in
+  *'"type":"view_changed","period":"This year"'*'"type":"done"'*)
+    printf '%s -> scripted view change\n' "$app_url/app/agent-capabilities-demo/chat" ;;
+  *) echo "public agent demo did not change the view" >&2; exit 1 ;;
+esac
 
 websocket_base=$(printf '%s' "$app_url" | sed 's,^https://,wss://,; s,^http://,ws://,')
 node "$(dirname "$0")/demo-websocket-smoke.mjs" \

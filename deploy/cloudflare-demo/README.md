@@ -81,8 +81,14 @@ collapsed fallback; neither path has mutation permissions. The demo account is
 bootstrapped with a display name and representative group memberships so the
 Identity application demonstrates the complete signed-claims contract.
 
+The agent capabilities app uses a scripted assistant. Its public entrypoint
+refuses `OPENAI_API_KEY`, `AGENT_DEMO_AGUI_URL`, and `AGENT_DEMO_AGUI_TOKEN`, and
+forces scripted mode before loading the app. The shared chat handler also
+honors that mode, so this demo cannot make model or external agent requests.
+The private agent demo may continue using its own OpenAI key.
+
 The demo deliberately uses ShinyHub's native runtime inside the outer container.
-Cloudflare Containers do not expose a Docker daemon, and the six bundled apps
+Cloudflare Containers do not expose a Docker daemon, and the seven bundled apps
 are repository-reviewed examples rather than visitor-provided code. This is a
 product demo, not a multi-tenant sandbox.
 

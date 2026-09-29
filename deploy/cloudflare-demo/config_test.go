@@ -60,8 +60,8 @@ func TestCloudflareDemoFleetIsCurated(t *testing.T) {
 	if len(problems) != 0 {
 		t.Fatalf("fleet manifest problems: %v", problems)
 	}
-	if len(manifest.Apps) != 6 {
-		t.Fatalf("demo fleet has %d apps, want 6", len(manifest.Apps))
+	if len(manifest.Apps) != 7 {
+		t.Fatalf("demo fleet has %d apps, want 7", len(manifest.Apps))
 	}
 	for _, app := range manifest.Apps {
 		if app.Visibility != "public" {
@@ -229,6 +229,8 @@ func TestCloudflareDemoDeploysAfterSuccessfulReleases(t *testing.T) {
 		`-X main.version=${VERSION}`,
 		`"shinyhub-bookmarks==0.5.2"`,
 		`COPY examples/bookmarking-demo/app.py /opt/shinyhub-demo/apps/bookmarking-demo/app.py`,
+		`COPY examples/agent-chat-demo/app.py examples/agent-chat-demo/dashboard.json examples/agent-chat-demo/index.html /opt/shinyhub-demo/apps/agent-capabilities-demo/`,
+		`COPY deploy/cloudflare-demo/apps/agent-capabilities-demo/public.py /opt/shinyhub-demo/apps/agent-capabilities-demo/public.py`,
 	} {
 		if !strings.Contains(dockerfileSource, required) {
 			t.Errorf("demo image is missing contract %q", required)
@@ -241,6 +243,8 @@ func TestCloudflareDemoDeploysAfterSuccessfulReleases(t *testing.T) {
 	}
 	for _, required := range []string{
 		`$app_url/app/bookmarking-demo/`,
+		`$app_url/app/agent-capabilities-demo/`,
+		`$app_url/app/agent-capabilities-demo/agent-status`,
 		`$websocket_base/app/bookmarking-demo/websocket/`,
 	} {
 		if !strings.Contains(string(smoke), required) {

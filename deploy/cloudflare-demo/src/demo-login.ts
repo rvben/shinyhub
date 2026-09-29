@@ -268,7 +268,7 @@ function entryMarkup(showError: boolean, destination: string | null): string {
     <section class="demo-entry" aria-labelledby="demo-entry-title">
       <div class="demo-entry-meta">
         <span class="demo-live-status"><span class="demo-live-dot" aria-hidden="true"></span>Live workspace</span>
-        <span>6 interactive apps</span>
+        <span>7 interactive apps</span>
       </div>
       <h2 id="demo-entry-title">Explore ShinyHub, already running.</h2>
       <p class="demo-entry-copy">Step into a real read-only control plane and launch working Python, R, Dash, and Streamlit applications.</p>

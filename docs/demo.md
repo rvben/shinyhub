@@ -15,7 +15,10 @@ Public applications open without an account. They use synthetic bundled data
 and run on an application origin isolated from the dashboard and API.
 
 The fleet includes examples built with Python Shiny, R Shiny, Dash, and
-Streamlit. Applications hibernate when idle, so the first request may briefly
+Streamlit. The [agent capabilities demo](https://demo.shinyhub.dev/app/agent-capabilities-demo/)
+has a scripted assistant that can explain synthetic dashboard data, change the
+selected view, and undo that change. It uses no model API key or paid model
+requests. Applications hibernate when idle, so the first request may briefly
 show ShinyHub waking the process.
 
 ## Explore the control plane
@@ -39,6 +42,7 @@ permissions on this instance.
 - Every public identity starts as `viewer`.
 - Application containers have fixed CPU, memory, session, and replica limits.
 - The fleet is reconciled from version-controlled manifests.
+- The public agent demo rejects model and external-agent credentials at startup.
 - Demo data is synthetic and can be replaced during reconciliation.
 - Administration uses a separate non-public credential.
 
