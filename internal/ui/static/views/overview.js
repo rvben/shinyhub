@@ -4,7 +4,7 @@
 // is the renderer + the 10s liveness poll. All app/user-supplied text is set via
 // textContent / createElement, never innerHTML, so a malicious slug or crash
 // traceback can never inject markup.
-import { buildOverviewModel, pulseMeta } from './overview-model.js';
+import { buildOverviewWorkspace, pulseMeta } from './overview-model.js';
 import { formatBytes } from './stat-format.js';
 import { formatStatus } from './status-label.js';
 import { appCardBadge } from './app-card-badge.js';
@@ -21,6 +21,12 @@ export function mountOverview(ctx) {
   view.hidden = false;
   ctx.updateActiveNav(location.pathname);
 
+  let selectedScope = 'all';
+  let overviewSnapshot = null;
+  let overviewStale = false;
+  let overviewRetryPending = false;
+  let scopeNotice = '';
+  const pendingRestarts = new Set();
   let disposed = false;
   let stopPoll = null;
   let loadInFlight = false;
@@ -74,12 +80,12 @@ export function mountOverview(ctx) {
         const { response: resp, body: ovBody } = await requestJSON('/api/apps');
         if (disposed) return;
         if (resp.status === 401) { stop(); ctx.onUnauthorized(); return; }
-        if (!resp.ok) { if (initial) body.replaceChildren(errorState()); return; }
+        if (!resp.ok) { showRefreshFailure(initial); return; }
         // Standard {items,...} list envelope; tolerate a bare array for resilience.
         const payload = ovBody || [];
         apps = Array.isArray(payload) ? payload : (Array.isArray(payload.items) ? payload.items : []);
       } catch {
-        if (initial) body.replaceChildren(errorState());
+        if (!disposed) showRefreshFailure(initial);
         return;
       }
       if (disposed) return;
@@ -93,8 +99,17 @@ export function mountOverview(ctx) {
       ]);
       if (disposed) return;
 
-      const model = buildOverviewModel(apps, metrics, history);
-      replaceOverviewContent(body, render(model, activitySnapshot));
+      const recovered = overviewStale;
+      overviewStale = false;
+      overviewSnapshot = { apps, metrics, history, updatedAt: new Date().toISOString() };
+      const workspace = buildOverviewWorkspace(apps, metrics, history, selectedScope);
+      scopeNotice = workspace.selectedKey !== selectedScope
+        ? 'The selected fleet is no longer available. Showing all apps.' : '';
+      selectedScope = workspace.selectedKey;
+      const model = workspace.model;
+      replaceOverviewContent(body, render(workspace, activitySnapshot));
+      if (scopeNotice) appendOverviewAnnouncement(live, scopeNotice);
+      if (recovered) appendOverviewAnnouncement(live, 'Overview is current again.');
       const signature = resourceLiveSignature(model.resources);
       if (!initial && lastLiveSignature && signature !== lastLiveSignature) {
         appendOverviewAnnouncement(live, resourceLiveSummary(model.resources, lastLiveResources));
@@ -103,7 +118,27 @@ export function mountOverview(ctx) {
       lastLiveResources = model.resources;
     } finally {
       loadInFlight = false;
+      overviewRetryPending = false;
+      const warning = body.querySelector('.ov-refresh-warning');
+      if (warning) {
+        warning.removeAttribute('aria-busy');
+        const retry = warning.querySelector('button');
+        retry.disabled = false;
+        retry.textContent = 'Retry';
+      }
     }
+  }
+
+  function showRefreshFailure(initial) {
+    if (initial || !overviewSnapshot) { body.replaceChildren(errorState()); return; }
+    const changed = !overviewStale;
+    const wasRetry = overviewRetryPending;
+    overviewRetryPending = false;
+    overviewStale = true;
+    const { apps, metrics, history } = overviewSnapshot;
+    const workspace = buildOverviewWorkspace(apps, { ...metrics, state: 'stale' }, history, selectedScope);
+    replaceOverviewContent(body, render(workspace, activitySnapshot));
+    if (changed || wasRetry) appendOverviewAnnouncement(live, 'Overview could not refresh. Showing the last successful update.');
   }
 
   async function fetchMetrics(appCount) {
@@ -202,22 +237,121 @@ export function mountOverview(ctx) {
     if (!restoreFocus(next, focusKey) && (fallbackFocusKey || focusKey)) restoreFocus(next, fallbackFocusKey || 'activity:heading');
   }
 
-  function render(model, activity) {
+  function selectScope(key, bringIntoView = false) {
+    if (!overviewSnapshot || disposed) return;
+    const { apps, metrics, history } = overviewSnapshot;
+    const workspace = buildOverviewWorkspace(apps, overviewStale ? { ...metrics, state: 'stale' } : metrics, history, key);
+    selectedScope = workspace.selectedKey;
+    scopeNotice = '';
+    lastLiveSignature = resourceLiveSignature(workspace.model.resources);
+    lastLiveResources = workspace.model.resources;
+    replaceOverviewContent(body, render(workspace, activitySnapshot));
+    restoreFocus(body, 'overview:scope');
+    if (bringIntoView) body.querySelector('.ov-scope')?.scrollIntoView?.({ block: 'start' });
+    live.textContent = `${workspace.scopes.find((scope) => scope.key === selectedScope).label}. ${workspace.model.verdict.headline}. ${workspace.model.verdict.detail}`;
+  }
+
+  function render(workspace, activity) {
+    const model = workspace.model;
     const root = el('div', 'ov-grid');
+    if (overviewStale) {
+      model.verdict = { tone: 'warning', headline: 'Overview data is stale', detail: 'App health, fleet membership, and resources reflect the last successful update.' };
+      const notice = el('section', 'ov-panel ov-refresh-warning');
+      notice.setAttribute('aria-label', 'Overview refresh status');
+      notice.appendChild(el('p', null, 'Overview could not refresh. Showing the last successful update.'));
+      const stamp = el('time', 'ov-res-scope', `Last updated ${new Date(overviewSnapshot.updatedAt).toLocaleTimeString()}`);
+      stamp.dateTime = overviewSnapshot.updatedAt;
+      const retry = el('button', 'ov-btn', overviewRetryPending ? 'Trying again…' : 'Retry');
+      retry.disabled = overviewRetryPending;
+      notice.setAttribute('aria-busy', String(overviewRetryPending));
+      retry.type = 'button';
+      retry.dataset.focusKey = 'overview:retry';
+      retry.addEventListener('click', () => {
+        if (loadInFlight) return;
+        overviewRetryPending = true;
+        retry.disabled = true;
+        retry.textContent = 'Trying again…';
+        notice.setAttribute('aria-busy', 'true');
+        void load(false);
+      });
+      notice.append(stamp, retry);
+      root.appendChild(notice);
+    }
+    if (scopeNotice) root.appendChild(el('p', 'ov-scope-summary', scopeNotice));
     if (model.total === 0) {
       root.appendChild(renderFirstRun());
       return root;
     }
+    root.appendChild(renderScope(workspace));
     root.appendChild(renderPulse(model));
     if (model.attention.length > 0) root.appendChild(renderAttention(model.attention));
     root.appendChild(renderFooter(model, activity));
+    if (workspace.groups.length > 0) root.appendChild(renderFleets(workspace.groups));
     return root;
+  }
+
+  function renderScope(workspace) {
+    const wrap = el('div', 'ov-scope');
+    const field = el('div', 'ov-scope-field');
+    const label = el('label', null, 'Show');
+    label.htmlFor = 'ov-scope-select';
+    const select = el('select', 'ov-scope-select');
+    select.id = 'ov-scope-select';
+    select.dataset.focusKey = 'overview:scope';
+    for (const scope of workspace.scopes) {
+      const option = el('option', null, `${scope.label} (${scope.total})`);
+      option.value = scope.key;
+      select.appendChild(option);
+    }
+    select.value = workspace.selectedKey;
+    select.addEventListener('change', () => selectScope(select.value));
+    field.append(label, select);
+    wrap.appendChild(field);
+    const selected = workspace.scopes.find((scope) => scope.key === workspace.selectedKey);
+    const text = selected.key === 'all'
+      ? `${selected.total} ${selected.total === 1 ? 'app' : 'apps'} across the hub · ${workspace.fleetCount} named ${workspace.fleetCount === 1 ? 'fleet' : 'fleets'}`
+      : `${selected.total} ${selected.total === 1 ? 'app' : 'apps'} · health and resources for ${selected.label}`;
+    wrap.appendChild(el('p', 'ov-scope-summary', text));
+    return wrap;
+  }
+
+  function renderFleets(groups) {
+    const sec = el('section', 'ov-panel ov-fleets');
+    sec.setAttribute('aria-labelledby', 'ov-fleets-title');
+    const title = sectionTitle('Fleets');
+    title.id = 'ov-fleets-title';
+    sec.appendChild(title);
+    sec.appendChild(el('p', 'ov-res-scope', 'App health and measured usage by fleet. Select a fleet to inspect its apps.'));
+    const list = el('ul', 'ov-fleet-list');
+    for (const group of groups) {
+      const { model } = group;
+      const row = el('li', 'ov-fleet-row');
+      const main = el('div', 'ov-fleet-main');
+      const button = el('button', 'ov-fleet-name', group.label);
+      button.type = 'button';
+      button.dataset.focusKey = `overview:${group.key}`;
+      button.addEventListener('click', () => selectScope(group.key, true));
+      main.appendChild(button);
+      main.appendChild(el('span', 'ov-fleet-meta', `${model.total} ${model.total === 1 ? 'app' : 'apps'} · ${model.counts.healthy} running`));
+      row.appendChild(main);
+      row.appendChild(el('span', `ov-fleet-health ov-fleet-health--${overviewStale ? 'warning' : model.verdict.tone}`, overviewStale ? 'Last reported health · Stale' : model.verdict.headline));
+      for (const metric of [model.resources.cpu, model.resources.memory]) {
+        const value = el('span', 'ov-fleet-usage');
+        const unavailable = metric.state === 'unavailable';
+        value.appendChild(el('b', null, model.resources.state === 'idle' ? '—' : unavailable ? 'Unavailable' : formatResource(metric.kind, metric.observedUsed)));
+        value.appendChild(el('span', null, `${metric.kind === 'cpu' ? 'CPU' : 'Memory'}${metric.state === 'partial' ? ' · Partial' : metric.state === 'stale' ? ' · Stale' : ''}`));
+        row.appendChild(value);
+      }
+      list.appendChild(row);
+    }
+    sec.appendChild(list);
+    return sec;
   }
 
   // ── Pulse: the fleet verdict + a proportional status bar (the signature). ──
   function renderPulse(model) {
     const sec = el('section', 'ov-pulse ov-pulse--' + model.verdict.tone);
-    sec.setAttribute('aria-label', 'Fleet status');
+    sec.setAttribute('aria-label', `${model.resources.scope.label} status`);
 
     const verdict = el('div', 'ov-pulse-verdict');
     verdict.appendChild(el('span', 'ov-pulse-dot'));
@@ -267,6 +401,7 @@ export function mountOverview(ctx) {
       const name = el('a', 'ov-attn-name', a.name);
       name.href = '/apps/' + encodeURIComponent(a.slug);
       name.setAttribute('data-nav', '');
+      name.dataset.focusKey = `attention:${a.slug}:name`;
       main.appendChild(name);
       main.appendChild(el('span', 'ov-attn-reason', a.reason || formatStatus(a.status)));
       li.appendChild(main);
@@ -279,18 +414,26 @@ export function mountOverview(ctx) {
       // this app (the server would reject it for view-only members anyway), the
       // same gate the Apps grid uses.
       if (ctx.canManageApp(ctx.state.user, a.app)) {
-        const restart = el('button', 'ov-btn', 'Restart');
+        const restart = el('button', 'ov-btn', pendingRestarts.has(a.slug) ? 'Restarting…' : 'Restart');
+        restart.disabled = pendingRestarts.has(a.slug);
+        restart.dataset.focusKey = `attention:${a.slug}:restart`;
         restart.type = 'button';
         restart.addEventListener('click', () => {
+          if (pendingRestarts.has(a.slug)) return;
+          pendingRestarts.add(a.slug);
           restart.disabled = true;
           restart.textContent = 'Restarting…';
-          Promise.resolve(ctx.restart(a.slug)).finally(() => { if (!disposed) load(false); });
+          Promise.resolve().then(() => ctx.restart(a.slug)).catch(() => {}).finally(() => {
+            pendingRestarts.delete(a.slug);
+            if (!disposed) void load(false);
+          });
         });
         actions.appendChild(restart);
       }
       const open = el('a', 'ov-btn', 'Open');
       open.href = '/apps/' + encodeURIComponent(a.slug);
       open.setAttribute('data-nav', '');
+      open.dataset.focusKey = `attention:${a.slug}:open`;
       actions.appendChild(open);
       li.appendChild(actions);
 
@@ -387,6 +530,7 @@ export function renderActivityBrief(snapshot, onRetry = null, options = {}) {
   title.tabIndex = -1;
   title.dataset.focusKey = 'activity:heading';
   heading.appendChild(title);
+  heading.appendChild(el('p', 'ov-res-scope', 'Across the hub'));
   if ((state === 'ready' || state === 'stale') && snapshot.updatedAt) {
     const freshness = el('p', 'ov-activity-freshness');
     const dot = el('span', 'ov-activity-freshness-dot');
@@ -595,7 +739,7 @@ function activityUnavailable(onRetry, retryPending = false) {
   state.appendChild(activityIcon('attention'));
   const copy = el('div', 'ov-activity-unavailable-copy');
   copy.appendChild(el('b', null, 'Activity unavailable'));
-  copy.appendChild(el('p', null, 'Fleet health is still current. Recent changes could not be loaded.'));
+  copy.appendChild(el('p', null, 'Recent changes could not be loaded. App health is shown above.'));
   state.appendChild(copy);
   if (typeof onRetry === 'function') state.appendChild(activityRetry(onRetry, retryPending));
   return state;
@@ -659,10 +803,10 @@ export function renderResourcePressure(res) {
 
   const head = el('div', 'ov-res-head');
   const titleWrap = el('div', 'ov-res-heading');
-  const title = el('h2', 'ov-section-title', panelTitle(res.scale));
+  const title = el('h2', 'ov-section-title', panelTitle(res.scale, res.scope));
   title.id = 'ov-resources-title';
   titleWrap.appendChild(title);
-  titleWrap.appendChild(el('p', 'ov-res-scope', panelScope(res.scale)));
+  titleWrap.appendChild(el('p', 'ov-res-scope', panelScope(res.scale, res.scope, res.cpu.scale !== res.memory.scale)));
   head.appendChild(titleWrap);
   head.appendChild(el('p', 'ov-res-updated', updatedText(res)));
   sec.appendChild(head);
@@ -687,7 +831,7 @@ export function renderResourcePressure(res) {
   // With no limits anywhere there are no per-replica thresholds to alert on, so
   // the panel answers the next question instead: which apps account for this.
   if (res.scale !== 'limits') {
-    if (res.topConsumers) sec.appendChild(renderTopConsumers(res.topConsumers));
+    if (res.topConsumers) sec.appendChild(renderTopConsumers(res.topConsumers, res.scope));
     return sec;
   }
 
@@ -741,6 +885,8 @@ export function replaceOverviewContent(body, next) {
   restoreDisclosures(body, disclosures);
   if (!restoreFocus(body, focusKey) && focusKey && focusKey.startsWith('activity:')) {
     restoreFocus(body, 'activity:heading');
+  } else if (focusKey && !body.contains(document.activeElement)) {
+    restoreFocus(body, 'overview:scope');
   }
 }
 
@@ -758,7 +904,7 @@ function renderCapacityRow(label, metric, runningReplicas) {
   const context = el('span', 'ov-capacity-context');
   // A percentage needs a denominator. Without one the value beside it already
   // says everything that is known, so nothing stands in for the missing share.
-  if (metric.fraction != null) context.appendChild(el('strong', null, `${Math.round(metric.fraction * 100)}%`));
+  if (metric.fraction != null) context.appendChild(el('strong', null, `${Math.round(metric.fraction * 100)}% of ${metric.scale === 'host' ? 'host' : 'limits'}`));
   if (metric.peakFraction != null && metric.fraction != null && metric.peakFraction - metric.fraction >= 0.05) {
     context.appendChild(el('span', 'ov-capacity-peak', `Peak replica ${Math.round(metric.peakFraction * 100)}%`));
   }
@@ -786,11 +932,12 @@ function renderCapacityRow(label, metric, runningReplicas) {
 // renderTopConsumers attributes fleet usage to the apps behind it. It replaces
 // the pressure alerts on a fleet with no limits: nothing can be near a
 // threshold that does not exist, so the useful question is who is using it.
-function renderTopConsumers(top) {
+function renderTopConsumers(top, scope = { key: 'all', label: 'All apps' }) {
   const wrap = document.createDocumentFragment();
   const head = el('div', 'ov-hotspot-head');
   head.appendChild(el('h3', 'ov-res-subhead', `Top ${top.kind === 'cpu' ? 'CPU' : 'memory'} consumers`));
   wrap.appendChild(head);
+  wrap.appendChild(el('p', 'ov-res-scope', `Share of measured ${top.kind} usage · ${scope.label}${top.partial ? ' · Partial reporting' : ''}`));
 
   const list = el('ul', 'ov-consumer-list');
   for (const item of top.items) {
@@ -799,11 +946,14 @@ function renderTopConsumers(top) {
     link.href = '/apps/' + encodeURIComponent(item.slug) + '/configuration';
     link.setAttribute('data-nav', '');
     link.dataset.focusKey = `consumer:${item.slug}:${top.kind}`;
-    li.appendChild(link);
+    const main = el('div', 'ov-consumer-main');
+    main.appendChild(link);
+    if (scope.key === 'all') main.appendChild(el('span', 'ov-fleet-meta', item.fleetID ? `Fleet · ${item.fleetID}` : 'Outside fleets'));
+    li.appendChild(main);
 
     const share = el('span', 'ov-consumer-share');
     share.setAttribute('role', 'img');
-    share.setAttribute('aria-label', `${Math.round(item.fraction * 100)} percent of fleet ${top.kind}`);
+    share.setAttribute('aria-label', `${Math.round(item.fraction * 100)} percent of measured ${top.kind} usage in ${scope.label}`);
     const fill = el('span', 'ov-consumer-fill');
     fill.style.width = `${Math.max(2, Math.round(item.fraction * 100))}%`;
     share.appendChild(fill);
@@ -811,7 +961,7 @@ function renderTopConsumers(top) {
 
     const values = el('span', 'ov-consumer-values');
     values.appendChild(el('b', null, formatResource(top.kind, item.used)));
-    values.appendChild(el('span', null, `${Math.round(item.fraction * 100)}% of fleet`));
+    values.appendChild(el('span', null, `${Math.round(item.fraction * 100)}% of measured usage`));
     li.appendChild(values);
     list.appendChild(li);
   }
@@ -819,16 +969,20 @@ function renderTopConsumers(top) {
   return wrap;
 }
 
-function panelTitle(scale) {
-  return scale === 'limits' ? 'App allocation pressure' : 'Fleet resource usage';
+function panelTitle(scale, scope) {
+  if (scale === 'limits') return 'App allocation pressure';
+  if (!scope || scope.key === 'all') return 'Hub resource usage';
+  return scope.key.startsWith('fleet:') ? 'Fleet resource usage' : 'App resource usage';
 }
 
 // The scope line says what the numbers are measured against, and on a fleet
 // with no limits it also says why the panel is answering a different question.
-function panelScope(scale) {
-  if (scale === 'limits') return 'Against enforced per-replica limits';
-  if (scale === 'host') return 'No per-app limits set · measured against host capacity';
-  return 'No per-app limits set · host capacity unknown';
+function panelScope(scale, scope, mixed = false) {
+  const prefix = scope && scope.key !== 'all' ? `${scope.label} · ` : 'All apps · ';
+  if (mixed) return `${prefix}each resource shows its own capacity basis`;
+  if (scale === 'limits') return `${prefix}against enforced per-replica limits`;
+  if (scale === 'host') return `${prefix}app usage against shared host capacity`;
+  return `${prefix}measured app usage · host capacity unknown`;
 }
 
 function renderHotspot(item) {
@@ -863,6 +1017,7 @@ function renderHotspot(item) {
 }
 
 function capacityValue(metric) {
+  if (metric.state === 'unavailable') return 'Unavailable';
   if (metric.capacity > 0) {
     return `${formatResource(metric.kind, metric.used)} / ${formatResource(metric.kind, metric.capacity)}`;
   }

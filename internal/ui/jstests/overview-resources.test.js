@@ -134,8 +134,8 @@ test('a fleet with no limits is measured against the host, not reported as immea
     { cores: 4, cores_source: 'affinity', memory_mb: 8192, memory_source: 'host-total' },
   );
   const node = renderResourcePressure(resources);
-  assert.match(node.textContent, /Fleet resource usage/);
-  assert.match(node.textContent, /No per-app limits set · measured against host capacity/);
+  assert.match(node.textContent, /Hub resource usage/);
+  assert.match(node.textContent, /All apps · app usage against shared host capacity/);
   assert.match(node.textContent, /1\.5 cores \/ 4\.0 cores/);
   assert.match(node.textContent, /2\.0 GB \/ 8\.0 GB/);
   assert.match(node.textContent, /Across 1 running replica/);
@@ -154,7 +154,7 @@ test('an unmeasurable host reports live usage rather than an invented percentage
     forecast: { status: 'running', replicas: [unlimited(0, 150, 2048)] },
   });
   const node = renderResourcePressure(resources);
-  assert.match(node.textContent, /No per-app limits set · host capacity unknown/);
+  assert.match(node.textContent, /All apps · measured app usage · host capacity unknown/);
   assert.match(node.textContent, /1\.5 cores in use/);
   assert.match(node.textContent, /2\.0 GB in use/);
   assert.match(node.textContent, /Live/);
@@ -178,7 +178,7 @@ test('a no-limit fleet attributes its usage to the apps behind it', () => {
   assert.equal(rows.length, 3);
   assert.equal(rows[0].querySelector('a').getAttribute('href'), '/apps/alpha/configuration');
   assert.match(rows[0].textContent, /400 MB/);
-  assert.match(rows[0].textContent, /40% of fleet/);
+  assert.match(rows[0].textContent, /40% of measured usage/);
   // Attribution, not alarm: no pressure alerts and no all-clear about limits
   // that were never set.
   assert.equal(node.querySelector('.ov-hotspot-row'), null);

@@ -367,3 +367,79 @@ test('buildOverviewModel: with no denominator a small absolute move stays steady
   assert.equal(busy.resources.memory.trend.state, 'rising');
   assert.equal(busy.resources.memory.trend.deltaValue, 100 * MIB);
 });
+
+test('stale pressure is explicitly historical even when its last reading was critical', () => {
+  const apps = [{ slug: 'a', name: 'Alpha', status: 'running' }];
+  const metrics = { state: 'stale', metrics: { a: { replicas: [replica(0, { cpu: 95 })] } } };
+  const model = buildOverviewModel(apps, metrics);
+  assert.equal(model.verdict.headline, 'Resource data is stale');
+  assert.match(model.verdict.detail, /Last reported: Alpha cpu was at 95%/);
+  assert.equal(model.resources.hotspots.length, 1);
+  metrics.metrics.a.replicas[0] = replica(0, { cpu: 390, cpuQuota: 0, memMB: 0 });
+  metrics.host = { cores: 4, memory_mb: 8192 };
+  assert.match(buildOverviewModel(apps, metrics).verdict.detail, /Last reported: CPU was at 98%/);
+});
+
+test('known enforced limits keep their scale when only unlimited replicas report', () => {
+  const model = buildOverviewModel([{ slug: 'a', status: 'running' }, { slug: 'b', status: 'running' }], {
+    ...ready({ a: { replicas: [replica(0, { metricsAvailable: false })] }, b: { replicas: [replica(0, { cpu: 10, rssMB: 20, cpuQuota: 0, memMB: 0 })] } }),
+    host: { cores: 4, memory_mb: 8192 },
+  });
+  for (const metric of [model.resources.cpu, model.resources.memory]) {
+    assert.equal(metric.scale, 'limits');
+    assert.equal(metric.state, 'unavailable');
+    assert.equal(metric.fraction, null);
+    assert.equal(metric.coverage.enforcedReplicas, 1);
+    assert.equal(metric.coverage.unavailableReplicas, 1);
+  }
+});
+
+test('sampler failure cannot turn a running app into idle measurements', () => {
+  const failed = { ...replica(0), status: 'stopped', metrics_available: false };
+  const model = buildOverviewModel([{ slug: 'a', status: 'running', replicas_running: 1 }], ready({ a: { status: 'stopped', replicas: [failed] } }));
+  assert.equal(model.resources.runningReplicas, 1);
+  assert.equal(model.resources.state, 'unavailable');
+  assert.equal(model.verdict.headline, 'Resource metrics unavailable');
+});
+
+test('three history samples compare disjoint endpoints on limits and host scales', () => {
+  const apps = [{ slug: 'a', status: 'running' }];
+  const history = { historyAvailable: true, historyBySlug: { a: { ts: [0, 60, 120], cpu: [10, 50, 90], rss: [10, 50, 90].map((v) => v * MIB), instances: [1, 1, 1] } } };
+  for (const limits of [true, false]) {
+    const metrics = { ...ready({ a: { replicas: [replica(0, { cpuQuota: limits ? 100 : 0, memMB: limits ? 100 : 0 })] } }), host: { cores: 4, memory_mb: 100 } };
+    const model = buildOverviewModel(apps, metrics, history);
+    assert.equal(model.resources.cpu.trend.state, 'rising');
+    assert.equal(model.resources.memory.trend.state, 'rising');
+    assert.equal(model.resources.cpu.trend.deltaFraction, limits ? 0.8 : 0.2);
+  }
+});
+
+test('reported healthy survivors and absent replica rows remain part of measurement coverage', () => {
+  const stopped = { ...replica(0), status: 'stopped', metrics_available: false };
+  const degraded = buildOverviewModel([{ slug: 'a', status: 'degraded', replicas_running: 1 }], ready({ a: { replicas: [stopped] } }));
+  assert.equal(degraded.resources.runningReplicas, 1);
+  assert.equal(degraded.resources.state, 'unavailable');
+  for (const metrics of [{}, { a: { replicas: [] } }]) {
+    const missing = buildOverviewModel([{ slug: 'a', status: 'degraded', replicas_running: 1, replicas: 3 }], ready(metrics));
+    assert.equal(missing.resources.runningReplicas, 1);
+    assert.equal(missing.resources.state, 'unavailable');
+    const workers = buildOverviewModel([{ slug: 'a', status: 'running', workers_running: 5 }], ready(metrics));
+    assert.equal(workers.resources.runningReplicas, 5);
+  }
+  const absent = buildOverviewModel([{ slug: 'a', status: 'running', replicas_running: 3 }], ready({ a: { replicas: [replica(0)] } }));
+  assert.equal(absent.resources.runningReplicas, 3);
+  assert.equal(absent.resources.state, 'partial');
+  assert.equal(absent.resources.cpu.coverage.coveredReplicas, 1);
+});
+
+test('startup and active deployments are working rather than idle or already running', () => {
+  const model = buildOverviewModel([
+    { slug: 'a', status: 'starting' }, { slug: 'b', status: 'resuming' },
+    { slug: 'c', status: 'stopped', deploying: true, last_deployment_status: 'failed' },
+  ], {});
+  assert.equal(model.counts.transient, 3);
+  assert.equal(model.counts.idle, 0);
+  assert.equal(model.attention.length, 0);
+  assert.match(model.verdict.detail, /3 working/);
+  assert.doesNotMatch(model.verdict.detail, /running/);
+});

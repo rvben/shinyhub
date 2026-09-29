@@ -4,12 +4,13 @@
 // status distribution for the pulse bar, the apps that need attention, and a
 // fleet resource summary. Kept DOM-free so it is unit-testable and so the view
 // stays a thin renderer over a tested model.
+import { fleetID } from './fleet-ui.js';
 
 // Wire statuses grouped into the four pulse buckets. Anything unmapped counts
 // as "idle" (stopped/unknown): present but not serving, and not an alarm.
 const HEALTHY = new Set(['running', 'healthy']);
 const SLEEPING = new Set(['hibernated', 'suspended']);
-const TRANSIENT = new Set(['deploying', 'waking']);
+const TRANSIENT = new Set(['deploying', 'waking', 'starting', 'booting', 'resuming']);
 const ATTENTION = new Set(['crashed', 'degraded']);
 
 // pulseOrder is the segment order in the status bar: healthy leads, attention
@@ -81,7 +82,7 @@ export function buildOverviewModel(apps, metricsInput, historyInput = {}) {
     // recent deployment failed (which leaves the app "stopped" - indistinguish-
     // able from an intentionally-stopped app by status alone).
     const attn = needsAttention(app);
-    const bucket = attn ? 'attention' : bucketOf(app.status);
+    const bucket = attn ? 'attention' : app.deploying ? 'transient' : bucketOf(app.status);
     counts[bucket] += 1;
     if (attn) {
       attention.push({
@@ -110,6 +111,46 @@ export function buildOverviewModel(apps, metricsInput, historyInput = {}) {
     verdict: verdictFor(list.length, counts, attention, resources),
     attention,
     resources,
+  };
+}
+
+// Scope keys include a prefix so fleet names such as "all" or "unmanaged"
+// cannot collide with the hub and independent-app selections.
+export function buildOverviewWorkspace(apps, metrics, history = {}, selectedKey = 'all') {
+  const list = Array.isArray(apps) ? apps : [];
+  const groups = new Map();
+  for (const app of list) {
+    const id = fleetID(app);
+    const key = id ? `fleet:${id}` : 'unmanaged';
+    if (!groups.has(key)) groups.set(key, { key, fleetID: id, label: id ? `Fleet · ${id}` : 'Outside fleets', apps: [] });
+    groups.get(key).apps.push(app);
+  }
+  const scopes = [
+    { key: 'all', label: 'All apps', apps: list },
+    ...[...groups.values()].sort((a, b) => {
+      if (!a.fleetID) return 1;
+      if (!b.fleetID) return -1;
+      return a.fleetID.localeCompare(b.fleetID);
+    }),
+  ];
+  const selected = scopes.find((scope) => scope.key === selectedKey) || scopes[0];
+  function modelFor(scope) {
+    const model = buildOverviewModel(scope.apps, metrics, history);
+    model.resources.scope = { key: scope.key, label: scope.label };
+    // A selected fleet's usage is a contribution to shared host capacity,
+    // rather than a measurement of everything occupying the host.
+    if (scope.key !== 'all' && model.verdict.headline.startsWith('Host ')) {
+      model.verdict.headline = 'Selected apps are nearing host capacity';
+    }
+    return model;
+  }
+  return {
+    selectedKey: selected.key,
+    scopes: scopes.map(({ apps, ...scope }) => ({ ...scope, total: apps.length })),
+    fleetCount: [...groups.values()].filter((group) => group.fleetID).length,
+    model: modelFor(selected),
+    groups: selected.key === 'all' && [...groups.values()].some((group) => group.fleetID)
+      ? scopes.slice(1).map((scope) => ({ key: scope.key, label: scope.label, model: modelFor(scope) })) : [],
   };
 }
 
@@ -185,6 +226,7 @@ function buildResources(apps, metricsState, historyInput) {
   if (runningReplicas === 0) state = 'idle';
   else if (metricsState.state === 'unavailable') state = 'unavailable';
   else if (metricsState.state === 'stale') state = 'stale';
+  else if (cpu.state === 'unavailable' && memory.state === 'unavailable') state = 'unavailable';
   else if (cpu.state !== 'ready' || memory.state !== 'ready') state = 'partial';
 
   // The panel's scale is the strongest denominator any row has: one row on
@@ -224,12 +266,12 @@ function buildResources(apps, metricsState, historyInput) {
  * size is unknown. In neither case does it invent a limit.
  */
 function applyHostScale(metric, host, runningReplicas, metricsState) {
-  if (metric.coverage.coveredReplicas > 0) return;
+  if (metric.coverage.enforcedReplicas > 0) return;
   metric.scale = host ? 'host' : 'none';
   metric.used = metric.observedUsed;
   metric.capacity = host ? host.value : 0;
   metric.capacitySource = host ? host.source : null;
-  metric.fraction = host ? metric.observedUsed / host.value : null;
+  metric.fraction = host && metric.coverage.observedReplicas > 0 ? metric.observedUsed / host.value : null;
   // There are no per-replica denominators here, so there is no hottest replica
   // to name; the fraction covers the whole fleet at once.
   metric.peakFraction = null;
@@ -262,8 +304,8 @@ function topConsumersFor(memory, cpu) {
   const items = [...metric.usageInputs]
     .sort((a, b) => b.used - a.used || a.name.localeCompare(b.name))
     .slice(0, TOP_CONSUMERS)
-    .map((entry) => ({ slug: entry.slug, name: entry.name, used: entry.used, fraction: entry.used / total }));
-  return { kind: metric.kind, items };
+    .map((entry) => ({ slug: entry.slug, name: entry.name, fleetID: entry.fleetID, used: entry.used, fraction: entry.used / total }));
+  return { kind: metric.kind, items, partial: metric.coverage.observedReplicas < metric.coverage.runningReplicas };
 }
 
 function newPressureMetric(kind) {
@@ -286,6 +328,7 @@ function newPressureMetric(kind) {
       runningReplicas: 0,
       completeApps: 0,
       coveredReplicas: 0,
+      enforcedReplicas: 0,
       observedReplicas: 0,
       unlimitedReplicas: 0,
       unenforcedReplicas: 0,
@@ -303,10 +346,23 @@ function newPressureMetric(kind) {
 
 function runningReplicasFor(app, metrics) {
   if (metrics && Array.isArray(metrics.replicas) && metrics.replicas.length > 0) {
-    return metrics.replicas.filter((replica) => isRunning(replica.status));
+    const running = metrics.replicas.filter((replica) => isRunning(replica.status));
+    // Sampling can mark a replica stopped when its measurement fails. Retain
+    // missing observations while the app list still reports running replicas.
+    const reported = Number(app.replicas_running) || Number(app.workers_running) || 0;
+    const expected = Math.max(running.length, reported > 0 ? reported : isRunning(app.status)
+      ? Math.max(1, Number(app.replicas) || metrics.replicas.length) : 0);
+    const missing = metrics.replicas.filter((replica) => !isRunning(replica.status));
+    const placeholders = missing.slice(0, expected - running.length)
+      .map((replica) => ({ ...replica, metrics_available: false }));
+    while (running.length + placeholders.length < expected) {
+      placeholders.push({ status: 'running', metrics_available: false });
+    }
+    return running.concat(placeholders);
   }
-  if (!isRunning(metrics && metrics.status) && !isRunning(app.status)) return [];
-  const count = Math.max(1, Number(metrics && metrics.replicas_running) || Number(app.replicas_running) || Number(app.replicas) || 1);
+  const reported = Number(app.replicas_running) || Number(app.workers_running) || 0;
+  if (!reported && !isRunning(metrics && metrics.status) && !isRunning(app.status)) return [];
+  const count = Math.max(1, reported || Number(metrics && metrics.replicas_running) || Number(app.replicas) || 1);
   return Array.from({ length: count }, (_, index) => {
     if (count !== 1 || !metrics) return { index, status: 'running', metrics_available: false };
     return {
@@ -359,6 +415,7 @@ function collectAppPressure(app, replicas, metric, hotspots) {
       complete = false;
       continue;
     }
+    metric.coverage.enforcedReplicas += 1;
     if (!facts.observed) {
       metric.coverage.unavailableReplicas += 1;
       complete = false;
@@ -404,6 +461,7 @@ function collectAppPressure(app, replicas, metric, hotspots) {
     metric.usageInputs.push({
       slug: app.slug,
       name: app.name || app.slug,
+      fleetID: fleetID(app),
       used: appObservedUsed,
       allObserved: appObserved === replicas.length,
     });
@@ -441,7 +499,7 @@ function finishMetric(metric, runningApps, runningReplicas, metricsState) {
   else if (metricsState === 'unavailable') metric.state = 'unavailable';
   else if (metric.coverage.coveredReplicas === runningReplicas) metric.state = metricsState === 'stale' ? 'stale' : 'ready';
   else if (metricsState === 'stale') metric.state = 'stale';
-  else if (metric.coverage.observedReplicas > 0) metric.state = 'partial';
+  else if (metric.coverage.coveredReplicas > 0) metric.state = 'partial';
   else metric.state = 'unavailable';
 }
 
@@ -479,8 +537,8 @@ function pressureTrend(metric, history) {
   for (const input of metric.trendInputs) {
     const windowed = trendWindow(historyPoints(history[input.slug], metric.kind, input.perReplicaLimit));
     if (!windowed) return collectingTrend();
-    earlyWeighted += median(windowed.slice(0, 3).map((point) => point.value)) * input.capacity;
-    lateWeighted += median(windowed.slice(-3).map((point) => point.value)) * input.capacity;
+    earlyWeighted += median(windowed.slice(0, Math.min(3, Math.floor(windowed.length / 2))).map((point) => point.value)) * input.capacity;
+    lateWeighted += median(windowed.slice(-Math.min(3, Math.floor(windowed.length / 2))).map((point) => point.value)) * input.capacity;
     totalWeight += input.capacity;
     shortestSpan = Math.min(shortestSpan, windowed.at(-1).ts - windowed[0].ts);
   }
@@ -514,8 +572,8 @@ function usageTrend(metric, history) {
   for (const input of metric.usageInputs) {
     const windowed = trendWindow(absoluteHistoryPoints(history[input.slug], metric.kind));
     if (!windowed) return collectingTrend();
-    earlyTotal += median(windowed.slice(0, 3).map((point) => point.value));
-    lateTotal += median(windowed.slice(-3).map((point) => point.value));
+    earlyTotal += median(windowed.slice(0, Math.min(3, Math.floor(windowed.length / 2))).map((point) => point.value));
+    lateTotal += median(windowed.slice(-Math.min(3, Math.floor(windowed.length / 2))).map((point) => point.value));
     counted += 1;
     shortestSpan = Math.min(shortestSpan, windowed.at(-1).ts - windowed[0].ts);
   }
@@ -631,6 +689,19 @@ function verdictFor(total, counts, attention, resources) {
     };
   }
 
+  if (resources.state === 'stale') {
+    const hotspot = resources.hotspots[0];
+    const host = hostScaleMetric(resources, 'critical') || hostScaleMetric(resources, 'warning');
+    const lastPressure = hotspot
+      ? `Last reported: ${hotspot.name} ${hotspot.metric} was at ${Math.round(hotspot.fraction * 100)}% on replica ${(hotspot.replicaIndex ?? 0) + 1}.`
+      : host ? `Last reported: ${hostScaleDetail(host, resources.runningReplicas).replace(' is at ', ' was at ')}` : '';
+    return {
+      tone: 'warning',
+      headline: 'Resource data is stale',
+      detail: lastPressure || 'Showing the last successful resource snapshot while live metrics recover.',
+    };
+  }
+
   const critical = resources.hotspots.find((item) => item.severity === 'critical');
   if (critical) {
     return {
@@ -670,13 +741,6 @@ function verdictFor(total, counts, attention, resources) {
       detail: 'App health is visible, but current CPU and memory pressure cannot be verified.',
     };
   }
-  if (resources.state === 'stale') {
-    return {
-      tone: 'warning',
-      headline: 'Resource data is stale',
-      detail: 'Showing the last successful resource snapshot while live metrics recover.',
-    };
-  }
   if (resources.state === 'partial') {
     return {
       tone: 'warning',
@@ -684,11 +748,10 @@ function verdictFor(total, counts, attention, resources) {
       detail: partialDetail(resources),
     };
   }
-  const live = counts.healthy + counts.transient;
   return {
     tone: 'nominal',
     headline: 'All systems nominal',
-    detail: summaryLine(total, counts, live),
+    detail: summaryLine(total, counts),
   };
 }
 
@@ -724,15 +787,17 @@ function partialDetail(resources) {
     : 'Some running replicas have unlimited or unenforced capacity.';
 }
 
-function summaryLine(total, counts, live) {
+function summaryLine(total, counts) {
   const parts = [`${total} ${total === 1 ? 'app' : 'apps'}`];
-  if (live) parts.push(`${live} running`);
+  if (counts.healthy) parts.push(`${counts.healthy} running`);
+  if (counts.transient) parts.push(`${counts.transient} working`);
   if (counts.sleeping) parts.push(`${counts.sleeping} sleeping`);
   if (counts.idle) parts.push(`${counts.idle} idle`);
   return parts.join(' · ');
 }
 
 function needsAttention(app) {
+  if (app.deploying) return false;
   const s = (app.status || '').toLowerCase();
   if (ATTENTION.has(s)) return true;
   return (app.last_deployment_status || '').toLowerCase() === 'failed';

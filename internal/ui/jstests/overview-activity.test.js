@@ -279,7 +279,7 @@ test('unavailable and stale states stay truthful and recoverable', () => {
   let retries = 0;
   const unavailable = renderActivityBrief({ state: 'unavailable', events: [], updatedAt: null }, () => { retries += 1; });
   assert.match(unavailable.textContent, /Activity unavailable/);
-  assert.match(unavailable.textContent, /Fleet health is still current/);
+  assert.match(unavailable.textContent, /App health is shown above/);
   assert.doesNotMatch(unavailable.textContent, /No changes/);
   unavailable.querySelector('.ov-activity-retry').click();
   assert.equal(retries, 1);
