@@ -476,6 +476,7 @@
     ".chat-panel-action:disabled { opacity: .45; cursor: default; }",
     ".chat-panel-action:focus-visible { outline: 2px solid var(--sh-signal); outline-offset: -2px; }",
     ".chat-panel-close { display: grid; place-items: center; width: 34px; padding: 0; }",
+    ".chat-panel-close svg { display: block; width: 16px; height: 16px; }",
     ".chat-content { display: block; flex: 1; min-height: 0; overflow: hidden; }",
     ".scrim {" +
       "  position: absolute; inset: 0; background: var(--sh-deep); opacity: 0;" +
@@ -1123,7 +1124,7 @@
   var chatClose = document.createElement("button");
   chatClose.type = "button";
   chatClose.className = "chat-panel-action chat-panel-close";
-  chatClose.appendChild(svg(["M5 5l14 14", "M19 5 5 19"], 16));
+  chatClose.appendChild(svg(["M5 5l14 14", "M19 5 5 19"], 24));
   chatClose.setAttribute("aria-label", "Close assistant");
   chatPanelHead.appendChild(chatPanelMark);
   chatPanelHead.appendChild(chatPanelTitle);

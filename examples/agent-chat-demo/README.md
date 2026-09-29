@@ -1,10 +1,10 @@
 # Agent capabilities demo
 
 A self-contained prototype showing two independent capabilities for a ShinyHub
-app. The hoster can provide a chat agent in a dashboard side panel, and the app
+app. The hoster can provide a chat agent in a native ShinyHub overlay, and the app
 can expose browser tools for a visitor's own agent. The dashboard values are
-synthetic. ShinyHub's **Ask** toolbar control opens a side panel on desktop so
-dashboard changes remain visible; it fills the screen on narrow viewports.
+synthetic. ShinyHub's **Ask** toolbar control opens the overlay over the full-width
+dashboard; it fills the screen on narrow viewports.
 Outside ShinyHub, the app shows its own **Ask the assistant** launcher.
 With an OpenAI API key, the app runs a tool-using agent on the
 server. A hoster can instead provide an AG-UI endpoint. With neither configured,
