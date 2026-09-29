@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.18.1](https://github.com/rvben/shinyhub/compare/v0.18.0...v0.18.1) - 2026-09-29
+
+### Fixed
+
+- **deploy**: install a shipped uv.lock as locked instead of re-resolving it ([b94d5e0](https://github.com/rvben/shinyhub/commit/b94d5e0eeb82fe080dd9c5dbeff9d2ec61115508))
+
 ## [0.18.0](https://github.com/rvben/shinyhub/compare/v0.17.8...v0.18.0) - 2026-09-28
 
 ### Added
