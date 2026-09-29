@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.18.2](https://github.com/rvben/shinyhub/compare/v0.18.1...v0.18.2) - 2026-09-29
+
+### Fixed
+
+- **cli**: keep credential saves from switching hosts ([d2ce981](https://github.com/rvben/shinyhub/commit/d2ce981a2a625e3d29b726b4391a1bdadb012055))
+
 ## [0.18.1](https://github.com/rvben/shinyhub/compare/v0.18.0...v0.18.1) - 2026-09-29
 
 ### Fixed
