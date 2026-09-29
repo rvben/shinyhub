@@ -1,5 +1,5 @@
 ---
-description: "Give a Python Shiny app a session-scoped assistant and WebMCP tools with explicit, validated actions."
+description: "Give a Python Shiny app a session-scoped assistant and WebMCP tools that call explicit, validated actions on each viewer's own session."
 ---
 
 # Agent tools in Python Shiny
