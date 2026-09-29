@@ -59,6 +59,16 @@ type Options struct {
 	Open bool
 	// Check runs in preflight mode: boot, verify healthy, stop, exit 0/1.
 	Check bool
+	// CheckBundle, when set, judges the archive a deploy of the source (with
+	// its resolved bundle inputs) would upload, before anything is created on
+	// disk. An error wrapping process.ErrStaleLock fails a Check run with that
+	// error's message, because the server refuses such a deploy with the same
+	// words; a normal run prints it as a warning and continues, since the
+	// local sync still resolves a stale lock. Any other error only warns that
+	// the check could not run. Every reload judges the source again and warns
+	// when the verdict changes, so an edit that makes the lock stale is
+	// reported without repeating the warning on each later save.
+	CheckBundle func(sourceDir string, inputs []bundle.FileInputSnapshot) error
 }
 
 // ValidationError marks user-correctable preflight failures so the CLI emits
@@ -190,6 +200,15 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 		}); err != nil {
 			return &ValidationError{Err: fmt.Errorf("resolve launch: %w", err)}
 		}
+	}
+	lockWarning := ""
+	if o.CheckBundle != nil {
+		err := o.CheckBundle(sourceDir, inputSnapshots)
+		if o.Check && errors.Is(err, process.ErrStaleLock) {
+			return &ValidationError{Err: err}
+		}
+		lockWarning = bundleLockWarning(err)
+		fmt.Fprint(stderr, lockWarning)
 	}
 
 	workspaceIdentity := ""
@@ -324,6 +343,12 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 				fmt.Fprintf(stderr, "Reload failed; current app is still serving: resolve bundle inputs: %v\n", resolveErr)
 				continue
 			}
+			if o.CheckBundle != nil {
+				if warning := bundleLockWarning(o.CheckBundle(sourceDir, stagedInputs)); warning != lockWarning {
+					fmt.Fprint(stderr, warning)
+					lockWarning = warning
+				}
+			}
 			depsChanged, syncErr := stagingWorkspace.syncSourceWithInputs(sourceDir, stagedInputs)
 			if syncErr != nil {
 				fmt.Fprintf(stderr, "Reload failed; current app is still serving: %v\n", syncErr)
@@ -367,6 +392,19 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 			stopChild(old.cmd, old.exitCh, stderr)
 			fmt.Fprintln(stdout, "Reload ready; traffic switched.")
 		}
+	}
+}
+
+// bundleLockWarning renders a CheckBundle verdict as the warning line a
+// normal run prints, or "" for a bundle whose lock a deploy accepts.
+func bundleLockWarning(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, process.ErrStaleLock):
+		return fmt.Sprintf("Warning: a deploy of this bundle will be refused: %v\n", err)
+	default:
+		return fmt.Sprintf("Warning: could not check uv.lock against pyproject.toml: %v\n", err)
 	}
 }
 

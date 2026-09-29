@@ -105,6 +105,21 @@ func RunnerLockMode(dir string) string {
 // verdict to uv. It rejects only a lock it can show is stale. Dependency groups
 // it cannot resolve are left out of the comparison rather than failing it.
 func CheckLockCurrent(dir string) error {
+	pyproject, err := os.ReadFile(filepath.Join(dir, "pyproject.toml"))
+	if err != nil {
+		return nil
+	}
+	lock, err := os.ReadFile(filepath.Join(dir, "uv.lock"))
+	if err != nil {
+		return nil
+	}
+	return CheckLockFiles(pyproject, lock)
+}
+
+// CheckLockFiles is CheckLockCurrent over the contents of a project's
+// pyproject.toml and uv.lock, for a caller that holds them outside a
+// directory, such as the archive a deploy is about to upload.
+func CheckLockFiles(pyproject, lock []byte) error {
 	var project struct {
 		Project *struct {
 			Name                 string              `toml:"name"`
@@ -119,7 +134,7 @@ func CheckLockCurrent(dir string) error {
 			} `toml:"uv"`
 		} `toml:"tool"`
 	}
-	if _, err := toml.DecodeFile(filepath.Join(dir, "pyproject.toml"), &project); err != nil {
+	if _, err := toml.Decode(string(pyproject), &project); err != nil {
 		return nil
 	}
 	p := project.Project
@@ -148,20 +163,20 @@ func CheckLockCurrent(dir string) error {
 	}
 	declaredGroups, groupsKnown := resolveDependencyGroups(project.DependencyGroups, project.Tool.UV.DevDependencies)
 
-	var lock struct {
+	var lockFile struct {
 		Package []uvLockPackage `toml:"package"`
 	}
-	if _, err := toml.DecodeFile(filepath.Join(dir, "uv.lock"), &lock); err != nil {
+	if _, err := toml.Decode(string(lock), &lockFile); err != nil {
 		return nil
 	}
 	root := normalizePackageName(p.Name)
-	idx := slices.IndexFunc(lock.Package, func(pkg uvLockPackage) bool {
+	idx := slices.IndexFunc(lockFile.Package, func(pkg uvLockPackage) bool {
 		return normalizePackageName(pkg.Name) == root && (pkg.Source["virtual"] == "." || pkg.Source["editable"] == ".")
 	})
 	if idx < 0 {
 		return nil
 	}
-	pkg := lock.Package[idx]
+	pkg := lockFile.Package[idx]
 	locked := map[string]bool{}
 	lockedGroups := map[string]bool{}
 	if pkg.Metadata == nil {
