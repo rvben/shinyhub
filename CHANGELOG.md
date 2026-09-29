@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.18.4](https://github.com/rvben/shinyhub/compare/v0.18.3...v0.18.4) - 2026-09-29
+
 ### Added
 
 - **agent**: add a streaming Amazon Bedrock chat backend with AWS credential chain support, app tools, and visitor-approved writes.
