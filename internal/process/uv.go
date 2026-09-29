@@ -91,7 +91,7 @@ func uvPythonInstallCmd(version string) *exec.Cmd {
 }
 
 // Sync runs `uv sync` in dir if a pyproject.toml is present, creating/updating
-// the .venv. For requirements.txt-only projects, dependency installation is
+// the .venv. A shipped uv.lock is installed as-is (see LockSyncFlags). For requirements.txt-only projects, dependency installation is
 // handled lazily by `uv run --with-requirements` at process start.
 func Sync(ctx context.Context, dir string) error {
 	if _, err := os.Stat(filepath.Join(dir, "pyproject.toml")); os.IsNotExist(err) {
@@ -101,7 +101,7 @@ func Sync(ctx context.Context, dir string) error {
 	if err != nil {
 		return err
 	}
-	out, err := uvSyncCmd(ctx, dir, build.Env, build.Flags).CombinedOutput()
+	out, err := uvSyncCmd(ctx, dir, build.Env, append(LockSyncFlags(dir), build.Flags...)).CombinedOutput()
 	if err != nil {
 		switch ctx.Err() {
 		case context.DeadlineExceeded:

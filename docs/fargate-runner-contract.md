@@ -77,7 +77,15 @@ entrypoint must perform dependency preparation itself after unpacking the bundle
 
 The reference image mirrors `internal/process/uv.go Sync()`:
 
-- If `pyproject.toml` is present: run `uv sync` (no extra flags).
+- If `pyproject.toml` is present: run `uv sync`, adding `--frozen` when the
+  bundle ships a `uv.lock`. `--frozen` installs the lock exactly as recorded;
+  a plain `uv sync` re-resolves and rewrites the lock whenever the image's index
+  configuration differs from the one the lock was made against. The control
+  plane rejects an upload whose lock is stale against `pyproject.toml`, so the
+  runner does not check that itself. Unlike the host build, which falls back
+  to a plain `uv sync` for a stale lock, the runner cannot tell: a deployment
+  accepted with a stale lock before that check existed installs the lock as
+  recorded here. Run `uv lock` and redeploy such an app.
 - If only `requirements.txt` is present: do NOT run uv sync. The launch
   command uses `uv run --with-requirements` which installs at exec time.
 
@@ -85,7 +93,11 @@ The reference image mirrors `internal/process/uv.go Sync()`:
 # Keep in sync with internal/process/uv.go Sync() when the host prep changes.
 cd /app/bundle
 if [ -f pyproject.toml ]; then
-    uv sync
+    if [ -f uv.lock ]; then
+        uv sync --frozen
+    else
+        uv sync
+    fi
 fi
 ```
 

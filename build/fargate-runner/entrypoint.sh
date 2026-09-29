@@ -8,7 +8,9 @@
 #   SHINYHUB_SLUG               - app slug (informational, used in log output)
 #
 # Dep-prep mirrors internal/process/uv.go Sync():
-#   - If pyproject.toml is present: run "uv sync" (same command, no flags)
+#   - If pyproject.toml is present: run "uv sync", with --frozen when the
+#     bundle ships a uv.lock so the lock is installed as-is and never re-resolved
+#     against this container's index configuration
 #   - If only requirements.txt: uv run --with-requirements handles it at start
 #
 # R runner is a fast-follow (out of scope for this initial image).
@@ -58,12 +60,20 @@ rm -f "${BUNDLE_ZIP}"
 # Step 4: prepare dependencies.
 # Mirrors internal/process/uv.go Sync(): run "uv sync" only when pyproject.toml
 # is present; requirements.txt-only projects rely on "uv run --with-requirements"
-# at exec time (see the command override from the control plane).
+# at exec time (see the command override from the control plane). A shipped
+# uv.lock is installed with --frozen; the control plane rejects an upload whose
+# lock is stale against pyproject.toml, so the runner does not repeat that
+# check (see docs/fargate-runner-contract.md).
 # Cross-reference: if internal/process/uv.go Sync() changes, update this block.
 cd "${BUNDLE_DIR}"
 if [ -f pyproject.toml ]; then
-    echo "[shinyhub-runner] running uv sync"
-    uv sync
+    if [ -f uv.lock ]; then
+        echo "[shinyhub-runner] running uv sync --frozen"
+        uv sync --frozen
+    else
+        echo "[shinyhub-runner] running uv sync"
+        uv sync
+    fi
 fi
 
 # Step 5: exec the launch command supplied by the control plane as the container
