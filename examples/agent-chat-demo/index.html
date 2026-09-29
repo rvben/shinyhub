@@ -50,8 +50,12 @@
     .integration { max-width:1100px; margin-top:39px; border-top:1px solid var(--line); padding-top:16px; color:var(--muted); font-size:.875rem; }
     .integration summary { cursor:pointer; width:max-content; max-width:100%; padding:6px 0; color:var(--text); font-weight:700; }
     .integration .capabilities { margin-top:12px; }
-    @media (min-width:950px) { body.chat-open .shell { padding-right:calc(430px + clamp(18px,4vw,60px)); } body.chat-open .agent-button { display:none; } }
+    @media (min-width:950px) { body.chat-open:not(.shinyhub-native-chat) .shell { padding-right:calc(430px + clamp(18px,4vw,60px)); } body.chat-open .agent-button { display:none; } }
     @media (max-width:949px) { .shell { padding-top:25px; } .chat, body.shinyhub-toolbar-host .chat { top:0; right:0; bottom:0; width:100vw; height:auto; border:0; border-radius:0; } body.shinyhub-toolbar-host .chat-head { padding-top:65px; } body.chat-open .agent-button { display:none; } }
+    body.shinyhub-native-chat .chat { position:relative; inset:auto; z-index:auto; width:100%; height:100%; border:0; border-radius:0; }
+    body.shinyhub-native-chat .chat-title { display:none; }
+    body.shinyhub-native-chat .chat-head { padding:14px 20px 15px; }
+    body.shinyhub-native-chat .chat-head p { margin:0 0 12px; }
     @media (max-width:650px) { .bars,.axis { gap:6px; } }
     @media (prefers-reduced-motion:no-preference) { .bar { transition:height .22s cubic-bezier(.22,1,.36,1),background-color .18s ease; } .metric strong { transition:color .18s ease; } }
   </style>
@@ -85,10 +89,10 @@
     const root = location.pathname.endsWith('/') ? location.pathname : location.pathname + '/';
     const $ = id => document.getElementById(id);
     const messages = []; let threadId = crypto.randomUUID(); let pending = false; let currentRequest = null; let highlightTimer;
-    let chatEnabled = false, toolbarAvailable = false, toolbarSuspended = false;
+    let chatEnabled = false, toolbarAvailable = false, toolbarSuspended = false, nativeChat = false;
     const chatProtocol = 1;
     function chatEvent(name, detail) { window.dispatchEvent(new CustomEvent('shinyhub:chat:'+name,{detail:{version:chatProtocol,...detail}})); }
-    function announceChat() { if(chatEnabled) chatEvent('capabilities',{enabled:true}); }
+    function announceChat() { if(chatEnabled) chatEvent('capabilities',{enabled:true,panel:$('chat'),title:'Dashboard assistant'}); }
     const views = __DASHBOARD_VIEWS__;
     const welcome = $('messages').innerHTML;
     function renderView({announce=false,highlight=false}={}) { const period=$('view').value, data=views[period]; $('requests').textContent=data.requests; $('latency').textContent=data.latency; $('errors').textContent=data.errors; $('series-note').textContent=data.series_note; $('context-view').textContent=period; const peak=Math.max(...data.bars); $('bars').replaceChildren(...data.bars.map(value => { const bar=document.createElement('div'); bar.className='bar'+(value===peak?' peak':''); bar.style.height=value+'%'; const label=document.createElement('span'); label.textContent=value; bar.append(label); return bar; })); $('axis').style.gridTemplateColumns='repeat('+data.labels.length+',1fr)'; $('axis').replaceChildren(...data.labels.map(value=>{const label=document.createElement('span'); label.textContent=value; return label;})); $('bars').setAttribute('aria-label','Illustrative request volume for '+period+'; peak: '+data.peak); if(highlight){clearTimeout(highlightTimer);document.querySelectorAll('.metric').forEach(node=>node.classList.add('updated'));highlightTimer=setTimeout(()=>document.querySelectorAll('.metric').forEach(node=>node.classList.remove('updated')),950);} if(announce)$('chat-announcement').textContent='Dashboard now showing '+period+'.'; }
@@ -104,7 +108,7 @@
       if(!$('chat').classList.contains('open')) openChat();
       const prior=messages.slice(-20), view=$('view').value;
       messages.push({role:'user',content:question}); addMessage('user',question); $('question').value='';
-      pending=true; currentRequest=new AbortController(); $('send').disabled=true; $('stop').hidden=false; $('new-chat').disabled=true;
+      pending=true; chatEvent('busy',{busy:true}); currentRequest=new AbortController(); $('send').disabled=true; $('stop').hidden=false; $('new-chat').disabled=true;
       const {node,content}=addMessage('assistant',''); const activity=setActivity(node,'Connecting to assistant');
       let answer='', ended=false;
       try {
@@ -132,24 +136,26 @@
         if(answer) content.textContent=answer+'\n\nAnswer incomplete.';
         if(!stopped&&!answer){const retry=document.createElement('button');retry.type='button';retry.className='retry';retry.textContent='Retry';retry.addEventListener('click',()=>{if(!pending){node.previousElementSibling?.remove();node.remove();messages.pop();ask(question);}});node.append(retry);}
       } finally {
-        pending=false; currentRequest=null; $('send').disabled=false; $('stop').hidden=true; $('new-chat').disabled=false; $('question').focus({preventScroll:true});
+        pending=false; chatEvent('busy',{busy:false}); currentRequest=null; $('send').disabled=false; $('stop').hidden=true; $('new-chat').disabled=false; $('question').focus({preventScroll:true});
       }
     }
-    function syncChatMode() { const mobile=matchMedia('(max-width:949px)').matches,open=$('chat').classList.contains('open'); document.querySelectorAll('.top,.dashboard,.prompts,.integration,.agent-button').forEach(node=>node.inert=mobile&&open); $('chat').setAttribute('role',mobile?'dialog':'complementary'); if(mobile)$('chat').setAttribute('aria-modal','true');else $('chat').removeAttribute('aria-modal'); }
+    function syncChatMode() { const mobile=matchMedia('(max-width:949px)').matches,open=$('chat').classList.contains('open'); document.querySelectorAll('.top,.dashboard,.prompts,.integration,.agent-button').forEach(node=>node.inert=mobile&&open); $('chat').setAttribute('role',nativeChat?'region':mobile?'dialog':'complementary'); if(nativeChat){$('chat').setAttribute('aria-label','Conversation');$('chat').removeAttribute('aria-labelledby');}else{$('chat').removeAttribute('aria-label');$('chat').setAttribute('aria-labelledby','chat-title');} if(mobile&&!nativeChat)$('chat').setAttribute('aria-modal','true');else $('chat').removeAttribute('aria-modal'); }
     function openChat() { $('chat').classList.add('open'); document.body.classList.add('chat-open'); $('open-chat').setAttribute('aria-expanded','true'); syncChatMode(); chatEvent('state',{open:true}); $('question').focus({preventScroll:true}); }
     function closeChat() { $('chat').classList.remove('open'); document.body.classList.remove('chat-open'); $('open-chat').setAttribute('aria-expanded','false'); syncChatMode(); chatEvent('state',{open:false,focus:toolbarAvailable}); if(!toolbarAvailable&&!toolbarSuspended)$('open-chat').focus({preventScroll:true}); }
     window.addEventListener('shinyhub:chat:discover',event=>{if(event.detail?.version===chatProtocol)announceChat();});
-    window.addEventListener('shinyhub:chat:host',event=>{if(event.detail?.version!==chatProtocol)return;toolbarAvailable=!!event.detail.available;toolbarSuspended=!!event.detail.suspended;document.body.classList.toggle('shinyhub-toolbar-host',toolbarAvailable);$('open-chat').hidden=!chatEnabled||toolbarAvailable||toolbarSuspended;});
+    window.addEventListener('shinyhub:chat:host',event=>{if(event.detail?.version!==chatProtocol)return;toolbarAvailable=!!event.detail.available;toolbarSuspended=!!event.detail.suspended;nativeChat=!!event.detail.native;document.body.classList.toggle('shinyhub-toolbar-host',toolbarAvailable);document.body.classList.toggle('shinyhub-native-chat',nativeChat);$('open-chat').hidden=!chatEnabled||toolbarAvailable||toolbarSuspended;syncChatMode();});
     window.addEventListener('shinyhub:chat:toggle',event=>{if(event.detail?.version!==chatProtocol||!chatEnabled)return;if($('chat').classList.contains('open'))closeChat();else openChat();});
+    window.addEventListener('shinyhub:chat:new',event=>{if(event.detail?.version!==chatProtocol||!chatEnabled||pending)return;newChat();});
     $('view').addEventListener('change',()=>renderView({announce:true,highlight:true}));
     $('composer').addEventListener('submit',event=>{event.preventDefault();ask($('question').value);});
     $('stop').addEventListener('click',()=>currentRequest?.abort());
     $('question').addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();$('composer').requestSubmit();}});
     document.addEventListener('click',event=>{const button=event.target.closest('[data-question]');if(button)ask(button.dataset.question);});
     $('open-chat').addEventListener('click',openChat); $('close-chat').addEventListener('click',closeChat);
-    $('new-chat').addEventListener('click',()=>{if(pending)return;messages.length=0;threadId=crypto.randomUUID();$('messages').innerHTML=welcome;$('question').value='';$('question').focus({preventScroll:true});$('chat-announcement').textContent='New conversation started.';});
+    function newChat() { messages.length=0;threadId=crypto.randomUUID();$('messages').innerHTML=welcome;$('question').value='';$('question').focus({preventScroll:true});$('chat-announcement').textContent='New conversation started.'; }
+    $('new-chat').addEventListener('click',()=>{if(!pending)newChat();});
     $('try-tool').addEventListener('click',()=>{const next=$('view').value==='This week'?'Last week':'This week'; const result=setDashboardPeriod({period:next},{announce:true,highlight:true}); $('tool-result').textContent='Preview: showing '+result.period+'. A WebMCP agent can call the same action when supported.';});
-    document.addEventListener('keydown',event=>{if(!$('chat').classList.contains('open'))return;if(event.key==='Escape'){closeChat();return;}if(event.key==='Tab'&&matchMedia('(max-width:949px)').matches){const focusable=Array.from($('chat').querySelectorAll('button,textarea')).filter(element=>!element.disabled&&!element.hidden);const first=focusable[0],last=focusable[focusable.length-1];if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}}});
+    document.addEventListener('keydown',event=>{if(!$('chat').classList.contains('open'))return;if(event.key==='Escape'){closeChat();return;}if(!nativeChat&&event.key==='Tab'&&matchMedia('(max-width:949px)').matches){const focusable=Array.from($('chat').querySelectorAll('button,textarea')).filter(element=>!element.disabled&&!element.hidden);const first=focusable[0],last=focusable[focusable.length-1];if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}}});
     addEventListener('resize',syncChatMode);
     fetch(root+'agent-status').then(response=>response.json()).then(data=>{chatEnabled=!!data.chat_enabled;$('chat-status').textContent=chatEnabled?'Enabled · '+data.mode:'Assistant disabled';$('open-chat').hidden=!chatEnabled||toolbarAvailable||toolbarSuspended;announceChat();$('webmcp-status').textContent=data.webmcp_enabled?'Checking browser support…':'WebMCP disabled';$('try-tool').hidden=!data.webmcp_enabled;if(data.webmcp_enabled)registerWebMcpTools();}).catch(()=>{$('chat-status').textContent='Agent status unavailable';$('webmcp-status').textContent='Browser tool status unavailable';$('open-chat').hidden=true;$('try-tool').hidden=true;});
     renderView();

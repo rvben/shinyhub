@@ -14,8 +14,9 @@
  *      internal is called, nothing runs before the app's own bootstrap.
  *   2. Every entry point is wrapped. A throw here must never escape into the
  *      app's page.
- *   3. Everything it renders lives inside a shadow root, so the app's CSS
- *      cannot restyle the switcher and the switcher's CSS cannot reach the app. An
+ *   3. Its chrome lives inside a shadow root, so the app's CSS cannot restyle
+ *      the switcher and the switcher's CSS cannot reach the app. Opted-in chat
+ *      content is slotted into that chrome and retains the app's own styles. An
  *      injected stylesheet without that boundary would be a fleet-wide
  *      restyling of applications this server did not write.
  *   4. It starts at the top right, then lets the visitor snap it to another
@@ -58,6 +59,8 @@
   var CHAT_HOST_EVENT = "shinyhub:chat:host";
   var CHAT_TOGGLE_EVENT = "shinyhub:chat:toggle";
   var CHAT_STATE_EVENT = "shinyhub:chat:state";
+  var CHAT_NEW_EVENT = "shinyhub:chat:new";
+  var CHAT_BUSY_EVENT = "shinyhub:chat:busy";
   var BOOKMARK_TIMEOUT_MS = 10000;
   var VERSION_POLL_TIMEOUT_MS = 10000;
   var VERSION_SWITCH_TIMEOUT_MS = 12000;
@@ -463,11 +466,22 @@
     ".chat-trigger[aria-expanded='true'], .chat-trigger:hover { background: var(--sh-hover); }",
     ".root[data-position='left-center'] .chat-trigger, .root[data-position='right-center'] .chat-trigger { width: 38px; height: 38px; border-right: 0; border-bottom: 1px solid var(--sh-line); }",
     ".root[data-position='left-center'] .chat-label, .root[data-position='right-center'] .chat-label { display: none; }",
+    ".chat-panel { position: absolute; top: 60px; right: 12px; bottom: 12px; width: min(430px, calc(100vw - 24px)); box-sizing: border-box; display: none; flex-direction: column; overflow: hidden; pointer-events: auto; color: var(--sh-text); background: var(--sh-surface); border: 1px solid var(--sh-line-strong); border-radius: var(--sh-r-lg); box-shadow: 0 32px 80px rgba(0,0,0,0.7); }",
+    ".root.chat-native.chat-open .chat-panel { display: flex; }",
+    ".chat-panel-head { display: flex; flex: none; align-items: center; gap: 10px; min-height: 48px; padding: 0 8px 0 16px; border-bottom: 1px solid var(--sh-line-strong); }",
+    ".chat-panel-head .chat-mark { width: 26px; height: 26px; }",
+    ".chat-panel-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 750; }",
+    ".chat-panel-action { flex: none; min-height: 34px; padding: 0 9px; border: 0; border-radius: var(--sh-r-md); background: transparent; color: var(--sh-soft); font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }",
+    ".chat-panel-action:hover { color: var(--sh-text); background: var(--sh-hover); }",
+    ".chat-panel-action:disabled { opacity: .45; cursor: default; }",
+    ".chat-panel-action:focus-visible { outline: 2px solid var(--sh-signal); outline-offset: -2px; }",
+    ".chat-panel-close { display: grid; place-items: center; width: 34px; padding: 0; }",
+    ".chat-content { display: block; flex: 1; min-height: 0; overflow: hidden; }",
     ".scrim {" +
       "  position: absolute; inset: 0; background: var(--sh-deep); opacity: 0;" +
       "  pointer-events: none; transition: opacity 160ms ease;" +
       "}",
-    ".root.open .scrim, .root.bookmark-open .scrim, .root.session-open .scrim { opacity: 0.14; pointer-events: auto; }",
+    ".root.open .scrim, .root.bookmark-open .scrim, .root.session-open .scrim, .root.chat-native.chat-open .scrim { opacity: 0.14; pointer-events: auto; }",
     ".root.placing .scrim { opacity: 0; pointer-events: auto; }",
 
     ".panel {" +
@@ -884,6 +898,7 @@
       " .root.chat-ready[data-position='top-right'] .restore { top: auto; bottom: 0; border-top: 1px solid var(--sh-line-strong); border-bottom: 0; border-radius: var(--sh-r-md) var(--sh-r-md) 0 0; }" +
       " .root.chat-ready[data-position='top-right'] .position-menu { top: auto; bottom: 60px; }" +
       " .root.chat-open .bar { display: none; }" +
+      " .chat-panel { inset: 0; width: 100%; border: 0; border-radius: 0; }" +
       "}",
 
     "@media (prefers-reduced-motion: reduce) {" +
@@ -1085,6 +1100,40 @@
   ], 20));
   chatBtn.appendChild(chatMark);
   chatBtn.appendChild(div("chat-label", "Ask"));
+
+  // The app supplies its conversation body; ShinyHub owns the surrounding
+  // surface. A slot keeps the app's styles and event handlers on its element
+  // while the chrome remains isolated in our shadow root.
+  var chatPanel = div("chat-panel");
+  chatPanel.setAttribute("role", "dialog");
+  chatPanel.setAttribute("aria-modal", "true");
+  chatPanel.setAttribute("aria-label", "Ask this app");
+  var chatPanelHead = div("chat-panel-head");
+  var chatPanelMark = div("chat-mark");
+  chatPanelMark.appendChild(svg([
+    "M16.75 9.3a6.4 6.4 0 01-6.4 6.4H4l1.55-2.6A6.4 6.4 0 1116.75 9.3z",
+    "M10.3 5.8l.8 2.05 2.05.8-2.05.8-.8 2.05-.8-2.05-2.05-.8 2.05-.8z"
+  ], 20));
+  var chatPanelTitle = div("chat-panel-title", "Ask this app");
+  var chatNew = document.createElement("button");
+  chatNew.type = "button";
+  chatNew.className = "chat-panel-action";
+  chatNew.textContent = "New";
+  chatNew.setAttribute("aria-label", "Start a new conversation");
+  var chatClose = document.createElement("button");
+  chatClose.type = "button";
+  chatClose.className = "chat-panel-action chat-panel-close";
+  chatClose.appendChild(svg(["M5 5l14 14", "M19 5 5 19"], 16));
+  chatClose.setAttribute("aria-label", "Close assistant");
+  chatPanelHead.appendChild(chatPanelMark);
+  chatPanelHead.appendChild(chatPanelTitle);
+  chatPanelHead.appendChild(chatNew);
+  chatPanelHead.appendChild(chatClose);
+  var chatContent = document.createElement("slot");
+  chatContent.className = "chat-content";
+  chatContent.name = "shinyhub-chat-content";
+  chatPanel.appendChild(chatPanelHead);
+  chatPanel.appendChild(chatContent);
 
   var closeBtn = document.createElement("button");
   closeBtn.type = "button";
@@ -1419,6 +1468,7 @@
   root.appendChild(panel);
   root.appendChild(sessionPanel);
   root.appendChild(bookmarkPanel);
+  root.appendChild(chatPanel);
   root.appendChild(announcer);
   root.appendChild(positionMenu);
   root.appendChild(snapGuides);
@@ -1461,6 +1511,24 @@
   var bookmarkSyncError = false;
   var chatReady = false;
   var chatOpen = false;
+  var chatBody = null;
+  var chatInertSiblings = [];
+
+  function setChatModal(active) {
+    if (active) {
+      chatInertSiblings = [];
+      for (var child = document.body.firstElementChild; child; child = child.nextElementSibling) {
+        if (child === host || child.tagName === "SCRIPT") continue;
+        chatInertSiblings.push({ element: child, inert: child.inert });
+        child.inert = true;
+      }
+    } else {
+      for (var i = 0; i < chatInertSiblings.length; i++) {
+        chatInertSiblings[i].element.inert = chatInertSiblings[i].inert;
+      }
+      chatInertSiblings = [];
+    }
+  }
 
   function announceChatHost() {
     if (typeof window.CustomEvent !== "function") return;
@@ -1468,7 +1536,8 @@
       detail: {
         version: CHAT_PROTOCOL_VERSION,
         available: chatReady && !snapshotActive && !root.classList.contains("dismissed"),
-        suspended: snapshotActive
+        suspended: snapshotActive,
+        native: chatReady && !!chatBody
       }
     }));
   }
@@ -2617,13 +2686,21 @@
     setBookmarkOpen(!bookmarkOpen);
   }));
 
-  chatBtn.addEventListener("click", guard(function () {
+  function toggleChat() {
     if (!chatReady || snapshotActive || typeof window.CustomEvent !== "function") return;
     setOpen(false);
     setSessionOpen(false, false);
     setBookmarkOpen(false, false);
     setPlacing(false);
     window.dispatchEvent(new window.CustomEvent(CHAT_TOGGLE_EVENT, {
+      detail: { version: CHAT_PROTOCOL_VERSION }
+    }));
+  }
+  chatBtn.addEventListener("click", guard(toggleChat));
+  chatClose.addEventListener("click", guard(toggleChat));
+  chatNew.addEventListener("click", guard(function () {
+    if (!chatReady || typeof window.CustomEvent !== "function") return;
+    window.dispatchEvent(new window.CustomEvent(CHAT_NEW_EVENT, {
       detail: { version: CHAT_PROTOCOL_VERSION }
     }));
   }));
@@ -2874,7 +2951,17 @@
     var detail = ev && ev.detail;
     if (!detail || detail.version !== CHAT_PROTOCOL_VERSION || typeof detail.enabled !== "boolean") return;
     chatReady = detail.enabled;
-    if (!chatReady) chatOpen = false;
+    if (!chatReady) {
+      chatOpen = false;
+      setChatModal(false);
+    }
+    if (chatReady && detail.panel && detail.panel.nodeType === 1 && detail.panel.ownerDocument === document && detail.panel !== host) {
+      chatBody = detail.panel;
+      chatBody.setAttribute("slot", chatContent.name);
+      host.appendChild(chatBody);
+      chatPanelTitle.textContent = String(detail.title || "Ask this app").slice(0, 80);
+    }
+    root.classList.toggle("chat-native", chatReady && !!chatBody);
     root.classList.toggle("chat-ready", chatReady);
     root.classList.toggle("chat-open", chatOpen);
     chatBtn.setAttribute("aria-expanded", chatOpen ? "true" : "false");
@@ -2885,10 +2972,17 @@
   window.addEventListener(CHAT_STATE_EVENT, guard(function (ev) {
     var detail = ev && ev.detail;
     if (!detail || detail.version !== CHAT_PROTOCOL_VERSION || typeof detail.open !== "boolean") return;
+    var chatWasOpen = chatOpen;
     chatOpen = detail.open;
     root.classList.toggle("chat-open", chatOpen);
+    if (chatBody && chatWasOpen !== chatOpen) setChatModal(chatOpen);
     chatBtn.setAttribute("aria-expanded", chatOpen ? "true" : "false");
     if (!chatOpen && detail.focus && chatReady && !root.classList.contains("dismissed")) chatBtn.focus();
+  }));
+  window.addEventListener(CHAT_BUSY_EVENT, guard(function (ev) {
+    var detail = ev && ev.detail;
+    if (!detail || detail.version !== CHAT_PROTOCOL_VERSION || typeof detail.busy !== "boolean") return;
+    chatNew.disabled = detail.busy;
   }));
 
   window.addEventListener(BOOKMARK_SYNC_STATUS_EVENT, guard(function (ev) {
@@ -2963,6 +3057,10 @@
       moveBtn.focus();
       return;
     }
+    if (chatOpen && chatBody) {
+      toggleChat();
+      return;
+    }
     if (bookmarkOpen) {
       setBookmarkOpen(false);
       return;
@@ -2983,6 +3081,28 @@
   // into our filter box, and we must not see theirs.
   root.addEventListener("keydown", guard(function (ev) {
     if (navigating || versionSwitching) {
+      return;
+    }
+    if (chatOpen && chatBody) {
+      if (ev.key === "Escape") {
+        ev.stopPropagation();
+        toggleChat();
+        return;
+      }
+      if (ev.key !== "Tab") return;
+      var chatItems = [chatNew, chatClose];
+      var chatCandidates = chatBody.querySelectorAll("button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), a[href]");
+      for (var ci = 0; ci < chatCandidates.length; ci++) {
+        if (!chatCandidates[ci].hidden && chatCandidates[ci].offsetParent !== null) chatItems.push(chatCandidates[ci]);
+      }
+      var chatTarget = typeof ev.composedPath === "function" ? ev.composedPath()[0] : ev.target;
+      if (ev.shiftKey && chatTarget === chatItems[0]) {
+        ev.preventDefault();
+        chatItems[chatItems.length - 1].focus();
+      } else if (!ev.shiftKey && chatTarget === chatItems[chatItems.length - 1]) {
+        ev.preventDefault();
+        chatItems[0].focus();
+      }
       return;
     }
     if (bookmarkOpen) {

@@ -267,11 +267,64 @@ test('shows Ask only for an app that advertises chat and delegates opening to th
   assert.equal(m.jsdomErrors.length, 0);
 });
 
+test('native chat mounts app content inside the ShinyHub overlay and restores the app on close', (t) => {
+  const m = mount();
+  t.after(() => m.dom.window.close());
+  const appRoot = m.document.getElementById('app-root');
+  appRoot.inert = false;
+  const body = m.document.createElement('section');
+  body.id = 'app-chat';
+  body.appendChild(m.document.createElement('textarea'));
+  appRoot.appendChild(body);
+  const toggles = [];
+  const fresh = [];
+  const hosts = [];
+  m.window.addEventListener(CHAT_TOGGLE_EVENT, (event) => toggles.push(event.detail));
+  m.window.addEventListener('shinyhub:chat:new', (event) => fresh.push(event.detail));
+  m.window.addEventListener(CHAT_HOST_EVENT, (event) => hosts.push(event.detail));
+  m.window.dispatchEvent(new m.window.CustomEvent(CHAT_CAPABILITIES_EVENT, {
+    detail: { version: 1, enabled: true, panel: body, title: 'Dashboard assistant' },
+  }));
+  assert.equal(m.host().querySelector('#app-chat'), body);
+  assert.equal(body.slot, 'shinyhub-chat-content');
+  assert.equal(m.q('.chat-panel-title').textContent, 'Dashboard assistant');
+  assert.equal(m.root().classList.contains('chat-native'), true);
+  assert.equal(hosts.at(-1).native, true);
+  m.q('button.chat-trigger').click();
+  assert.equal(toggles.length, 1);
+  m.window.dispatchEvent(new m.window.CustomEvent(CHAT_STATE_EVENT, {
+    detail: { version: 1, open: true },
+  }));
+  assert.equal(m.root().classList.contains('chat-open'), true);
+  assert.equal(appRoot.inert, true);
+  m.window.dispatchEvent(new m.window.CustomEvent('shinyhub:chat:busy', {
+    detail: { version: 1, busy: true },
+  }));
+  assert.equal(m.q('.chat-panel-action[aria-label="Start a new conversation"]').disabled, true);
+  m.window.dispatchEvent(new m.window.CustomEvent('shinyhub:chat:busy', {
+    detail: { version: 1, busy: false },
+  }));
+  m.q('.chat-panel-action[aria-label="Start a new conversation"]').click();
+  assert.equal(fresh.length, 1);
+  m.q('.chat-panel-close').click();
+  assert.equal(toggles.length, 2);
+  m.window.dispatchEvent(new m.window.CustomEvent(CHAT_STATE_EVENT, {
+    detail: { version: 1, open: false, focus: true },
+  }));
+  assert.equal(appRoot.inert, false);
+  assert.equal(m.focused(), m.q('button.chat-trigger'));
+  assert.equal(m.jsdomErrors.length, 0);
+});
+
 test('the Shiny helper uses the toolbar entry and restores focus after chat closes', (t) => {
   const m = mount();
   t.after(() => m.dom.window.close());
   const handlers = new Map();
-  m.window.Shiny = { addCustomMessageHandler: (name, handler) => handlers.set(name, handler) };
+  const inputs = [];
+  m.window.Shiny = {
+    addCustomMessageHandler: (name, handler) => handlers.set(name, handler),
+    setInputValue: (name, value) => inputs.push({ name, value }),
+  };
   m.window.matchMedia = () => ({ matches: false });
   m.window.eval(chatSource);
   const launcher = m.document.querySelector('.sh-agent-launcher');
@@ -280,11 +333,15 @@ test('the Shiny helper uses the toolbar entry and restores focus after chat clos
   assert.equal(launcher.hidden, true);
   handlers.get('shinyhub-agent-chat-capabilities')({ version: 1, enabled: true, session: 'viewer-1' });
   assert.equal(m.root().classList.contains('chat-ready'), true);
+  assert.equal(chat.parentElement, m.host(), 'the helper conversation is slotted into native chrome');
+  assert.equal(m.root().classList.contains('chat-native'), true);
   assert.equal(launcher.hidden, true, 'the toolbar replaces the separate launcher');
   ask.click();
   assert.equal(chat.hidden, false);
   assert.equal(ask.getAttribute('aria-expanded'), 'true');
-  chat.querySelector('[aria-label="Close assistant"]').click();
+  m.q('.chat-panel-action[aria-label="Start a new conversation"]').click();
+  assert.equal(inputs.at(-1).value.action, 'reset');
+  m.q('.chat-panel-close').click();
   assert.equal(chat.hidden, true);
   assert.equal(ask.getAttribute('aria-expanded'), 'false');
   assert.equal(m.focused(), ask);

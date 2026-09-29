@@ -12,6 +12,7 @@
   var pendingTools = [];
   var toolbarAvailable = false;
   var toolbarSuspended = false;
+  var nativeChat = false;
 
   function announceChat(name, detail) {
     if (typeof window.CustomEvent !== "function") return;
@@ -163,6 +164,7 @@
 
   function setBusy(busy) {
     reset.disabled = busy;
+    announceChat("busy", { busy: busy });
     stop.hidden = !busy;
     stop.disabled = false;
     updateSend();
@@ -174,7 +176,12 @@
     panel.hidden = false;
     launcher.setAttribute("aria-expanded", "true");
     announceChat("state", { open: true });
-    if (matchMedia("(max-width: 680px)").matches) {
+    if (nativeChat) {
+      panel.setAttribute("role", "region");
+      panel.setAttribute("aria-label", "Conversation");
+      panel.removeAttribute("aria-labelledby");
+      panel.removeAttribute("aria-modal");
+    } else if (matchMedia("(max-width: 680px)").matches) {
       panel.setAttribute("role", "dialog");
       panel.setAttribute("aria-modal", "true");
     } else {
@@ -300,14 +307,16 @@
   close.addEventListener("click", closePanel);
   window.addEventListener("shinyhub:chat:discover", function (event) {
     if (event.detail && event.detail.version === VERSION && chatSession) {
-      announceChat("capabilities", { enabled: true });
+      announceChat("capabilities", { enabled: true, panel: panel, title: "Ask this app" });
     }
   });
   window.addEventListener("shinyhub:chat:host", function (event) {
     if (!event.detail || event.detail.version !== VERSION) return;
     toolbarAvailable = !!event.detail.available;
     toolbarSuspended = !!event.detail.suspended;
+    nativeChat = !!event.detail.native;
     document.body.classList.toggle("sh-agent-toolbar-host", toolbarAvailable);
+    document.body.classList.toggle("sh-agent-native-chat", nativeChat);
     launcher.hidden = !chatSession || toolbarAvailable || toolbarSuspended;
   });
   window.addEventListener("shinyhub:chat:toggle", function (event) {
@@ -315,12 +324,15 @@
     if (panel.hidden) openPanel();
     else closePanel();
   });
+  window.addEventListener("shinyhub:chat:new", function (event) {
+    if (event.detail && event.detail.version === VERSION) reset.click();
+  });
   jump.addEventListener("click", function () { log.scrollTop = log.scrollHeight; jump.hidden = true; });
   log.addEventListener("scroll", function () { jump.hidden = nearBottom(); });
   input.addEventListener("input", updateSend);
   panel.addEventListener("keydown", function (event) {
     if (event.key === "Escape") { closePanel(); return; }
-    if (event.key !== "Tab" || !matchMedia("(max-width: 680px)").matches) return;
+    if (event.key !== "Tab" || nativeChat || !matchMedia("(max-width: 680px)").matches) return;
     var focusable = Array.from(panel.querySelectorAll("button,textarea,summary")).filter(function (item) {
       return !item.disabled && !item.hidden && item.getClientRects().length;
     });
@@ -371,7 +383,7 @@
       }
       chatSession = message.session;
       launcher.hidden = toolbarAvailable || toolbarSuspended;
-      announceChat("capabilities", { enabled: true });
+      announceChat("capabilities", { enabled: true, panel: panel, title: "Ask this app" });
       updateSend();
     });
     window.Shiny.addCustomMessageHandler("shinyhub-agent-chat-event", function (event) {

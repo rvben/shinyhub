@@ -85,6 +85,16 @@ registered handler after approval, and emits `action_applied` with its result.
 Denial or timeout does not run the handler. The chat panel's **Stop** and
 **New chat** controls send `action: "cancel"` and `action: "reset"` requests.
 
+The browser helper also announces `shinyhub:chat:capabilities` with
+`{version: 1, enabled: true, panel: <Element>, title: <string>}`. A compatible
+ShinyHub host slots that element into its own overlay and responds with
+`shinyhub:chat:host` containing `native: true`. The helper then hides its
+fallback header. The host sends `shinyhub:chat:toggle` and
+`shinyhub:chat:new`; the helper reports `shinyhub:chat:state` and
+`shinyhub:chat:busy` so the host can manage its overlay and disable **New**
+while a request is active. Older hosts ignore the added fields and retain the
+helper's own chat frame.
+
 ## Compatibility rules
 
 - Unknown message versions are ignored or rejected; changes to field meaning
