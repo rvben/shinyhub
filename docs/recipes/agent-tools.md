@@ -18,7 +18,7 @@ Install the [published `shinyhub-agent` package](https://pypi.org/project/shinyh
 in a Python Shiny app:
 
 ```text
-shinyhub-agent[bedrock]==0.2.0b2
+shinyhub-agent==0.2.0b2
 ```
 
 The repository contains a [runnable example](https://github.com/rvben/shinyhub/tree/main/examples/agent-shiny-demo)
@@ -79,6 +79,9 @@ the viewer's authorization in the handler as well.
 ## Add chat
 
 Include `chat_dependency()` in the UI and pass a chat backend to `register()`.
+The same package provides all three backends; choose one in your app's
+configuration.
+
 `OpenAIChat` uses a private `OPENAI_API_KEY` app secret and app-specific
 instructions. `BedrockChat` uses AWS credentials and a selected Bedrock model
 through `ConverseStream`. `AGUIChat` connects to a hoster-owned HTTPS AG-UI
@@ -101,8 +104,9 @@ chat = OpenAIChat(
 register(session=session, input=input, tools=tools, chat=chat)
 ```
 
-For Bedrock, install the `bedrock` extra and supply an AWS region and a model
-ID that supports streaming tool use:
+For Bedrock, install `shinyhub-agent[bedrock]==0.2.0b2` instead of the base
+requirement. This installs `boto3` for the same package and version. Then supply
+an AWS region and a model ID that supports streaming tool use:
 
 ```python
 from shinyhub_agent import BedrockChat
