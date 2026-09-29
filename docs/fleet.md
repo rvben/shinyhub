@@ -366,6 +366,10 @@ failure's own kind and exit code, never as a rejection. Servers that advertise
 `deploy_preflight` answer the full check; servers with only
 `runtime_capabilities` are asked the runtime-topology question for bundles
 that declare producer or roll schedules; older servers are not asked.
+Servers that advertise `stale_uv_lock_refusal` refuse an upload whose
+`uv.lock` no longer records what its `pyproject.toml` declares; the plan runs
+that check itself on the archive it would upload and reports it with the
+upload's message, beside any rejection the server returned.
 Config-only drift is not rehearsed, because the server validates that patch in
 place before writing.
 

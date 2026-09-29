@@ -146,6 +146,10 @@ shinyhub run . --check       # boot smoke test, then exit
 shinyhub run . --no-reload   # run once without watching files
 ```
 
+`--check` also fails, before booting, on a `uv.lock` that no longer records
+what `pyproject.toml` declares, which a deploy would refuse (see
+[shipped `uv.lock` files](environment.md#shipped-uvlock-files)).
+
 New interactive workflows should use `shinyhub dev` so every app shares one
 mental model. To work on the ShinyHub platform rather than an application, use
 the separate [contributor development setup](contributing/development.md).

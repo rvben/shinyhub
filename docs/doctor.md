@@ -38,7 +38,11 @@ Local checks:
 - the derived or explicit deployment slug is valid;
 - `shinyhub.toml` parses under the same strict rules used by deploy;
 - the production launch plan resolves to an inferred or custom command;
-- the command's local executable, such as `uv` or `Rscript`, is on `PATH`.
+- the command's local executable, such as `uv` or `Rscript`, is on `PATH`;
+- a shipped `uv.lock` still records what `pyproject.toml` declares, judged on
+  the archive a deploy would upload, so a lock the upload would refuse fails
+  here with the same message (see
+  [shipped `uv.lock` files](environment.md#shipped-uvlock-files)).
 
 Remote checks:
 
