@@ -26,6 +26,7 @@ app env vars are passed through unchanged.
 | `SHINYHUB_REPLICA_INDEX` | Yes | Zero-based index of this replica within the app's pool, as a decimal string. Always injected, including `"0"` for the first (or only) replica. |
 | `SHINYHUB_DEPLOYMENT_ID` | No | Numeric deployment ID as a decimal string. Injected when the deployment ID is known (non-zero). Used for log correlation. |
 | `SHINYHUB_APP_VERSION` | No | App version string. Injected when non-empty. Used for labeling. |
+| `SHINYHUB_UV_LOCK` | No | `resolve` when the bundle ships a `uv.lock` that is stale against its `pyproject.toml`; absent otherwise. See [Python apps](#python-apps). |
 
 App-specific environment variables set by operators via `shinyhub env set` are
 prepended to the list (before the platform vars), so the `SHINYHUB_*` platform
@@ -80,12 +81,14 @@ The reference image mirrors `internal/process/uv.go Sync()`:
 - If `pyproject.toml` is present: run `uv sync`, adding `--frozen` when the
   bundle ships a `uv.lock`. `--frozen` installs the lock exactly as recorded;
   a plain `uv sync` re-resolves and rewrites the lock whenever the image's index
-  configuration differs from the one the lock was made against. The control
-  plane rejects an upload whose lock is stale against `pyproject.toml`, so the
-  runner does not check that itself. Unlike the host build, which falls back
-  to a plain `uv sync` for a stale lock, the runner cannot tell: a deployment
-  accepted with a stale lock before that check existed installs the lock as
-  recorded here. Run `uv lock` and redeploy such an app.
+  configuration differs from the one the lock was made against.
+- When `SHINYHUB_UV_LOCK` is `resolve`, run a plain `uv sync` even though a
+  `uv.lock` is present. The control plane sets it only for a lock it can show
+  records different requirements than `pyproject.toml` declares, so a frozen
+  install would leave out what `pyproject.toml` adds. A new upload with such a
+  lock is refused, so this reaches the runner only for a deployment accepted
+  before that check existed; the host build re-resolves the same lock in the
+  same way. Treat any other value like an unset variable.
 - If only `requirements.txt` is present: do NOT run uv sync. The launch
   command uses `uv run --with-requirements` which installs at exec time.
 
@@ -93,7 +96,7 @@ The reference image mirrors `internal/process/uv.go Sync()`:
 # Keep in sync with internal/process/uv.go Sync() when the host prep changes.
 cd /app/bundle
 if [ -f pyproject.toml ]; then
-    if [ -f uv.lock ]; then
+    if [ -f uv.lock ] && [ "${SHINYHUB_UV_LOCK:-}" != "resolve" ]; then
         uv sync --frozen
     else
         uv sync

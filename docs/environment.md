@@ -202,7 +202,10 @@ uploaded bundle, whatever the runtime or launch command. It never runs when an
 already-accepted deployment comes back up (a restart, rollback, restore,
 replica recovery or scale-up), so a deployment accepted with a stale lock
 before this check existed keeps working: when its environment has to be
-rebuilt, a plain `uv sync` re-resolves it as it did at the time.
+rebuilt, a plain `uv sync` re-resolves it as it did at the time. That holds on
+managed container runtimes too (Fargate, Scaleway), where the control plane
+tells the runner image to resolve such a lock again (see the
+[managed runner contract](fargate-runner-contract.md#python-apps)).
 
 The lock records absolute download URLs, so every replica must be able to reach
 the index the lock was made against. To install through a different index, lock

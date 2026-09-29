@@ -6,11 +6,18 @@
 #   SHINYHUB_BUNDLE_TOKEN       - short-lived capability token for the bundle fetch
 #   SHINYHUB_CONTENT_DIGEST     - expected sha256 digest (format: "sha256:<hex>")
 #   SHINYHUB_SLUG               - app slug (informational, used in log output)
+#   SHINYHUB_UV_LOCK            - "resolve" when the bundle's uv.lock is stale
+#                                 against pyproject.toml; unset otherwise
+#
+# SHINYHUB_RUNNER_BUNDLE_ZIP and SHINYHUB_RUNNER_BUNDLE_DIR override where the
+# bundle is downloaded and unpacked (defaults /tmp/shinyhub-bundle.zip and
+# /app/bundle).
 #
 # Dep-prep mirrors internal/process/uv.go Sync():
 #   - If pyproject.toml is present: run "uv sync", with --frozen when the
 #     bundle ships a uv.lock so the lock is installed as-is and never re-resolved
-#     against this container's index configuration
+#     against this container's index configuration, unless SHINYHUB_UV_LOCK is
+#     "resolve"
 #   - If only requirements.txt: uv run --with-requirements handles it at start
 #
 # R runner is a fast-follow (out of scope for this initial image).
@@ -21,8 +28,8 @@ set -eu
 : "${SHINYHUB_BUNDLE_TOKEN:?SHINYHUB_BUNDLE_TOKEN is required}"
 : "${SHINYHUB_CONTENT_DIGEST:?SHINYHUB_CONTENT_DIGEST is required}"
 
-BUNDLE_ZIP=/tmp/shinyhub-bundle.zip
-BUNDLE_DIR=/app/bundle
+BUNDLE_ZIP="${SHINYHUB_RUNNER_BUNDLE_ZIP:-/tmp/shinyhub-bundle.zip}"
+BUNDLE_DIR="${SHINYHUB_RUNNER_BUNDLE_DIR:-/app/bundle}"
 
 # Step 1: fetch the bundle from the control plane using the capability token.
 # The token is passed as a Bearer credential in the Authorization header so it
@@ -61,16 +68,20 @@ rm -f "${BUNDLE_ZIP}"
 # Mirrors internal/process/uv.go Sync(): run "uv sync" only when pyproject.toml
 # is present; requirements.txt-only projects rely on "uv run --with-requirements"
 # at exec time (see the command override from the control plane). A shipped
-# uv.lock is installed with --frozen; the control plane rejects an upload whose
-# lock is stale against pyproject.toml, so the runner does not repeat that
-# check (see docs/fargate-runner-contract.md).
+# uv.lock is installed with --frozen. The control plane checks the lock against
+# pyproject.toml (the runner image carries no such check) and sets
+# SHINYHUB_UV_LOCK=resolve for a stale one, which a plain "uv sync" re-resolves,
+# as the host build does (see docs/fargate-runner-contract.md).
 # Cross-reference: if internal/process/uv.go Sync() changes, update this block.
 cd "${BUNDLE_DIR}"
 if [ -f pyproject.toml ]; then
-    if [ -f uv.lock ]; then
+    if [ -f uv.lock ] && [ "${SHINYHUB_UV_LOCK:-}" != "resolve" ]; then
         echo "[shinyhub-runner] running uv sync --frozen"
         uv sync --frozen
     else
+        if [ -f uv.lock ]; then
+            echo "[shinyhub-runner] uv.lock is out of date with pyproject.toml; resolving the dependencies again"
+        fi
         echo "[shinyhub-runner] running uv sync"
         uv sync
     fi

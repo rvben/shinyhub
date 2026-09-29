@@ -22,10 +22,13 @@
 //	SHINYHUB_SLUG, SHINYHUB_REPLICA_INDEX, SHINYHUB_CONTENT_DIGEST,
 //	SHINYHUB_DEPLOYMENT_ID, SHINYHUB_APP_VERSION
 //
+// plus SHINYHUB_UV_LOCK=resolve when the bundle's uv.lock is stale against its
+// pyproject.toml (see process.RunnerLockMode).
+//
 // The runner image is responsible for fetching the bundle for
 // SHINYHUB_CONTENT_DIGEST from the operator-configured control-plane URL, placing
-// it at the working directory the launch command expects, and exec'ing the
-// command. The control plane never ships the bundle bytes into the task; it only
+// it at the working directory the launch command expects, preparing its
+// dependencies, and exec'ing the command. The control plane never ships the bundle bytes into the task; it only
 // names the bundle. This keeps the AWS-facing surface here minimal and leaves
 // image build, IAM, and bundle distribution to the operator's deployment.
 package fargate
@@ -488,6 +491,7 @@ func (r *Runtime) replicaEnv(p process.StartParams) []ecstypes.KeyValuePair {
 		add("SHINYHUB_DEPLOYMENT_ID", strconv.FormatInt(p.DeploymentID, 10))
 	}
 	add("SHINYHUB_APP_VERSION", p.AppVersion)
+	add(process.UVLockModeEnv, process.RunnerLockMode(p.Dir))
 	if r.cfg.ControlPlaneURL != "" {
 		add("SHINYHUB_CONTROL_PLANE_URL", r.cfg.ControlPlaneURL)
 	}

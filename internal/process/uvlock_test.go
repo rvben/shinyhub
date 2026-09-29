@@ -381,3 +381,27 @@ func TestLockSyncFlags(t *testing.T) {
 		})
 	}
 }
+
+func TestRunnerLockMode(t *testing.T) {
+	stale := strings.Replace(currentPyproject, `"typing_extensions"]`, `"typing_extensions", "requests"]`, 1)
+	dynamic := strings.Replace(stale, `requires-python = ">=3.9"`, `requires-python = ">=3.9"`+"\ndynamic = [\"dependencies\"]", 1)
+	cases := []struct {
+		name string
+		dir  string
+		want string
+	}{
+		{"stale lock resolves again", writeProject(t, stale, currentLock), process.UVLockModeResolve},
+		{"current lock stays frozen", writeProject(t, currentPyproject, currentLock), ""},
+		{"no lock leaves the variable unset", writeProject(t, stale, ""), ""},
+		{"a lock the check cannot judge stays frozen", writeProject(t, dynamic, currentLock), ""},
+		{"a bundle missing on the control plane stays frozen", filepath.Join(t.TempDir(), "gone"), ""},
+		{"no bundle directory stays frozen", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := process.RunnerLockMode(tc.dir); got != tc.want {
+				t.Errorf("RunnerLockMode = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
