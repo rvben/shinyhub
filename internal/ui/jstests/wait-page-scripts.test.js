@@ -54,7 +54,7 @@ const SHELL = `<!DOCTYPE html><html><body>
 // parameters rather than patched onto the window, so time, jitter, the reload
 // and the scheduled timer are all controllable while the DOM, sessionStorage
 // and everything else stay genuinely real.
-function run(script, { path = '/app/demo/', navType = 'navigate', now = 1_000_000, random = 0, storage = null } = {}) {
+function run(script, { path = '/app/demo/', navType = 'navigate', now = 1_000_000, random = 0, storage = null, requestStart, perfNow } = {}) {
   const dom = new JSDOM(SHELL, { runScripts: 'outside-only', url: 'http://host' + path });
   const w = dom.window;
   if (storage) for (const [k, v] of storage) w.sessionStorage.setItem(k, v);
@@ -65,8 +65,11 @@ function run(script, { path = '/app/demo/', navType = 'navigate', now = 1_000_00
     win: { location: { pathname: path, reload() { reloads.push(now); } } },
     setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
     Date: { now: () => now },
-    Math: { random: () => random, floor: Math.floor },
-    performance: { getEntriesByType: () => [{ type: navType }] },
+    Math: { random: () => random, floor: Math.floor, min: Math.min, max: Math.max },
+    performance: {
+      getEntriesByType: () => [{ type: navType, requestStart }],
+      now: perfNow === undefined ? undefined : () => perfNow,
+    },
   };
   w.eval(
     '(function(window, setTimeout, Date, Math, performance){' + script + '})(' +
@@ -170,21 +173,53 @@ test('waiting page: it clears the starting budget, not the other way round', () 
   assert.equal(r.storage().has(CAPACITY_KEY), true);
 });
 
-test('starting page: it retries on a flat interval up to the cap', () => {
-  const first = run(loadingScript);
+test('starting page: with no server hold, requests are a flat 3 s apart', () => {
+  // The page rendered 40 ms after its request went out: nothing held it, so the
+  // whole spacing is still ahead and the next reload waits the full interval.
+  const first = run(loadingScript, { requestStart: 10, perfNow: 50 });
   assert.equal(first.gaveUp, false);
-  assert.equal(first.timers[0].ms, 3000, 'the cold-start page has no burst to spread, so no jitter');
-  assert.equal(first.storage().get(RETRY_KEY), '1');
+  assert.equal(first.timers.length, 1, 'it must schedule exactly one reload');
+  assert.equal(first.timers[0].ms, 2960, 'the next request starts 3 s after this one did');
+  assert.equal(first.storage().get(RETRY_KEY), String(1_000_000 + 60_000), 'it must record a 60s deadline');
 });
 
-test('starting page: it gives up after the cap and does not poison the next start', () => {
-  const spent = new Map([[RETRY_KEY, '20']]);
-  const done = run(loadingScript, { navType: 'reload', storage: spent });
+test('starting page: a request the server held is followed at once, not after 3 s', () => {
+  // The proxy held this request for 5 s during a wake. The spacing is spent,
+  // so the page asks again almost immediately: the held requests chain into a
+  // continuous long poll and the app is served the moment it is routable. A
+  // flat 3 s pause here is up to 3 s of spinner after the app is already up.
+  const held = run(loadingScript, { requestStart: 10, perfNow: 5_060 });
+  assert.equal(held.timers[0].ms, 250, 'a held request is followed after only the floor delay');
+  const partly = run(loadingScript, { requestStart: 10, perfNow: 2_010 });
+  assert.equal(partly.timers[0].ms, 1000, 'a partly held request waits out only the rest of the spacing');
+});
+
+test('starting page: without navigation timing it falls back to the flat interval', () => {
+  // Older engines without performance.now or a navigation entry must still
+  // poll, at the conservative rate, never in a tight loop.
+  assert.equal(run(loadingScript).timers[0].ms, 3000);
+  assert.equal(run(loadingScript, { requestStart: 0, perfNow: 9_000 }).timers[0].ms, 3000,
+    'a zero requestStart (timing unavailable) must not read as a long hold');
+});
+
+test('starting page: reloads within the budget keep the original deadline', () => {
+  const started = run(loadingScript);
+  const deadline = started.storage().get(RETRY_KEY);
+  const later = run(loadingScript, { navType: 'reload', now: 1_045_000, storage: started.storage() });
+  assert.equal(later.gaveUp, false);
+  assert.equal(later.storage().get(RETRY_KEY), deadline, 'a mid-wait reload must not extend the deadline');
+});
+
+test('starting page: it gives up once the budget is spent and does not poison the next start', () => {
+  const started = run(loadingScript);
+  const done = run(loadingScript, { navType: 'reload', now: 1_060_001, storage: started.storage() });
   assert.equal(done.gaveUp, true);
   assert.equal(done.title, 'App did not start');
+  assert.match(done.message, /60 seconds/);
+  assert.equal(done.retryVisible, true, 'give-up must offer a manual retry');
   assert.equal(done.timers.length, 0, 'give-up is terminal');
-  assert.equal(done.storage().has(RETRY_KEY), false, 'give-up must not leave its spent count behind');
+  assert.equal(done.storage().has(RETRY_KEY), false, 'give-up must not leave its spent deadline behind');
 
-  const again = run(loadingScript, { navType: 'reload', storage: done.storage() });
+  const again = run(loadingScript, { navType: 'reload', now: 9_000_000, storage: done.storage() });
   assert.equal(again.gaveUp, false, 'a later start must wait again, not give up on arrival');
 });

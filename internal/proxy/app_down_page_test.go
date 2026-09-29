@@ -82,7 +82,7 @@ func TestServeMissPage_HibernatedServesLoadingPage(t *testing.T) {
 }
 
 // The generic loading page keeps its bounded give-up after the shell refactor:
-// the retry cap, the error copy, and the manual retry button must survive.
+// the time budget, the error copy, and the manual retry button must survive.
 func TestLoadingPage_KeepsBoundedGiveUp(t *testing.T) {
 	p := proxy.New()
 	p.SetPoolSize("cold", 1) // sized but no backend, no status lookup -> loading page
@@ -97,7 +97,7 @@ func TestLoadingPage_KeepsBoundedGiveUp(t *testing.T) {
 	body := rec.Body.String()
 	for _, needle := range []string{
 		proxy.LoadingPageSentinel,
-		"var MAX = 20",
+		"var BUDGET_MS = 60000",
 		"App did not start",
 		`id="shinyhub-retry"`,
 		"window.location.reload",
@@ -109,7 +109,7 @@ func TestLoadingPage_KeepsBoundedGiveUp(t *testing.T) {
 }
 
 // A deployment is in flight: serve the deploy-aware wait page. It must
-// auto-refresh, must clear the give-up counter, and must not contain the
+// auto-refresh, must clear the give-up deadline, and must not contain the
 // give-up state that falsely reports "App did not start" mid-build.
 func TestServeMissPage_DeployingServesDeployAwareWaitPage(t *testing.T) {
 	p := proxy.New()
@@ -128,7 +128,7 @@ func TestServeMissPage_DeployingServesDeployAwareWaitPage(t *testing.T) {
 		t.Error("deploying page missing its sentinel copy")
 	}
 	if !strings.Contains(body, "sessionStorage.removeItem") {
-		t.Error("deploying page must clear the give-up counter")
+		t.Error("deploying page must clear the give-up deadline")
 	}
 	if !strings.Contains(body, "window.location.reload") {
 		t.Error("deploying page must auto-refresh")

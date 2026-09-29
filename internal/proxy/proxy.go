@@ -124,48 +124,72 @@ func waitPage(title, msg, script string) string {
 </html>`
 }
 
-// loadingScript reloads the page every 3 s up to MAX times (~60 s) and then
-// switches to an error state with a manual retry button. The per-path retry
-// count is stored in sessionStorage, and is discarded at both ends of a wait:
-// a fresh navigation (not a reload) starts a new one, and giving up ends one.
-// Between those two the count must survive, because the reloads that spend it
-// are the wait.
+// loadingScript polls the app by reloading the page and gives up after ~60 s
+// with a manual retry button.
+//
+// Reloads are spaced so that consecutive requests START at least 3 s apart,
+// measured from when this page's own request went out. While a wake is in
+// progress the proxy holds each request (holdForWake) until the app is routable
+// or the hold expires, so most of the 3 s is usually already spent waiting on
+// the server by the time this page renders; the next request then goes out
+// almost at once, and the held requests form a continuous long poll that
+// returns the app the moment it is routable. A flat 3 s pause after every held
+// request would instead leave the visitor on this page for up to 3 s after the
+// app came up. When nothing was held (hold disabled, or a crashed app served
+// this page at once), the spacing is the plain 3 s, so the request rate never
+// exceeds one per 3 s either way.
+//
+// The wait is bounded by elapsed time rather than by a reload count, because
+// the time a reload takes depends on how long the server held it, and the
+// give-up copy quotes the duration. The per-path deadline is stored in
+// sessionStorage and discarded at both ends of a wait: a fresh navigation (not
+// a reload) starts a new one, and giving up ends one. Between those two it
+// must survive, because the reloads that spend it are the wait.
 const loadingScript = `(function(){
-  var MAX = 20;
+  var BUDGET_MS = 60000;
   var INTERVAL_MS = 3000;
+  var MIN_DELAY_MS = 250;
   var key = 'shinyhub-retry:' + window.location.pathname;
   var nav = (performance.getEntriesByType && performance.getEntriesByType('navigation')[0]) || {};
   if (nav.type !== 'reload') { sessionStorage.removeItem(key); }
-  var n = parseInt(sessionStorage.getItem(key) || '0', 10);
   var box = document.getElementById('shinyhub-box');
   var title = document.getElementById('shinyhub-title');
   var msg = document.getElementById('shinyhub-msg');
   var retry = document.getElementById('shinyhub-retry');
   retry.addEventListener('click', function(){ window.location.reload(); });
-  if (n >= MAX) {
-    // Terminal: this branch schedules no reload, so the counter has done its
+  var deadline = parseInt(sessionStorage.getItem(key) || '0', 10);
+  if (!deadline) {
+    deadline = Date.now() + BUDGET_MS;
+    sessionStorage.setItem(key, String(deadline));
+  }
+  if (Date.now() >= deadline) {
+    // Terminal: this branch schedules no reload, so the deadline has done its
     // job and clearing it is what makes the NEXT start in this tab a real
-    // wait. A count left at MAX would make a later load give up on arrival,
-    // reporting a 60-second wait that never happened.
+    // wait. An expired deadline left behind would make a later load give up
+    // on arrival, reporting a 60-second wait that never happened.
     sessionStorage.removeItem(key);
     box.classList.add('error');
     title.textContent = 'App did not start';
-    msg.textContent = 'Gave up after ' + (MAX * INTERVAL_MS / 1000) +
+    msg.textContent = 'Gave up after ' + (BUDGET_MS / 1000) +
       ' seconds. The app may have failed to deploy or is missing its bundle.';
     retry.style.display = 'inline-block';
     return;
   }
-  sessionStorage.setItem(key, String(n + 1));
-  setTimeout(function(){ window.location.reload(); }, INTERVAL_MS);
+  var spent = 0;
+  if (typeof nav.requestStart === 'number' && nav.requestStart > 0 && performance.now) {
+    spent = performance.now() - nav.requestStart;
+  }
+  var delay = Math.min(INTERVAL_MS, Math.max(MIN_DELAY_MS, INTERVAL_MS - spent));
+  setTimeout(function(){ window.location.reload(); }, delay);
 })();`
 
 // deployingScript reloads every 3 s with no give-up cap. While a deployment
 // is in flight the server keeps serving the deploying page, and the pending
 // deployment row resolves on every handler path (promote, fail, or startup
 // reconciliation), so the refresh loop is bounded by the deploy itself, not
-// by a client-side count. It also clears the loading page's give-up counter
+// by a client-side count. It also clears the loading page's give-up deadline
 // so the post-deploy boot phase gets a fresh ~60 s window instead of
-// inheriting stale reloads.
+// inheriting a deadline that ran while the deploy was building.
 const deployingScript = `(function(){
   var key = 'shinyhub-retry:' + window.location.pathname;
   sessionStorage.removeItem(key);
@@ -186,7 +210,7 @@ var deployingPage = waitPage("Deploying app…",
 	"A deployment is in progress. This can take a few minutes. This page will refresh automatically.",
 	deployingScript)
 
-// waitingScript is the render-capacity counterpart of loadingScript. Three
+// waitingScript is the render-capacity counterpart of loadingScript. Two
 // things differ, each for its own reason.
 //
 // It keys its budget on 'shinyhub-capacity:' rather than 'shinyhub-retry:', so
@@ -195,7 +219,7 @@ var deployingPage = waitPage("Deploying app…",
 // failed to start, and burning the starting budget here would make a later
 // genuine cold boot give up early. For the same reason it clears the starting
 // budget outright, since being served this page proves the app is up and any
-// starting retries counted against it are stale.
+// starting deadline set against it is stale.
 //
 // It retries at 1.5 s plus 0-500 ms of jitter instead of a flat 3 s. Paced
 // clients arrive as a crowd by construction (they are the overflow of one
@@ -203,10 +227,8 @@ var deployingPage = waitPage("Deploying app…",
 // retry every cycle, re-creating the burst the pacer just absorbed. The jitter
 // spreads them across the window.
 //
-// It bounds the wait by elapsed time rather than by a retry count, because a
-// jittered interval makes a count a poor proxy for duration, and the give-up
-// copy quotes that duration. Like the retry count, the deadline is discarded
-// at both ends of a wait and survives only the reloads in between.
+// Like the starting page, it bounds the wait by elapsed time, and the deadline
+// is discarded at both ends of a wait and survives only the reloads in between.
 const waitingScript = `(function(){
   var BUDGET_MS = 60000;
   var INTERVAL_MS = 1500;
