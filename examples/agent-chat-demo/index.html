@@ -21,7 +21,8 @@
     @media (max-width:790px) { .shell { padding-top:25px; } .top { flex-direction:column; margin-bottom:25px; } .agent-button { right:16px; bottom:16px; } .chat { inset:0; width:100%; height:100dvh; border-radius:0; } .chat-open .agent-button { display:none; } .summary { grid-template-columns:1fr; } .metric, .metric + .metric { padding:15px 12px; border-left:0; border-bottom:1px solid var(--line); } .metric:last-child { border-bottom:0; } .metric strong { margin:3px 0; } .bars { gap:7px; } .axis { gap:7px; } } @media (prefers-reduced-motion:no-preference) { .agent-button,.suggestions button,.composer-row button { transition:background-color .16s ease,border-color .16s ease; } @keyframes activity-pulse { 50% { opacity:.35; transform:scale(.75); } } }
     @media (max-width:790px) { .capabilities { grid-template-columns:1fr; } }
     /* The assistant stays beside the dashboard so its actions remain visible. */
-    .chat { top:68px; right:0; bottom:0; width:min(430px,100vw); height:auto; border-radius:0; border-top:0; border-right:0; border-bottom:0; }
+    .chat { top:12px; right:12px; bottom:12px; width:min(430px,calc(100vw - 24px)); height:auto; border:1px solid var(--line); border-radius:14px; }
+    body.shinyhub-toolbar-host .chat { top:60px; }
     .chat-head { padding:21px 22px 17px; }
     .chat-title h2 { flex:1; }
     .chat-head p { margin-bottom:12px; }
@@ -50,7 +51,7 @@
     .integration summary { cursor:pointer; width:max-content; max-width:100%; padding:6px 0; color:var(--text); font-weight:700; }
     .integration .capabilities { margin-top:12px; }
     @media (min-width:950px) { body.chat-open .shell { padding-right:calc(430px + clamp(18px,4vw,60px)); } body.chat-open .agent-button { display:none; } }
-    @media (max-width:949px) { .shell { padding-top:25px; } .chat { top:0; right:0; bottom:0; width:100vw; height:auto; border-left:0; } .chat-head { padding-top:65px; } body.chat-open .agent-button { display:none; } }
+    @media (max-width:949px) { .shell { padding-top:25px; } .chat, body.shinyhub-toolbar-host .chat { top:0; right:0; bottom:0; width:100vw; height:auto; border:0; border-radius:0; } body.shinyhub-toolbar-host .chat-head { padding-top:65px; } body.chat-open .agent-button { display:none; } }
     @media (max-width:650px) { .bars,.axis { gap:6px; } }
     @media (prefers-reduced-motion:no-preference) { .bar { transition:height .22s cubic-bezier(.22,1,.36,1),background-color .18s ease; } .metric strong { transition:color .18s ease; } }
   </style>
@@ -138,7 +139,7 @@
     function openChat() { $('chat').classList.add('open'); document.body.classList.add('chat-open'); $('open-chat').setAttribute('aria-expanded','true'); syncChatMode(); chatEvent('state',{open:true}); $('question').focus({preventScroll:true}); }
     function closeChat() { $('chat').classList.remove('open'); document.body.classList.remove('chat-open'); $('open-chat').setAttribute('aria-expanded','false'); syncChatMode(); chatEvent('state',{open:false,focus:toolbarAvailable}); if(!toolbarAvailable&&!toolbarSuspended)$('open-chat').focus({preventScroll:true}); }
     window.addEventListener('shinyhub:chat:discover',event=>{if(event.detail?.version===chatProtocol)announceChat();});
-    window.addEventListener('shinyhub:chat:host',event=>{if(event.detail?.version!==chatProtocol)return;toolbarAvailable=!!event.detail.available;toolbarSuspended=!!event.detail.suspended;$('open-chat').hidden=!chatEnabled||toolbarAvailable||toolbarSuspended;});
+    window.addEventListener('shinyhub:chat:host',event=>{if(event.detail?.version!==chatProtocol)return;toolbarAvailable=!!event.detail.available;toolbarSuspended=!!event.detail.suspended;document.body.classList.toggle('shinyhub-toolbar-host',toolbarAvailable);$('open-chat').hidden=!chatEnabled||toolbarAvailable||toolbarSuspended;});
     window.addEventListener('shinyhub:chat:toggle',event=>{if(event.detail?.version!==chatProtocol||!chatEnabled)return;if($('chat').classList.contains('open'))closeChat();else openChat();});
     $('view').addEventListener('change',()=>renderView({announce:true,highlight:true}));
     $('composer').addEventListener('submit',event=>{event.preventDefault();ask($('question').value);});
