@@ -99,6 +99,12 @@ apps' data. The hoster must
 authorize and secure their endpoint. Tool calls from all three backends are
 validated again by the app. A write pauses for visitor approval in the chat
 panel, then runs the handler and returns its applied result to the agent.
+For a clear action result, a write tool may provide `receipt=lambda args,
+result: f"View set to {result['period']}"`. A tool may also provide an async
+`undo(args, result)` handler. The chat then offers Undo for five minutes. Undo
+runs in the same viewer's Shiny session without asking the model; the handler
+must verify the app is still in the state created by that action before
+restoring the previous state. Only the most recent write remains undoable.
 
 An AG-UI agent hosted in Amazon Bedrock AgentCore needs an authenticated
 `InvokeAgentRuntime` client or a hoster-managed HTTPS relay. `AGUIChat` does

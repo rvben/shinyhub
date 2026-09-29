@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import httpx
 
-from shinyhub_agent import AgentTool, OpenAIChat, ToolRegistry
+from shinyhub_agent import AgentTool, OpenAIChat, ToolError, ToolRegistry
 from shinyhub_agent._chat import ChatSession
 
 
@@ -168,3 +168,72 @@ def test_declined_action_does_not_run_handler():
     asyncio.run(run())
     assert applied == []
     assert any(item.get("text") == "Change cancelled." for item in events)
+
+
+def test_action_receipt_can_undo_once_and_reject_stale_view():
+    state = {"period": "week"}
+    events = []
+
+    async def change(args):
+        previous = state["period"]
+        state["period"] = args["period"]
+        return {"period": state["period"], "previous_period": previous}
+
+    async def undo(_args, result):
+        if state["period"] != result["period"]:
+            raise ToolError("stale_view", "The view changed again.")
+        state["period"] = result["previous_period"]
+        return {"period": state["period"]}
+
+    tools = ToolRegistry([AgentTool("set_period", "Change period", {
+        "type": "object", "properties": {"period": {"type": "string", "enum": ["week", "year"]}},
+        "required": ["period"], "additionalProperties": False,
+    }, change, read_only=False, confirmation="Change period?",
+        receipt=lambda _args, result: f"View set to {result['period']}", undo=undo)])
+
+    class StubAgent:
+        async def run(self, message, history, tools, approve, *, thread_id):
+            result = await approve("set_period", {"period": "year"})
+            yield {"type": "action_applied", "name": "set_period", "result": result}
+            yield {"type": "delta", "text": "Showing year."}
+
+    async def run():
+        async def send(item):
+            events.append(item)
+        chat = ChatSession(StubAgent(), tools, send)
+
+        async def change_with_approval(request_id):
+            task = asyncio.create_task(chat.handle({
+                "version": 1, "session": chat.nonce, "requestId": request_id,
+                "message": "Show year",
+            }))
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            approval = [item for item in events if item["type"] == "approval_required"][-1]
+            chat.decide({"version": 1, "session": chat.nonce,
+                         "approvalId": approval["approvalId"], "approved": True})
+            await task
+            return [item for item in events if item["type"] == "action_applied"][-1]
+
+        action = await change_with_approval("request_12345678")
+        assert action["receipt"] == "View set to year"
+        assert isinstance(action["actionId"], str)
+        await chat.handle({"version": 1, "session": chat.nonce, "requestId": "request_87654321",
+                           "action": "undo", "actionId": action["actionId"]})
+        assert state["period"] == "week"
+        assert events[-1] == {"version": 1, "session": chat.nonce,
+                              "requestId": "request_87654321", "type": "undo_result",
+                              "ok": True, "actionId": action["actionId"],
+                              "detail": "View set to week"}
+        await chat.handle({"version": 1, "session": chat.nonce, "requestId": "request_87654322",
+                           "action": "undo", "actionId": action["actionId"]})
+        assert events[-1]["ok"] is False
+
+        action = await change_with_approval("request_12345679")
+        state["period"] = "week"  # A manual filter change makes the receipt stale.
+        await chat.handle({"version": 1, "session": chat.nonce, "requestId": "request_87654323",
+                           "action": "undo", "actionId": action["actionId"]})
+        assert events[-1]["ok"] is False
+        assert state["period"] == "week"
+
+    asyncio.run(run())

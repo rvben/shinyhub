@@ -9,7 +9,7 @@ still works and the chat panel stays hidden.
 To run from this repository:
 
 ```bash
-uv run --prerelease allow --no-project --with 'shinyhub-agent[bedrock]==0.2.0b1' \
+uv run --prerelease allow --no-project --with 'shinyhub-agent[bedrock]==0.2.0b2' \
   shiny run examples/agent-shiny-demo/app.py
 ```
 

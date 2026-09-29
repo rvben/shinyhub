@@ -43,6 +43,8 @@ class AgentTool:
     handler: Callable[[dict[str, Any]], Any]
     read_only: bool = True
     confirmation: str = ""
+    receipt: Callable[[dict[str, Any], Any], str] | None = None
+    undo: Callable[[dict[str, Any], Any], Any] | None = None
 
     def __post_init__(self) -> None:
         if not NAME.fullmatch(self.name):
@@ -66,6 +68,12 @@ class AgentTool:
             raise ValueError("State-changing tools need visitor-facing confirmation text")
         if len(self.confirmation) > 300:
             raise ValueError("Confirmation text is too long")
+        if self.read_only and (self.receipt is not None or self.undo is not None):
+            raise ValueError("Only state-changing tools can have a receipt or undo action")
+        if self.receipt is not None and not callable(self.receipt):
+            raise TypeError("Receipt must be a callable")
+        if self.undo is not None and not inspect.iscoroutinefunction(self.undo):
+            raise TypeError("Undo handler must be an async function")
 
     def public_spec(self) -> dict[str, Any]:
         return {

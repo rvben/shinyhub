@@ -37,6 +37,7 @@ class ChatSession:
         self.seen_requests: deque[str] = deque(maxlen=32)
         self.lock = asyncio.Lock()
         self.pending_approval: tuple[str, asyncio.Future[bool]] | None = None
+        self.last_action: tuple[str, str, dict[str, Any], Any, float] | None = None
         self.task: asyncio.Task[Any] | None = None
 
     def capabilities(self) -> dict[str, Any]:
@@ -60,11 +61,43 @@ class ChatSession:
             if not self.lock.locked():
                 self.history.clear()
                 self.thread_id = secrets.token_urlsafe(18)
+                self.last_action = None
                 await emit({"type": "reset"})
             return
         if raw.get("action") == "cancel":
             if self.task is not None:
                 self.task.cancel()
+            return
+        if raw.get("action") == "undo":
+            if self.lock.locked():
+                await emit({"type": "undo_result", "ok": False,
+                            "message": "Wait for the answer to finish, then try Undo."})
+                return
+            async with self.lock:
+                action = self.last_action
+                if (action is None or raw.get("actionId") != action[0]
+                        or time.monotonic() - action[4] > 300):
+                    await emit({"type": "undo_result", "ok": False,
+                                "message": "This change can no longer be undone."})
+                    return
+                tool = self.tools.get(action[1])
+                if tool is None or tool.undo is None:
+                    await emit({"type": "undo_result", "ok": False,
+                                "message": "Undo is unavailable for this change."})
+                    return
+                self.last_action = None
+                try:
+                    result = await asyncio.wait_for(tool.undo(action[2], action[3]), 8.0)
+                    self.history.clear()
+                    self.thread_id = secrets.token_urlsafe(18)
+                    detail = self._receipt(tool, action[2], result, "Previous view restored")
+                    await emit({"type": "undo_result", "ok": True,
+                                "actionId": action[0], "detail": detail})
+                except Exception:
+                    logger.exception("Agent chat undo failed")
+                    await emit({"type": "undo_result", "ok": False,
+                                "actionId": action[0],
+                                "message": "Undo could not finish. Check the current view."})
             return
         if request_id in self.seen_requests:
             await emit({"type": "error", "message": "That question was already submitted."})
@@ -114,6 +147,13 @@ class ChatSession:
                             raise ToolError("answer_too_large", "The answer was too long.")
                     elif event.get("type") == "action_applied":
                         applied_actions.append(str(event.get("name", "app action")))
+                        action = self.last_action
+                        if action is not None and event.get("name") == action[1]:
+                            tool = self.tools.get(action[1])
+                            event = {**event, "receipt": self._receipt(
+                                tool, action[2], action[3], "Change applied to this view")}
+                            if tool and tool.undo is not None:
+                                event["actionId"] = action[0]
                     await emit(event)
                 if not answer.strip():
                     raise ToolError("empty_answer", "The assistant returned no answer.")
@@ -163,7 +203,26 @@ class ChatSession:
             self.pending_approval = None
         if not allowed:
             raise ToolError("action_declined", "The visitor declined the action.")
-        return await self.tools.execute(name, arguments)
+        result = await self.tools.execute(name, arguments)
+        self.last_action = (secrets.token_urlsafe(16), name, arguments, result, time.monotonic())
+        return result
+
+    @staticmethod
+    def _receipt_text(value: Any) -> str:
+        if not isinstance(value, str) or not 1 <= len(value.strip()) <= 140:
+            raise ValueError("Receipt text must contain 1 to 140 characters")
+        return value.strip()
+
+    @classmethod
+    def _receipt(cls, tool: Any, arguments: dict[str, Any], result: Any,
+                 fallback: str) -> str:
+        if tool is None or tool.receipt is None:
+            return fallback
+        try:
+            return cls._receipt_text(tool.receipt(arguments, result))
+        except Exception:
+            logger.exception("Agent tool receipt failed")
+            return fallback
 
     def decide(self, raw: Any) -> None:
         if not isinstance(raw, dict) or self.pending_approval is None:

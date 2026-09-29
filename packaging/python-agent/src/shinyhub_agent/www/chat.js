@@ -10,6 +10,7 @@
   var installed = false;
   var previousFocus = null;
   var pendingTools = [];
+  var undoRequests = new Map();
   var toolbarAvailable = false;
   var toolbarSuspended = false;
   var nativeChat = false;
@@ -168,6 +169,9 @@
     stop.hidden = !busy;
     stop.disabled = false;
     updateSend();
+    panel.querySelectorAll(".sh-agent-undo").forEach(function (button) {
+      if (!button.dataset.pending) button.disabled = busy;
+    });
     if (!busy && !panel.hidden) input.focus({ preventScroll: true });
   }
 
@@ -303,6 +307,44 @@
     setStatus("Waiting for your approval");
   }
 
+  function showReceipt(event) {
+    var follow = nearBottom();
+    var receipt = lastApprovalCard && lastApprovalCard.dataset.result === "applying"
+      ? lastApprovalCard : make("div", "sh-agent-receipt");
+    receipt.className = "sh-agent-receipt";
+    receipt.removeAttribute("data-result");
+    var mark = make("span", "sh-agent-receipt-mark");
+    mark.append(icon(["M5 12l4 4L19 6"]));
+    var copy = make("span", "sh-agent-receipt-copy");
+    var title = make("strong", "sh-agent-receipt-title", event.receipt || "Change applied to this view");
+    var detail = make("span", "sh-agent-receipt-detail");
+    detail.hidden = true;
+    copy.append(title, detail);
+    receipt.replaceChildren(mark, copy);
+    var toolIndex = pendingTools.findIndex(function (entry) { return entry.name === event.name; });
+    if (toolIndex >= 0) pendingTools.splice(toolIndex, 1)[0].item.remove();
+    panel.querySelectorAll(".sh-agent-undo").forEach(function (button) { button.remove(); });
+    if (typeof event.actionId === "string") {
+      var undo = make("button", "sh-agent-undo", "Undo");
+      undo.type = "button";
+      undo.disabled = !!activeRequest;
+      undo.setAttribute("aria-label", "Undo: " + title.textContent);
+      undo.addEventListener("click", function () {
+        var requestId = crypto.randomUUID();
+        undo.disabled = true;
+        undo.dataset.pending = "true";
+        undo.textContent = "Undoing…";
+        undoRequests.set(requestId, { receipt: receipt, title: title, detail: detail, button: undo });
+        emit({ version: VERSION, session: chatSession, requestId: requestId,
+          action: "undo", actionId: event.actionId });
+      });
+      receipt.append(undo);
+    }
+    if (!receipt.isConnected && activeAnswer) activeAnswer.parentNode.before(receipt);
+    lastApprovalCard = null;
+    scrollAfterChange(follow);
+  }
+
   launcher.addEventListener("click", openPanel);
   close.addEventListener("click", closePanel);
   window.addEventListener("shinyhub:chat:discover", function (event) {
@@ -392,7 +434,27 @@
       if (event.type === "reset") {
         log.replaceChildren(empty);
         lastApprovalCard = null;
+        undoRequests.clear();
         setStatus("New chat started");
+        return;
+      }
+      if (event.type === "undo_result") {
+        var pendingUndo = undoRequests.get(event.requestId);
+        if (!pendingUndo) return;
+        undoRequests.delete(event.requestId);
+        pendingUndo.button.remove();
+        if (event.ok) {
+          pendingUndo.receipt.dataset.result = "undone";
+          pendingUndo.title.textContent = "Change undone";
+          pendingUndo.detail.textContent = (event.detail || "Previous view restored") +
+            ". The answer describes the view before Undo.";
+          pendingUndo.detail.hidden = false;
+        } else {
+          pendingUndo.receipt.dataset.result = "unavailable";
+          pendingUndo.detail.textContent = event.message || "Undo is unavailable.";
+          pendingUndo.detail.hidden = false;
+        }
+        setStatus(event.ok ? "Previous view restored" : "Check the current view", event.ok ? "working" : "error");
         return;
       }
       if (event.requestId !== activeRequest) return;
@@ -405,15 +467,7 @@
         setStatus("Writing answer");
         scrollAfterChange(follow);
       } else if (event.type === "action_applied") {
-        if (lastApprovalCard && lastApprovalCard.dataset.result === "applying") {
-          lastApprovalCard.dataset.result = "applied";
-          lastApprovalCard.querySelector(".sh-agent-approval-label").textContent = "Change applied";
-        } else {
-          var followReceipt = nearBottom();
-          var receipt = make("p", "sh-agent-receipt", "Change applied to this view");
-          activeAnswer.parentNode.before(receipt);
-          scrollAfterChange(followReceipt);
-        }
+        showReceipt(event);
         setStatus("Writing answer");
       } else if (event.type === "done") finish("");
       else if (event.type === "error") {

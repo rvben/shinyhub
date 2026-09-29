@@ -283,7 +283,33 @@ body.sh-agent-native-chat .sh-agent-reset { display: none; }
 .sh-agent-approval[data-result="applying"] .sh-agent-approval-label { color: #0369a1; }
 .sh-agent-approval[data-result="applied"] .sh-agent-approval-label { color: #166534; }
 .sh-agent-approval[data-result="unknown"] .sh-agent-approval-label { color: #7c2d12; }
-.sh-agent-receipt { align-self: flex-start; margin: 0; padding: 6px 10px; border-radius: 7px; background: #e7f4e9; color: #166534; font-size: 12px; font-weight: 700; }
+.sh-agent-receipt {
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+  gap: 10px;
+  min-height: 48px;
+  margin: 0;
+  padding: 9px 11px;
+  border: 1px solid #dbe2ee;
+  border-radius: 8px;
+  background: #fff;
+  color: #16203a;
+  font-size: 12px;
+  line-height: 1.35;
+}
+.sh-agent-receipt-mark { display: grid; flex: none; place-items: center; width: 24px; height: 24px; border-radius: 8px; background: #e8edf6; color: #166534; }
+.sh-agent-receipt-mark svg { width: 15px; height: 15px; }
+.sh-agent-receipt-copy { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
+.sh-agent-receipt-title { font-weight: 750; }
+.sh-agent-receipt-detail { color: #45526e; }
+.sh-agent-undo { flex: none; min-height: 36px; padding: 0 9px; border: 0; border-radius: 8px; background: transparent; color: #0369a1; font-size: 12px; font-weight: 750; cursor: pointer; }
+.sh-agent-undo:hover { background: #e9eef7; }
+.sh-agent-undo:focus-visible { outline: 2px solid #0284c7; outline-offset: 1px; }
+.sh-agent-receipt[data-result="undone"],
+.sh-agent-receipt[data-result="unavailable"] { border-color: #dbe2ee; background: #fff; }
+.sh-agent-receipt[data-result="undone"] .sh-agent-receipt-mark,
+.sh-agent-receipt[data-result="unavailable"] .sh-agent-receipt-mark { background: #e8edf6; color: #45526e; }
 
 .sh-agent-status {
   display: flex;

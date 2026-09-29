@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 
 from shiny import App, reactive, render, ui
-from shinyhub_agent import AGUIChat, AgentTool, BedrockChat, OpenAIChat, agent_dependency, chat_dependency, register
+from shinyhub_agent import AGUIChat, AgentTool, BedrockChat, OpenAIChat, ToolError, agent_dependency, chat_dependency, register
 
 VIEWS = {
     "This week": {"requests": "1.42M", "p95_latency_ms": 148, "error_rate": "0.3%"},
@@ -77,8 +77,17 @@ def server(input, output, session):
 
     async def set_dashboard_period(args):
         period = args["period"]
+        previous_period = selected_period.get()
         selected_period.set(period)
         ui.update_select("period", selected=period, session=session)
+        return {**(await get_dashboard_state({})), "previous_period": previous_period}
+
+    async def undo_dashboard_period(_args, result):
+        if selected_period.get() != result["period"]:
+            raise ToolError("stale_view", "The reporting period changed again.")
+        previous_period = result["previous_period"]
+        selected_period.set(previous_period)
+        ui.update_select("period", selected=previous_period, session=session)
         return await get_dashboard_state({})
 
     register(session=session, input=input, tools=[
@@ -96,6 +105,8 @@ def server(input, output, session):
             set_dashboard_period,
             read_only=False,
             confirmation="Change this dashboard's reporting period?",
+            receipt=lambda _args, result: f"View set to {result['period']}",
+            undo=undo_dashboard_period,
         ),
     ], chat=CHAT)
 

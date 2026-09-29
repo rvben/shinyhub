@@ -1,7 +1,7 @@
 """Local-only browser integration fixture; no external model calls."""
 
 from shiny import App, reactive, render, ui
-from shinyhub_agent import AgentTool, agent_dependency, chat_dependency, register
+from shinyhub_agent import AgentTool, ToolError, agent_dependency, chat_dependency, register
 
 
 class StubAgent:
@@ -39,8 +39,16 @@ def server(input, output, session):
         return {"period": period.get()}
 
     async def set_period(args):
+        previous_period = period.get()
         period.set(args["period"])
         ui.update_select("period", selected=args["period"], session=session)
+        return {"period": period.get(), "previous_period": previous_period}
+
+    async def undo_period(_args, result):
+        if period.get() != result["period"]:
+            raise ToolError("stale_view", "The view changed again.")
+        period.set(result["previous_period"])
+        ui.update_select("period", selected=result["previous_period"], session=session)
         return await get_period({})
 
     register(session=session, input=input, tools=[
@@ -50,7 +58,9 @@ def server(input, output, session):
         AgentTool("set_period", "Change period", {
             "type": "object", "properties": {"period": {"type": "string", "enum": ["week", "year"]}},
             "required": ["period"], "additionalProperties": False,
-        }, set_period, read_only=False, confirmation="Change period to year?"),
+        }, set_period, read_only=False, confirmation="Change period to year?",
+            receipt=lambda _args, result: f"View set to {result['period']}",
+            undo=undo_period),
     ], chat=StubAgent())
 
     @output
