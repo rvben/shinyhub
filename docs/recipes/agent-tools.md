@@ -78,6 +78,10 @@ Include `chat_dependency()` in the UI and pass a chat backend to `register()`.
 instructions. `AGUIChat` connects to a hoster-owned HTTPS AG-UI endpoint and
 can use a private bearer token. The two backends use the same app tool
 registry. The browser receives neither credential.
+When this app runs on a ShinyHub server with toolbar chat support, **Ask**
+appears in the app toolbar after the chat session connects. The helper uses its
+own launcher if the toolbar is unavailable or hidden. The app remains
+responsible for its panel, model instructions, and tools.
 
 ```python
 import os

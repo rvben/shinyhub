@@ -1,0 +1,31 @@
+{
+  "views": {
+    "This week": {
+      "requests": "1.28M",
+      "latency": "182 ms",
+      "errors": "0.7%",
+      "bars": [55, 68, 96, 74, 82, 41, 52],
+      "labels": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+      "series_note": "Illustrative daily values",
+      "peak": "Wednesday"
+    },
+    "Last week": {
+      "requests": "1.16M",
+      "latency": "164 ms",
+      "errors": "0.5%",
+      "bars": [61, 70, 80, 72, 67, 43, 48],
+      "labels": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+      "series_note": "Illustrative daily values",
+      "peak": "Wednesday"
+    },
+    "This year": {
+      "requests": "11.4M",
+      "latency": "176 ms",
+      "errors": "0.6%",
+      "bars": [50, 58, 64, 72, 69, 75, 82, 94, 86],
+      "labels": ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep"],
+      "series_note": "Illustrative monthly values (Jan–Sep)",
+      "peak": "August"
+    }
+  }
+}

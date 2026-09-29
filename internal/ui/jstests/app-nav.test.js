@@ -16,6 +16,7 @@ import { GROUP_ORDER_FIXTURE, GROUP_ORDER_EXPECTED } from './group-order-fixture
 
 const NAV_JS = new URL('../../appnav/assets/nav.js', import.meta.url);
 const source = readFileSync(NAV_JS, 'utf8');
+const chatSource = readFileSync(new URL('../../../packaging/python-agent/src/shinyhub_agent/www/chat.js', import.meta.url), 'utf8');
 // A renamed or emptied source would make every assertion below pass on an
 // empty document, which is the one outcome worse than failing.
 if (!source.includes('shinyhub-app-nav')) {
@@ -38,6 +39,10 @@ const BOOKMARK_CREATE_EVENT = 'shinyhub:bookmark:create';
 const BOOKMARK_RESULT_EVENT = 'shinyhub:bookmark:result';
 const BOOKMARK_ERROR_EVENT = 'shinyhub:bookmark:error';
 const BOOKMARK_SYNC_STATUS_EVENT = 'shinyhub:bookmark:sync-status';
+const CHAT_CAPABILITIES_EVENT = 'shinyhub:chat:capabilities';
+const CHAT_HOST_EVENT = 'shinyhub:chat:host';
+const CHAT_TOGGLE_EVENT = 'shinyhub:chat:toggle';
+const CHAT_STATE_EVENT = 'shinyhub:chat:state';
 
 const flush = () => new Promise((r) => setImmediate(r));
 
@@ -227,6 +232,65 @@ test('mounts a recognizable app bar into the page without fetching anything', as
   assert.equal(m.root().getAttribute('data-position'), 'top-right');
   assert.equal(m.fetches.length, 0);
   assert.equal(m.jsdomErrors.length, 0, `script errored: ${m.jsdomErrors.join('; ')}`);
+});
+
+test('shows Ask only for an app that advertises chat and delegates opening to the app', (t) => {
+  const m = mount();
+  t.after(() => m.dom.window.close());
+  const ask = m.q('button.chat-trigger');
+  const hostEvents = [];
+  const toggleEvents = [];
+  m.window.addEventListener(CHAT_HOST_EVENT, (event) => hostEvents.push(event.detail));
+  m.window.addEventListener(CHAT_TOGGLE_EVENT, (event) => toggleEvents.push(event.detail));
+  assert.equal(m.root().classList.contains('chat-ready'), false);
+  m.window.dispatchEvent(new m.window.CustomEvent(CHAT_CAPABILITIES_EVENT, {
+    detail: { version: 1, enabled: true },
+  }));
+  assert.equal(m.root().classList.contains('chat-ready'), true);
+  assert.equal(hostEvents.at(-1).available, true);
+  ask.click();
+  assert.equal(toggleEvents.length, 1);
+  assert.equal(toggleEvents[0].version, 1);
+  m.window.dispatchEvent(new m.window.CustomEvent(CHAT_STATE_EVENT, {
+    detail: { version: 1, open: true },
+  }));
+  assert.equal(ask.getAttribute('aria-expanded'), 'true');
+  m.closeBtn().click();
+  assert.equal(hostEvents.at(-1).available, false);
+  m.restoreBtn().click();
+  assert.equal(hostEvents.at(-1).available, true);
+  m.window.dispatchEvent(new m.window.CustomEvent(CHAT_CAPABILITIES_EVENT, {
+    detail: { version: 1, enabled: false },
+  }));
+  assert.equal(m.root().classList.contains('chat-ready'), false);
+  assert.equal(hostEvents.at(-1).available, false);
+  assert.equal(m.jsdomErrors.length, 0);
+});
+
+test('the Shiny helper uses the toolbar entry and restores focus after chat closes', (t) => {
+  const m = mount();
+  t.after(() => m.dom.window.close());
+  const handlers = new Map();
+  m.window.Shiny = { addCustomMessageHandler: (name, handler) => handlers.set(name, handler) };
+  m.window.matchMedia = () => ({ matches: false });
+  m.window.eval(chatSource);
+  const launcher = m.document.querySelector('.sh-agent-launcher');
+  const chat = m.document.querySelector('.sh-agent-panel');
+  const ask = m.q('button.chat-trigger');
+  assert.equal(launcher.hidden, true);
+  handlers.get('shinyhub-agent-chat-capabilities')({ version: 1, enabled: true, session: 'viewer-1' });
+  assert.equal(m.root().classList.contains('chat-ready'), true);
+  assert.equal(launcher.hidden, true, 'the toolbar replaces the separate launcher');
+  ask.click();
+  assert.equal(chat.hidden, false);
+  assert.equal(ask.getAttribute('aria-expanded'), 'true');
+  chat.querySelector('[aria-label="Close assistant"]').click();
+  assert.equal(chat.hidden, true);
+  assert.equal(ask.getAttribute('aria-expanded'), 'false');
+  assert.equal(m.focused(), ask);
+  m.closeBtn().click();
+  assert.equal(launcher.hidden, false, 'hiding the toolbar restores the app launcher');
+  assert.equal(m.jsdomErrors.length, 0);
 });
 
 test('offers an explicit switch when a different generation is active', async (t) => {
@@ -593,7 +657,7 @@ test('bookmarking and a ready version share one bar without adding a version but
   assert.ok(m.root().classList.contains('version-ready'));
   assert.equal(m.q('button.version-trigger'), null);
   assert.equal(
-    m.qa('.bar > button:not(.session-trigger)').length,
+    m.qa('.bar > button:not(.session-trigger):not(.chat-trigger)').length,
     4,
     'move, switch, bookmark, and close are the only active-mode bar controls',
   );

@@ -1,0 +1,4 @@
+[app]
+name = "Agent capabilities demo"
+description = "Try an app chatbot and WebMCP tools on an illustrative dashboard."
+framework = "fastapi"

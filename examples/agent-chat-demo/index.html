@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Operations pulse · Agent capabilities demo</title>
+  <style>
+    :root { color-scheme: dark; font-family: Manrope, system-ui, sans-serif; --bg:#060914; --surface:#0e1426; --raised:#141b32; --line:#2b3a63; --text:#e8eeff; --muted:#a8b4d4; --cyan:#38bdf8; --cyan-soft:#141b32; }
+    * { box-sizing:border-box; } [hidden] { display:none !important; } body { margin:0; background:var(--bg); color:var(--text); } button,textarea,select { font:inherit; } button { cursor:pointer; } ::selection { background:var(--cyan); color:#062032; }
+    :focus-visible { outline:3px solid var(--cyan); outline-offset:3px; } .shell { max-width:1440px; margin:auto; padding:68px clamp(18px,4vw,60px) 80px; }
+    .top { display:flex; justify-content:space-between; align-items:start; gap:24px; margin-bottom:38px; } h1 { font-size:clamp(2rem,3.2vw,3.4rem); line-height:1.08; letter-spacing:-.035em; margin:0 0 12px; } .lede { max-width:66ch; color:var(--muted); line-height:1.6; margin:0; }
+    .top-actions { display:flex; gap:10px; align-items:center; flex-wrap:wrap; } .label { color:var(--muted); font-size:.875rem; font-weight:750; letter-spacing:.01em; } select { min-height:43px; border-radius:8px; border:1px solid var(--line); padding:0 14px; background:var(--surface); color:var(--text); } .agent-button { position:fixed; right:24px; bottom:20px; z-index:31; min-height:48px; display:inline-flex; align-items:center; gap:9px; padding:0 18px; border:0; border-radius:8px; background:var(--cyan); color:#030510; font-weight:800; } .agent-button:hover { background:#7dd3fc; }
+    .app-layout { display:block; } .dashboard { max-width:1100px; } .summary { display:grid; grid-template-columns:repeat(3,1fr); border-top:1px solid var(--line); border-bottom:1px solid var(--line); } .metric { padding:25px 20px; } .metric + .metric { border-left:1px solid var(--line); } .metric strong { display:block; font-size:clamp(1.65rem,2.6vw,2.6rem); letter-spacing:-.035em; margin:9px 0 4px; font-variant-numeric:tabular-nums; } .metric small { color:var(--muted); font-size:.875rem; }
+    .panel { background:var(--surface); border-radius:14px; margin-top:24px; padding:25px; } .panel-head { display:flex; justify-content:space-between; gap:12px; align-items:baseline; } h2 { font-size:1.05rem; margin:0; letter-spacing:-.015em; } .panel-note { color:var(--muted); font-size:.875rem; } .bars { height:226px; display:flex; align-items:end; gap:14px; padding-top:32px; border-bottom:1px solid var(--line); } .bar { flex:1; background:#1b2444; border-radius:4px 4px 0 0; min-width:0; position:relative; } .bar:nth-child(3) { background:var(--cyan); } .bar span { position:absolute; bottom:100%; left:50%; transform:translateX(-50%); margin-bottom:7px; color:var(--muted); font-size:.875rem; font-variant-numeric:tabular-nums; } .axis { display:grid; grid-template-columns:repeat(7,1fr); gap:14px; margin-top:12px; color:var(--muted); text-align:center; font-size:.875rem; }
+    .observation { display:flex; gap:14px; align-items:start; padding:22px 0 0; color:var(--muted); line-height:1.55; font-size:.89rem; } .observation strong { color:var(--text); } .dot { width:9px; height:9px; flex:none; margin-top:7px; border-radius:50%; background:var(--cyan); }
+    .capabilities { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; max-width:1100px; margin-top:24px; } .capability { background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:20px; } .capability h2 { font-size:1.05rem; } .capability p { color:var(--muted); line-height:1.55; font-size:.875rem; margin:10px 0; } .capability code { color:#bae6fd; font-size:.82rem; overflow-wrap:anywhere; } .capability-status { display:inline-block; color:#bae6fd; font-size:.875rem; font-weight:800; margin-top:6px; } .try-tool { margin-top:10px; padding:9px 12px; border:1px solid var(--line); border-radius:8px; background:var(--raised); color:var(--text); } .try-tool:hover { border-color:var(--cyan); } .tool-result { min-height:40px; white-space:pre-wrap; overflow-wrap:anywhere; }
+    .chat { display:none; position:fixed; right:24px; bottom:82px; z-index:30; width:min(390px,calc(100vw - 32px)); height:min(690px,calc(100dvh - 106px)); flex-direction:column; background:var(--surface); border:1px solid var(--line); border-radius:14px; overflow:hidden; } .chat.open { display:flex; } .chat-head { padding:22px 22px 17px; border-bottom:1px solid var(--line); } .chat-title { display:flex; align-items:center; justify-content:space-between; gap:12px; } .chat-title h2 { font-size:1.1875rem; } .badge { color:#bae6fd; background:var(--cyan-soft); font-size:.875rem; padding:5px 9px; border-radius:999px; font-weight:800; white-space:nowrap; } .chat-head p { color:var(--muted); font-size:.875rem; line-height:1.5; margin:9px 0 0; }
+    .messages { flex:1; overflow-y:auto; padding:21px; display:flex; flex-direction:column; gap:16px; min-height:0; } .message { line-height:1.55; font-size:.875rem; white-space:pre-wrap; overflow-wrap:anywhere; } .message .who { display:block; font-weight:800; font-size:.875rem; color:var(--muted); margin-bottom:6px; } .message.user { background:var(--raised); padding:12px 14px; border-radius:14px; align-self:flex-end; max-width:90%; } .message.assistant { align-self:stretch; } .message.error { color:#f87171; } .activity { display:flex; align-items:center; gap:9px; color:#bae6fd; font-size:.82rem; min-height:25px; margin:2px 0 7px; } .activity::before { content:""; display:block; width:8px; height:8px; flex:none; border-radius:50%; background:var(--cyan); } .activity.busy::before { animation:activity-pulse 1.4s ease-in-out infinite; } .answer { display:block; } .suggestions { display:flex; gap:8px; flex-wrap:wrap; margin-top:7px; } .suggestions button { background:transparent; color:var(--text); border:1px solid var(--line); border-radius:8px; padding:9px 11px; text-align:left; font-size:.875rem; } .suggestions button:hover { border-color:var(--cyan); }
+    .composer { border-top:1px solid var(--line); padding:14px; } .composer textarea { display:block; width:100%; min-height:78px; max-height:150px; resize:vertical; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--text); padding:11px 12px; outline:none; } .composer textarea:focus { border-color:var(--cyan); box-shadow:0 0 0 2px #38bdf83d; } .composer textarea::placeholder { color:var(--muted); } .composer-row { display:flex; justify-content:space-between; align-items:center; gap:10px; margin-top:10px; } .composer-row span { color:var(--muted); font-size:.875rem; } .composer-actions { display:flex; gap:8px; } .composer-row button { border:0; background:var(--cyan); color:#030510; border-radius:8px; padding:9px 16px; font-weight:800; } .composer-row button:disabled { opacity:.5; cursor:wait; } .composer-row .stop { background:var(--raised); color:var(--text); border:1px solid var(--line); } .privacy { color:var(--muted); font-size:.875rem; padding:0 16px 13px; line-height:1.45; }
+    .close { display:flex; align-items:center; justify-content:center; width:32px; height:32px; flex:none; background:transparent; border:0; border-radius:4px; color:var(--text); } .close:hover { background:var(--raised); } .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+    @media (max-width:790px) { .shell { padding-top:25px; } .top { flex-direction:column; margin-bottom:25px; } .agent-button { right:16px; bottom:16px; } .chat { inset:0; width:100%; height:100dvh; border-radius:0; } .chat-open .agent-button { display:none; } .summary { grid-template-columns:1fr; } .metric, .metric + .metric { padding:15px 12px; border-left:0; border-bottom:1px solid var(--line); } .metric:last-child { border-bottom:0; } .metric strong { margin:3px 0; } .bars { gap:7px; } .axis { gap:7px; } } @media (prefers-reduced-motion:no-preference) { .agent-button,.suggestions button,.composer-row button { transition:background-color .16s ease,border-color .16s ease; } @keyframes activity-pulse { 50% { opacity:.35; transform:scale(.75); } } }
+    @media (max-width:790px) { .capabilities { grid-template-columns:1fr; } }
+    /* The assistant stays beside the dashboard so its actions remain visible. */
+    .chat { top:68px; right:0; bottom:0; width:min(430px,100vw); height:auto; border-radius:0; border-top:0; border-right:0; border-bottom:0; }
+    .chat-head { padding:21px 22px 17px; }
+    .chat-title h2 { flex:1; }
+    .chat-head p { margin-bottom:12px; }
+    .context { display:flex; align-items:center; gap:8px; width:max-content; max-width:100%; border:1px solid var(--line); border-radius:7px; padding:6px 10px; background:var(--raised); color:var(--muted); font-size:.8rem; }
+    .context strong { color:var(--text); }
+    .context::before { content:""; width:7px; height:7px; border-radius:50%; background:#9ee1c5; }
+    .header-action { display:flex; align-items:center; justify-content:center; min-width:38px; min-height:38px; border:0; border-radius:7px; background:transparent; color:var(--muted); font-size:.8rem; font-weight:700; }
+    .header-action:hover { background:var(--raised); color:var(--text); }
+    .receipt { display:flex; align-items:center; justify-content:space-between; gap:10px; margin:12px 0; padding:12px; border:1px solid #446b65; border-radius:9px; background:#112826; color:#daf6e9; font-size:.82rem; line-height:1.4; white-space:normal; }
+    .receipt strong { display:block; }
+    .receipt button,.retry { flex:none; border:1px solid #729a8c; border-radius:7px; padding:7px 9px; background:transparent; color:#daf6e9; font-weight:700; }
+    .receipt button:hover { background:#20453c; }
+    .receipt.undone { border-color:var(--line); background:var(--raised); color:var(--muted); }
+    .receipt.undone button { display:none; }
+    .retry { color:var(--text); border-color:var(--line); margin-top:9px; }
+    .error-text { color:#ffb2b2; }
+    .metric.updated strong { color:var(--cyan); }
+    .bar.peak { background:var(--cyan); }
+    .chart-note { color:var(--muted); line-height:1.5; font-size:.875rem; margin:18px 0 0; }
+    .prompts { max-width:1100px; margin-top:29px; }
+    .prompts h2 { margin-bottom:13px; }
+    .prompt-list { display:flex; flex-wrap:wrap; gap:9px; }
+    .prompt-list button { border:1px solid var(--line); border-radius:9px; padding:11px 13px; background:var(--surface); color:var(--text); text-align:left; font-size:.9rem; }
+    .prompt-list button:hover { border-color:var(--cyan); background:var(--raised); }
+    .integration { max-width:1100px; margin-top:39px; border-top:1px solid var(--line); padding-top:16px; color:var(--muted); font-size:.875rem; }
+    .integration summary { cursor:pointer; width:max-content; max-width:100%; padding:6px 0; color:var(--text); font-weight:700; }
+    .integration .capabilities { margin-top:12px; }
+    @media (min-width:950px) { body.chat-open .shell { padding-right:calc(430px + clamp(18px,4vw,60px)); } body.chat-open .agent-button { display:none; } }
+    @media (max-width:949px) { .shell { padding-top:25px; } .chat { top:0; right:0; bottom:0; width:100vw; height:auto; border-left:0; } .chat-head { padding-top:65px; } body.chat-open .agent-button { display:none; } }
+    @media (max-width:650px) { .bars,.axis { gap:6px; } }
+    @media (prefers-reduced-motion:no-preference) { .bar { transition:height .22s cubic-bezier(.22,1,.36,1),background-color .18s ease; } .metric strong { transition:color .18s ease; } }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="top">
+      <div><h1>Operations pulse</h1><p class="lede">Explore illustrative request volume, latency, and errors. Ask the assistant to explain the view or change the period. All values are synthetic.</p></div>
+      <div class="top-actions"><label class="label" for="view">VIEW</label><select id="view"><option>This week</option><option>Last week</option><option>This year</option></select></div>
+    </header>
+    <div class="app-layout">
+      <section class="dashboard" aria-label="Illustrative operations dashboard">
+        <div class="summary"><div class="metric"><span class="label">REQUESTS</span><strong id="requests">1.28M</strong><small>Illustrative total</small></div><div class="metric"><span class="label">P95 LATENCY</span><strong id="latency">182 ms</strong><small>Illustrative response time</small></div><div class="metric"><span class="label">ERROR RATE</span><strong id="errors">0.7%</strong><small>Illustrative share of requests</small></div></div>
+        <section class="panel"><div class="panel-head"><h2>Request volume</h2><span class="panel-note" id="series-note">Illustrative daily values</span></div><div class="bars" id="bars" role="img" aria-label="Illustrative request volume, highest on Wednesday"></div><div class="axis" id="axis"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span></div><p class="chart-note">Bars show a relative volume index. Use the view selector or ask the assistant to change the period.</p></section>
+      </section>
+      <section class="prompts" aria-labelledby="prompts-title"><h2 id="prompts-title">Explore this dashboard</h2><div class="prompt-list"><button type="button" data-question="What does this view tell me?">Summarize this view</button><button type="button" data-question="Compare this week with last week.">Compare with last week</button><button type="button" data-question="Set the view to this year.">Show this year</button></div></section>
+      <details class="integration"><summary>How agent integrations work</summary><section class="capabilities" aria-label="Agent capabilities">
+        <div class="capability"><h2>Chat supplied by the app</h2><span class="capability-status" id="chat-status">Checking…</span><p>The built-in OpenAI agent can answer questions and change the visible period. Hosters can also connect their own AG-UI agent.</p></div>
+        <div class="capability"><h2>Tools for your own agent</h2><span class="capability-status" id="webmcp-status">Checking…</span><p>The app exposes <code>get_dashboard_state</code> and <code>set_dashboard_period</code> through WebMCP when your browser supports it. Your agent can inspect the dashboard or change the visible period.</p><button class="try-tool" id="try-tool" type="button">Try changing the period</button><p class="tool-result" id="tool-result" role="status"></p></div>
+      </section></details>
+      <button class="agent-button" id="open-chat" aria-controls="chat" aria-expanded="false">Ask the assistant</button>
+      <aside class="chat" id="chat" role="complementary" aria-labelledby="chat-title">
+        <div class="chat-head"><div class="chat-title"><h2 id="chat-title">Dashboard assistant</h2><button class="header-action" id="new-chat" type="button" aria-label="Start a new conversation" title="Start a new conversation">New</button><button class="header-action" id="close-chat" aria-label="Close assistant"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M4 4l12 12M16 4L4 16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button></div><p>Ask about the numbers or change the view while you watch the dashboard.</p><div class="context">Using view <strong id="context-view">This week</strong></div></div>
+        <div class="messages" id="messages" role="log" aria-label="Assistant conversation" aria-live="off"><div class="message assistant"><span class="who">Assistant</span><span class="answer">I can explain these illustrative metrics and change the dashboard period. What would you like to explore?</span><div class="suggestions"><button type="button" data-question="Compare this week with last week.">Compare periods</button><button type="button" data-question="Set the view to this year.">Show this year</button></div></div></div>
+        <div class="sr-only" id="chat-announcement" aria-live="polite" aria-atomic="true"></div>
+        <form class="composer" id="composer"><label class="sr-only" for="question">Your question</label><textarea id="question" maxlength="2000" placeholder="Ask about this dashboard…" required></textarea><div class="composer-row"><span>Enter to send · Shift+Enter for a new line</span><div class="composer-actions"><button class="stop" id="stop" type="button" hidden>Stop</button><button id="send" type="submit">Send</button></div></div></form><div class="privacy">Your question, recent conversation, and selected period go to the configured agent. Values are synthetic.</div>
+      </aside>
+    </div>
+  </main>
+  <script>
+    const root = location.pathname.endsWith('/') ? location.pathname : location.pathname + '/';
+    const $ = id => document.getElementById(id);
+    const messages = []; let threadId = crypto.randomUUID(); let pending = false; let currentRequest = null; let highlightTimer;
+    let chatEnabled = false, toolbarAvailable = false, toolbarSuspended = false;
+    const chatProtocol = 1;
+    function chatEvent(name, detail) { window.dispatchEvent(new CustomEvent('shinyhub:chat:'+name,{detail:{version:chatProtocol,...detail}})); }
+    function announceChat() { if(chatEnabled) chatEvent('capabilities',{enabled:true}); }
+    const views = __DASHBOARD_VIEWS__;
+    const welcome = $('messages').innerHTML;
+    function renderView({announce=false,highlight=false}={}) { const period=$('view').value, data=views[period]; $('requests').textContent=data.requests; $('latency').textContent=data.latency; $('errors').textContent=data.errors; $('series-note').textContent=data.series_note; $('context-view').textContent=period; const peak=Math.max(...data.bars); $('bars').replaceChildren(...data.bars.map(value => { const bar=document.createElement('div'); bar.className='bar'+(value===peak?' peak':''); bar.style.height=value+'%'; const label=document.createElement('span'); label.textContent=value; bar.append(label); return bar; })); $('axis').style.gridTemplateColumns='repeat('+data.labels.length+',1fr)'; $('axis').replaceChildren(...data.labels.map(value=>{const label=document.createElement('span'); label.textContent=value; return label;})); $('bars').setAttribute('aria-label','Illustrative request volume for '+period+'; peak: '+data.peak); if(highlight){clearTimeout(highlightTimer);document.querySelectorAll('.metric').forEach(node=>node.classList.add('updated'));highlightTimer=setTimeout(()=>document.querySelectorAll('.metric').forEach(node=>node.classList.remove('updated')),950);} if(announce)$('chat-announcement').textContent='Dashboard now showing '+period+'.'; }
+    function getDashboardState() { const period=$('view').value; const data=views[period]; return {period,requests:data.requests,p95_latency:data.latency,error_rate:data.errors,volume_index:data.bars,labels:data.labels}; }
+    function setDashboardPeriod({period},options={}) { if(!Object.hasOwn(views,period)) throw Error('Choose This week, Last week, or This year.'); $('view').value=period; renderView(options); return getDashboardState(); }
+    async function registerWebMcpTools() { const context=document.modelContext; if(!context?.registerTool) { $('webmcp-status').textContent='WebMCP is unavailable in this browser'; return; } try { await context.registerTool({name:'get_dashboard_state',description:'Read the synthetic dashboard values and currently selected period.',inputSchema:{type:'object',properties:{}},annotations:{readOnlyHint:true},execute:async()=>getDashboardState()}); await context.registerTool({name:'set_dashboard_period',description:'Change the visible dashboard period to This week, Last week, or This year and return the updated values.',inputSchema:{type:'object',properties:{period:{type:'string',enum:['This week','Last week','This year']}},required:['period']},execute:async args=>setDashboardPeriod(args,{announce:true,highlight:true})}); $('webmcp-status').textContent='Two WebMCP tools available to your browser agent'; } catch { $('webmcp-status').textContent='Browser declined WebMCP registration'; } }
+    function scrollMessages() { $('messages').scrollTop=$('messages').scrollHeight; }
+    function addMessage(role,text) { const node=document.createElement('div'); node.className='message '+role; const who=document.createElement('span'); who.className='who'; who.textContent=role==='user'?'You':'Assistant'; const content=document.createElement('span'); content.className='answer'; content.textContent=text; node.append(who,content); $('messages').append(node); scrollMessages(); return {node,content}; }
+    function setActivity(node,text,busy=true) { let activity=node.querySelector('.activity'); if(!activity) { activity=document.createElement('div'); activity.className='activity'; node.insertBefore(activity,node.querySelector('.answer')); } activity.textContent=text; activity.classList.toggle('busy',busy); activity.hidden=false; $('chat-announcement').textContent=text; scrollMessages(); return activity; }
+    function addReceipt(node,from,to) { if(from===to)return; const receipt=document.createElement('div');receipt.className='receipt';const label=document.createElement('span');const heading=document.createElement('strong');heading.textContent='View changed';const detail=document.createElement('span');detail.textContent=from+' → '+to;label.append(heading,detail);const undo=document.createElement('button');undo.type='button';undo.textContent='Undo';undo.setAttribute('aria-label','Undo view change to '+to);undo.addEventListener('click',()=>{if($('view').value!==to){detail.textContent='View changed again; undo unavailable';receipt.classList.add('undone');return;}setDashboardPeriod({period:from},{announce:true,highlight:true});heading.textContent='Change undone';detail.textContent='Showing '+from+'. The answer below describes '+to+'.';receipt.classList.add('undone');});receipt.append(label,undo);node.insertBefore(receipt,node.querySelector('.answer'));scrollMessages(); }
+    async function ask(question) {
+      question=question.trim(); if(pending || !question) return;
+      if(!$('chat').classList.contains('open')) openChat();
+      const prior=messages.slice(-20), view=$('view').value;
+      messages.push({role:'user',content:question}); addMessage('user',question); $('question').value='';
+      pending=true; currentRequest=new AbortController(); $('send').disabled=true; $('stop').hidden=false; $('new-chat').disabled=true;
+      const {node,content}=addMessage('assistant',''); const activity=setActivity(node,'Connecting to assistant');
+      let answer='', ended=false;
+      try {
+        const response=await fetch(root+'chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:question,thread_id:threadId,messages:prior,view}),signal:currentRequest.signal});
+        if(!response.ok || !response.body) throw Error('The assistant could not connect. Try again.');
+        const reader=response.body.getReader(), decoder=new TextDecoder(); let buffer='';
+        while(true) {
+          const {value,done}=await reader.read(); if(done) break;
+          buffer+=decoder.decode(value,{stream:true}); let end;
+          while((end=buffer.indexOf('\n\n'))!==-1) {
+            const block=buffer.slice(0,end); buffer=buffer.slice(end+2);
+            const line=block.split('\n').find(part=>part.startsWith('data:')); if(!line) continue;
+            const event=JSON.parse(line.slice(5));
+            if(event.type==='status') { setActivity(node,event.text); }
+            else if(event.type==='view_changed') { if(!Object.hasOwn(views,event.period)) throw Error('The assistant selected an unavailable view.'); const from=$('view').value; setDashboardPeriod({period:event.period},{announce:true,highlight:true}); addReceipt(node,from,event.period); setActivity(node,'Dashboard updated · writing answer'); }
+            else if(event.type==='delta') { answer+=event.text; content.textContent=answer; activity.hidden=true; scrollMessages(); }
+            else if(event.type==='error') throw Error(event.message);
+            else if(event.type==='done') ended=true;
+          }
+        }
+        if(!ended || !answer.trim()) throw Error('The answer was interrupted. Please try again.');
+        activity.hidden=true; messages.push({role:'assistant',content:answer}); $('chat-announcement').textContent='Assistant answered: '+answer;
+      } catch(error) {
+        const stopped=error.name==='AbortError'; setActivity(node,stopped?'Stopped':error.message||'The answer was interrupted. Please try again.',false); activity.classList.add('error-text');
+        if(answer) content.textContent=answer+'\n\nAnswer incomplete.';
+        if(!stopped&&!answer){const retry=document.createElement('button');retry.type='button';retry.className='retry';retry.textContent='Retry';retry.addEventListener('click',()=>{if(!pending){node.previousElementSibling?.remove();node.remove();messages.pop();ask(question);}});node.append(retry);}
+      } finally {
+        pending=false; currentRequest=null; $('send').disabled=false; $('stop').hidden=true; $('new-chat').disabled=false; $('question').focus({preventScroll:true});
+      }
+    }
+    function syncChatMode() { const mobile=matchMedia('(max-width:949px)').matches,open=$('chat').classList.contains('open'); document.querySelectorAll('.top,.dashboard,.prompts,.integration,.agent-button').forEach(node=>node.inert=mobile&&open); $('chat').setAttribute('role',mobile?'dialog':'complementary'); if(mobile)$('chat').setAttribute('aria-modal','true');else $('chat').removeAttribute('aria-modal'); }
+    function openChat() { $('chat').classList.add('open'); document.body.classList.add('chat-open'); $('open-chat').setAttribute('aria-expanded','true'); syncChatMode(); chatEvent('state',{open:true}); $('question').focus({preventScroll:true}); }
+    function closeChat() { $('chat').classList.remove('open'); document.body.classList.remove('chat-open'); $('open-chat').setAttribute('aria-expanded','false'); syncChatMode(); chatEvent('state',{open:false,focus:toolbarAvailable}); if(!toolbarAvailable&&!toolbarSuspended)$('open-chat').focus({preventScroll:true}); }
+    window.addEventListener('shinyhub:chat:discover',event=>{if(event.detail?.version===chatProtocol)announceChat();});
+    window.addEventListener('shinyhub:chat:host',event=>{if(event.detail?.version!==chatProtocol)return;toolbarAvailable=!!event.detail.available;toolbarSuspended=!!event.detail.suspended;$('open-chat').hidden=!chatEnabled||toolbarAvailable||toolbarSuspended;});
+    window.addEventListener('shinyhub:chat:toggle',event=>{if(event.detail?.version!==chatProtocol||!chatEnabled)return;if($('chat').classList.contains('open'))closeChat();else openChat();});
+    $('view').addEventListener('change',()=>renderView({announce:true,highlight:true}));
+    $('composer').addEventListener('submit',event=>{event.preventDefault();ask($('question').value);});
+    $('stop').addEventListener('click',()=>currentRequest?.abort());
+    $('question').addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();$('composer').requestSubmit();}});
+    document.addEventListener('click',event=>{const button=event.target.closest('[data-question]');if(button)ask(button.dataset.question);});
+    $('open-chat').addEventListener('click',openChat); $('close-chat').addEventListener('click',closeChat);
+    $('new-chat').addEventListener('click',()=>{if(pending)return;messages.length=0;threadId=crypto.randomUUID();$('messages').innerHTML=welcome;$('question').value='';$('question').focus({preventScroll:true});$('chat-announcement').textContent='New conversation started.';});
+    $('try-tool').addEventListener('click',()=>{const next=$('view').value==='This week'?'Last week':'This week'; const result=setDashboardPeriod({period:next},{announce:true,highlight:true}); $('tool-result').textContent='Preview: showing '+result.period+'. A WebMCP agent can call the same action when supported.';});
+    document.addEventListener('keydown',event=>{if(!$('chat').classList.contains('open'))return;if(event.key==='Escape'){closeChat();return;}if(event.key==='Tab'&&matchMedia('(max-width:949px)').matches){const focusable=Array.from($('chat').querySelectorAll('button,textarea')).filter(element=>!element.disabled&&!element.hidden);const first=focusable[0],last=focusable[focusable.length-1];if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}}});
+    addEventListener('resize',syncChatMode);
+    fetch(root+'agent-status').then(response=>response.json()).then(data=>{chatEnabled=!!data.chat_enabled;$('chat-status').textContent=chatEnabled?'Enabled · '+data.mode:'Assistant disabled';$('open-chat').hidden=!chatEnabled||toolbarAvailable||toolbarSuspended;announceChat();$('webmcp-status').textContent=data.webmcp_enabled?'Checking browser support…':'WebMCP disabled';$('try-tool').hidden=!data.webmcp_enabled;if(data.webmcp_enabled)registerWebMcpTools();}).catch(()=>{$('chat-status').textContent='Agent status unavailable';$('webmcp-status').textContent='Browser tool status unavailable';$('open-chat').hidden=true;$('try-tool').hidden=true;});
+    renderView();
+  </script>
+</body>
+</html>

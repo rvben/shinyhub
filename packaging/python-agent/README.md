@@ -50,6 +50,11 @@ must perform its own permission checks for sensitive data or actions.
 
 Add `chat_dependency()` to the UI and pass one chat backend to `register()`:
 
+On ShinyHub versions with toolbar chat support, the helper announces chat
+availability and the toolbar shows **Ask**. Its own launcher remains available
+outside ShinyHub or when the toolbar is hidden. Apps without chat do not show
+**Ask**. The app still owns its chat panel and agent backend.
+
 ```python
 import os
 from shinyhub_agent import AGUIChat, OpenAIChat, chat_dependency

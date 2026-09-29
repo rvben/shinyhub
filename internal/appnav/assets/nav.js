@@ -52,6 +52,12 @@
   var BOOKMARK_ERROR_EVENT = "shinyhub:bookmark:error";
   var BOOKMARK_SYNC_STATUS_EVENT = "shinyhub:bookmark:sync-status";
   var BOOKMARK_PROTOCOL_VERSION = 1;
+  var CHAT_PROTOCOL_VERSION = 1;
+  var CHAT_DISCOVER_EVENT = "shinyhub:chat:discover";
+  var CHAT_CAPABILITIES_EVENT = "shinyhub:chat:capabilities";
+  var CHAT_HOST_EVENT = "shinyhub:chat:host";
+  var CHAT_TOGGLE_EVENT = "shinyhub:chat:toggle";
+  var CHAT_STATE_EVENT = "shinyhub:chat:state";
   var BOOKMARK_TIMEOUT_MS = 10000;
   var VERSION_POLL_TIMEOUT_MS = 10000;
   var VERSION_SWITCH_TIMEOUT_MS = 12000;
@@ -350,10 +356,18 @@
       " .root.session-snapshot[data-position='top-right'] .bar { width: min(304px, calc(100vw - 24px)); }",
     ".root.bookmark-ready:not(.session-snapshot)[data-position='top-center'] .bar," +
       " .root.bookmark-ready:not(.session-snapshot)[data-position='top-right'] .bar { width: min(302px, calc(100vw - 24px)); }",
+    ".root.chat-ready:not(.session-snapshot)[data-position='top-center'] .bar," +
+      " .root.chat-ready:not(.session-snapshot)[data-position='top-right'] .bar { width: min(350px, calc(100vw - 24px)); }",
+    ".root.chat-ready.bookmark-ready:not(.session-snapshot)[data-position='top-center'] .bar," +
+      " .root.chat-ready.bookmark-ready:not(.session-snapshot)[data-position='top-right'] .bar { width: min(388px, calc(100vw - 24px)); }",
     ".root.session-snapshot[data-position='left-center'] .bar," +
       " .root.session-snapshot[data-position='right-center'] .bar { height: 142px; }",
     ".root.bookmark-ready:not(.session-snapshot)[data-position='left-center'] .bar," +
       " .root.bookmark-ready:not(.session-snapshot)[data-position='right-center'] .bar { height: 142px; }",
+    ".root.chat-ready:not(.session-snapshot)[data-position='left-center'] .bar," +
+      " .root.chat-ready:not(.session-snapshot)[data-position='right-center'] .bar { height: 142px; }",
+    ".root.chat-ready.bookmark-ready:not(.session-snapshot)[data-position='left-center'] .bar," +
+      " .root.chat-ready.bookmark-ready:not(.session-snapshot)[data-position='right-center'] .bar { height: 180px; }",
     ".control {" +
       "  appearance: none; -webkit-appearance: none; border: 0; margin: 0; padding: 0;" +
       "  height: 38px; display: flex; align-items: center; justify-content: center;" +
@@ -442,6 +456,13 @@
       " .root[data-position='right-center'] .bookmark-trigger {" +
       "  width: 38px; height: 38px; border-right: 0; border-bottom: 1px solid var(--sh-line);" +
       "}",
+    ".chat-trigger { display: none; width: 86px; flex: none; gap: 8px; border-right: 1px solid var(--sh-line); color: var(--sh-text); font-size: 12px; font-weight: 600; }",
+    ".root.chat-ready:not(.session-snapshot) .chat-trigger { display: flex; }",
+    ".chat-mark { width: 24px; height: 24px; flex: none; display: flex; align-items: center; justify-content: center; border-radius: var(--sh-r-sm); background: var(--sh-raised); color: var(--sh-signal); }",
+    ".chat-mark svg { width: 14px; height: 14px; }",
+    ".chat-trigger[aria-expanded='true'], .chat-trigger:hover { background: var(--sh-hover); }",
+    ".root[data-position='left-center'] .chat-trigger, .root[data-position='right-center'] .chat-trigger { width: 38px; height: 38px; border-right: 0; border-bottom: 1px solid var(--sh-line); }",
+    ".root[data-position='left-center'] .chat-label, .root[data-position='right-center'] .chat-label { display: none; }",
     ".scrim {" +
       "  position: absolute; inset: 0; background: var(--sh-deep); opacity: 0;" +
       "  pointer-events: none; transition: opacity 160ms ease;" +
@@ -820,8 +841,13 @@
       " .bar { width: min(240px, calc(100vw - 24px)); }" +
       " .root.session-snapshot[data-position='top-center'] .bar, .root.session-snapshot[data-position='top-right'] .bar { width: min(280px, calc(100vw - 24px)); }" +
       " .root.bookmark-ready:not(.session-snapshot)[data-position='top-center'] .bar, .root.bookmark-ready:not(.session-snapshot)[data-position='top-right'] .bar { width: min(278px, calc(100vw - 24px)); }" +
+      " .root.chat-ready:not(.session-snapshot)[data-position='top-center'] .bar, .root.chat-ready:not(.session-snapshot)[data-position='top-right'] .bar { width: min(326px, calc(100vw - 24px)); }" +
+      " .root.chat-ready.bookmark-ready:not(.session-snapshot)[data-position='top-center'] .bar, .root.chat-ready.bookmark-ready:not(.session-snapshot)[data-position='top-right'] .bar { width: min(364px, calc(100vw - 24px)); }" +
       " .root.compact:not(.bookmark-ready)[data-position='top-center'] .bar, .root.compact:not(.bookmark-ready)[data-position='top-right'] .bar { width: 140px; }" +
       " .root.compact.bookmark-ready:not(.session-snapshot)[data-position='top-center'] .bar, .root.compact.bookmark-ready:not(.session-snapshot)[data-position='top-right'] .bar { width: 178px; }" +
+      " .root.compact.chat-ready:not(.bookmark-ready)[data-position='top-center'] .bar, .root.compact.chat-ready:not(.bookmark-ready)[data-position='top-right'] .bar { width: 226px; }" +
+      " .root.compact.chat-ready.bookmark-ready:not(.session-snapshot)[data-position='top-center'] .bar, .root.compact.chat-ready.bookmark-ready:not(.session-snapshot)[data-position='top-right'] .bar { width: 264px; }" +
+      " .root.chat-open .bar { display: none; }" +
       " .root.compact[data-position='top-center'] .current-meta, .root.compact[data-position='top-right'] .current-meta," +
       " .root.compact[data-position='top-center'] .chevron, .root.compact[data-position='top-right'] .chevron { display: none; }" +
       " .root.compact[data-position='top-center'] .compact-label, .root.compact[data-position='top-right'] .compact-label { display: block; }" +
@@ -851,6 +877,13 @@
       " .root[data-position='left-center'] .position-menu, .root[data-position='right-center'] .position-menu {" +
       "   top: 60px; right: 12px; left: auto; margin: 0;" +
       " }" +
+      "}",
+
+    "@media (max-width: 949px) {" +
+      " .root.chat-ready[data-position='top-right'] .bar { top: auto; bottom: 12px; }" +
+      " .root.chat-ready[data-position='top-right'] .restore { top: auto; bottom: 0; border-top: 1px solid var(--sh-line-strong); border-bottom: 0; border-radius: var(--sh-r-md) var(--sh-r-md) 0 0; }" +
+      " .root.chat-ready[data-position='top-right'] .position-menu { top: auto; bottom: 60px; }" +
+      " .root.chat-open .bar { display: none; }" +
       "}",
 
     "@media (prefers-reduced-motion: reduce) {" +
@@ -1039,6 +1072,20 @@
     "M13.5 6.5l1-1a3 3 0 014.25 4.25l-3 3A3 3 0 0111.5 13"
   ], 20));
 
+  var chatBtn = document.createElement("button");
+  chatBtn.type = "button";
+  chatBtn.className = "control chat-trigger";
+  chatBtn.setAttribute("aria-label", "Ask this app");
+  chatBtn.setAttribute("aria-expanded", "false");
+  chatBtn.title = "Ask this app";
+  var chatMark = div("chat-mark");
+  chatMark.appendChild(svg([
+    "M16.75 9.3a6.4 6.4 0 01-6.4 6.4H4l1.55-2.6A6.4 6.4 0 1116.75 9.3z",
+    "M10.3 5.8l.8 2.05 2.05.8-2.05.8-.8 2.05-.8-2.05-2.05-.8 2.05-.8z"
+  ], 20));
+  chatBtn.appendChild(chatMark);
+  chatBtn.appendChild(div("chat-label", "Ask"));
+
   var closeBtn = document.createElement("button");
   closeBtn.type = "button";
   closeBtn.className = "control close";
@@ -1053,6 +1100,7 @@
   bar.appendChild(openBtn);
   bar.appendChild(sessionBtn);
   bar.appendChild(bookmarkBtn);
+  bar.appendChild(chatBtn);
   bar.appendChild(closeBtn);
 
   var positionMenu = div("position-menu");
@@ -1411,6 +1459,19 @@
   var bookmarkPending = null;
   var bookmarkTimer = null;
   var bookmarkSyncError = false;
+  var chatReady = false;
+  var chatOpen = false;
+
+  function announceChatHost() {
+    if (typeof window.CustomEvent !== "function") return;
+    window.dispatchEvent(new window.CustomEvent(CHAT_HOST_EVENT, {
+      detail: {
+        version: CHAT_PROTOCOL_VERSION,
+        available: chatReady && !snapshotActive && !root.classList.contains("dismissed"),
+        suspended: snapshotActive
+      }
+    }));
+  }
 
   function mobileViewport() {
     try {
@@ -2525,6 +2586,7 @@
       }
     }
     revealBar(!snapshotActive);
+    announceChatHost();
   }
 
   function offerSessionOwner(owner) {
@@ -2553,6 +2615,17 @@
 
   bookmarkBtn.addEventListener("click", guard(function () {
     setBookmarkOpen(!bookmarkOpen);
+  }));
+
+  chatBtn.addEventListener("click", guard(function () {
+    if (!chatReady || snapshotActive || typeof window.CustomEvent !== "function") return;
+    setOpen(false);
+    setSessionOpen(false, false);
+    setBookmarkOpen(false, false);
+    setPlacing(false);
+    window.dispatchEvent(new window.CustomEvent(CHAT_TOGGLE_EVENT, {
+      detail: { version: CHAT_PROTOCOL_VERSION }
+    }));
   }));
 
   bookmarkClose.addEventListener("click", guard(function () {
@@ -2587,6 +2660,7 @@
     setPlacing(false);
     rememberDismissal(true);
     root.classList.add("dismissed");
+    announceChatHost();
     restoreBtn.focus();
     if (snapshotActive) {
       offerSessionOwner("overlay");
@@ -2596,6 +2670,7 @@
   restoreBtn.addEventListener("click", guard(function () {
     rememberDismissal(false);
     root.classList.remove("dismissed");
+    announceChatHost();
     revealBar(true);
     openBtn.focus();
     if (snapshotActive) {
@@ -2793,6 +2868,27 @@
       renderBookmark();
     }
     revealBar(true);
+  }));
+
+  window.addEventListener(CHAT_CAPABILITIES_EVENT, guard(function (ev) {
+    var detail = ev && ev.detail;
+    if (!detail || detail.version !== CHAT_PROTOCOL_VERSION || typeof detail.enabled !== "boolean") return;
+    chatReady = detail.enabled;
+    if (!chatReady) chatOpen = false;
+    root.classList.toggle("chat-ready", chatReady);
+    root.classList.toggle("chat-open", chatOpen);
+    chatBtn.setAttribute("aria-expanded", chatOpen ? "true" : "false");
+    revealBar(true);
+    announceChatHost();
+  }));
+
+  window.addEventListener(CHAT_STATE_EVENT, guard(function (ev) {
+    var detail = ev && ev.detail;
+    if (!detail || detail.version !== CHAT_PROTOCOL_VERSION || typeof detail.open !== "boolean") return;
+    chatOpen = detail.open;
+    root.classList.toggle("chat-open", chatOpen);
+    chatBtn.setAttribute("aria-expanded", chatOpen ? "true" : "false");
+    if (!chatOpen && detail.focus && chatReady && !root.classList.contains("dismissed")) chatBtn.focus();
   }));
 
   window.addEventListener(BOOKMARK_SYNC_STATUS_EVENT, guard(function (ev) {
@@ -3010,6 +3106,9 @@
   if (typeof window.CustomEvent === "function") {
     window.dispatchEvent(new window.CustomEvent(BOOKMARK_DISCOVER_EVENT, {
       detail: { version: BOOKMARK_PROTOCOL_VERSION, source: "shinyhub" }
+    }));
+    window.dispatchEvent(new window.CustomEvent(CHAT_DISCOVER_EVENT, {
+      detail: { version: CHAT_PROTOCOL_VERSION, source: "shinyhub" }
     }));
   }
 })();

@@ -1,9 +1,345 @@
-.sh-agent-launcher,.sh-agent-panel{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;box-sizing:border-box}
-.sh-agent-launcher[hidden],.sh-agent-panel[hidden],.sh-agent-panel [hidden]{display:none!important}
-.sh-agent-launcher{position:fixed;z-index:2147483000;right:24px;bottom:24px;border:0;border-radius:999px;padding:13px 19px;background:#0d334a;color:#fff;font-size:14px;font-weight:700;box-shadow:0 8px 24px rgba(5,26,44,.25);cursor:pointer}
-.sh-agent-launcher:hover{background:#14516f}.sh-agent-launcher[aria-expanded="true"]{display:none}.sh-agent-launcher:focus-visible,.sh-agent-panel :focus-visible{outline:3px solid #2e9cc8;outline-offset:3px}
-.sh-agent-panel{position:fixed;z-index:2147483001;right:24px;bottom:80px;width:min(420px,calc(100vw - 32px));height:min(680px,calc(100dvh - 104px));display:flex;flex-direction:column;background:#f8fbfd;color:#102c3d;border:1px solid #bdced7;border-radius:16px;box-shadow:0 20px 52px rgba(5,26,44,.22);overflow:hidden}
-.sh-agent-panel *{box-sizing:border-box}.sh-agent-header{display:flex;align-items:center;justify-content:space-between;padding:20px 22px 8px}.sh-agent-header h2{margin:0;font-size:20px;line-height:1.2;letter-spacing:-.025em;font-weight:750;color:#102c3d}.sh-agent-icon-button{border:0;background:transparent;color:#345367;padding:7px;cursor:pointer;font-size:13px;font-weight:700}
-.sh-agent-description{margin:0;padding:0 22px 16px;color:#466377;font-size:13px;line-height:1.5;border-bottom:1px solid #d8e3e9}.sh-agent-log{flex:1;min-height:0;overflow:auto;padding:18px 20px;display:flex;flex-direction:column;gap:16px;scrollbar-color:#9bb4c2 transparent}.sh-agent-empty{margin:auto;color:#587386;font-size:14px;text-align:center;max-width:25ch}.sh-agent-message{max-width:94%;display:flex;flex-direction:column;gap:5px}.sh-agent-message strong{font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:#466377}.sh-agent-message-body{white-space:pre-wrap;overflow-wrap:anywhere;font-size:14px;line-height:1.55}.sh-agent-user{align-self:flex-end;padding:12px 14px;background:#dbeef3;border-radius:14px 14px 4px 14px}.sh-agent-assistant{align-self:flex-start;padding:4px 2px}.sh-agent-status{min-height:22px;padding:0 22px;color:#3f6478;font-size:12px}.sh-agent-composer{padding:12px 18px 17px;border-top:1px solid #d8e3e9;background:#fff}.sh-agent-input{display:block;width:100%;min-height:62px;resize:vertical;border:1px solid #a7becb;border-radius:10px;padding:10px 12px;background:#fff;color:#102c3d;font:inherit;font-size:14px;line-height:1.4}.sh-agent-input::placeholder{color:#6b8190}.sh-agent-controls{display:flex;align-items:center;gap:8px;margin-top:10px}.sh-agent-controls .sh-agent-send{margin-left:auto}.sh-agent-send,.sh-agent-secondary{border-radius:9px;padding:9px 13px;font-size:13px;font-weight:700;cursor:pointer}.sh-agent-send{border:1px solid #0d334a;background:#0d334a;color:#fff}.sh-agent-send:hover{background:#14516f}.sh-agent-secondary{border:1px solid #bdced7;background:#fff;color:#24485f}.sh-agent-secondary:hover{background:#eaf2f6}.sh-agent-panel button:disabled{opacity:.55;cursor:not-allowed}.sh-agent-approval{padding:14px;border:1px solid #8eacbc;border-radius:12px;background:#eef6f8;font-size:13px}.sh-agent-approval strong{display:block;font-size:14px}.sh-agent-approval p{margin:6px 0;color:#26495f}.sh-agent-approval-args{font-weight:700}.sh-agent-approval-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}.sh-agent-receipt{align-self:flex-start;margin:0;padding:6px 9px;border-radius:7px;background:#e2f2e9;color:#22533b;font-size:12px;font-weight:700}
-@media(max-width:680px){.sh-agent-panel{inset:0;width:100%;height:100dvh;border:0;border-radius:0}.sh-agent-launcher{right:16px;bottom:16px}.sh-agent-header{padding-top:22px}}
-@media(prefers-reduced-motion:no-preference){.sh-agent-launcher,.sh-agent-send,.sh-agent-secondary{transition:background-color .16s ease}}
+.sh-agent-launcher,
+.sh-agent-panel {
+  font-family: "Manrope", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  box-sizing: border-box;
+}
+
+.sh-agent-launcher[hidden],
+.sh-agent-panel[hidden],
+.sh-agent-panel [hidden] { display: none !important; }
+
+.sh-agent-launcher {
+  position: fixed;
+  z-index: 2147483000;
+  right: 24px;
+  bottom: 24px;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 0 17px;
+  border: 1px solid #2b3a63;
+  border-radius: 999px;
+  background: #0e1426;
+  color: #e8eeff;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+  box-shadow: 0 12px 32px rgba(3, 5, 16, .24);
+  cursor: pointer;
+}
+
+.sh-agent-launcher svg { color: #7dd3fc; }
+.sh-agent-launcher:hover { background: #1b2444; }
+.sh-agent-launcher[aria-expanded="true"] { display: none; }
+.sh-agent-launcher:focus-visible,
+.sh-agent-panel :focus-visible { outline: 3px solid #38bdf8; outline-offset: 3px; }
+
+.sh-agent-panel {
+  position: fixed;
+  z-index: 2147483001;
+  right: 24px;
+  bottom: 84px;
+  display: flex;
+  flex-direction: column;
+  width: min(440px, calc(100vw - 32px));
+  height: min(710px, calc(100dvh - 108px));
+  overflow: hidden;
+  border: 1px solid #c6d0e0;
+  border-radius: 16px;
+  background: #f4f7fc;
+  color: #16203a;
+  box-shadow: 0 24px 64px rgba(3, 5, 16, .23);
+}
+
+body.sh-agent-toolbar-host .sh-agent-panel {
+  top: 60px;
+  right: 12px;
+  bottom: auto;
+  height: min(710px, calc(100dvh - 72px));
+}
+
+.sh-agent-panel * { box-sizing: border-box; }
+.sh-agent-panel button,
+.sh-agent-panel textarea { font-family: inherit; }
+
+.sh-agent-header {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 86px;
+  padding: 17px 19px;
+  background: #0e1426;
+  color: #e8eeff;
+}
+
+.sh-agent-brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.sh-agent-emblem {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border: 1px solid #2b3a63;
+  border-radius: 12px;
+  background: #1b2444;
+  color: #7dd3fc;
+}
+.sh-agent-emblem svg { width: 20px; height: 20px; }
+.sh-agent-titles { min-width: 0; }
+.sh-agent-header h2 {
+  margin: 0;
+  color: #e8eeff;
+  font-size: 17px;
+  font-weight: 750;
+  letter-spacing: -.02em;
+  line-height: 1.2;
+}
+.sh-agent-titles p {
+  margin: 4px 0 0;
+  color: #a8b4d4;
+  font-size: 12px;
+  line-height: 1.3;
+}
+.sh-agent-icon-button {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: #c6d1ec;
+  cursor: pointer;
+}
+.sh-agent-icon-button:hover { background: #1b2444; color: #fff; }
+
+.sh-agent-log-wrap { position: relative; display: flex; flex: 1; min-height: 0; }
+.sh-agent-log {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 19px;
+  min-width: 0;
+  padding: 24px 21px 30px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: #c6d0e0 transparent;
+  scrollbar-width: thin;
+}
+.sh-agent-log::selection,
+.sh-agent-panel ::selection { background: #bae6fd; color: #030510; }
+.sh-agent-jump {
+  position: absolute;
+  right: 18px;
+  bottom: 12px;
+  padding: 8px 12px;
+  border: 1px solid #c6d0e0;
+  border-radius: 999px;
+  background: #fff;
+  color: #16203a;
+  box-shadow: 0 5px 15px rgba(3, 5, 16, .12);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.sh-agent-jump:hover { background: #e9eef7; }
+
+.sh-agent-empty {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  max-width: 340px;
+  margin: auto;
+  padding: 16px 0 38px;
+}
+.sh-agent-empty-icon {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  margin-bottom: 20px;
+  border: 1px solid #dbe2ee;
+  border-radius: 14px;
+  background: #fff;
+  color: #0369a1;
+}
+.sh-agent-empty-icon svg { width: 23px; height: 23px; }
+.sh-agent-empty h3 {
+  margin: 0 0 8px;
+  color: #16203a;
+  font-size: 21px;
+  font-weight: 750;
+  letter-spacing: -.025em;
+  line-height: 1.2;
+}
+.sh-agent-empty p {
+  margin: 0;
+  color: #45526e;
+  font-size: 14px;
+  line-height: 1.55;
+}
+.sh-agent-suggestions { display: flex; flex-direction: column; align-items: flex-start; gap: 9px; margin-top: 24px; }
+.sh-agent-suggestion {
+  padding: 10px 13px;
+  border: 1px solid #c6d0e0;
+  border-radius: 9px;
+  background: #fff;
+  color: #16203a;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  text-align: left;
+  cursor: pointer;
+}
+.sh-agent-suggestion:hover { border-color: #0284c7; background: #f3f9fd; }
+
+.sh-agent-message { display: flex; flex-direction: column; gap: 6px; max-width: 96%; }
+.sh-agent-speaker {
+  color: #5b6784;
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: .055em;
+  line-height: 1.3;
+  text-transform: uppercase;
+}
+.sh-agent-message-body { color: #16203a; font-size: 14px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.sh-agent-user { align-self: flex-end; max-width: 88%; padding: 11px 14px; border-radius: 13px 13px 4px 13px; background: #e8edf6; }
+.sh-agent-user .sh-agent-speaker { color: #45526e; }
+.sh-agent-assistant { align-self: flex-start; padding: 0 2px; }
+.sh-agent-copy,
+.sh-agent-reset {
+  align-self: flex-start;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: #45526e;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.sh-agent-copy { margin-top: 5px; }
+.sh-agent-copy:hover,
+.sh-agent-reset:hover { color: #0369a1; text-decoration: underline; text-underline-offset: 3px; }
+.sh-agent-error { margin: 7px 0 0; color: #991b1b; font-size: 12px; line-height: 1.45; }
+
+.sh-agent-tool {
+  align-self: flex-start;
+  width: min(100%, 350px);
+  padding: 0;
+  border: 1px solid #dbe2ee;
+  border-radius: 10px;
+  background: #fff;
+  color: #45526e;
+  font-size: 12px;
+}
+.sh-agent-tool-summary { display: flex; align-items: center; gap: 9px; min-height: 40px; padding: 8px 12px; cursor: pointer; list-style: none; }
+.sh-agent-tool-summary::-webkit-details-marker { display: none; }
+.sh-agent-tool-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: #0284c7; }
+.sh-agent-tool[data-result="done"] .sh-agent-tool-dot { background: #166534; }
+.sh-agent-tool[data-result="error"] .sh-agent-tool-dot { background: #991b1b; }
+.sh-agent-tool-name { flex: 1; min-width: 0; overflow-wrap: anywhere; color: #16203a; font-weight: 700; }
+.sh-agent-tool-state { color: #5b6784; }
+.sh-agent-tool-detail { margin: 0; padding: 0 12px 12px 28px; color: #45526e; line-height: 1.5; }
+
+.sh-agent-approval {
+  align-self: stretch;
+  padding: 17px;
+  border: 1px solid #b8c9dc;
+  border-radius: 12px;
+  background: #fff;
+}
+.sh-agent-approval-label { color: #7c2d12; font-size: 11px; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; }
+.sh-agent-approval h3 { margin: 8px 0 0; color: #16203a; font-size: 15px; font-weight: 700; line-height: 1.45; }
+.sh-agent-approval-values { display: grid; grid-template-columns: minmax(75px, 1fr) 2fr; gap: 6px 12px; margin: 15px 0 0; padding: 11px 12px; border-radius: 8px; background: #f4f7fc; font-size: 12px; }
+.sh-agent-approval-values dt { margin: 0; color: #5b6784; }
+.sh-agent-approval-values dd { min-width: 0; margin: 0; color: #16203a; font-weight: 700; overflow-wrap: anywhere; }
+.sh-agent-approval-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.sh-agent-secondary,
+.sh-agent-apply { min-height: 44px; padding: 8px 12px; border-radius: 8px; font-size: 12px; font-weight: 700; cursor: pointer; }
+.sh-agent-secondary { border: 1px solid #c6d0e0; background: #fff; color: #16203a; }
+.sh-agent-secondary:hover { background: #e9eef7; }
+.sh-agent-apply { border: 1px solid #0e1426; background: #0e1426; color: #fff; }
+.sh-agent-apply:hover { background: #1b2444; }
+.sh-agent-approval[data-result="declined"] .sh-agent-approval-label { color: #5b6784; }
+.sh-agent-approval[data-result="applying"] .sh-agent-approval-label { color: #0369a1; }
+.sh-agent-approval[data-result="applied"] .sh-agent-approval-label { color: #166534; }
+.sh-agent-approval[data-result="unknown"] .sh-agent-approval-label { color: #7c2d12; }
+.sh-agent-receipt { align-self: flex-start; margin: 0; padding: 6px 10px; border-radius: 7px; background: #e7f4e9; color: #166534; font-size: 12px; font-weight: 700; }
+
+.sh-agent-status {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 9px;
+  min-height: 32px;
+  padding: 5px 21px 8px;
+  background: #f4f7fc;
+  color: #45526e;
+  font-size: 12px;
+  line-height: 1.35;
+}
+.sh-agent-status-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: #0284c7; }
+.sh-agent-status[data-mode="error"] .sh-agent-status-dot { background: #991b1b; }
+.sh-agent-composer { flex: none; padding: 13px 17px 15px; border-top: 1px solid #dbe2ee; background: #fff; }
+.sh-agent-input {
+  display: block;
+  width: 100%;
+  min-height: 66px;
+  max-height: 180px;
+  padding: 11px 12px;
+  resize: vertical;
+  border: 1px solid #c6d0e0;
+  border-radius: 10px;
+  background: #fff;
+  color: #16203a;
+  font-size: 14px;
+  line-height: 1.45;
+  caret-color: #0369a1;
+}
+.sh-agent-input::placeholder { color: #5b6784; opacity: 1; }
+.sh-agent-input:hover { border-color: #8fa9c5; }
+.sh-agent-input:focus { border-color: #0284c7; outline: 2px solid #bae6fd; outline-offset: 0; }
+.sh-agent-controls { display: flex; align-items: center; gap: 10px; min-height: 35px; margin-top: 8px; }
+.sh-agent-hint { color: #5b6784; font-size: 11px; line-height: 1.3; }
+.sh-agent-stop { margin-left: auto; }
+.sh-agent-send {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  margin-left: auto;
+  padding: 0;
+  border: 1px solid #0e1426;
+  border-radius: 9px;
+  background: #0e1426;
+  color: #fff;
+  cursor: pointer;
+}
+.sh-agent-send:hover { background: #1b2444; }
+.sh-agent-panel button:disabled { opacity: .48; cursor: not-allowed; }
+
+@media (max-width: 680px) {
+  .sh-agent-panel,
+  body.sh-agent-toolbar-host .sh-agent-panel { inset: 0; width: 100%; height: 100dvh; border: 0; border-radius: 0; }
+  .sh-agent-launcher { right: 16px; bottom: 16px; }
+  .sh-agent-log { padding: 22px 18px 28px; }
+  .sh-agent-hint { display: none; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .sh-agent-launcher,
+  .sh-agent-suggestion,
+  .sh-agent-send,
+  .sh-agent-apply { transition: background-color .16s ease, border-color .16s ease; }
+  .sh-agent-status[data-mode="working"] .sh-agent-status-dot { animation: sh-agent-pulse 1.5s ease-in-out infinite; }
+}
+
+@keyframes sh-agent-pulse { 50% { opacity: .35; } }

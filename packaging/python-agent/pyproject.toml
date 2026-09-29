@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "shinyhub-agent"
-version = "0.1.1"
+version = "0.2.0.dev0"
 description = "Session-scoped agent tools for Python Shiny apps on ShinyHub"
 readme = "README.md"
 requires-python = ">=3.10"
