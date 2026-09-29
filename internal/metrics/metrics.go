@@ -26,6 +26,7 @@ type Registry struct {
 	httpDuration            *prometheus.HistogramVec
 	admissionRejects        *prometheus.CounterVec
 	wsSessionEnds           *prometheus.CounterVec
+	wsAbnormalBursts        *prometheus.CounterVec
 	deploys                 *prometheus.CounterVec
 	generationHandoffs      *prometheus.CounterVec
 	generationDraining      prometheus.Gauge
@@ -105,6 +106,11 @@ func New(version string) *Registry {
 		Help: "Completed WebSocket tunnels by app, close-frame initiator or proxy action, first transport-ending side, and abnormal classification.",
 	}, []string{"slug", "closed_by", "transport_end_side", "abnormal"})
 	reg.MustRegister(wsSessionEnds)
+	wsAbnormalBursts := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "shinyhub_ws_abnormal_bursts_total",
+		Help: "Worker-local abnormal WebSocket close bursts observed by this proxy instance, by app.",
+	}, []string{"slug"})
+	reg.MustRegister(wsAbnormalBursts)
 
 	deploys := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "shinyhub_deploys_total",
@@ -268,6 +274,7 @@ func New(version string) *Registry {
 		httpDuration:            httpDuration,
 		admissionRejects:        admissionRejects,
 		wsSessionEnds:           wsSessionEnds,
+		wsAbnormalBursts:        wsAbnormalBursts,
 		deploys:                 deploys,
 		generationHandoffs:      generationHandoffs,
 		generationDraining:      generationDraining,
@@ -307,6 +314,10 @@ func New(version string) *Registry {
 // so series appear after that app's first close rather than being preseeded.
 func (r *Registry) RecordWSSessionEnd(slug, closedBy, transportEndSide string, abnormal bool) {
 	r.wsSessionEnds.WithLabelValues(slug, closedBy, transportEndSide, strconv.FormatBool(abnormal)).Inc()
+}
+
+func (r *Registry) RecordWSAbnormalBurst(slug string) {
+	r.wsAbnormalBursts.WithLabelValues(slug).Inc()
 }
 
 // RecordDeploy increments the deployment counter for the given result, which

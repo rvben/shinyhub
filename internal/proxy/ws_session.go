@@ -48,6 +48,7 @@ type wsSession struct {
 	backendAttached bool
 	backendClosed   bool
 	clientClosed    bool
+	clientClosing   bool
 	activeIO        int
 	emitted         bool
 }
@@ -59,10 +60,29 @@ func (s *wsSession) start(slug string, replica int, deploymentID int64, fn wsEnd
 	s.mu.Unlock()
 }
 
-func (s *wsSession) setProxyReason(reason string) {
+func (s *wsSession) setProxyReason(reason string) bool {
 	s.mu.Lock()
-	if s.proxyReason == "" && s.closedBy == "" && s.transportEnd == "" {
+	defer s.mu.Unlock()
+	if !s.clientClosing && !s.emitted && s.proxyReason == "" && s.closedBy == "" && s.transportEnd == "" {
 		s.proxyReason = reason
+		return true
+	}
+	return false
+}
+
+func (s *wsSession) beginClientClose(reason string) {
+	s.mu.Lock()
+	s.clientClosing = true
+	if reason != "" && s.proxyReason == "" && s.closedBy == "" && s.transportEnd == "" {
+		s.proxyReason = reason
+	}
+	s.mu.Unlock()
+}
+
+func (s *wsSession) clearProxyReason(reason string) {
+	s.mu.Lock()
+	if !s.emitted && s.proxyReason == reason {
+		s.proxyReason = ""
 	}
 	s.mu.Unlock()
 }
@@ -155,7 +175,7 @@ func (s *wsSession) readyToEmitLocked() (WSSessionEnd, wsEndFn) {
 	}
 	s.emitted = true
 	closedBy, signal := s.closedBy, "close_frame"
-	if s.proxyReason != "" {
+	if closedBy == "" && s.proxyReason != "" {
 		closedBy, signal = s.proxyReason, "proxy_action"
 	} else if closedBy == "" {
 		closedBy, signal = "unknown", "unknown"

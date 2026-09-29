@@ -104,6 +104,7 @@ series count.
 | `shinyhub_app_sessions` | gauge | `slug` | Active proxied sessions for an app, summed across live replicas (evaluated at scrape time). |
 | `shinyhub_app_sessions_limit` | gauge | `slug` | Admission ceiling for an app: the number of replicas that admit new sessions (live, not draining) times the per-replica session cap. Absent for uncapped apps, so `shinyhub_app_sessions / shinyhub_app_sessions_limit` is the saturation fraction wherever a cap applies. |
 | `shinyhub_ws_session_ends_total` | counter | `slug`, `closed_by`, `transport_end_side`, `abnormal` | Successfully hijacked WebSocket tunnels that ended. `closed_by` identifies the first observed close-frame sender or a known proxy action; it is `unknown` when only a transport end was observed. `transport_end_side` records the first side whose read ended. `abnormal=true` means an upstream close frame or upstream transport end without a 1000/1001 close code. |
+| `shinyhub_ws_abnormal_bursts_total` | counter | `slug` | Worker-local groups of at least three abnormal WebSocket endings within ten seconds, with a 30-second warning cooldown. The counter is local to each ShinyHub instance. |
 
 Each completed tunnel also emits one structured `ws_session_end` log with its
 replica, deployment, duration, close code and reason when observed, and bytes
@@ -112,6 +113,12 @@ transport end, proxy action, or unknown ending. Upstream abnormal endings are
 WARN; other endings are INFO. A transport EOF does not establish why the worker
 stopped responding. This counter measures the same local end events as the logs;
 it cannot prove that a specific log record reached an external log store.
+When a known lifetime stop or generation cleanup ends a connection, the event
+uses `closed_by=lifetime` or `closed_by=drain` and stays at INFO. A
+`ws_abnormal_burst` WARN names the app, deployment, worker slot, and number of
+abnormal endings in its window, plus their observed time span. It includes a
+close code and reason only when all endings in that window agree. It reports
+correlation, not a CPU-stall diagnosis.
 
 The `reason` label is a closed vocabulary. The same value is returned on the
 `X-Shinyhub-Reject` response header, so a rejected request can be traced from the

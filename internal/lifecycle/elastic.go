@@ -523,7 +523,12 @@ func (s *ElasticSpawner) expireLifetime(slug string, slotID int, backstop *elast
 		return
 	}
 	slog.Info("elastic spawn: max session lifetime reached, terminating worker", "slug", slug, "slotID", slotID)
-	s.Terminate(slug, slotID)
+	clear := s.Proxy.MarkElasticWorkerLifetime(slug, slotID)
+	if err := s.terminate(slug, slotID); err != nil {
+		if info, ok := s.Manager.GetReplica(slug, slotID); ok && info.Status != process.StatusStopped && info.Status != process.StatusCrashed {
+			clear()
+		}
+	}
 }
 
 // CancelLifetime invalidates a worker's timer, including callbacks already
@@ -675,6 +680,10 @@ func (s *ElasticSpawner) Resume(slug string, slotID int) {
 // logged at DEBUG level rather than propagated, so a double-terminate from a
 // grace-window race and a lifetime backstop is harmless.
 func (s *ElasticSpawner) Terminate(slug string, slotID int) {
+	_ = s.terminate(slug, slotID)
+}
+
+func (s *ElasticSpawner) terminate(slug string, slotID int) error {
 	if s.TerminateHook != nil {
 		s.TerminateHook(slug, slotID)
 	}
@@ -682,12 +691,14 @@ func (s *ElasticSpawner) Terminate(slug string, slotID int) {
 	// This prevents the timer goroutine from lingering after an early exit.
 	// A missing entry (already fired or never armed) is a no-op.
 	s.CancelLifetime(slug, slotID)
-	if err := s.stopWorker(slug, slotID); err != nil {
+	stopErr := s.stopWorker(slug, slotID)
+	if stopErr != nil {
 		slog.Debug("elastic terminate: stop replica (may already be stopped)",
-			"slug", slug, "slotID", slotID, "err", err)
+			"slug", slug, "slotID", slotID, "err", stopErr)
 	}
 	s.Proxy.DeregisterElasticWorker(slug, slotID)
 	s.Proxy.ReconcileElasticWarmSpares(slug)
+	return stopErr
 }
 
 // ReapElasticOrphans stops any processes the Manager knows about that belong

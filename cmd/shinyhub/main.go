@@ -1791,6 +1791,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		}
 		slog.Info("proxy_access", attrs...)
 	})
+	wsBursts := proxy.NewWSAbnormalBurstDetector()
 	prx.SetWSSessionEndRecorder(func(e proxy.WSSessionEnd) {
 		attrs := []any{
 			"slug", e.Slug, "replica", e.ReplicaIndex,
@@ -1812,6 +1813,23 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 			slog.Warn("ws_session_end", attrs...)
 		} else {
 			slog.Info("ws_session_end", attrs...)
+		}
+		if burst, ok := wsBursts.Record(e); ok {
+			if metricsReg != nil {
+				metricsReg.RecordWSAbnormalBurst(burst.Slug)
+			}
+			burstAttrs := []any{
+				"slug", burst.Slug, "replica", burst.Replica,
+				"deployment_id", burst.DeploymentID, "count", burst.Count,
+				"window_ms", burst.Window.Milliseconds(), "span_ms", burst.Span.Milliseconds(),
+			}
+			if burst.CloseCode != nil {
+				burstAttrs = append(burstAttrs, "close_code", *burst.CloseCode)
+			}
+			if burst.CloseReason != "" {
+				burstAttrs = append(burstAttrs, "close_reason", burst.CloseReason)
+			}
+			slog.Warn("ws_abnormal_burst", burstAttrs...)
 		}
 	})
 

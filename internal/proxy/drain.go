@@ -143,8 +143,8 @@ func (c *trackedConn) Close() error {
 
 func (c *trackedConn) close(reason string) error {
 	c.once.Do(func() {
-		if c.session != nil && reason != "" {
-			c.session.setProxyReason(reason)
+		if c.session != nil {
+			c.session.beginClientClose(reason)
 		}
 		c.timerMu.Lock()
 		if c.deadlineTimer != nil {

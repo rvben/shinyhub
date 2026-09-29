@@ -14,3 +14,11 @@ func TestRecordWSSessionEnd(t *testing.T) {
 		t.Fatalf("upstream abnormal closes = %v, want 2", got)
 	}
 }
+
+func TestRecordWSAbnormalBurst(t *testing.T) {
+	r := New("test")
+	r.RecordWSAbnormalBurst("demo")
+	if got := testutil.ToFloat64(r.wsAbnormalBursts.WithLabelValues("demo")); got != 1 {
+		t.Fatalf("abnormal bursts = %v, want 1", got)
+	}
+}

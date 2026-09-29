@@ -14,7 +14,13 @@ import (
 // Grouped workers may already have been stopped by their disconnect/lifetime
 // callback. A missing manager entry alone is not proof of termination; confirm
 // every durable native PID and process group before deleting the ledger.
-func (s *Server) stopGenerationForCleanup(slug string, deploymentID int64) error {
+func (s *Server) stopGenerationForCleanup(slug string, deploymentID int64) (resultErr error) {
+	clear := s.proxy.MarkGenerationDrain(slug, deploymentID)
+	defer func() {
+		if resultErr != nil {
+			clear()
+		}
+	}()
 	err := s.manager.StopGeneration(slug, deploymentID)
 	if err != nil && !errors.Is(err, process.ErrReplicaNotFound) {
 		return err
