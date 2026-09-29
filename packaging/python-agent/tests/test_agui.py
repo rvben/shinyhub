@@ -55,6 +55,9 @@ def test_agui_endpoint_resumes_after_frontend_tool_result():
     with patch("shinyhub_agent._agui.httpx.AsyncClient", side_effect=client_factory):
         events = asyncio.run(run())
     assert events[-1] == {"type": "delta", "text": "Showing week."}
+    assert {"type": "tool_started", "name": "get_view", "description": "Read view",
+            "readOnly": True} in events
+    assert {"type": "tool_finished", "name": "get_view", "ok": True} in events
     assert requests[0]["threadId"] == requests[1]["threadId"] == "thread-1"
     assert requests[0]["tools"][0]["name"] == "get_view"
     assert requests[1]["messages"][-1]["role"] == "tool"

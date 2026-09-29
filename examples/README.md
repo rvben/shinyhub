@@ -13,8 +13,14 @@ shinyhub run examples/identity-demo --open
 The [`bookmarking-demo`](bookmarking-demo/) shows Python Shiny's selective URL
 bookmark integration, including automatic refresh-safe URLs and selective links.
 
-The [`agent-shiny-demo`](agent-shiny-demo/) shows a Python Shiny app with
-session-scoped agent tools, an optional chat, and a real reactive period filter.
+The [`agent-chat-demo`](agent-chat-demo/) shows two independent capabilities:
+an app chat overlay backed by an OpenAI agent or a hoster-owned AG-UI endpoint,
+and WebMCP tools for a visitor's own browser agent. Chat works without either
+provider using clearly labeled scripted replies.
+
+The [`agent-shiny-demo`](agent-shiny-demo/) exercises the new session-scoped
+Python Shiny agent helper. Its filter is real Shiny reactive state. The example
+installs the published `shinyhub-agent` package; see its README for setup.
 
 The source remains untouched and the app is served through the same
 `/app/<slug>/` proxy shape used after deployment.

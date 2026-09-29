@@ -55,6 +55,9 @@ def test_openai_reads_registered_tool_and_keeps_response_ephemeral():
     with patch("shinyhub_agent._openai.httpx.AsyncClient", side_effect=client_factory):
         events = asyncio.run(run())
     assert events[-1] == {"type": "delta", "text": "Showing week."}
+    assert {"type": "tool_started", "name": "get_view", "description": "Read current view",
+            "readOnly": True} in events
+    assert {"type": "tool_finished", "name": "get_view", "ok": True} in events
     assert requests[0]["store"] is False
     assert requests[0]["stream"] is True
     assert json.loads(requests[1]["input"][-1]["output"]) == {"period": "week"}

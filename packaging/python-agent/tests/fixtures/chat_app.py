@@ -7,11 +7,15 @@ from shinyhub_agent import AgentTool, agent_dependency, chat_dependency, registe
 class StubAgent:
     async def run(self, message, history, tools, approve, *, thread_id):
         if "year" in message.lower():
+            yield {"type": "tool_started", "name": "set_period", "description": "Change period", "readOnly": False}
             result = await approve("set_period", {"period": "year"})
             yield {"type": "action_applied", "name": "set_period", "result": result}
+            yield {"type": "tool_finished", "name": "set_period", "ok": True}
             yield {"type": "delta", "text": "Showing year."}
         else:
+            yield {"type": "tool_started", "name": "get_period", "description": "Read period", "readOnly": True}
             result = await tools.execute("get_period", {})
+            yield {"type": "tool_finished", "name": "get_period", "ok": True}
             yield {"type": "delta", "text": f'Current period: {result["period"]}.'}
 
 

@@ -131,6 +131,9 @@ class OpenAIChat:
                     if tool is None:
                         result = {"error": "Tool unavailable"}
                     else:
+                        yield {"type": "tool_started", "name": tool.name,
+                               "description": tool.description, "readOnly": tool.read_only}
+                        succeeded = True
                         try:
                             arguments = json.loads(call.get("arguments", ""))
                             if tool.read_only:
@@ -140,6 +143,8 @@ class OpenAIChat:
                                 yield {"type": "action_applied", "name": name, "result": result}
                         except (ValueError, ToolError) as error:
                             result = {"error": str(error)}
+                            succeeded = False
+                        yield {"type": "tool_finished", "name": tool.name, "ok": succeeded}
                     inputs.append({
                         "type": "function_call_output",
                         "call_id": call["call_id"],

@@ -124,13 +124,19 @@ class AGUIChat:
                         arguments = json.loads(call["arguments"])
                         if tool is None:
                             result: Any = {"error": "Tool unavailable"}
-                        elif tool.read_only:
-                            result = await tools.execute(tool.name, arguments)
                         else:
-                            result = await approve(tool.name, arguments)
-                            yield {"type": "action_applied", "name": tool.name, "result": result}
+                            yield {"type": "tool_started", "name": tool.name,
+                                   "description": tool.description, "readOnly": tool.read_only}
+                            if tool.read_only:
+                                result = await tools.execute(tool.name, arguments)
+                            else:
+                                result = await approve(tool.name, arguments)
+                                yield {"type": "action_applied", "name": tool.name, "result": result}
+                            yield {"type": "tool_finished", "name": tool.name, "ok": True}
                     except (ValueError, ToolError) as error:
                         result = {"error": str(error)}
+                        if tool is not None:
+                            yield {"type": "tool_finished", "name": tool.name, "ok": False}
                     messages.append({
                         "id": secrets.token_urlsafe(10), "role": "tool",
                         "toolCallId": call_id, "content": json.dumps(result),
