@@ -223,8 +223,22 @@ try {
   });
   let recovered;
   await check('restart offers a new tab and preserves previous results as a snapshot', async () => {
+    const socket = sockets.get(fresh)?.at(-1);
+    assert.ok(socket, 'the app opened a WebSocket before restart');
+    const connectionID = new URL(socket.url()).searchParams.get('shinyhub_cid');
+    assert.match(connectionID, /^[0-9a-f]{24}$/, 'the browser tagged the Shiny upgrade');
     await api('/restart', {});
     await fresh.getByRole('link', { name: 'Start a new app session in a new tab', exact: true }).waitFor();
+    await poll(async () => (await fresh.locator('#shinyhub-status-connection-id').textContent().catch(() => ''))
+      === `Connection ID: ${connectionID}`, 'the interruption overlay shows its WebSocket ID');
+    const sessionEndLogs = async () => (await readFile(join(work, 'server.log'), 'utf8'))
+      .split('\n').flatMap(line => {
+        try { return [JSON.parse(line)]; } catch { return []; }
+      }).filter(entry => entry.msg === 'ws_session_end' && entry.connection_id === connectionID);
+    await poll(async () => (await sessionEndLogs()).length === 1, 'one matching ws_session_end log');
+    const [end] = await sessionEndLogs();
+    assert.equal(end.slug, 'browser');
+    assert.ok(end.bytes_to_client > 0 && end.bytes_to_upstream > 0, 'the log counts tunnel bytes');
     await fresh.screenshot({ path: join(work, 'recovery.png') });
     const opened = context.waitForEvent('page');
     await fresh.getByRole('link', { name: 'Start a new app session in a new tab', exact: true }).click();
