@@ -103,6 +103,15 @@ series count.
 | `shinyhub_admission_rejects_total` | counter | `slug`, `reason` | Proxy admission rejections. `slug` is `__unknown__` for requests to slugs that are not registered apps. |
 | `shinyhub_app_sessions` | gauge | `slug` | Active proxied sessions for an app, summed across live replicas (evaluated at scrape time). |
 | `shinyhub_app_sessions_limit` | gauge | `slug` | Admission ceiling for an app: the number of replicas that admit new sessions (live, not draining) times the per-replica session cap. Absent for uncapped apps, so `shinyhub_app_sessions / shinyhub_app_sessions_limit` is the saturation fraction wherever a cap applies. |
+| `shinyhub_ws_session_ends_total` | counter | `slug`, `closed_by`, `transport_end_side`, `abnormal` | Successfully hijacked WebSocket tunnels that ended. `closed_by` identifies the first observed close-frame sender or a known proxy action; it is `unknown` when only a transport end was observed. `transport_end_side` records the first side whose read ended. `abnormal=true` means an upstream close frame or upstream transport end without a 1000/1001 close code. |
+
+Each completed tunnel also emits one structured `ws_session_end` log with its
+replica, deployment, duration, close code and reason when observed, and bytes
+written in each tunnel direction. `end_signal` distinguishes a close frame,
+transport end, proxy action, or unknown ending. Upstream abnormal endings are
+WARN; other endings are INFO. A transport EOF does not establish why the worker
+stopped responding. This counter measures the same local end events as the logs;
+it cannot prove that a specific log record reached an external log store.
 
 The `reason` label is a closed vocabulary. The same value is returned on the
 `X-Shinyhub-Reject` response header, so a rejected request can be traced from the

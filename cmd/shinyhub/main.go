@@ -1791,6 +1791,29 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		}
 		slog.Info("proxy_access", attrs...)
 	})
+	prx.SetWSSessionEndRecorder(func(e proxy.WSSessionEnd) {
+		attrs := []any{
+			"slug", e.Slug, "replica", e.ReplicaIndex,
+			"deployment_id", e.DeploymentID, "duration_ms", e.Duration.Milliseconds(),
+			"closed_by", e.ClosedBy, "end_signal", e.EndSignal,
+			"transport_end_side", e.TransportEndSide, "bytes_to_client", e.BytesToClient,
+			"bytes_to_upstream", e.BytesToUpstream, "abnormal", e.Abnormal,
+		}
+		if e.CloseCode != nil {
+			attrs = append(attrs, "close_code", *e.CloseCode)
+		}
+		if e.CloseReason != "" {
+			attrs = append(attrs, "close_reason", e.CloseReason)
+		}
+		if metricsReg != nil {
+			metricsReg.RecordWSSessionEnd(e.Slug, e.ClosedBy, e.TransportEndSide, e.Abnormal)
+		}
+		if e.Abnormal {
+			slog.Warn("ws_session_end", attrs...)
+		} else {
+			slog.Info("ws_session_end", attrs...)
+		}
+	})
 
 	// Choose the metrics sampler. A docker default tier samples container stats
 	// through the Runtime API. Otherwise use the host sampler, which reads host

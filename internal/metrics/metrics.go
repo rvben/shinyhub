@@ -25,6 +25,7 @@ type Registry struct {
 	httpRequests            *prometheus.CounterVec
 	httpDuration            *prometheus.HistogramVec
 	admissionRejects        *prometheus.CounterVec
+	wsSessionEnds           *prometheus.CounterVec
 	deploys                 *prometheus.CounterVec
 	generationHandoffs      *prometheus.CounterVec
 	generationDraining      prometheus.Gauge
@@ -99,6 +100,11 @@ func New(version string) *Registry {
 		Help: "Total data-plane admission rejections by slug and reason. The slug label is __unknown__ for slugs that are not registered apps.",
 	}, []string{"slug", "reason"})
 	reg.MustRegister(admissionRejects)
+	wsSessionEnds := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "shinyhub_ws_session_ends_total",
+		Help: "Completed WebSocket tunnels by app, close-frame initiator or proxy action, first transport-ending side, and abnormal classification.",
+	}, []string{"slug", "closed_by", "transport_end_side", "abnormal"})
+	reg.MustRegister(wsSessionEnds)
 
 	deploys := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "shinyhub_deploys_total",
@@ -261,6 +267,7 @@ func New(version string) *Registry {
 		httpRequests:            httpRequests,
 		httpDuration:            httpDuration,
 		admissionRejects:        admissionRejects,
+		wsSessionEnds:           wsSessionEnds,
 		deploys:                 deploys,
 		generationHandoffs:      generationHandoffs,
 		generationDraining:      generationDraining,
@@ -294,6 +301,12 @@ func New(version string) *Registry {
 	}
 	seedBoundedSeries(r)
 	return r
+}
+
+// RecordWSSessionEnd counts a completed WebSocket tunnel. Slug is an app slug,
+// so series appear after that app's first close rather than being preseeded.
+func (r *Registry) RecordWSSessionEnd(slug, closedBy, transportEndSide string, abnormal bool) {
+	r.wsSessionEnds.WithLabelValues(slug, closedBy, transportEndSide, strconv.FormatBool(abnormal)).Inc()
 }
 
 // RecordDeploy increments the deployment counter for the given result, which

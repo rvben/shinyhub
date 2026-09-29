@@ -487,6 +487,7 @@ type Proxy struct {
 	trustedProxies atomic.Pointer[[]*net.IPNet]
 
 	accessLog        atomic.Pointer[accessLogFn]
+	wsEnd            atomic.Pointer[wsEndFn]
 	clientIP         atomic.Pointer[clientIPFn]
 	identityProvider atomic.Pointer[identityProviderFn]
 	usageRecorder    atomic.Pointer[usageRecorderCallbacks]
@@ -917,6 +918,17 @@ func (p *Proxy) SetAccessLogger(fn func(AccessLogEntry)) {
 	}
 	f := accessLogFn(fn)
 	p.accessLog.Store(&f)
+}
+
+// SetWSSessionEndRecorder installs the lifecycle callback for successfully
+// hijacked WebSocket tunnels. It may be called before or during serving.
+func (p *Proxy) SetWSSessionEndRecorder(fn func(WSSessionEnd)) {
+	if fn == nil {
+		p.wsEnd.Store(nil)
+		return
+	}
+	f := wsEndFn(fn)
+	p.wsEnd.Store(&f)
 }
 
 // SetUsageRecorder wires durable app-session analytics. Passing nil disables
@@ -2777,6 +2789,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// WebSocket upgrades, and the sendfile fast path keep working.
 	rec := newStatusRecorder(w)
 	start := time.Now()
+	var ws *wsSession
+	if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+		ws = &wsSession{}
+		r = r.WithContext(context.WithValue(r.Context(), wsSessionContextKey{}, ws))
+	}
 	replicaIndex := -1
 	deploymentID := int64(0)
 	routedAppID := int64(0)
@@ -2797,11 +2814,19 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rec.trackHijack = func(c net.Conn) net.Conn {
 		principal := connPrincipal(r, slug, routedAppID)
 		var onClose func()
+		if ws != nil {
+			var fn wsEndFn
+			if ptr := p.wsEnd.Load(); ptr != nil {
+				fn = *ptr
+			}
+			ws.start(slug, replicaIndex, deploymentID, fn)
+			onClose = ws.end
+		}
 		if recorder := p.usageRecorder.Load(); recorder != nil {
 			if u := auth.UserFromContext(r.Context()); u != nil && u.SupportSession != nil {
 				// Troubleshooting traffic is administrative activity, not product
 				// usage by either the administrator or the represented user.
-				return p.conns.trackWithClose(c, principal, nil)
+				return p.conns.trackWithSession(c, principal, onClose, ws)
 			}
 			// Service credentials are automation, not people. Keep their live
 			// connection visible while classifying them separately from anonymous
@@ -2821,10 +2846,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				PrincipalKind: principalKind, StartedAt: time.Now().UTC(),
 			})
 			if usageID != "" {
-				onClose = func() { recorder.end(usageID) }
+				prior := onClose
+				onClose = func() {
+					recorder.end(usageID)
+					if prior != nil {
+						prior()
+					}
+				}
 			}
 		}
-		return p.conns.trackWithClose(c, principal, onClose)
+		return p.conns.trackWithSession(c, principal, onClose, ws)
 	}
 
 	// Trace context derivation: if tracing is enabled, parse the incoming

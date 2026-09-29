@@ -31,7 +31,11 @@ func (t *connTracker) track(c net.Conn, principal ConnPrincipal) net.Conn {
 }
 
 func (t *connTracker) trackWithClose(c net.Conn, principal ConnPrincipal, onClose func()) net.Conn {
-	tc := &trackedConn{Conn: c, tracker: t, principal: principal, onClose: onClose}
+	return t.trackWithSession(c, principal, onClose, nil)
+}
+
+func (t *connTracker) trackWithSession(c net.Conn, principal ConnPrincipal, onClose func(), session *wsSession) net.Conn {
+	tc := &trackedConn{Conn: c, tracker: t, principal: principal, onClose: onClose, session: session}
 	delay := time.Duration(0)
 	hasDeadline := !principal.SupportExpiresAt.IsZero()
 	if hasDeadline {
@@ -44,12 +48,12 @@ func (t *connTracker) trackWithClose(c net.Conn, principal ConnPrincipal, onClos
 		// callback may start immediately, but Close will wait until the pointer is
 		// assigned; an early manual Close can then cancel and release the closure.
 		tc.timerMu.Lock()
-		tc.deadlineTimer = time.AfterFunc(delay, func() { _ = tc.Close() })
+		tc.deadlineTimer = time.AfterFunc(delay, func() { _ = tc.closeWithReason("support_expired") })
 		tc.timerMu.Unlock()
 	}
 	t.mu.Unlock()
 	if hasDeadline && delay <= 0 {
-		_ = tc.Close()
+		_ = tc.closeWithReason("support_expired")
 	}
 	return tc
 }
@@ -84,7 +88,7 @@ func (t *connTracker) count() int {
 func (t *connTracker) closeAll() int {
 	open := t.snapshot()
 	for _, tc := range open {
-		tc.Close()
+		_ = tc.closeWithReason("drain")
 	}
 	return len(open)
 }
@@ -100,14 +104,48 @@ type trackedConn struct {
 	// reads it without holding the tracker lock.
 	principal     ConnPrincipal
 	onClose       func()
+	session       *wsSession
 	once          sync.Once
 	closeErr      error
 	timerMu       sync.Mutex
 	deadlineTimer *time.Timer
 }
 
+func (c *trackedConn) Read(p []byte) (int, error) {
+	if c.session != nil {
+		c.session.beginIO()
+	}
+	n, err := c.Conn.Read(p)
+	if c.session != nil {
+		c.session.finishIO("client", n, err, true, p[:n])
+	}
+	return n, err
+}
+
+func (c *trackedConn) Write(p []byte) (int, error) {
+	if c.session != nil {
+		c.session.beginIO()
+	}
+	n, err := c.Conn.Write(p)
+	if c.session != nil {
+		c.session.finishIO("client", n, err, false, nil)
+	}
+	return n, err
+}
+
+func (c *trackedConn) closeWithReason(reason string) error {
+	return c.close(reason)
+}
+
 func (c *trackedConn) Close() error {
+	return c.close("")
+}
+
+func (c *trackedConn) close(reason string) error {
 	c.once.Do(func() {
+		if c.session != nil && reason != "" {
+			c.session.setProxyReason(reason)
+		}
 		c.timerMu.Lock()
 		if c.deadlineTimer != nil {
 			c.deadlineTimer.Stop()

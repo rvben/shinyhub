@@ -100,7 +100,7 @@ func (p *Proxy) RecheckSessions(fn Reauthorizer) int {
 		if reason == "" {
 			continue
 		}
-		c.Close()
+		_ = c.closeWithReason("access_revoked")
 		closed++
 	}
 	return closed
