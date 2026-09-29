@@ -39,10 +39,13 @@ func TestSecurityHeaders_ControlPlane(t *testing.T) {
 		if !strings.Contains(csp, "default-src 'self'") {
 			t.Errorf("%s: CSP missing default-src 'self': %q", path, csp)
 		}
-		// The dashboard pulls fonts from Google Fonts; the CSP must permit that
-		// or the UI breaks.
-		if !strings.Contains(csp, "fonts.gstatic.com") || !strings.Contains(csp, "fonts.googleapis.com") {
-			t.Errorf("%s: CSP must allow Google Fonts hosts or the dashboard fonts break: %q", path, csp)
+		// The dashboard's webfonts are self-hosted, so the policy admits no
+		// third-party font or stylesheet origin.
+		if !strings.Contains(csp, "font-src 'self';") {
+			t.Errorf("%s: CSP font-src must be exactly 'self': %q", path, csp)
+		}
+		if strings.Contains(csp, "fonts.gstatic.com") || strings.Contains(csp, "fonts.googleapis.com") {
+			t.Errorf("%s: CSP must not admit Google Fonts hosts: %q", path, csp)
 		}
 		// No 'unsafe-inline': inline scripts/styles are allowed by hash, not blanket.
 		if strings.Contains(csp, "'unsafe-inline'") {
@@ -74,7 +77,7 @@ func TestSecurityHeaders_BrandingImageSources(t *testing.T) {
 // TestBuildControlPlaneCSP asserts the policy is strict with no branding and
 // lists the exact inline hashes (never 'unsafe-inline') when branding is active.
 func TestBuildControlPlaneCSP(t *testing.T) {
-	plain := buildControlPlaneCSP(nil, nil, nil)
+	plain := buildControlPlaneCSP(nil, nil, nil, false)
 	if !strings.Contains(plain, "img-src 'self' data:;") {
 		t.Errorf("with no branding the image policy must stay closed: %q", plain)
 	}
@@ -85,12 +88,12 @@ func TestBuildControlPlaneCSP(t *testing.T) {
 		t.Errorf("inactive-branding script-src should be just 'self': %q", plain)
 	}
 
-	csp := buildControlPlaneCSP([]string{"'sha256-abc'"}, []string{"'sha256-def'"}, nil)
+	csp := buildControlPlaneCSP([]string{"'sha256-abc'"}, []string{"'sha256-def'"}, nil, false)
 	if !strings.Contains(csp, "script-src 'self' 'sha256-abc'") {
 		t.Errorf("script-src missing hash source: %q", csp)
 	}
-	if !strings.Contains(csp, "style-src 'self' 'sha256-def' https://fonts.googleapis.com") {
-		t.Errorf("style-src missing hash source or fonts host: %q", csp)
+	if !strings.Contains(csp, "style-src 'self' 'sha256-def';") {
+		t.Errorf("style-src must be 'self' plus the hash source: %q", csp)
 	}
 	if strings.Contains(csp, "'unsafe-inline'") {
 		t.Errorf("active-branding CSP must not contain 'unsafe-inline': %q", csp)
@@ -104,8 +107,13 @@ func TestLandingPageCSP(t *testing.T) {
 	if !strings.Contains(csp, "script-src 'self' 'unsafe-inline'") {
 		t.Errorf("landing-page CSP must permit inline scripts: %q", csp)
 	}
-	if !strings.Contains(csp, "style-src 'self' 'unsafe-inline'") {
-		t.Errorf("landing-page CSP must permit inline styles: %q", csp)
+	if !strings.Contains(csp, "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;") {
+		t.Errorf("landing-page CSP must permit inline styles and Google Fonts stylesheets: %q", csp)
+	}
+	// Operator HTML may link Google Fonts; the dashboard dropping them must not
+	// break a landing page that uses them.
+	if !strings.Contains(csp, "font-src 'self' https://fonts.gstatic.com;") {
+		t.Errorf("landing-page CSP must permit Google Fonts files: %q", csp)
 	}
 }
 

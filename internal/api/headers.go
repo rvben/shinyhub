@@ -10,8 +10,9 @@ import (
 
 // buildControlPlaneCSP assembles the Content-Security-Policy applied to
 // control-plane responses (dashboard SPA, static assets, JSON API). It allows
-// 'self' for everything by default, the Google Fonts hosts the dashboard loads
-// its webfont from, and data: images (CSS/inline icons).
+// 'self' for everything by default (the dashboard's webfonts are served from
+// /static/fonts/) and data: images (CSS/inline icons). googleFonts additionally
+// admits the Google Fonts hosts, for operator-authored HTML that links them.
 //
 // There is no 'unsafe-inline': the SPA shell and assets are external files, and
 // the only inline blocks (the branding <script>/<style> injected by
@@ -29,14 +30,18 @@ import (
 // defensive additions: they block ALL framing, same-origin included (the
 // dashboard never embeds itself, and the accept-invitation page already used
 // 'none' for the same reason), and limit where the page can post or rebase to.
-func buildControlPlaneCSP(scriptSources, styleSources, imgSources []string) string {
+func buildControlPlaneCSP(scriptSources, styleSources, imgSources []string, googleFonts bool) string {
 	scriptSrc := append([]string{"'self'"}, scriptSources...)
 	styleSrc := append([]string{"'self'"}, styleSources...)
-	styleSrc = append(styleSrc, "https://fonts.googleapis.com")
+	fontSrc := []string{"'self'"}
+	if googleFonts {
+		styleSrc = append(styleSrc, "https://fonts.googleapis.com")
+		fontSrc = append(fontSrc, "https://fonts.gstatic.com")
+	}
 	imgSrc := append([]string{"'self'", "data:"}, imgSources...)
 	return "default-src 'self'; " +
 		"img-src " + strings.Join(imgSrc, " ") + "; " +
-		"font-src 'self' https://fonts.gstatic.com; " +
+		"font-src " + strings.Join(fontSrc, " ") + "; " +
 		"style-src " + strings.Join(styleSrc, " ") + "; " +
 		"script-src " + strings.Join(scriptSrc, " ") + "; " +
 		"connect-src 'self'; " +
@@ -50,9 +55,10 @@ func buildControlPlaneCSP(scriptSources, styleSources, imgSources []string) stri
 // use inline scripts/styles, so - unlike the strict, inline-free SPA policy - it
 // permits 'unsafe-inline' (the pre-hash behavior, reused via the same builder).
 // The landing handler sets it on that one response only; the SPA shell, assets,
-// and API keep the strict policy.
+// and API keep the strict policy. It keeps admitting Google Fonts, which an
+// operator's page may link.
 func LandingPageCSP() string {
-	return buildControlPlaneCSP([]string{"'unsafe-inline'"}, []string{"'unsafe-inline'"}, nil)
+	return buildControlPlaneCSP([]string{"'unsafe-inline'"}, []string{"'unsafe-inline'"}, nil, true)
 }
 
 // controlPlanePermissionsPolicy disables powerful browser features the
@@ -82,7 +88,7 @@ const hstsValue = "max-age=63072000; includeSubDomains"
 // there is no same-origin framing use to preserve, and DENY also covers
 // legacy browsers that ignore the CSP frame-ancestors directive above.
 func SecurityHeaders(trustedNets []*net.IPNet, scriptSources, styleSources, imgSources []string, next http.Handler) http.Handler {
-	csp := buildControlPlaneCSP(scriptSources, styleSources, imgSources)
+	csp := buildControlPlaneCSP(scriptSources, styleSources, imgSources, false)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/app/") {
 			h := w.Header()
