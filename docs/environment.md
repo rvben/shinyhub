@@ -176,6 +176,38 @@ shinyhub env set demo UV_INDEX_CORP_PASSWORD --secret --stdin
 `shinyhub run` mirrors this locally: variables passed via `--env`/`.env` reach
 the local dependency build the same way per-app vars reach a server build.
 
+### Shipped `uv.lock` files
+
+A bundle that ships a `uv.lock` is installed exactly as locked: every build
+runs `uv sync --frozen`, which takes the versions, hashes and download URLs
+from the lock and never rewrites it. The index settings above then do not
+change what gets installed, even when they differ from the index the lock was
+made against; they apply to bundles without a lock. A plain `uv sync` would
+instead re-resolve whenever the server's index configuration differs from the
+lock's (a trailing slash is enough), rewrite the lock and install the new
+resolution without reporting it.
+
+Because `--frozen` does not compare the lock with `pyproject.toml`, the deploy
+does: when `pyproject.toml` declares a requirement the lock does not record, or
+the lock records one `pyproject.toml` no longer declares, the upload is
+rejected (HTTP 422) with an error naming them, before the running app is
+touched. Run `uv lock` and deploy again. A requirement is
+compared by package name, by the extras it requests (`httpx[http2]`), and by
+where it is declared: the project's dependencies, a named extra, or a
+dependency group, so moving a package from an extra into the dependencies also
+counts as a change. Version specifiers, markers and `[tool.uv.sources]` are
+not compared, so changing only a specifier or a package's source is not
+caught; lock after every change to `pyproject.toml`. The check runs on every
+uploaded bundle, whatever the runtime or launch command. It never runs when an
+already-accepted deployment comes back up (a restart, rollback, restore,
+replica recovery or scale-up), so a deployment accepted with a stale lock
+before this check existed keeps working: when its environment has to be
+rebuilt, a plain `uv sync` re-resolves it as it did at the time.
+
+The lock records absolute download URLs, so every replica must be able to reach
+the index the lock was made against. To install through a different index, lock
+against it (`uv lock --default-index <url>`) before deploying.
+
 ## Build interpreter provisioning
 
 Native Python apps build with [uv](https://docs.astral.sh/uv/). By default uv

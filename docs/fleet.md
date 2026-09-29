@@ -227,6 +227,26 @@ contents of each shared file. Apply remains non-atomic and continue-on-error,
 so one consumer can fail after another has deployed; the report names that
 partial outcome.
 
+A shared `uv.toml` is a common case: it gives every consumer the same uv
+settings, such as a mirror index, without repeating them in each
+`pyproject.toml`.
+
+```toml
+[[bundle_file]]
+from      = "_shared/uv.toml"
+to        = "uv.toml"
+consumers = ["sales", "operations"]
+```
+
+A project-level `uv.toml` replaces the `[tool.uv]` section of the app's
+`pyproject.toml` entirely (uv ignores that section and warns), so move any
+`[tool.uv]` settings a consumer needs into the shared file. Index variables in
+the server or app environment (`UV_DEFAULT_INDEX`, `UV_INDEX_URL`, ...) take
+precedence over the file. A consumer that ships a `uv.lock` is installed exactly
+as locked (see [Shipped `uv.lock` files](environment.md#shipped-uvlock-files)),
+so lock it with the same settings: `uv lock --config-file _shared/uv.toml`.
+`git+` consumers are not covered; commit the `uv.toml` to their repository.
+
 Single-app `shinyhub run`, `shinyhub plan`, and `shinyhub deploy` do not compose
 fleet inputs. When they can discover a valid nearest-parent fleet manifest for
 the selected local source, they warn on stderr and point to the corresponding

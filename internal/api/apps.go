@@ -2497,6 +2497,20 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A shipped uv.lock is installed with --frozen, which never compares it with
+	// pyproject.toml, so a lock that demonstrably no longer records what the
+	// project declares is refused here, where a bundle is first accepted and
+	// before the running pool is touched. Every runtime installs the lock (the
+	// managed-container runner even under an explicit command), so the check
+	// does not depend on either. Restarts, rollbacks, restores and replica
+	// recovery bring back a bundle that was already accepted and never pass
+	// through here.
+	if err := process.CheckLockCurrent(bundleDir); err != nil {
+		endValidate(err)
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+
 	// Durable-data guard: refuse to deploy a data-using app onto a tier whose
 	// storage is ephemeral (bare Fargate with no durable backend) unless the
 	// operator explicitly acknowledged it, before the running pool is torn down.

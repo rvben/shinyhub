@@ -259,6 +259,9 @@ func runSandboxedBuildStep(ctx context.Context, dir string, argv []string, appEn
 // hook. Both apply the package-index options of a synthesized project's
 // requirements.txt through process.ReadRequirementsBuild, since `uv sync`
 // does not read that file, and mask the values it expanded in uv's output.
+// Both install a shipped uv.lock as-is (--frozen) unless it is stale against
+// pyproject.toml; see process.LockSyncFlags. A newly uploaded bundle never
+// gets here with a stale lock: the deploy handler refuses it first.
 //
 // Residual gap: ensureProjectFn (process.EnsureProject — the uv-init/uv-add
 // project-conversion step that runs before this for a requirements.txt-only
@@ -278,7 +281,8 @@ func sandboxedPythonSync(ctx context.Context, dir string, appEnv []string) error
 	if err != nil {
 		return err
 	}
-	out, err := buildStepRunner(ctx, dir, append([]string{"uv", "sync"}, build.Flags...), build.Env)
+	argv := append(append([]string{"uv", "sync"}, process.LockSyncFlags(dir)...), build.Flags...)
+	out, err := buildStepRunner(ctx, dir, argv, build.Env)
 	if err != nil {
 		switch ctx.Err() {
 		case context.DeadlineExceeded:
