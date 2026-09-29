@@ -3,9 +3,11 @@ package cli
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -95,6 +97,41 @@ func TestSaveConfig_SpellingVariantsShareOneEntry(t *testing.T) {
 	}
 }
 
+func TestConcurrentCredentialSavesKeepEveryHost(t *testing.T) {
+	isolatedCredentials(t)
+	const count = 24
+	var wg sync.WaitGroup
+	errs := make(chan error, count)
+	for i := range count {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			host := fmt.Sprintf("https://host-%d.example.com", i)
+			errs <- saveConfig(&cliConfig{Host: host, Token: fmt.Sprintf("shk_%d", i)})
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	st, err := loadStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Hosts) != count {
+		t.Fatalf("saved %d hosts, want %d", len(st.Hosts), count)
+	}
+	for i := range count {
+		host := fmt.Sprintf("https://host-%d.example.com", i)
+		if st.Hosts[host].Token != fmt.Sprintf("shk_%d", i) {
+			t.Errorf("missing credential for %s", host)
+		}
+	}
+}
+
 // A file written by a pre-multi-host binary is the shape most existing installs
 // have on disk. Reading it must yield a working current host, not "not logged
 // in" - an upgrade that silently signs everyone out is the worst outcome here.
@@ -144,7 +181,7 @@ func TestSaveStore_RemainsReadableByPreMultiHostBinary(t *testing.T) {
 	if err := json.Unmarshal(raw, &old); err != nil {
 		t.Fatalf("old binary could not parse the file: %v", err)
 	}
-	if old.Host != "https://b.example.com" || old.Token != "shk_b" {
+	if old.Host != "https://a.example.com" || old.Token != "shk_a" {
 		t.Errorf("downgrade mirror = %+v, want the current host's credential", old)
 	}
 }
@@ -589,8 +626,8 @@ func TestLoadConfig_UsesHostFlagOverrideWithThatHostsToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadStore: %v", err)
 	}
-	if st.CurrentHost != "https://dev.example.com" {
-		t.Errorf("current host = %q, want --host to leave it at %q", st.CurrentHost, "https://dev.example.com")
+	if st.CurrentHost != "https://prod.example.com" {
+		t.Errorf("current host = %q, want --host to leave it at %q", st.CurrentHost, "https://prod.example.com")
 	}
 }
 

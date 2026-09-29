@@ -217,6 +217,9 @@ func TestConnect_ValidSavedCredentialIsCurrentWithoutRotation(t *testing.T) {
 	origTTY, origOpen := isStdinTTY, openBrowserURL
 	t.Cleanup(func() { isStdinTTY, openBrowserURL = origTTY, origOpen })
 	isStdinTTY = func() bool { return true }
+	origStderrTTY := isStderrTTY
+	t.Cleanup(func() { isStderrTTY = origStderrTTY })
+	isStderrTTY = func() bool { return true }
 	openBrowserURL = func(string) error {
 		browserCalls++
 		return nil
@@ -275,7 +278,7 @@ func TestConnect_CurrentTableOutputIsDistinct(t *testing.T) {
 	}
 }
 
-func TestConnect_CurrentCredentialStillAppliesSelectionAndName(t *testing.T) {
+func TestConnect_CurrentCredentialPreservesSelectionAndUpdatesName(t *testing.T) {
 	isolatedCredentials(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -309,7 +312,7 @@ func TestConnect_CurrentCredentialStillAppliesSelectionAndName(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := after.Hosts[srv.URL]
-	if result["status"] != "current" || result["switched_from"] != previousHost || after.CurrentHost != srv.URL {
+	if result["status"] != "current" || result["switched_from"] != "" || result["current_host"] != previousHost || after.CurrentHost != previousHost {
 		t.Fatalf("result=%+v current=%q", result, after.CurrentHost)
 	}
 	if got.Name != "prod" || got.Token != "shk_saved" || got.SavedAt != "2026-08-01T12:00:00Z" {
@@ -317,6 +320,14 @@ func TestConnect_CurrentCredentialStillAppliesSelectionAndName(t *testing.T) {
 	}
 	if after.Hosts[previousHost].Token != "shk_previous" {
 		t.Fatalf("other host changed: %+v", after.Hosts[previousHost])
+	}
+	out.Reset()
+	if err := runConnect(cmd, []string{srv.URL}, &connectFlags{use: true, timeout: defaultConnectTimeout}); err != nil {
+		t.Fatal(err)
+	}
+	after, err = loadStore()
+	if err != nil || after.CurrentHost != srv.URL {
+		t.Fatalf("--use did not select saved host: current=%q err=%v", after.CurrentHost, err)
 	}
 }
 
@@ -349,6 +360,9 @@ func TestConnect_RejectedSavedCredentialReauthorizes(t *testing.T) {
 	origTTY, origOpen := isStdinTTY, openBrowserURL
 	t.Cleanup(func() { isStdinTTY, openBrowserURL = origTTY, origOpen })
 	isStdinTTY = func() bool { return true }
+	origStderrTTY := isStderrTTY
+	t.Cleanup(func() { isStderrTTY = origStderrTTY })
+	isStderrTTY = func() bool { return true }
 	openBrowserURL = func(string) error { browserCalls++; return nil }
 
 	cmd, out, _ := connectTestCommand()
@@ -394,6 +408,9 @@ func TestConnect_SavedCredentialServerFailureDoesNotRotate(t *testing.T) {
 	origTTY, origOpen := isStdinTTY, openBrowserURL
 	t.Cleanup(func() { isStdinTTY, openBrowserURL = origTTY, origOpen })
 	isStdinTTY = func() bool { return true }
+	origStderrTTY := isStderrTTY
+	t.Cleanup(func() { isStderrTTY = origStderrTTY })
+	isStderrTTY = func() bool { return true }
 	openBrowserURL = func(string) error { browserCalls++; return errors.New("must not open browser") }
 
 	cmd, _, _ := connectTestCommand()
@@ -457,6 +474,9 @@ func TestConnect_BrowserFlowKeepsPairingStateOutOfURL(t *testing.T) {
 	origTTY, origOpen := isStdinTTY, openBrowserURL
 	t.Cleanup(func() { isStdinTTY, openBrowserURL = origTTY, origOpen })
 	isStdinTTY = func() bool { return true }
+	origStderrTTY := isStderrTTY
+	t.Cleanup(func() { isStderrTTY = origStderrTTY })
+	isStderrTTY = func() bool { return true }
 	var opened string
 	openBrowserURL = func(target string) error {
 		opened = target
@@ -498,7 +518,7 @@ func TestConnect_NonInteractiveRequiresCredential(t *testing.T) {
 
 	cmd, _, _ := connectTestCommand()
 	err := runConnect(cmd, []string{srv.URL}, &connectFlags{timeout: defaultConnectTimeout})
-	if err == nil || !strings.Contains(err.Error(), "requires a terminal") {
+	if err == nil || !strings.Contains(err.Error(), "requires a visible terminal") {
 		t.Fatalf("error = %v, want non-interactive credential guidance", err)
 	}
 	if hint := hintOf(err); !strings.Contains(hint, "--no-browser") {
@@ -509,6 +529,35 @@ func TestConnect_NonInteractiveRequiresCredential(t *testing.T) {
 	}
 	if requests != 0 {
 		t.Fatalf("non-interactive missing credentials made %d request(s), want immediate local failure", requests)
+	}
+}
+
+func TestConnect_RedirectedStderrFailsBeforeBrowserFlow(t *testing.T) {
+	isolatedCredentials(t)
+	stdinTTY, stderrTTY := isStdinTTY, isStderrTTY
+	t.Cleanup(func() { isStdinTTY, isStderrTTY = stdinTTY, stderrTTY })
+	isStdinTTY = func() bool { return true }
+	isStderrTTY = func() bool { return false }
+	cmd, _, _ := connectTestCommand()
+	err := runConnect(cmd, []string{"https://hidden.example.com"}, &connectFlags{timeout: defaultConnectTimeout})
+	if err == nil || !strings.Contains(err.Error(), "not logged in to https://hidden.example.com") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestConnect_RedirectedStderrDoesNotPromptForHost(t *testing.T) {
+	isolatedCredentials(t)
+	stdinTTY, stderrTTY := isStdinTTY, isStderrTTY
+	t.Cleanup(func() { isStdinTTY, isStderrTTY = stdinTTY, stderrTTY })
+	isStdinTTY = func() bool { return true }
+	isStderrTTY = func() bool { return false }
+	cmd, _, progress := connectTestCommand()
+	err := runConnect(cmd, nil, &connectFlags{timeout: defaultConnectTimeout})
+	if err == nil || !strings.Contains(err.Error(), "no ShinyHub server specified") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(progress.String(), "ShinyHub URL:") {
+		t.Fatalf("hidden URL prompt: %q", progress.String())
 	}
 }
 
@@ -582,6 +631,9 @@ func TestConnect_OlderServerExplainsTokenFallback(t *testing.T) {
 	origTTY := isStdinTTY
 	t.Cleanup(func() { isStdinTTY = origTTY })
 	isStdinTTY = func() bool { return true }
+	origStderrTTY := isStderrTTY
+	t.Cleanup(func() { isStderrTTY = origStderrTTY })
+	isStderrTTY = func() bool { return true }
 
 	cmd, _, _ := connectTestCommand()
 	err := runConnect(cmd, []string{srv.URL}, &connectFlags{timeout: defaultConnectTimeout})
@@ -692,6 +744,9 @@ func TestFirstDeployOffersConnectionOnlyInInteractiveTableMode(t *testing.T) {
 	origResolved := resolvedFormat
 	t.Cleanup(func() { isStdinTTY = origTTY; outputFlagValue = origOutput; resolvedFormat = origResolved })
 	isStdinTTY = func() bool { return true }
+	origStderrTTY := isStderrTTY
+	t.Cleanup(func() { isStderrTTY = origStderrTTY })
+	isStderrTTY = func() bool { return true }
 	outputFlagValue = "table"
 	resolvedFormat = ""
 
@@ -711,6 +766,13 @@ func TestFirstDeployOffersConnectionOnlyInInteractiveTableMode(t *testing.T) {
 	connected, err = offerConnectForFirstDeploy(cmd)
 	if err != nil || connected || progress.Len() != 0 {
 		t.Fatalf("non-interactive offer must be silent: connected=%v err=%v output=%q", connected, err, progress.String())
+	}
+	isStdinTTY = func() bool { return true }
+	isStderrTTY = func() bool { return false }
+	cmd, _, progress = connectTestCommand()
+	connected, err = offerConnectForFirstDeploy(cmd)
+	if err != nil || connected || progress.Len() != 0 {
+		t.Fatalf("hidden offer must be silent: connected=%v err=%v output=%q", connected, err, progress.String())
 	}
 }
 
@@ -737,6 +799,9 @@ func TestConnect_PreDeviceCodeServerExplainsUpgrade(t *testing.T) {
 	origTTY, origOpen := isStdinTTY, openBrowserURL
 	t.Cleanup(func() { isStdinTTY, openBrowserURL = origTTY, origOpen })
 	isStdinTTY = func() bool { return true }
+	origStderrTTY := isStderrTTY
+	t.Cleanup(func() { isStderrTTY = origStderrTTY })
+	isStderrTTY = func() bool { return true }
 	openBrowserURL = func(string) error { browserCalls++; return nil }
 
 	cmd, _, _ := connectTestCommand()

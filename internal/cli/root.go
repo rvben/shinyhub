@@ -234,7 +234,7 @@ func looksLikeJWT(token string) bool {
 	return auth.LooksLikeJWT(token)
 }
 
-// saveConfig stores one server's credentials and makes it the current host,
+// saveConfig stores one server's credentials and selects it only when no host is current,
 // leaving every other saved host intact. It is the single-host entry point onto
 // the multi-host store; use saveNamedConfig when the caller also has an alias.
 func saveConfig(cfg *cliConfig) error {
@@ -244,10 +244,6 @@ func saveConfig(cfg *cliConfig) error {
 // saveNamedConfig is saveConfig with the optional alias and the username the
 // credential belongs to, so `shinyhub hosts` can report both without a request.
 func saveNamedConfig(cfg *cliConfig, name, user string) error {
-	st, err := loadStore()
-	if err != nil {
-		return err
-	}
-	st.setCredential(normalizeHost(cfg.Host), name, cfg.Token, user)
-	return saveStore(st)
+	_, _, _, err := saveAuthenticatedCredential(normalizeHost(cfg.Host), name, cfg.Token, user, false)
+	return err
 }

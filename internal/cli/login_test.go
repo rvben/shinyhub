@@ -100,6 +100,9 @@ func TestRunLogin_PromptsForPasswordWhenStdinIsTTY(t *testing.T) {
 	origIsTTY, origReadPw := isStdinTTY, readPassword
 	t.Cleanup(func() { isStdinTTY, readPassword = origIsTTY, origReadPw })
 	isStdinTTY = func() bool { return true }
+	origStderrTTY := isStderrTTY
+	t.Cleanup(func() { isStderrTTY = origStderrTTY })
+	isStderrTTY = func() bool { return true }
 	readPassword = func() (string, error) { return "secret123", nil }
 
 	// Configure flags the way the CLI would after parsing
@@ -202,6 +205,9 @@ func TestRunLogin_PromptsRouteThroughCobraStreams(t *testing.T) {
 	origIsTTY, origReadPw := isStdinTTY, readPassword
 	t.Cleanup(func() { isStdinTTY, readPassword = origIsTTY, origReadPw })
 	isStdinTTY = func() bool { return true }
+	origStderrTTY := isStderrTTY
+	t.Cleanup(func() { isStderrTTY = origStderrTTY })
+	isStderrTTY = func() bool { return true }
 	readPassword = func() (string, error) { return "hunter2", nil }
 
 	// Both flags empty so both prompts fire.
@@ -254,6 +260,24 @@ func TestRunLogin_PromptsRouteThroughCobraStreams(t *testing.T) {
 	}
 	if res.Host != srv.URL {
 		t.Errorf("host = %q, want %q", res.Host, srv.URL)
+	}
+}
+
+func TestRunLogin_RedirectedStderrDoesNotPrompt(t *testing.T) {
+	isolatedCredentials(t)
+	stdinTTY, stderrTTY := isStdinTTY, isStderrTTY
+	t.Cleanup(func() { isStdinTTY, isStderrTTY = stdinTTY, stderrTTY })
+	isStdinTTY = func() bool { return true }
+	isStderrTTY = func() bool { return false }
+	cmd := &cobra.Command{}
+	var stderr bytes.Buffer
+	cmd.SetErr(&stderr)
+	err := runLogin(cmd, &loginFlags{host: "https://hidden.example.com"})
+	if err == nil || !strings.Contains(err.Error(), "username and password required") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("hidden login prompt: %q", stderr.String())
 	}
 }
 

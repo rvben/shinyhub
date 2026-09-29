@@ -33,7 +33,7 @@ func runCmd(t *testing.T, cmd *cobra.Command, args ...string) (string, string, e
 	return stdout.String(), stderr.String(), err
 }
 
-// seedHosts saves a set of hosts in order; the last one saved is current.
+// seedHosts saves a set of hosts in order; the first one saved is current.
 func seedHosts(t *testing.T, entries ...[3]string) {
 	t.Helper()
 	for _, e := range entries {
@@ -76,10 +76,10 @@ func TestHostsCmd_ListsSavedHostsAndMarksCurrent(t *testing.T) {
 	if env.Items[0].Host != "https://dev.example.com" || env.Items[1].Host != "https://prod.example.com" {
 		t.Errorf("items not in stable host order: %+v", env.Items)
 	}
-	if env.CurrentHost != "https://dev.example.com" {
-		t.Errorf("current_host = %q, want the most recently saved host", env.CurrentHost)
+	if env.CurrentHost != "https://prod.example.com" {
+		t.Errorf("current_host = %q, want the first saved host", env.CurrentHost)
 	}
-	if !env.Items[0].Current || env.Items[1].Current {
+	if env.Items[0].Current || !env.Items[1].Current {
 		t.Errorf("current flag on the wrong item: %+v", env.Items)
 	}
 	if env.Items[1].Name != "prod" || env.Items[1].User != "alice" {
@@ -172,9 +172,9 @@ func TestHostsCmd_TableMarksTheCurrentHost(t *testing.T) {
 	var currentLine, otherLine string
 	for _, line := range strings.Split(stdout, "\n") {
 		switch {
-		case strings.Contains(line, "https://dev.example.com"):
-			currentLine = line
 		case strings.Contains(line, "https://prod.example.com"):
+			currentLine = line
+		case strings.Contains(line, "https://dev.example.com"):
 			otherLine = line
 		}
 	}
@@ -259,8 +259,8 @@ func TestUseCmd_SwitchesCurrentHostByNameAndURL(t *testing.T) {
 		t.Run(selector, func(t *testing.T) {
 			isolatedCredentials(t)
 			seedHosts(t,
-				[3]string{"https://prod.example.com", "shk_prod", "prod"},
 				[3]string{"https://dev.example.com", "shk_dev", "dev"},
+				[3]string{"https://prod.example.com", "shk_prod", "prod"},
 			)
 
 			stdout, _, err := runCmd(t, newUseCmd(), selector)
@@ -398,7 +398,7 @@ func TestHostsAndUse_RefuseTheGlobalHostFlag(t *testing.T) {
 		}
 		// The refused command must not have switched anything.
 		st, _ := loadStore()
-		if st.CurrentHost != "https://dev.example.com" {
+		if st.CurrentHost != "https://prod.example.com" {
 			t.Errorf("current host = %q, want it unchanged", st.CurrentHost)
 		}
 	})

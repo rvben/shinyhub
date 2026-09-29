@@ -185,8 +185,8 @@ func confirmationRequiredError(msg, bypassFlag string) error {
 		Err: &hintedMsgError{msg: msg, hint: "pass " + bypassFlag + " to proceed without a prompt"}}
 }
 
-// loginMissingCredsError returns a KindValidation error when a non-TTY login
-// attempt is missing username or password. The hint names the flags that
+// loginMissingCredsError returns a KindValidation error when login cannot show
+// a prompt and is missing username or password. The hint names the flags that
 // supply credentials non-interactively.
 func loginMissingCredsError() error {
 	return &ExitCodeError{Code: 1, Kind: KindValidation,

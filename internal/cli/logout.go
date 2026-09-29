@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -77,24 +76,32 @@ func runLogoutWith(cmd *cobra.Command, f *logoutFlags) error {
 		return nil
 	}
 
-	// Best-effort revoke: server-side cleanup is desirable but must not block
-	// local cleanup. Network errors and 4xx/5xx are warnings, not failures.
-	if err := revokeServerSession(cfg); err != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not revoke session on server: %v\n", err)
-	}
-
 	_, stored := st.Hosts[cfg.Host]
-	delete(st.Hosts, cfg.Host)
-	if st.CurrentHost == cfg.Host {
-		st.CurrentHost = ""
-		if remaining := st.sortedHosts(); len(remaining) > 0 {
-			st.CurrentHost = remaining[0]
+	removedFile := false
+	st, err = mutateStore(func(latest *credentialStore) (bool, error) {
+		if !stored {
+			return false, nil
 		}
-	}
-
-	removedFile, err := persistAfterLogout(st, stored)
+		if latest.Hosts[cfg.Host].Token != st.Hosts[cfg.Host].Token {
+			return false, authErr("credential changed while signing out", "run `shinyhub logout` again")
+		}
+		delete(latest.Hosts, cfg.Host)
+		if latest.CurrentHost == cfg.Host {
+			latest.CurrentHost = ""
+			if remaining := latest.sortedHosts(); len(remaining) > 0 {
+				latest.CurrentHost = remaining[0]
+			}
+		}
+		removedFile = len(latest.Hosts) == 0
+		return true, nil
+	})
 	if err != nil {
 		return err
+	}
+	// Revoke only after local removal succeeds. A concurrent update can make the
+	// transaction fail; revoking first would leave a dead credential on disk.
+	if err := revokeServerSession(cfg); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not revoke session on server: %v\n", err)
 	}
 
 	fields := map[string]any{
@@ -128,6 +135,24 @@ func logoutAll(cmd *cobra.Command, st *credentialStore) error {
 		fmt.Fprintln(cmd.OutOrStdout(), "Not logged in.")
 		return nil
 	}
+	removedFile := false
+	_, err := mutateStore(func(latest *credentialStore) (bool, error) {
+		for _, host := range hosts {
+			if latest.Hosts[host].Token != st.Hosts[host].Token {
+				return false, authErr("credentials changed while signing out", "run `shinyhub logout --all` again")
+			}
+		}
+		if len(latest.Hosts) != len(st.Hosts) {
+			return false, authErr("credentials changed while signing out", "run `shinyhub logout --all` again")
+		}
+		latest.Hosts = map[string]hostCredential{}
+		latest.CurrentHost = ""
+		removedFile = true
+		return true, nil
+	})
+	if err != nil {
+		return err
+	}
 	for _, host := range hosts {
 		cred := st.Hosts[host]
 		if cred.Token == "" {
@@ -136,12 +161,6 @@ func logoutAll(cmd *cobra.Command, st *credentialStore) error {
 		if err := revokeServerSession(&cliConfig{Host: host, Token: cred.Token}); err != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not revoke session on %s: %v\n", host, err)
 		}
-	}
-	st.Hosts = map[string]hostCredential{}
-	st.CurrentHost = ""
-	removedFile, err := persistAfterLogout(st, true)
-	if err != nil {
-		return err
 	}
 	prose := fmt.Sprintf("Logged out of %d server(s).", len(hosts))
 	if removedFile {
@@ -157,29 +176,6 @@ func logoutAll(cmd *cobra.Command, st *credentialStore) error {
 	}
 	warnEnvCredentialsRemain(cmd)
 	return nil
-}
-
-// persistAfterLogout writes what is left of the store, deleting the file
-// outright once nothing is left. An empty file would be indistinguishable from
-// a corrupt one to the next reader, and leaving a stale credentials file behind
-// after the user asked to log out is the wrong default. changed is false when
-// the credential came from the environment rather than the file, in which case
-// there is nothing on disk to rewrite.
-func persistAfterLogout(st *credentialStore, changed bool) (bool, error) {
-	if len(st.Hosts) > 0 {
-		if !changed {
-			return false, nil
-		}
-		return false, saveStore(st)
-	}
-	path := configPath()
-	if err := os.Remove(path); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return false, nil
-		}
-		return false, fmt.Errorf("remove %s: %w", path, err)
-	}
-	return true, nil
 }
 
 // warnEnvCredentialsRemain warns when the environment still supplies

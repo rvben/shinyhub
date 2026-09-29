@@ -62,12 +62,14 @@ shinyhub connect http://localhost:8080 --name dev
 `--name` is optional and gives the server a short alias. It has to be unique and
 must not look like a URL, so `shinyhub use <name>` can never be a coin flip
 between two servers. Reconnecting without `--name` keeps the alias the entry
-already had. Reusing a valid credential still applies `--name` and makes that
-server current, but leaves the token and its `saved_at` value unchanged.
+already had. Reusing a valid credential still applies `--name`, but leaves the
+token and its `saved_at` value unchanged.
 
-The server you just connected to becomes the current one. The completion summary
-names the authenticated identity, role, deploy permission, available runtimes,
-credentials path, and previous server when the current selection changed.
+The first saved server becomes current. Later `connect` and `login` commands
+save credentials without switching the current server, including when `--host`
+or `SHINYHUB_HOST` selects another target. Pass `--use` to switch as part of
+authentication, or run `shinyhub use <name|url>` separately. The completion
+summary shows the current server when it differs from the one just saved.
 
 Omit the URL to reconnect with the current server. Likewise, omit `--host` from
 `login` to refresh a short-lived session for the current server.
@@ -140,6 +142,9 @@ The token comes from the entry for the resolved server. A token is never carried
 over from a different server, so overriding the host cannot send production's
 credential to whatever address a typo or an inherited environment variable
 happens to name.
+
+Credential updates use a sibling `.lock` file to serialize reads and writes
+across CLI processes. The credentials file itself is still replaced atomically.
 
 `SHINYHUB_TOKEN` is the way to say "use this credential, whatever the host":
 

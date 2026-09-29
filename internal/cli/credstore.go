@@ -328,7 +328,7 @@ func (st *credentialStore) label(host string) string {
 // timeNow is a seam so tests can pin saved_at instead of asserting on wall clock.
 var timeNow = func() time.Time { return time.Now() }
 
-// setCredential adds or refreshes a host entry and makes it current. An empty
+// setCredential adds or refreshes a host entry. An empty
 // name leaves any existing name in place, so re-running login without --name
 // does not silently drop the alias the user chose earlier.
 func (st *credentialStore) setCredential(host, name, token, user string) {
@@ -345,5 +345,24 @@ func (st *credentialStore) setCredential(host, name, token, user string) {
 	}
 	cred.SavedAt = timeNow().UTC().Format(time.RFC3339)
 	st.Hosts[host] = cred
-	st.CurrentHost = host
+}
+
+// saveAuthenticatedCredential commits a verified credential against the latest
+// store, preserving the default unless this is the first host or --use was set.
+func saveAuthenticatedCredential(host, name, token, user string, use bool) (*credentialStore, bool, string, error) {
+	var existed bool
+	var previous string
+	st, err := mutateStore(func(st *credentialStore) (bool, error) {
+		if err := validateHostName(st, host, name); err != nil {
+			return false, err
+		}
+		_, existed = st.Hosts[host]
+		previous = st.CurrentHost
+		st.setCredential(host, name, token, user)
+		if previous == "" || use {
+			st.CurrentHost = host
+		}
+		return true, nil
+	})
+	return st, existed, previous, err
 }

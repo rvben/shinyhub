@@ -63,9 +63,8 @@ func TestLogin_AddsAHostWithoutDisturbingOthers(t *testing.T) {
 	if res["status"] != "added" {
 		t.Errorf("second login status = %v, want %q", res["status"], "added")
 	}
-	if res["switched_from"] != first.URL {
-		t.Errorf("switched_from = %v, want %q so the move of the current host is visible",
-			res["switched_from"], first.URL)
+	if res["switched_from"] != "" || res["current_host"] != first.URL {
+		t.Errorf("login changed current host: %+v", res)
 	}
 
 	st, err := loadStore()
@@ -78,8 +77,46 @@ func TestLogin_AddsAHostWithoutDisturbingOthers(t *testing.T) {
 	if st.Hosts[first.URL].Token != "shk_first" {
 		t.Errorf("first host's token = %q, want it untouched", st.Hosts[first.URL].Token)
 	}
-	if st.CurrentHost != second.URL {
-		t.Errorf("current host = %q, want the server just logged in to", st.CurrentHost)
+	if st.CurrentHost != first.URL {
+		t.Errorf("current host = %q, want the first server", st.CurrentHost)
+	}
+}
+
+func TestLoginUseSelectsExplicitHost(t *testing.T) {
+	isolatedCredentials(t)
+	first := meServer(t, "alice")
+	second := meServer(t, "bob")
+	loginTo(t, first.URL, "shk_first", "one")
+	cmd := &cobra.Command{}
+	cmd.SetOut(&strings.Builder{})
+	cmd.SetErr(&strings.Builder{})
+	if err := runLogin(cmd, &loginFlags{host: second.URL, token: "shk_second", use: true}); err != nil {
+		t.Fatal(err)
+	}
+	st, err := loadStore()
+	if err != nil || st.CurrentHost != second.URL {
+		t.Fatalf("--use current=%q err=%v", st.CurrentHost, err)
+	}
+}
+
+func TestLoginEnvironmentHostDoesNotSwitchDefault(t *testing.T) {
+	isolatedCredentials(t)
+	first := meServer(t, "alice")
+	second := meServer(t, "bob")
+	loginTo(t, first.URL, "shk_first", "one")
+	t.Setenv("SHINYHUB_HOST", second.URL)
+	cmd := &cobra.Command{}
+	cmd.SetOut(&strings.Builder{})
+	cmd.SetErr(&strings.Builder{})
+	if err := runLogin(cmd, &loginFlags{token: "shk_second"}); err != nil {
+		t.Fatal(err)
+	}
+	st, err := loadStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.CurrentHost != first.URL || st.Hosts[second.URL].Token != "shk_second" {
+		t.Fatalf("environment login changed default or missed target: %+v", st)
 	}
 }
 
@@ -317,21 +354,21 @@ func TestLogout_RemovesOneHostAndPromotesAnother(t *testing.T) {
 	if err := json.Unmarshal([]byte(out.String()), &res); err != nil {
 		t.Fatalf("logout output is not an action envelope: %q (%v)", out.String(), err)
 	}
-	if res.Host != drop.URL {
-		t.Errorf("logged out of %q, want the current host %q", res.Host, drop.URL)
+	if res.Host != keep.URL {
+		t.Errorf("logged out of %q, want the current host %q", res.Host, keep.URL)
 	}
-	if res.CurrentHost != keep.URL || res.RemainingHosts != 1 {
-		t.Errorf("got current=%q remaining=%d, want %q and 1", res.CurrentHost, res.RemainingHosts, keep.URL)
+	if res.CurrentHost != drop.URL || res.RemainingHosts != 1 {
+		t.Errorf("got current=%q remaining=%d, want %q and 1", res.CurrentHost, res.RemainingHosts, drop.URL)
 	}
 
 	st, err := loadStore()
 	if err != nil {
 		t.Fatalf("loadStore: %v", err)
 	}
-	if _, still := st.Hosts[drop.URL]; still {
+	if _, still := st.Hosts[keep.URL]; still {
 		t.Error("the host logged out of is still saved")
 	}
-	if st.Hosts[keep.URL].Token != "shk_keep" {
+	if st.Hosts[drop.URL].Token != "shk_drop" {
 		t.Error("the other credential must survive")
 	}
 	// The file must still exist: there is a credential left in it.

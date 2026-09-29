@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"syscall"
 
@@ -24,6 +25,7 @@ type loginFlags struct {
 	token    string
 	username string
 	password string
+	use      bool
 }
 
 // newLoginCmd builds a fresh login command each time it is called, with its
@@ -40,9 +42,9 @@ func newLoginCmd() *cobra.Command {
 		Short: "Authenticate with a ShinyHub server",
 		Long: `Login authenticates with a ShinyHub server and saves the credential under
 that server's URL, keeping any other servers you are signed in to. The server
-you log in to becomes the current one.
+you log in to becomes current only when none is selected. Use --use to switch.
 
-Omit --host to re-authenticate with the current server. Give --name to label a
+Omit --host to re-authenticate with SHINYHUB_HOST, if set, or the current server. Give --name to label a
 server so you can switch to it with ` + "`shinyhub use <name>`" + `.
 
 login or connect? login is the direct path: you already hold a username,
@@ -55,11 +57,12 @@ it is a no-op while the saved credential still works.`,
 			return runLogin(cmd, f)
 		},
 	}
-	cmd.Flags().StringVar(&f.host, "host", "", "ShinyHub server URL (e.g. https://shiny.example.com); defaults to the current host")
+	cmd.Flags().StringVar(&f.host, "host", "", "ShinyHub server URL (e.g. https://shiny.example.com); defaults to SHINYHUB_HOST or the current host")
 	cmd.Flags().StringVar(&f.name, "name", "", "Short name for this server, usable as `shinyhub use <name>`")
 	cmd.Flags().StringVar(&f.token, "token", "", "API token (skips username/password)")
 	cmd.Flags().StringVar(&f.username, "username", "", "Username")
 	cmd.Flags().StringVar(&f.password, "password", "", "Password")
+	cmd.Flags().BoolVar(&f.use, "use", false, "Make this server the current host")
 	return cmd
 }
 
@@ -85,10 +88,10 @@ func runLogin(cmd *cobra.Command, f *loginFlags) error {
 		if err != nil {
 			return fmt.Errorf("token rejected by server: %w", err)
 		}
-		return finishLogin(cmd, st, f, f.token, user)
+		return finishLogin(cmd, f, f.token, user)
 	}
 
-	// Prompt for missing fields when stdin is a terminal. Without this the
+	// Prompt for missing fields when both input and prompt output are visible. Without this the
 	// snippet `shinyhub login --host X --username Y` shown in the new-user
 	// handoff modal POSTed an empty password and surfaced a confusing
 	// "login failed: 401 Unauthorized", and the receiving user had no obvious
@@ -96,7 +99,7 @@ func runLogin(cmd *cobra.Command, f *loginFlags) error {
 	// pipe credentials still work because the tty check fails and the empty
 	// strings are passed through unchanged (which the server rejects with a
 	// clear 401, the same as before).
-	if isStdinTTY() {
+	if hasVisibleTerminal() {
 		// Prompts and the password echo go to stderr so they don't pollute
 		// stdout for callers like `shinyhub login --token X | jq ...`.
 		// Line input is read from cmd.InOrStdin() so tests can drive the
@@ -117,7 +120,7 @@ func runLogin(cmd *cobra.Command, f *loginFlags) error {
 			f.password = p
 		}
 	} else if f.username == "" || f.password == "" {
-		// Non-TTY with missing credentials: fail fast with a structured
+		// No visible prompt with missing credentials: fail fast with a structured
 		// validation error that names the flags needed for non-interactive
 		// login, rather than forwarding empty values to the server.
 		return loginMissingCredsError()
@@ -141,16 +144,28 @@ func runLogin(cmd *cobra.Command, f *loginFlags) error {
 	if result.Token == "" {
 		return fmt.Errorf("server returned empty token")
 	}
-	return finishLogin(cmd, st, f, result.Token, f.username)
+	return finishLogin(cmd, f, result.Token, f.username)
 }
 
-// loginTargetHost resolves which server login signs in to: the --host value
-// when given, otherwise the current host. Re-authenticating with the server you
+// loginTargetHost resolves which server login signs in to: the --host value,
+// then SHINYHUB_HOST, then the current host. Re-authenticating with the server you
 // are already on is the common case, so requiring --host every time only forces
 // the URL to be retyped; requiring it when nothing is saved is the opposite,
 // because there is nothing to infer.
 func loginTargetHost(st *credentialStore, hostFlag string) (string, error) {
 	hostFlag = strings.TrimSpace(hostFlag)
+	if hostFlag == "" {
+		if envHost := strings.TrimSpace(os.Getenv("SHINYHUB_HOST")); envHost != "" {
+			resolved, err := st.resolveSelector(envHost)
+			if err != nil {
+				return "", err
+			}
+			if !hasScheme(resolved) {
+				return "", validationErr(fmt.Sprintf("SHINYHUB_HOST %q is not a usable server URL", envHost), "include a scheme, e.g. https://shinyhub.example.com")
+			}
+			return resolved, nil
+		}
+	}
 	if hostFlag == "" {
 		if st.CurrentHost == "" {
 			return "", validationErr("no server to log in to",
@@ -189,16 +204,13 @@ func validateHostName(st *credentialStore, host, name string) error {
 
 // finishLogin saves the credential under its own host and reports what changed:
 // whether the server was added or its credential refreshed, and whether the
-// current host moved. Naming the outcome is the point - the previous
+// current host moved or stayed elsewhere. Naming the outcome is the point - the previous
 // single-slot file replaced a different server's credential with the same
 // "Logged in" message, so the one case worth noticing looked exactly like the
 // routine one.
-func finishLogin(cmd *cobra.Command, st *credentialStore, f *loginFlags, token, user string) error {
-	_, existed := st.Hosts[f.host]
-	previous := st.CurrentHost
-
-	st.setCredential(f.host, f.name, token, user)
-	if err := saveStore(st); err != nil {
+func finishLogin(cmd *cobra.Command, f *loginFlags, token, user string) error {
+	st, existed, previous, err := saveAuthenticatedCredential(f.host, f.name, token, user, f.use)
+	if err != nil {
 		return err
 	}
 	saved := st.Hosts[f.host]
@@ -208,15 +220,17 @@ func finishLogin(cmd *cobra.Command, st *credentialStore, f *loginFlags, token, 
 		status = "added"
 	}
 	switchedFrom := ""
-	if previous != "" && previous != f.host {
+	if previous != "" && previous != st.CurrentHost {
 		switchedFrom = previous
 	}
 
 	var prose string
 	switch {
+	case st.CurrentHost != f.host:
+		prose = fmt.Sprintf("Logged in to %s. Saved credentials to %s; current host is still %s. Run `shinyhub use %s` to switch.",
+			st.label(f.host), configPath(), st.label(st.CurrentHost), f.host)
 	case switchedFrom != "":
-		prose = fmt.Sprintf("Logged in to %s. Saved credentials to %s; current host was %s, other saved hosts are unchanged.",
-			st.label(f.host), configPath(), switchedFrom)
+		prose = fmt.Sprintf("Logged in to %s. Saved credentials to %s; now using this host.", st.label(f.host), configPath())
 	case existed:
 		prose = fmt.Sprintf("Logged in to %s. Refreshed credentials in %s", st.label(f.host), configPath())
 	default:
@@ -227,7 +241,8 @@ func finishLogin(cmd *cobra.Command, st *credentialStore, f *loginFlags, token, 
 		"host":             f.host,
 		"name":             saved.Name,
 		"user":             saved.User,
-		"current":          true,
+		"current":          st.CurrentHost == f.host,
+		"current_host":     st.CurrentHost,
 		"switched_from":    switchedFrom,
 		"credentials_path": configPath(),
 	}, prose)

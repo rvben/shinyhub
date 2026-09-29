@@ -119,27 +119,31 @@ first to add one.`,
 				fmt.Sprintf("drop --host, or run `shinyhub use %s` to switch to that one instead", hostFlagOverride)); err != nil {
 				return err
 			}
-			st, err := loadStore()
+			var host string
+			var cred hostCredential
+			var changed bool
+			st, err := mutateStore(func(st *credentialStore) (bool, error) {
+				var err error
+				host, err = st.resolveSelector(args[0])
+				if err != nil {
+					return false, err
+				}
+				var ok bool
+				cred, ok = st.Hosts[host]
+				if !ok {
+					return false, authErr(fmt.Sprintf("not logged in to %s", host), fmt.Sprintf("run `shinyhub connect %s` first; %s", host, st.knownHostsHint()))
+				}
+				changed = st.CurrentHost != host
+				st.CurrentHost = host
+				return changed, nil
+			})
 			if err != nil {
 				return err
 			}
-			host, err := st.resolveSelector(args[0])
-			if err != nil {
-				return err
-			}
-			cred, ok := st.Hosts[host]
-			if !ok {
-				return authErr(fmt.Sprintf("not logged in to %s", host),
-					fmt.Sprintf("run `shinyhub connect %s` first; %s", host, st.knownHostsHint()))
-			}
-			if st.CurrentHost == host {
+			if !changed {
 				return renderAction(cmd, "unchanged",
 					map[string]any{"host": host, "name": cred.Name, "user": cred.User},
 					fmt.Sprintf("Already using %s", st.label(host)))
-			}
-			st.CurrentHost = host
-			if err := saveStore(st); err != nil {
-				return err
 			}
 			return renderAction(cmd, "switched",
 				map[string]any{"host": host, "name": cred.Name, "user": cred.User},
