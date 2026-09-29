@@ -1,5 +1,10 @@
 # ShinyHub agent tools for Python Shiny
 
+**Experimental.** This prerelease helper is for evaluation. Its APIs and
+behavior may change between releases. Do not depend on it for critical
+workflows; review agent results and keep a manual path for consequential
+actions.
+
 This helper lets an app declare a small, typed set of tools for the **current
 viewer session**. The app owns all data access and state changes. ShinyHub does
 not infer tools from visible inputs or let a model run arbitrary R/Python code.

@@ -26,6 +26,8 @@
     .chat-head { padding:21px 22px 17px; }
     .chat-title h2 { flex:1; }
     .chat-head p { margin-bottom:12px; }
+    .heading-row { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; }
+    .stage { color:#bae6fd; font-size:.75rem; font-weight:800; letter-spacing:.02em; white-space:nowrap; }
     .context { display:flex; align-items:center; gap:8px; width:max-content; max-width:100%; border:1px solid var(--line); border-radius:7px; padding:6px 10px; background:var(--raised); color:var(--muted); font-size:.8rem; }
     .context strong { color:var(--text); }
     .context::before { content:""; width:7px; height:7px; border-radius:50%; background:#9ee1c5; }
@@ -56,6 +58,7 @@
     body.shinyhub-native-chat .chat-title { display:none; }
     body.shinyhub-native-chat .chat-head { padding:14px 20px 15px; }
     body.shinyhub-native-chat .chat-head p { margin:0 0 12px; }
+    body.shinyhub-native-chat .experimental-detail { display:none; }
     @media (max-width:650px) { .bars,.axis { gap:6px; } }
     @media (prefers-reduced-motion:no-preference) { .bar { transition:height .22s cubic-bezier(.22,1,.36,1),background-color .18s ease; } .metric strong { transition:color .18s ease; } }
   </style>
@@ -63,7 +66,7 @@
 <body>
   <main class="shell">
     <header class="top">
-      <div><h1>Operations pulse</h1><p class="lede">Explore illustrative request volume, latency, and errors. Ask the assistant to explain the view or change the period. All values are synthetic.</p></div>
+      <div><div class="heading-row"><h1>Operations pulse</h1><span class="stage">Experimental agent demo</span></div><p class="lede">Explore illustrative request volume, latency, and errors. Ask the assistant to explain the view or change the period. All values are synthetic. Agent integration may change; check results before relying on them.</p></div>
       <div class="top-actions"><label class="label" for="view">VIEW</label><select id="view"><option>This week</option><option>Last week</option><option>This year</option></select></div>
     </header>
     <div class="app-layout">
@@ -78,7 +81,7 @@
       </section></details>
       <button class="agent-button" id="open-chat" aria-controls="chat" aria-expanded="false">Ask the assistant</button>
       <aside class="chat" id="chat" role="complementary" aria-labelledby="chat-title">
-        <div class="chat-head"><div class="chat-title"><h2 id="chat-title">Dashboard assistant</h2><button class="header-action" id="new-chat" type="button" aria-label="Start a new conversation" title="Start a new conversation">New</button><button class="header-action" id="close-chat" aria-label="Close assistant"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M4 4l12 12M16 4L4 16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button></div><p>Ask about the numbers or change the view while you watch the dashboard.</p><div class="context">Using view <strong id="context-view">This week</strong></div></div>
+        <div class="chat-head"><div class="chat-title"><h2 id="chat-title">Dashboard assistant</h2><button class="header-action" id="new-chat" type="button" aria-label="Start a new conversation" title="Start a new conversation">New</button><button class="header-action" id="close-chat" aria-label="Close assistant"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M4 4l12 12M16 4L4 16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button></div><p>Ask about the numbers or change the view while you watch the dashboard. <span class="experimental-detail">Experimental: check answers and changes before relying on them.</span></p><div class="context">Using view <strong id="context-view">This week</strong></div></div>
         <div class="messages" id="messages" role="log" aria-label="Assistant conversation" aria-live="off"><div class="message assistant"><span class="who">Assistant</span><span class="answer">I can explain these illustrative metrics and change the dashboard period. What would you like to explore?</span><div class="suggestions"><button type="button" data-question="Compare this week with last week.">Compare periods</button><button type="button" data-question="Set the view to this year.">Show this year</button></div></div></div>
         <div class="sr-only" id="chat-announcement" aria-live="polite" aria-atomic="true"></div>
         <form class="composer" id="composer"><label class="sr-only" for="question">Your question</label><textarea id="question" maxlength="2000" placeholder="Ask about this dashboard…" required></textarea><div class="composer-row"><span>Enter to send · Shift+Enter for a new line</span><div class="composer-actions"><button class="stop" id="stop" type="button" hidden>Stop</button><button id="send" type="submit">Send</button></div></div></form><div class="privacy" id="chat-privacy">Your question, recent conversation, and selected period go to the configured agent. Values are synthetic.</div>

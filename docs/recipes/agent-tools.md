@@ -4,6 +4,11 @@ description: "Give a Python Shiny app a session-scoped assistant and WebMCP tool
 
 # Agent tools in Python Shiny
 
+**Experimental.** The chat, WebMCP integration, and `shinyhub-agent` helper are
+available for evaluation. Their APIs and behavior may change between releases.
+Do not depend on them for critical workflows; review agent results and keep a
+manual way to complete consequential actions.
+
 The `shinyhub-agent` helper lets an app author register a small set of typed
 tools for each viewer's Shiny session. The same tools are available to a chat
 agent and, where supported by the browser, a visitor's WebMCP agent. The app

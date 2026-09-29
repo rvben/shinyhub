@@ -288,6 +288,8 @@ test('native chat mounts app content inside the ShinyHub overlay and restores th
   assert.equal(m.host().querySelector('#app-chat'), body);
   assert.equal(body.slot, 'shinyhub-chat-content');
   assert.equal(m.q('.chat-panel-title').textContent, 'Dashboard assistant');
+  assert.equal(m.q('.chat-panel-stage').textContent, 'Experimental');
+  assert.match(m.q('.chat-panel-notice').textContent, /Check answers and changes/);
   assert.equal(m.root().classList.contains('chat-native'), true);
   assert.equal(hosts.at(-1).native, true);
   m.q('button.chat-trigger').click();

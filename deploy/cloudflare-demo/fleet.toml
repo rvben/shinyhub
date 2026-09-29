@@ -96,8 +96,8 @@ source = "./apps/agent-capabilities-demo"
 visibility = "public"
 
   [app.config]
-  name = "Agent capabilities"
-  description = "Try a scripted dashboard assistant that changes views with safe Undo. All values are synthetic."
+  name = "Agent capabilities · Experimental"
+  description = "Try an experimental scripted assistant that changes views with Undo. Synthetic data; no model API requests."
   project = "featured"
   hibernate_timeout_minutes = 10
   replicas = 1

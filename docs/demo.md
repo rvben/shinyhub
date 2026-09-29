@@ -15,11 +15,12 @@ Public applications open without an account. They use synthetic bundled data
 and run on an application origin isolated from the dashboard and API.
 
 The fleet includes examples built with Python Shiny, R Shiny, Dash, and
-Streamlit. The [agent capabilities demo](https://demo.shinyhub.dev/app/agent-capabilities-demo/)
+Streamlit. The [experimental agent capabilities demo](https://demo.shinyhub.dev/app/agent-capabilities-demo/)
 has a scripted assistant that can explain synthetic dashboard data, change the
-selected view, and undo that change. It uses no model API key or paid model
-requests. Applications hibernate when idle, so the first request may briefly
-show ShinyHub waking the process.
+selected view, and undo that change. Agent integration is for evaluation and
+may change; do not depend on it for critical workflows. This public demo uses
+no model API key or paid model requests. Applications hibernate when idle, so
+the first request may briefly show ShinyHub waking the process.
 
 ## Explore the control plane
 

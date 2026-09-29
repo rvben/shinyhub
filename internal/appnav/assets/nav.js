@@ -471,6 +471,8 @@
     ".chat-panel-head { display: flex; flex: none; align-items: center; gap: 10px; min-height: 48px; padding: 0 8px 0 16px; border-bottom: 1px solid var(--sh-line-strong); }",
     ".chat-panel-head .chat-mark { width: 26px; height: 26px; }",
     ".chat-panel-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 750; }",
+    ".chat-panel-stage { flex: none; color: var(--sh-soft); font-size: 11px; font-weight: 750; letter-spacing: .02em; text-transform: uppercase; }",
+    ".chat-panel-notice { flex: none; padding: 7px 16px; border-bottom: 1px solid var(--sh-line); color: var(--sh-soft); font-size: 12px; line-height: 1.4; }",
     ".chat-panel-action { flex: none; min-height: 34px; padding: 0 9px; border: 0; border-radius: var(--sh-r-md); background: transparent; color: var(--sh-soft); font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }",
     ".chat-panel-action:hover { color: var(--sh-text); background: var(--sh-hover); }",
     ".chat-panel-action:disabled { opacity: .45; cursor: default; }",
@@ -1093,7 +1095,7 @@
   chatBtn.className = "control chat-trigger";
   chatBtn.setAttribute("aria-label", "Ask this app");
   chatBtn.setAttribute("aria-expanded", "false");
-  chatBtn.title = "Ask this app";
+  chatBtn.title = "Ask this app · Experimental";
   var chatMark = div("chat-mark");
   chatMark.appendChild(svg([
     "M16.75 9.3a6.4 6.4 0 01-6.4 6.4H4l1.55-2.6A6.4 6.4 0 1116.75 9.3z",
@@ -1116,6 +1118,7 @@
     "M10.3 5.8l.8 2.05 2.05.8-2.05.8-.8 2.05-.8-2.05-2.05-.8 2.05-.8z"
   ], 20));
   var chatPanelTitle = div("chat-panel-title", "Ask this app");
+  var chatPanelStage = div("chat-panel-stage", "Experimental");
   var chatNew = document.createElement("button");
   chatNew.type = "button";
   chatNew.className = "chat-panel-action";
@@ -1128,12 +1131,14 @@
   chatClose.setAttribute("aria-label", "Close assistant");
   chatPanelHead.appendChild(chatPanelMark);
   chatPanelHead.appendChild(chatPanelTitle);
+  chatPanelHead.appendChild(chatPanelStage);
   chatPanelHead.appendChild(chatNew);
   chatPanelHead.appendChild(chatClose);
   var chatContent = document.createElement("slot");
   chatContent.className = "chat-content";
   chatContent.name = "shinyhub-chat-content";
   chatPanel.appendChild(chatPanelHead);
+  chatPanel.appendChild(div("chat-panel-notice", "Check answers and changes before relying on them. This feature may change."));
   chatPanel.appendChild(chatContent);
 
   var closeBtn = document.createElement("button");
