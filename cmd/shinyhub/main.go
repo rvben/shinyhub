@@ -1794,7 +1794,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	wsBursts := proxy.NewWSAbnormalBurstDetector()
 	prx.SetWSSessionEndRecorder(func(e proxy.WSSessionEnd) {
 		attrs := []any{
-			"slug", e.Slug, "replica", e.ReplicaIndex,
+			"slug", e.Slug, "connection_id", e.ConnectionID, "replica", e.ReplicaIndex,
 			"deployment_id", e.DeploymentID, "duration_ms", e.Duration.Milliseconds(),
 			"closed_by", e.ClosedBy, "end_signal", e.EndSignal,
 			"transport_end_side", e.TransportEndSide, "bytes_to_client", e.BytesToClient,

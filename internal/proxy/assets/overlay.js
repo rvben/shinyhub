@@ -11,17 +11,18 @@
  * Three properties keep an injected script that runs inside every app on the
  * platform from becoming a fleet-wide outage:
  *
- *   1. It never patches a global or calls a framework internal. The only
- *      contract it depends on is Shiny appending a #shiny-disconnected-overlay
+ *   1. It does not call a framework internal. It wraps WebSocket only to tag
+ *      this app's /websocket/ URL with a random connection ID; every other URL
+ *      reaches the native constructor unchanged. Its disconnect UI depends on
+ *      Shiny appending a #shiny-disconnected-overlay
  *      div to <body> on disconnect and removing it on reconnect, which is a
  *      public, user-styleable DOM contract shared by R and Python Shiny. After
  *      an explicit viewer choice it may hide that marker so the retained page
  *      can be inspected as a clearly labelled offline snapshot.
  *   2. Every entry point is wrapped. A throw here must never escape into a page
  *      whose app is already in trouble.
- *   3. An app that never emits that div never sees this code do anything, so a
- *      non-Shiny app (Streamlit, Dash, a plain HTML page) degrades to exactly
- *      today's behaviour rather than to a broken one.
+ *   3. An app that never emits that div never sees the status UI. The socket
+ *      wrapper leaves every route except this app's /websocket/ unchanged.
  *
  * Every value that varies per app rides on the script tag's data-* attributes
  * and never in this body. A CSP hash covers script text only, so keeping the
@@ -72,6 +73,76 @@
   var previousFocus = null;
   var everConnected = false;
   var memoryDeadline = 0;
+  var activeConnectionID = "";
+  var endedConnectionID = "";
+  var incidentConnectionID = "";
+
+  // The browser hides 101 response headers from JavaScript. Tag the Shiny
+  // socket before it opens so the browser and proxy know the same ID. If this
+  // script runs after Shiny has already opened its socket, omit the ID rather
+  // than display a guess from another tab or connection.
+  function installWebSocketTagger() {
+    var NativeWebSocket = window.WebSocket;
+    var suffix = "/.shinyhub/ready";
+    if (typeof NativeWebSocket !== "function" || !window.URL ||
+        !window.crypto || !window.crypto.getRandomValues ||
+        readyURL.slice(-suffix.length) !== suffix) return;
+    var appPath = readyURL.slice(0, -suffix.length);
+    function TaggedWebSocket(url, protocols) {
+      if (!(this instanceof TaggedWebSocket)) {
+        throw new TypeError("WebSocket must be constructed with new");
+      }
+      var target = url;
+      var id = "";
+      try {
+        var rawURL = String(url);
+        var parsed = new window.URL(rawURL, window.location.href);
+        if ((parsed.protocol === "ws:" || parsed.protocol === "wss:") &&
+            parsed.host === window.location.host && !parsed.hash &&
+            (parsed.pathname === appPath + "/websocket/" ||
+             parsed.pathname === appPath + "/websocket")) {
+          var bytes = new Uint8Array(12);
+          window.crypto.getRandomValues(bytes);
+          for (var i = 0; i < bytes.length; i++) {
+            id += ("0" + bytes[i].toString(16)).slice(-2);
+          }
+          target = rawURL + (rawURL.indexOf("?") < 0 ? "?" : "&") +
+            "shinyhub_cid=" + id;
+        }
+      } catch (e) {
+        id = "";
+        target = url;
+      }
+      var socket = arguments.length > 1
+        ? new NativeWebSocket(target, protocols)
+        : new NativeWebSocket(target);
+      if (id && typeof socket.addEventListener === "function") {
+        var opened = false;
+        socket.addEventListener("open", function () {
+          opened = true;
+          activeConnectionID = id;
+          endedConnectionID = "";
+        });
+        socket.addEventListener("close", function () {
+          if (opened && activeConnectionID === id) {
+            activeConnectionID = "";
+            endedConnectionID = id;
+          }
+        });
+      }
+      return socket;
+    }
+    TaggedWebSocket.prototype = NativeWebSocket.prototype;
+    if (Object.setPrototypeOf) Object.setPrototypeOf(TaggedWebSocket, NativeWebSocket);
+    else {
+      TaggedWebSocket.CONNECTING = NativeWebSocket.CONNECTING;
+      TaggedWebSocket.OPEN = NativeWebSocket.OPEN;
+      TaggedWebSocket.CLOSING = NativeWebSocket.CLOSING;
+      TaggedWebSocket.CLOSED = NativeWebSocket.CLOSED;
+    }
+    window.WebSocket = TaggedWebSocket;
+  }
+  guard(installWebSocketTagger)();
 
   function capacityDeadline() {
     var deadline = memoryDeadline;
@@ -93,6 +164,8 @@
 
   function connected() {
     everConnected = true;
+    endedConnectionID = "";
+    incidentConnectionID = "";
     clearCapacityDeadline();
   }
 
@@ -303,6 +376,13 @@
       maxWidth: "64ch"
     });
     msg.id = MESSAGE_ID;
+    var reference = el("p", {
+      color: "#A8B4D4",
+      fontSize: "0.75rem",
+      margin: "12px 0 0",
+      overflowWrap: "anywhere"
+    });
+    reference.id = "shinyhub-status-connection-id";
 
     var actions = el("div", {
       display: "flex",
@@ -353,6 +433,7 @@
     signal.appendChild(stateDot);
     copy.appendChild(title);
     copy.appendChild(msg);
+    copy.appendChild(reference);
     header.appendChild(signal);
     header.appendChild(copy);
     actions.appendChild(openLink);
@@ -419,6 +500,7 @@
       stateDot: stateDot,
       title: title,
       msg: msg,
+      reference: reference,
       openLink: openLink,
       reloadButton: reloadButton,
       restartButton: restartButton
@@ -460,6 +542,9 @@
     ui.title.textContent = titleText;
     ui.title.style.color = "#E8EEFF";
     ui.msg.textContent = msgText;
+    ui.reference.textContent = incidentConnectionID
+      ? "Connection ID: " + incidentConnectionID : "";
+    ui.reference.style.display = incidentConnectionID ? "block" : "none";
     ui.spinner.style.display = state === "waiting" || state === "busy" ? "block" : "none";
     ui.stateDot.style.display = state === "waiting" || state === "busy" ? "none" : "block";
     ui.stateDot.style.background = state === "error" ? "#F87171" : "#FBBF24";
@@ -571,6 +656,7 @@
     polls = 0;
     publishConnected();
     currentState = null;
+    incidentConnectionID = "";
     if (ui && ui.root.parentNode) {
       ui.root.parentNode.removeChild(ui.root);
     }
@@ -722,6 +808,7 @@
       return;
     }
     showing = true;
+    incidentConnectionID = endedConnectionID;
     polls = 0;
     previousFocus = document.activeElement;
     if (everConnected) waiting();

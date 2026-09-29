@@ -41,6 +41,7 @@ const flush = () => new Promise((r) => setImmediate(r));
 function mount({
   statuses = [], pollMs = 3000, maxPolls = 20, attrs = {}, preMarker = false,
   claimSnapshot = false, connected = true, connectedViaJQuery = false, expiredCapacity = false,
+  webSockets = false,
 } = {}) {
   const jsdomErrors = [];
   const virtualConsole = new VirtualConsole();
@@ -53,6 +54,24 @@ function mount({
   });
   const w = dom.window;
   const d = w.document;
+  const sockets = [];
+  if (webSockets) {
+    class FakeWebSocket extends w.EventTarget {
+      constructor(url, protocols) {
+        super();
+        this.url = url;
+        this.protocols = protocols;
+        sockets.push(this);
+      }
+      open() { this.dispatchEvent(new w.Event('open')); }
+      end() { this.dispatchEvent(new w.Event('close')); }
+    }
+    FakeWebSocket.CONNECTING = 0;
+    FakeWebSocket.OPEN = 1;
+    FakeWebSocket.CLOSING = 2;
+    FakeWebSocket.CLOSED = 3;
+    w.WebSocket = FakeWebSocket;
+  }
   let jqueryConnectedHandler;
   if (connectedViaJQuery) {
     w.jQuery = () => ({ on: (name, handler) => {
@@ -126,6 +145,7 @@ function mount({
     timers,
     jsdomErrors,
     sessionEvents,
+    sockets,
     overlay,
     // disconnect reproduces what Shiny's client does on a socket close.
     async disconnect({ reloading = false } = {}) {
@@ -168,6 +188,7 @@ function mount({
     },
     title: () => (overlay() ? overlay().querySelector('h1').textContent : null),
     message: () => (overlay() ? overlay().querySelector('p').textContent : null),
+    connectionID: () => el('#shinyhub-status-connection-id')?.textContent || '',
     button: () => el(`#${RELOAD_ID}`),
     openLink: () => el(`#${OPEN_ID}`),
     restartButton: () => el(`#${RESTART_ID}`),
@@ -212,6 +233,48 @@ test('a jQuery Shiny connected event preserves the interrupted-session path', as
   await h.disconnect();
   assert.equal(h.title(), 'This session was interrupted');
   assert.equal(h.timers.length, 0);
+});
+
+test('an upgraded Shiny socket shows its exact connection ID after interruption', async () => {
+  const h = mount({ webSockets: true, statuses: [200] });
+  const socket = new h.window.WebSocket('ws://host/app/demo/websocket/?keep=1');
+  assert.equal(h.sockets.length, 1);
+  assert.ok(socket instanceof h.window.WebSocket);
+  assert.equal(h.window.WebSocket.OPEN, 1);
+  const url = new URL(socket.url);
+  const id = url.searchParams.get('shinyhub_cid');
+  assert.match(id, /^[0-9a-f]{24}$/);
+  assert.equal(url.searchParams.get('keep'), '1');
+  socket.open();
+  socket.end();
+  await h.disconnect();
+  assert.equal(h.connectionID(), `Connection ID: ${id}`);
+  assert.equal(h.title(), 'This session was interrupted');
+});
+
+test('a failed upgrade and unrelated socket never display a guessed ID', async () => {
+  const h = mount({ webSockets: true, statuses: [200] });
+  const unrelated = new h.window.WebSocket('ws://host/app/demo/other-stream');
+  assert.equal(unrelated.url, 'ws://host/app/demo/other-stream');
+  unrelated.open();
+  unrelated.end();
+  const failed = new h.window.WebSocket('ws://host/app/demo/websocket/');
+  failed.end(); // No open event means no upgraded connection or end log.
+  await h.disconnect();
+  assert.equal(h.connectionID(), '');
+});
+
+test('a late close from a replaced socket cannot label the current interruption', async () => {
+  const h = mount({ webSockets: true, statuses: [200] });
+  const oldSocket = new h.window.WebSocket('ws://host/app/demo/websocket/');
+  oldSocket.open();
+  const currentSocket = new h.window.WebSocket('ws://host/app/demo/websocket/');
+  currentSocket.open();
+  oldSocket.end();
+  currentSocket.end();
+  await h.disconnect();
+  const currentID = new URL(currentSocket.url).searchParams.get('shinyhub_cid');
+  assert.equal(h.connectionID(), `Connection ID: ${currentID}`);
 });
 
 test('it is inert until the app disconnects', async () => {

@@ -2792,6 +2792,19 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var ws *wsSession
 	if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 		ws = &wsSession{}
+		shinySocketPath := "/app/" + slug + "/websocket"
+		if ids, ok := r.URL.Query()["shinyhub_cid"]; ok &&
+			(r.URL.Path == shinySocketPath || r.URL.Path == shinySocketPath+"/") {
+			if len(ids) == 1 {
+				ws.connectionID = wsConnectionID(ids[0])
+			}
+			// The tag belongs to ShinyHub, not the app. Keep the backend's
+			// original WebSocket route and query contract intact.
+			u := *r.URL
+			u.RawQuery = stripWSConnectionID(u.RawQuery)
+			r = r.Clone(r.Context())
+			r.URL = &u
+		}
 		r = r.WithContext(context.WithValue(r.Context(), wsSessionContextKey{}, ws))
 	}
 	replicaIndex := -1

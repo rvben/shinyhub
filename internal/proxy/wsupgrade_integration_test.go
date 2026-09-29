@@ -57,14 +57,18 @@ func TestProxy_WSSessionEndFromRealTunnel(t *testing.T) {
 		wantCode       uint16
 		clientCloses   bool
 		compressed     bool
+		customPath     bool
 	}{
 		{name: "upstream EOF", wantSide: "unknown"},
 		{name: "upstream 1011", wantSide: "upstream", wantCode: 1011},
 		{name: "upstream 1011 with deflate", wantSide: "upstream", wantCode: 1011, compressed: true},
 		{name: "client 1000", wantSide: "client", wantCode: 1000, clientCloses: true},
+		{name: "other app socket preserves query", wantSide: "unknown", customPath: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			backendQuery := make(chan string, 1)
 			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				backendQuery <- r.URL.RawQuery
 				conn, buf, err := w.(http.Hijacker).Hijack()
 				if err != nil {
 					t.Errorf("backend hijack: %v", err)
@@ -106,7 +110,11 @@ func TestProxy_WSSessionEndFromRealTunnel(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer conn.Close()
-			req := "GET /app/demo/ws HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n"
+			path := "/app/demo/websocket/"
+			if tc.customPath {
+				path = "/app/demo/custom-socket"
+			}
+			req := "GET " + path + "?keep=1&shinyhub_cid=0123456789abcdef01234567 HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n"
 			if tc.compressed {
 				req += "Sec-WebSocket-Extensions: permessage-deflate\r\n"
 			}
@@ -135,6 +143,16 @@ func TestProxy_WSSessionEndFromRealTunnel(t *testing.T) {
 			}
 			select {
 			case e := <-events:
+				if !tc.customPath && e.ConnectionID != "0123456789abcdef01234567" || tc.customPath && (len(e.ConnectionID) != 24 || e.ConnectionID == "0123456789abcdef01234567") {
+					t.Fatalf("connection ID = %q", e.ConnectionID)
+				}
+				wantQuery := "keep=1"
+				if tc.customPath {
+					wantQuery += "&shinyhub_cid=0123456789abcdef01234567"
+				}
+				if got := <-backendQuery; got != wantQuery {
+					t.Fatalf("backend query = %q, want %q", got, wantQuery)
+				}
 				if e.ClosedBy != tc.wantSide || (tc.wantCode == 0) != (e.CloseCode == nil) {
 					t.Fatalf("event = %+v", e)
 				}

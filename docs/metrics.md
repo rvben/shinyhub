@@ -107,7 +107,7 @@ series count.
 | `shinyhub_ws_abnormal_bursts_total` | counter | `slug` | Worker-local groups of at least three abnormal WebSocket endings within ten seconds, with a 30-second warning cooldown. The counter is local to each ShinyHub instance. |
 
 Each completed tunnel also emits one structured `ws_session_end` log with its
-replica, deployment, duration, close code and reason when observed, and bytes
+`connection_id`, replica, deployment, duration, close code and reason when observed, and bytes
 written in each tunnel direction. `end_signal` distinguishes a close frame,
 transport end, proxy action, or unknown ending. Upstream abnormal endings are
 WARN; other endings are INFO. A transport EOF does not establish why the worker
@@ -119,6 +119,12 @@ uses `closed_by=lifetime` or `closed_by=drain` and stays at INFO. A
 abnormal endings in its window, plus their observed time span. It includes a
 close code and reason only when all endings in that window agree. It reports
 correlation, not a CPU-stall diagnosis.
+For Shiny's `/websocket/` connection, the injected interruption overlay sends a
+random connection ID on the upgrade and shows that same ID after a connected
+session drops. The proxy removes the tag before forwarding the request to the
+app. If the script loads after the socket opened or browser crypto is
+unavailable, the overlay omits the ID rather than risk showing a different
+session's ID; the server still generates and logs one.
 
 The `reason` label is a closed vocabulary. The same value is returned on the
 `X-Shinyhub-Reject` response header, so a rejected request can be traced from the

@@ -1,9 +1,12 @@
 package proxy
 
 import (
+	"crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -15,14 +18,14 @@ import (
 // identifies a close-frame sender or a known proxy action; transport EOF alone
 // leaves it unknown. TransportEndSide records the first side whose read ended.
 type WSSessionEnd struct {
-	Slug, ClosedBy, EndSignal, TransportEndSide, CloseReason string
-	ReplicaIndex                                             int
-	DeploymentID                                             int64
-	Duration                                                 time.Duration
-	CloseCode                                                *uint16
-	BytesToClient                                            int64
-	BytesToUpstream                                          int64
-	Abnormal                                                 bool
+	Slug, ConnectionID, ClosedBy, EndSignal, TransportEndSide, CloseReason string
+	ReplicaIndex                                                           int
+	DeploymentID                                                           int64
+	Duration                                                               time.Duration
+	CloseCode                                                              *uint16
+	BytesToClient                                                          int64
+	BytesToUpstream                                                        int64
+	Abnormal                                                               bool
 }
 
 type wsEndFn func(WSSessionEnd)
@@ -33,6 +36,7 @@ type wsSession struct {
 	mu              sync.Mutex
 	started         time.Time
 	slug            string
+	connectionID    string
 	replica         int
 	deploymentID    int64
 	clientFrames    wsFrameScanner
@@ -57,7 +61,46 @@ func (s *wsSession) start(slug string, replica int, deploymentID int64, fn wsEnd
 	s.mu.Lock()
 	s.started = time.Now()
 	s.slug, s.replica, s.deploymentID, s.onEnd = slug, replica, deploymentID, fn
+	if s.connectionID == "" {
+		s.connectionID = newWSConnectionID()
+	}
 	s.mu.Unlock()
+}
+
+// A browser-generated ID is accepted only in the same fixed format that the
+// injected overlay produces. Untagged clients receive a server-generated ID.
+func wsConnectionID(raw string) string {
+	if len(raw) != 24 {
+		return newWSConnectionID()
+	}
+	for _, ch := range raw {
+		if !(ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'f') {
+			return newWSConnectionID()
+		}
+	}
+	return raw
+}
+
+// Remove only ShinyHub's query component. Re-encoding the other components
+// could change an app's signed or otherwise byte-sensitive WebSocket URL.
+func stripWSConnectionID(raw string) string {
+	parts := strings.Split(raw, "&")
+	keep := parts[:0]
+	for _, part := range parts {
+		key, _, _ := strings.Cut(part, "=")
+		decoded, err := url.QueryUnescape(key)
+		if err == nil && decoded == "shinyhub_cid" {
+			continue
+		}
+		keep = append(keep, part)
+	}
+	return strings.Join(keep, "&")
+}
+
+func newWSConnectionID() string {
+	var b [12]byte
+	_, _ = rand.Read(b[:]) // crypto/rand.Read is guaranteed not to fail on supported Go versions.
+	return hex.EncodeToString(b[:])
 }
 
 func (s *wsSession) setProxyReason(reason string) bool {
@@ -184,7 +227,7 @@ func (s *wsSession) readyToEmitLocked() (WSSessionEnd, wsEndFn) {
 		}
 	}
 	e := WSSessionEnd{
-		Slug: s.slug, ReplicaIndex: s.replica, DeploymentID: s.deploymentID,
+		Slug: s.slug, ConnectionID: s.connectionID, ReplicaIndex: s.replica, DeploymentID: s.deploymentID,
 		ClosedBy: closedBy, EndSignal: signal, TransportEndSide: s.transportEnd,
 		CloseCode: s.closeCode, CloseReason: s.closeReason,
 		Duration: time.Since(s.started), BytesToClient: s.bytesToClient,

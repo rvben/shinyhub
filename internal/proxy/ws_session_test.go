@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"io"
 	"net/http"
+	"regexp"
 	"testing"
 	"time"
 )
@@ -13,6 +14,32 @@ type testWSBody struct{ io.ReadWriteCloser }
 type testWSCloseWriter struct{ testWSBody }
 
 func (testWSCloseWriter) CloseWrite() error { return nil }
+
+func TestWSConnectionIDAcceptsOnlyBrowserFormat(t *testing.T) {
+	const valid = "0123456789abcdef01234567"
+	if got := wsConnectionID(valid); got != valid {
+		t.Fatalf("valid ID changed to %q", got)
+	}
+	pattern := regexp.MustCompile(`^[0-9a-f]{24}$`)
+	for _, raw := range []string{"", "short", "0123456789ABCDEF01234567", "0123456789abcdef0123456/"} {
+		got := wsConnectionID(raw)
+		if got == raw || !pattern.MatchString(got) {
+			t.Fatalf("invalid ID %q became %q", raw, got)
+		}
+	}
+	s := &wsSession{}
+	s.start("demo", 9, 42, nil)
+	if !pattern.MatchString(s.connectionID) {
+		t.Fatalf("untagged session ID = %q", s.connectionID)
+	}
+}
+
+func TestStripWSConnectionIDPreservesOtherQueryBytes(t *testing.T) {
+	raw := "signed=a%20b&shinyhub_cid=0123456789abcdef01234567&x=%2f&shinyhub%5fcid=other"
+	if got, want := stripWSConnectionID(raw), "signed=a%20b&x=%2f"; got != want {
+		t.Fatalf("stripped query = %q, want %q", got, want)
+	}
+}
 
 func TestObserveWSTunnelPreservesOptionalCloseWrite(t *testing.T) {
 	s := &wsSession{}
