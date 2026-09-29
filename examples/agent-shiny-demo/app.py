@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 
 from shiny import App, reactive, render, ui
-from shinyhub_agent import AGUIChat, AgentTool, OpenAIChat, agent_dependency, chat_dependency, register
+from shinyhub_agent import AGUIChat, AgentTool, BedrockChat, OpenAIChat, agent_dependency, chat_dependency, register
 
 VIEWS = {
     "This week": {"requests": "1.42M", "p95_latency_ms": 148, "error_rate": "0.3%"},
@@ -14,18 +14,23 @@ VIEWS = {
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 AGUI_URL = os.environ.get("SHINYHUB_AGENT_AGUI_URL", "").strip()
 AGUI_TOKEN = os.environ.get("SHINYHUB_AGENT_AGUI_TOKEN", "").strip()
-OPENAI_CHAT = OpenAIChat(
-    api_key=OPENAI_API_KEY,
-    instructions=(
-        "You assist with an illustrative operations dashboard. Use the app tools for "
-        "any statement about the current view or metrics. The data is synthetic. "
-        "When asked to change the period, call set_dashboard_period and wait for "
-        "approval and the applied result before saying the view changed. "
-        "Do not infer incidents, causes, or timelines that are not shown. "
-        "Answer briefly and name the reporting period."
-    ),
-) if OPENAI_API_KEY else None
-CHAT = AGUIChat(AGUI_URL, AGUI_TOKEN) if AGUI_URL else OPENAI_CHAT
+BEDROCK_MODEL_ID = os.environ.get("SHINYHUB_AGENT_BEDROCK_MODEL_ID", "").strip()
+INSTRUCTIONS = (
+    "You assist with an illustrative operations dashboard. Use the app tools for "
+    "any statement about the current view or metrics. The data is synthetic. "
+    "When asked to change the period, call set_dashboard_period and wait for "
+    "approval and the applied result before saying the view changed. "
+    "Do not infer incidents, causes, or timelines that are not shown. "
+    "Answer briefly and name the reporting period."
+)
+if AGUI_URL:
+    CHAT = AGUIChat(AGUI_URL, AGUI_TOKEN)
+elif BEDROCK_MODEL_ID:
+    CHAT = BedrockChat(BEDROCK_MODEL_ID, INSTRUCTIONS, os.environ["AWS_REGION"])
+elif OPENAI_API_KEY:
+    CHAT = OpenAIChat(OPENAI_API_KEY, INSTRUCTIONS)
+else:
+    CHAT = None
 
 STYLES = """
 body { background:#0a101d; color:#edf3ff; }

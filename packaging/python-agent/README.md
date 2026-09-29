@@ -57,13 +57,19 @@ outside ShinyHub or when the toolbar is hidden. Apps without chat do not show
 
 ```python
 import os
-from shinyhub_agent import AGUIChat, OpenAIChat, chat_dependency
+from shinyhub_agent import AGUIChat, BedrockChat, OpenAIChat, chat_dependency
 
 # Include chat_dependency() alongside agent_dependency() in the app UI.
 if os.environ.get("SHINYHUB_AGENT_AGUI_URL"):
     chat = AGUIChat(
         endpoint=os.environ["SHINYHUB_AGENT_AGUI_URL"],
         bearer_token=os.environ.get("SHINYHUB_AGENT_AGUI_TOKEN", ""),
+    )
+elif os.environ.get("SHINYHUB_AGENT_BEDROCK_MODEL_ID"):
+    chat = BedrockChat(
+        model_id=os.environ["SHINYHUB_AGENT_BEDROCK_MODEL_ID"],
+        region=os.environ["AWS_REGION"],
+        instructions="You help with this dashboard. Use registered tools for app facts.",
     )
 else:
     chat = OpenAIChat(
@@ -73,14 +79,28 @@ else:
 register(session=session, input=input, tools=tools, chat=chat)
 ```
 
-The app stores both credentials as private ShinyHub environment secrets. The
-browser never receives them. OpenAI requests use the Responses API with
-streaming, bounded output, and `store: false`. AG-UI requests carry the current
-session's thread ID, recent messages, and registered tool schemas; they do not
-carry ShinyHub cookies, identity headers, or other apps' data. The hoster must
-authorize and secure their endpoint. Tool calls from either backend are
+Install `shinyhub-agent[bedrock]` for `BedrockChat`. It uses Bedrock's
+`ConverseStream` API and the standard AWS credential chain. Give the app only
+`bedrock:InvokeModelWithResponseStream` for its chosen model or inference
+profile. The model must support streaming tool use. On an on-premises ShinyHub
+host, store AWS
+credentials as private per-app secrets; on AWS, prefer a scoped workload role.
+Choose a model ID available in the selected region. The adapter does not infer
+one because model and tool support vary by region. Bedrock requests inherit the
+AWS account's invocation logging and data policies.
+
+The browser never receives model or endpoint credentials. OpenAI requests use
+the Responses API with streaming, bounded output, and `store: false`. AG-UI
+requests carry the current session's thread ID, recent messages, and registered
+tool schemas; they do not carry ShinyHub cookies, identity headers, or other
+apps' data. The hoster must
+authorize and secure their endpoint. Tool calls from all three backends are
 validated again by the app. A write pauses for visitor approval in the chat
 panel, then runs the handler and returns its applied result to the agent.
+
+An AG-UI agent hosted in Amazon Bedrock AgentCore needs an authenticated
+`InvokeAgentRuntime` client or a hoster-managed HTTPS relay. `AGUIChat` does
+not sign AgentCore requests itself.
 
 When WebMCP is available, `bridge.js` registers the declared tools. In other
 browsers it makes them available through `window.shinyhubAgentTools.invoke()`

@@ -49,9 +49,9 @@ jobs:
         run: |
           set -euo pipefail
           for archive in dist/*.whl dist/*.tar.gz; do
-            uv run --isolated --no-project --with "$archive" python -c 'import os; from importlib.resources import files; import shinyhub_agent as a; assert a.__version__ == os.environ["GITHUB_REF_NAME"].removeprefix("shinyhub-agent-v"); assert files("shinyhub_agent").joinpath("www/chat.js").is_file(); assert files("shinyhub_agent").joinpath("www/bridge.js").is_file()'
+            uv run --isolated --no-project --with "$archive" python -c 'import os; from importlib.resources import files; import shinyhub_agent as a; assert a.__version__ == os.environ["GITHUB_REF_NAME"].removeprefix("shinyhub-agent-v"); assert a.BedrockChat; assert files("shinyhub_agent").joinpath("www/chat.js").is_file(); assert files("shinyhub_agent").joinpath("www/bridge.js").is_file()'
           done
-          uv run --isolated --no-project --with dist/*.whl --with pytest pytest tests/ -q
+          uv run --isolated --no-project --with dist/*.whl --with boto3 --with pytest pytest tests/ -q
           node tests/bridge.test.cjs
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

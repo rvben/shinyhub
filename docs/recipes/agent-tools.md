@@ -13,7 +13,7 @@ Install the [published `shinyhub-agent` package](https://pypi.org/project/shinyh
 in a Python Shiny app:
 
 ```text
-shinyhub-agent==0.1.1
+shinyhub-agent[bedrock]==0.2.0b1
 ```
 
 The repository contains a [runnable example](https://github.com/rvben/shinyhub/tree/main/examples/agent-shiny-demo)
@@ -75,9 +75,10 @@ the viewer's authorization in the handler as well.
 
 Include `chat_dependency()` in the UI and pass a chat backend to `register()`.
 `OpenAIChat` uses a private `OPENAI_API_KEY` app secret and app-specific
-instructions. `AGUIChat` connects to a hoster-owned HTTPS AG-UI endpoint and
-can use a private bearer token. The two backends use the same app tool
-registry. The browser receives neither credential.
+instructions. `BedrockChat` uses AWS credentials and a selected Bedrock model
+through `ConverseStream`. `AGUIChat` connects to a hoster-owned HTTPS AG-UI
+endpoint and can use a private bearer token. All three backends use the same
+app tool registry. The browser receives no backend credentials.
 When this app runs on a ShinyHub server with toolbar chat support, **Ask**
 appears in the app toolbar after the chat session connects. The helper uses its
 own launcher if the toolbar is unavailable or hidden. The app remains
@@ -94,6 +95,24 @@ chat = OpenAIChat(
 
 register(session=session, input=input, tools=tools, chat=chat)
 ```
+
+For Bedrock, install the `bedrock` extra and supply an AWS region and a model
+ID that supports streaming tool use:
+
+```python
+from shinyhub_agent import BedrockChat
+
+chat = BedrockChat(
+    model_id=os.environ["SHINYHUB_AGENT_BEDROCK_MODEL_ID"],
+    region=os.environ["AWS_REGION"],
+    instructions="Use the registered app tools for facts about the current view.",
+)
+```
+
+The app's AWS identity needs `bedrock:InvokeModelWithResponseStream` for the
+selected model or inference profile. Use per-app private credentials on an
+on-premises host or a scoped workload role on AWS. Bedrock access and model
+availability depend on the chosen account and region.
 
 To bring your own agent, construct `AGUIChat` in place of `OpenAIChat`:
 

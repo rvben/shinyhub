@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **agent**: add a streaming Amazon Bedrock chat backend with AWS credential chain support, app tools, and visitor-approved writes.
+- **agent**: show an app-owned chat panel from a capability-gated Ask control in the ShinyHub toolbar, with launcher fallback when the toolbar is hidden.
+- **agent**: surface observable tool progress and action receipts in the Python Shiny chat helper.
+- **example**: add the agent capabilities dashboard with OpenAI and AG-UI chat paths and browser tools.
+
 ## [0.18.3](https://github.com/rvben/shinyhub/compare/v0.18.2...v0.18.3) - 2026-09-29
 
 ### Fixed
