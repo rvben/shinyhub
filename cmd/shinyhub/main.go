@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -8,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -3194,11 +3194,10 @@ func registerBrandingRoutes(mux *http.ServeMux, cfg *config.Config, srv *api.Ser
 	brandingActive := cfg.Branding.IsActive()
 	resolved := cfg.Branding.ResolvedAssets()
 
-	// serveShell serves the stock SPA shell: byte-for-byte the existing
-	// ServeFileFS path when branding is inactive (preserving Last-Modified /
-	// ETag / Range / conditional-GET and SHINYHUB_DEV_STATIC live reload),
-	// or the branded render when active (re-reading index.html per request so
-	// dev live-reload still works).
+	// serveShell serves the SPA shell (ui.ShellHTML: index.html pointed at the
+	// immutable versioned asset tree), branded when branding is active. Under
+	// SHINYHUB_DEV_STATIC the shell is re-read from disk per request so live
+	// reload still works.
 	pub := ui.PublicBranding(cfg.Branding, resolved)
 	// One canonical handler backs explicit links on standalone ShinyHub pages
 	// and the browser's implicit /favicon.ico request for custom landing pages.
@@ -3215,6 +3214,14 @@ func registerBrandingRoutes(mux *http.ServeMux, cfg *config.Config, srv *api.Ser
 		// the login form. This needs a per-request render, so it leaves the cached
 		// ServeFileFS fast path only when there is a reason to.
 		authed := auth.UserFromContext(r.Context()) != nil
+		// The shell names the build's versioned asset URLs, so a stored copy
+		// must be revalidated before reuse: an old shell would keep pointing an
+		// upgraded server's visitors at the previous build's assets. A caller
+		// that already set a stricter policy (no-store on an auth-varying
+		// root) keeps it.
+		if w.Header().Get("Cache-Control") == "" {
+			w.Header().Set("Cache-Control", "no-cache")
+		}
 		// gzip is negotiated only for a plain GET/HEAD with no Range: a Range
 		// request keeps behaving exactly as before (identity bytes), since
 		// neither shell path serves partial content against a compressed
@@ -3223,7 +3230,7 @@ func registerBrandingRoutes(mux *http.ServeMux, cfg *config.Config, srv *api.Ser
 			r.Header.Get("Range") == "" && ui.AcceptsGzip(r)
 		if !brandingActive && !authed {
 			if gzipEligible {
-				if raw, err := fs.ReadFile(ui.Static(), "index.html"); err == nil {
+				if raw, err := ui.ShellHTML(); err == nil {
 					key := ""
 					if !devStatic {
 						key = "shell:stock"
@@ -3232,10 +3239,20 @@ func registerBrandingRoutes(mux *http.ServeMux, cfg *config.Config, srv *api.Ser
 					return
 				}
 			}
-			http.ServeFileFS(w, r, ui.Static(), "index.html")
+			if devStatic {
+				http.ServeFileFS(w, r, ui.Static(), "index.html")
+				return
+			}
+			raw, err := ui.ShellHTML()
+			if err != nil {
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			http.ServeContent(w, r, "index.html", time.Time{}, bytes.NewReader(raw))
 			return
 		}
-		raw, err := fs.ReadFile(ui.Static(), "index.html")
+		raw, err := ui.ShellHTML()
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return

@@ -87,6 +87,10 @@ func Handler() http.Handler {
 	fileServer := http.StripPrefix("/static/", http.FileServer(http.FS(Static())))
 	dev := os.Getenv("SHINYHUB_DEV_STATIC") != ""
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, versionedPrefix) {
+			serveVersioned(w, r, fileServer)
+			return
+		}
 		if dev {
 			w.Header().Set("Cache-Control", "no-store")
 			fileServer.ServeHTTP(w, r)

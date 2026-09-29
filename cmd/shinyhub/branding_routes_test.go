@@ -61,26 +61,29 @@ func TestBrandingRoutes(t *testing.T) {
 			t.Fatalf("GET / status = %d, want 200", rr.Code)
 		}
 
-		// Byte-identical to the static index.html via ServeFileFS: this proves
-		// the zero-branding route delegates to the same ServeFileFS call and
-		// does not run through any hand-written writer that could alter bytes.
+		// Byte-identical to the stock shell (ui.ShellHTML): the zero-branding
+		// route serves it unchanged and runs it through no branding rewrite.
 		body := rr.Body.Bytes()
 		if !bytes.Equal(body, staticIndex) {
-			t.Errorf("GET / body not byte-identical to ui.Static()/index.html (got %d bytes, want %d bytes)",
+			t.Errorf("GET / body not byte-identical to ui.ShellHTML() (got %d bytes, want %d bytes)",
 				len(body), len(staticIndex))
 		}
 
-		// Content-Type must be text/html (set by ServeFileFS via sniff).
+		if got := rr.Header().Get("Cache-Control"); got != "no-cache" {
+			t.Errorf("GET / Cache-Control = %q, want no-cache: the shell names versioned assets and must be revalidated", got)
+		}
+
+		// Content-Type must be text/html.
 		ct := rr.Header().Get("Content-Type")
 		if !strings.HasPrefix(ct, "text/html") {
 			t.Errorf("GET / Content-Type = %q, want text/html prefix", ct)
 		}
 
-		// Accept-Ranges: bytes is set by ServeFileFS but not by a hand-written
-		// fs.ReadFile + w.Write path. This proves the zero-branding route still
-		// goes through ServeFileFS and the backwards-compat invariant holds.
+		// Accept-Ranges: bytes is set by http.ServeContent but not by a
+		// hand-written w.Write path, so the zero-branding route keeps
+		// conditional and range request handling.
 		if rr.Header().Get("Accept-Ranges") != "bytes" {
-			t.Errorf("GET / missing Accept-Ranges: bytes; ServeFileFS path may have regressed")
+			t.Errorf("GET / missing Accept-Ranges: bytes; ServeContent path may have regressed")
 		}
 	})
 
@@ -447,20 +450,16 @@ func TestBrandingRoutes(t *testing.T) {
 	})
 }
 
-// mustReadStaticIndex reads index.html directly from the embedded FS using the
-// same ServeFileFS path the zero-branding route uses.
+// mustReadStaticIndex returns the stock SPA shell exactly as the zero-branding
+// route must serve it: index.html with its assets pointed at the versioned tree
+// and its module preloads added (ui.ShellHTML).
 func mustReadStaticIndex(t *testing.T) []byte {
 	t.Helper()
-	// Serve via a real httptest round-trip using ServeFileFS so we get the same
-	// bytes (after any ServeFileFS compression/range negotiation). For the
-	// byte-identity comparison we use a plain GET with no special headers, which
-	// mirrors the test request in the main case.
-	rr := httptest.NewRecorder()
-	http.ServeFileFS(rr, httptest.NewRequest("GET", "/", nil), ui.Static(), "index.html")
-	if rr.Code != http.StatusOK {
-		t.Fatalf("mustReadStaticIndex: ServeFileFS returned %d", rr.Code)
+	shell, err := ui.ShellHTML()
+	if err != nil {
+		t.Fatalf("mustReadStaticIndex: %v", err)
 	}
-	return rr.Body.Bytes()
+	return shell
 }
 
 // buildBrandingConfigWithLanding creates a BrandingConfig whose LandingFile()
