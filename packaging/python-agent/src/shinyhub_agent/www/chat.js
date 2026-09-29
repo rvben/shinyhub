@@ -67,7 +67,7 @@
   var titles = make("div", "sh-agent-titles");
   var heading = make("h2", "", "Ask this app");
   heading.id = "shinyhub-agent-chat-heading";
-  titles.append(heading, make("p", "", "Experimental · Check answers and changes"));
+  titles.append(heading, make("p", "", "Explore the current view"));
   brand.append(emblem, titles);
   var close = make("button", "sh-agent-icon-button");
   close.type = "button";

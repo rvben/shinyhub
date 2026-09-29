@@ -91,6 +91,9 @@ When this app runs on a ShinyHub server with toolbar chat support, **Ask**
 appears in the app toolbar after the chat session connects. The helper uses its
 own launcher if the toolbar is unavailable or hidden. The app remains
 responsible for its panel, model instructions, and tools.
+It also decides what visitors need to know about the assistant's capabilities,
+limits, and how to check consequential results. ShinyHub's experimental status
+is guidance for app authors, not a label applied to every hosted app.
 
 ```python
 import os
