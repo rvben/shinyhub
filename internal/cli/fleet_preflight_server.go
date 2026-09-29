@@ -14,6 +14,7 @@ import (
 
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/fleet"
+	"github.com/rvben/shinyhub/internal/process"
 )
 
 // fleetServerPreflightProblem is one rejection the server would raise for an
@@ -66,6 +67,10 @@ type fleetBundleFacts struct {
 	Dir      string
 	Manifest *deploy.Manifest
 	AppType  string
+	// StaleLock is the upload's stale-lock refusal (wrapping
+	// process.ErrStaleLock) when the uv.lock in the upload no longer records
+	// what its pyproject.toml declares, and nil otherwise.
+	StaleLock error
 }
 
 // resolveFleetBundleFacts derives the facts for one bundle from the source
@@ -75,11 +80,17 @@ func resolveFleetBundleFacts(spec bundleBuildSpec, manifest *deploy.Manifest, pr
 	for _, name := range preview.Files {
 		uploaded[name] = true
 	}
-	return fleetBundleFacts{
+	facts := fleetBundleFacts{
 		Dir:      spec.Dir,
 		Manifest: manifest,
 		AppType:  deploy.DetectAppTypeIn(spec.Dir, func(name string) bool { return uploaded[name] }),
 	}
+	// Only a lock the server's own check shows is stale is recorded; a lock
+	// it cannot judge is accepted by the upload and so is not a problem here.
+	if err := checkBundleLock(preview); errors.Is(err, process.ErrStaleLock) {
+		facts.StaleLock = err
+	}
+	return facts
 }
 
 // preflightsDeploy reports whether a diff action ends in a bundle deploy. A
@@ -108,13 +119,21 @@ func preflightsDeploy(action fleet.Action) bool {
 // guards but not the deploy's other policy checks. A server with neither is
 // left alone, exactly as before.
 //
+// A stale uv.lock is judged on the client, from the pyproject.toml and uv.lock
+// in the archive the deploy will upload, because the endpoint receives only
+// the manifest. It is reported only to a server advertising
+// stale_uv_lock_refusal, which is the server that refuses such an upload, and
+// with the upload's own message. The endpoint stops at its first problem, as
+// the deploy does; a stale lock is listed beside that problem rather than
+// ordered against it, since both must be fixed before the deploy succeeds.
+//
 // Returns the problems found. A question the server did not answer (transport
 // failure, refusal, undecodable reply) is returned as a typed error, never as
 // a problem, so the caller reports it with its own kind and exit code rather
 // than as a rejection the operator would go and fix in the manifest.
 func fleetServerPreflight(cfg *cliConfig, caps serverCaps, m *fleet.Manifest, diff []fleet.AppDiff,
 	bundles map[string]fleetBundleFacts) ([]fleetServerPreflightProblem, error) {
-	if !caps.DeployPreflight && !caps.RuntimeCapabilities {
+	if !caps.DeployPreflight && !caps.RuntimeCapabilities && !caps.StaleUVLockRefusal {
 		return nil, nil
 	}
 	entries := make(map[string]*fleet.AppEntry, len(m.Apps))
@@ -134,24 +153,28 @@ func fleetServerPreflight(cfg *cliConfig, caps serverCaps, m *fleet.Manifest, di
 		if !ok {
 			continue
 		}
-		if !caps.DeployPreflight {
+		switch {
+		case caps.DeployPreflight:
+			req, err := buildDeployPreflightRequest(facts, entry)
+			if err != nil {
+				return nil, err
+			}
+			reply, err := postDeployPreflight(cfg, d.Slug, req)
+			if err != nil {
+				return nil, err
+			}
+			for _, p := range reply.Problems {
+				problems = append(problems, fleetServerPreflightProblem{Slug: d.Slug, Stage: p.Stage, Message: p.Message})
+			}
+		case caps.RuntimeCapabilities:
 			fallback, err := runtimeTopologyFallback(cfg, d.Slug, facts.Manifest)
 			if err != nil {
 				return nil, err
 			}
 			problems = append(problems, fallback...)
-			continue
 		}
-		req, err := buildDeployPreflightRequest(facts, entry)
-		if err != nil {
-			return nil, err
-		}
-		reply, err := postDeployPreflight(cfg, d.Slug, req)
-		if err != nil {
-			return nil, err
-		}
-		for _, p := range reply.Problems {
-			problems = append(problems, fleetServerPreflightProblem{Slug: d.Slug, Stage: p.Stage, Message: p.Message})
+		if caps.StaleUVLockRefusal && facts.StaleLock != nil {
+			problems = append(problems, fleetServerPreflightProblem{Slug: d.Slug, Stage: "deploy", Message: facts.StaleLock.Error()})
 		}
 	}
 	return problems, nil
