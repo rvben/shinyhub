@@ -59,12 +59,12 @@ test('resource renderer shows stable capacity ratios, semantic meters, labels, a
   document.body.appendChild(node);
 
   assert.equal(node.getAttribute('aria-labelledby'), 'ov-resources-title');
-  assert.match(node.textContent, /0\.4 cores \/ 1\.0 cores/);
+  assert.match(node.textContent, /0\.43 \/ 1 cores/);
   assert.match(node.textContent, /256 MB \/ 512 MB/);
   assert.match(node.textContent, /1 of 1 running replicas covered/);
   const meters = node.querySelectorAll('meter');
   assert.equal(meters.length, 2);
-  assert.equal(meters[0].high, 0.95);
+  assert.equal(meters[0].high, 0.9);
   assert.match(meters[0].getAttribute('aria-label'), /CPU allocation, 43 percent/);
 });
 
@@ -73,7 +73,7 @@ test('small real CPU loads retain enough precision to avoid a false zero', () =>
     small: { status: 'running', replicas: [replica(0, 4, 64)] },
   });
   const node = renderResourcePressure(resources);
-  assert.match(node.textContent, /0\.04 cores \/ 1\.0 cores/);
+  assert.match(node.textContent, /0\.04 \/ 1 cores/);
   assert.match(node.textContent, /4%/);
 });
 
@@ -136,7 +136,7 @@ test('a fleet with no limits is measured against the host, not reported as immea
   const node = renderResourcePressure(resources);
   assert.match(node.textContent, /Hub resource usage/);
   assert.match(node.textContent, /All apps · app usage against shared host capacity/);
-  assert.match(node.textContent, /1\.5 cores \/ 4\.0 cores/);
+  assert.match(node.textContent, /1\.5 \/ 4 cores/);
   assert.match(node.textContent, /2\.0 GB \/ 8\.0 GB/);
   assert.match(node.textContent, /Across 1 running replica/);
   assert.doesNotMatch(node.textContent, /Capacity unavailable/);
@@ -248,7 +248,7 @@ test('live signature and announcement identify a warning that moves between apps
     beta: { status: 'running', replicas: [replica(1, 90, 64)] },
   });
   assert.notEqual(resourceLiveSignature(first), resourceLiveSignature(second));
-  assert.match(resourceLiveSummary(second), /Beta, cpu, replica 2, warning/);
+  assert.match(resourceLiveSummary(second), /Beta, cpu, replica 2, critical/);
 });
 
 test('live announcement identifies a changed secondary hotspot, not the unchanged hottest one', () => {
@@ -268,6 +268,6 @@ test('live announcement identifies a changed secondary hotspot, not the unchange
     gamma: { status: 'running', replicas: [replica(1, 90, 64)] },
   });
   const summary = resourceLiveSummary(second, first);
-  assert.match(summary, /Gamma, cpu, replica 2, warning/);
+  assert.match(summary, /Gamma, cpu, replica 2, critical/);
   assert.doesNotMatch(summary, /Alpha/);
 });

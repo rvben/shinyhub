@@ -5,7 +5,8 @@
 // textContent / createElement, never innerHTML, so a malicious slug or crash
 // traceback can never inject markup.
 import { buildOverviewWorkspace, pulseMeta } from './overview-model.js';
-import { formatBytes } from './stat-format.js';
+import { formatBytes, formatCoreCapacity, formatCoreCount } from './stat-format.js';
+import { updateCPUMeter } from './cpu-capacity.js';
 import { formatStatus } from './status-label.js';
 import { appCardBadge } from './app-card-badge.js';
 import { activityTime, buildActivityBrief } from './overview-activity.js';
@@ -868,7 +869,7 @@ export function renderResourcePressure(res) {
   } else {
     const complete = res.cpu.state === 'ready' && res.memory.state === 'ready';
     const text = complete
-      ? 'All covered replicas are below the 85% warning threshold.'
+      ? 'All covered replicas are below the CPU and memory warning thresholds.'
       : `No pressure alerts among ${Math.max(res.cpu.coverage.coveredReplicas, res.memory.coverage.coveredReplicas)} of ${res.runningReplicas} covered running replicas.`;
     sec.appendChild(el('p', 'ov-res-clear', text));
   }
@@ -914,15 +915,18 @@ function renderCapacityRow(label, metric, runningReplicas) {
 
   if (metric.fraction != null) {
     const meter = document.createElement('meter');
-    meter.className = 'ov-capacity-meter ov-capacity-meter--' + metric.severity;
-    meter.min = 0;
-    meter.max = 1;
-    meter.low = 0.85;
-    meter.high = 0.95;
-    meter.optimum = 0;
-    meter.value = Math.min(1, Math.max(0, metric.fraction));
-    meter.setAttribute('aria-label', meterLabel(label, metric, runningReplicas));
-    meter.textContent = `${Math.round(metric.fraction * 100)}%`;
+    if (metric.kind === 'cpu') updateCPUMeter(meter, metric.fraction, meterLabel(label, metric, runningReplicas));
+    else {
+      meter.className = 'ov-capacity-meter ov-capacity-meter--' + metric.severity;
+      meter.min = 0;
+      meter.max = 1;
+      meter.low = 0.85;
+      meter.high = 0.95;
+      meter.optimum = 0;
+      meter.value = Math.min(1, Math.max(0, metric.fraction));
+      meter.setAttribute('aria-label', meterLabel(label, metric, runningReplicas));
+      meter.textContent = `${Math.round(metric.fraction * 100)}%`;
+    }
     row.appendChild(meter);
   }
   row.appendChild(el('p', 'ov-capacity-coverage', coverageText(metric, runningReplicas)));
@@ -998,14 +1002,17 @@ function renderHotspot(item) {
   li.appendChild(main);
 
   const meter = document.createElement('meter');
-  meter.className = 'ov-capacity-meter ov-capacity-meter--' + item.severity;
-  meter.min = 0;
-  meter.max = 1;
-  meter.low = 0.85;
-  meter.high = 0.95;
-  meter.optimum = 0;
-  meter.value = Math.min(1, item.fraction);
-  meter.setAttribute('aria-label', hotspotLabel(item));
+  if (item.metric === 'cpu') updateCPUMeter(meter, item.fraction, hotspotLabel(item));
+  else {
+    meter.className = 'ov-capacity-meter ov-capacity-meter--' + item.severity;
+    meter.min = 0;
+    meter.max = 1;
+    meter.low = 0.85;
+    meter.high = 0.95;
+    meter.optimum = 0;
+    meter.value = Math.min(1, item.fraction);
+    meter.setAttribute('aria-label', hotspotLabel(item));
+  }
   li.appendChild(meter);
 
   const values = el('span', 'ov-hotspot-values');
@@ -1019,6 +1026,7 @@ function renderHotspot(item) {
 function capacityValue(metric) {
   if (metric.state === 'unavailable') return 'Unavailable';
   if (metric.capacity > 0) {
+    if (metric.kind === 'cpu') return formatCoreCapacity(metric.used / 100, metric.capacity / 100);
     return `${formatResource(metric.kind, metric.used)} / ${formatResource(metric.kind, metric.capacity)}`;
   }
   if (metric.coverage.observedReplicas > 0) return `${formatResource(metric.kind, metric.observedUsed)} in use`;
@@ -1027,8 +1035,7 @@ function capacityValue(metric) {
 
 function formatResource(kind, value) {
   if (kind === 'cpu') {
-    const cores = Number(value || 0) / 100;
-    return `${cores > 0 && cores < 0.1 ? cores.toFixed(2) : cores.toFixed(1)} cores`;
+    return formatCoreCount(Number(value || 0) / 100);
   }
   const bytes = Number(value || 0);
   const gib = 1024 * 1024 * 1024;

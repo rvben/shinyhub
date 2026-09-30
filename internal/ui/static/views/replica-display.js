@@ -2,6 +2,8 @@
 // and honest resource metrics for PID-less backends (Fargate, remote_docker).
 // No DOM dependency; importable from jsdom tests and app.js/app-detail.js.
 
+import { formatCoreCount } from './stat-format.js';
+
 /**
  * backendLabel returns a short human-readable backend/tier string.
  * Examples: "native:local", "fargate:burst", "docker:local".
@@ -64,13 +66,24 @@ export function metricsText(replica) {
   }
   // Confirmed PID-less: show n/a with the monitoring hint.
   if (replica.metrics_available !== true) {
+    if (replica.metrics_available === false && replica.pid > 0) {
+      return { cpuText: '—', ramText: '—', physicalText: '—', attributionNote: '',
+        note: 'Live resource sampling failed for this process. Retry metrics or wait for the next check.' };
+    }
     return { cpuText: 'n/a', ramText: 'n/a', physicalText: 'n/a', attributionNote: '', note: METRICS_NA_NOTE };
   }
   // A null cpu_percent on a PID-backed replica means the rate is not in yet
   // (first poll after it started), which the neutral dash already covers. Zero
   // would claim the replica is doing nothing.
-  const cpuText =
-    typeof replica.cpu_percent === 'number' ? `${replica.cpu_percent.toFixed(1)}%` : '—';
+  const cpuQuota = replica.cpu_quota_enforced && Number.isFinite(replica.effective_cpu_quota_percent) && replica.effective_cpu_quota_percent > 0
+    ? replica.effective_cpu_quota_percent / 100 : null;
+  const cpuCores = Number.isFinite(replica.cpu_percent) && replica.cpu_percent >= 0 ? replica.cpu_percent / 100 : null;
+  const usage = formatCoreCount(cpuCores);
+  const cpuText = cpuCores === null ? '—' : cpuQuota === null ? usage
+    : `${usage.replace(/ cores$/, '')} / ${cpuQuota} cores`;
+  const cpuNote = cpuQuota === null
+    ? 'CPU usage in cores; no enforced CPU quota. One full core is 100% CPU.'
+    : 'CPU usage / enforced CPU quota, in cores.';
   const rss = Number(replica.rss_bytes || 0);
   let ramText;
   if (rss <= 0) {
@@ -92,5 +105,5 @@ export function metricsText(replica) {
   if (typeof replica.swap_pss_bytes === 'number') attribution.push(`swap PSS ${formatBytes(replica.swap_pss_bytes)}`);
   let attributionNote = attribution.join(' · ');
   if (attributionNote && replica.memory_attribution_partial === true) attributionNote += ' · partial';
-  return { cpuText, ramText, physicalText, attributionNote, note: null };
+  return { cpuText, cpuNote, ramText, physicalText, attributionNote, note: null };
 }

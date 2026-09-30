@@ -58,6 +58,27 @@ func newTestCollector(p *fakeProcs, sess *fakeSessions, smp *fakeSampler, st *St
 	return NewCollector(p, sess, smp, st, 15*time.Second)
 }
 
+func TestCollectorFeedsSustainedReplicaCPU(t *testing.T) {
+	p := &fakeProcs{infos: []*process.ProcessInfo{running("demo", 0, 10)},
+		handles: map[rk]process.RunHandle{{"demo", 0}: {PID: 10}}}
+	p.infos[0].LogRunID = "run-a"
+	busy, idle := 95.0, 10.0
+	smp := &fakeSampler{byPID: map[int]process.Stats{10: {CPUPercent: &busy}}}
+	st := NewStore(time.Hour, 15*time.Second)
+	c := newTestCollector(p, &fakeSessions{}, smp, st)
+	for _, ts := range []int64{1000, 1015, 1030} {
+		c.collectOnce(ts)
+	}
+	if !st.ReplicaCPUSaturated("demo", 0, "run-a", 1030, 100) {
+		t.Fatal("fixed-cadence collector samples should establish saturation")
+	}
+	smp.byPID[10] = process.Stats{CPUPercent: &idle}
+	c.collectOnce(1045)
+	if st.ReplicaCPUSaturated("demo", 0, "run-a", 1045, 100) {
+		t.Fatal("a low collector sample should clear saturation")
+	}
+}
+
 func (f *fakeSampler) sampledPID(pid int) bool {
 	for _, h := range f.sampled {
 		if h.PID == pid {
@@ -234,7 +255,7 @@ func TestCollectSessionMinusOneTreatedAsZero(t *testing.T) {
 	}
 }
 
-func TestCollectSampleErrorSkipsCPURSSButCountsInstance(t *testing.T) {
+func TestCollectSampleErrorMakesCPUUnavailableButCountsInstance(t *testing.T) {
 	p := &fakeProcs{
 		infos:   []*process.ProcessInfo{running("demo", 0, 10), running("demo", 1, 11)},
 		handles: map[rk]process.RunHandle{{"demo", 0}: {PID: 10}, {"demo", 1}: {PID: 11}},
@@ -253,8 +274,44 @@ func TestCollectSampleErrorSkipsCPURSSButCountsInstance(t *testing.T) {
 	if got.Instances[0] != 2 {
 		t.Errorf("instances = %v, want 2 (errored replica still counts)", got.Instances[0])
 	}
-	if got.CPU[0] == nil || *got.CPU[0] != 5 || got.RSS[0] != 100 {
-		t.Errorf("cpu/rss = %v/%v, want 5/100 (errored replica contributes nothing)", got.CPU[0], got.RSS[0])
+	if got.CPU[0] != nil || got.RSS[0] != 100 {
+		t.Errorf("cpu/rss = %v/%v, want nil/100 (CPU subtotal is not the app's total)", got.CPU[0], got.RSS[0])
+	}
+}
+
+func TestCollectSampleErrorBreaksSaturationAndRecovers(t *testing.T) {
+	p := &fakeProcs{
+		infos:   []*process.ProcessInfo{running("demo", 0, 10)},
+		handles: map[rk]process.RunHandle{{"demo", 0}: {PID: 10}},
+	}
+	p.infos[0].LogRunID = "run-a"
+	busy := 95.0
+	smp := &fakeSampler{byPID: map[int]process.Stats{10: {CPUPercent: &busy}}}
+	st := NewStore(time.Hour, 15*time.Second)
+	c := newTestCollector(p, &fakeSessions{}, smp, st)
+	for _, ts := range []int64{1000, 1015, 1030} {
+		c.collectOnce(ts)
+	}
+	if !st.ReplicaCPUSaturated("demo", 0, "run-a", 1030, 100) {
+		t.Fatal("three good high samples should establish saturation")
+	}
+	smp.errByPID = map[int]error{10: errSample}
+	c.collectOnce(1045)
+	got := st.Series("demo", 1045)
+	if got.CPU[len(got.CPU)-1] != nil {
+		t.Fatal("all failed samples must produce unavailable CPU, not zero")
+	}
+	if st.ReplicaCPUSaturated("demo", 0, "run-a", 1045, 100) {
+		t.Fatal("a sampling error must break the saturated streak")
+	}
+	smp.errByPID = nil
+	c.collectOnce(1060)
+	got = st.Series("demo", 1060)
+	if last := got.CPU[len(got.CPU)-1]; last == nil || *last != busy {
+		t.Fatal("CPU must recover as soon as sampling succeeds")
+	}
+	if st.ReplicaCPUSaturated("demo", 0, "run-a", 1060, 100) {
+		t.Fatal("one recovered sample must not restore the old saturated streak")
 	}
 }
 

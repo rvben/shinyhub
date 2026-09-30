@@ -4,6 +4,7 @@
 // status distribution for the pulse bar, the apps that need attention, and a
 // fleet resource summary. Kept DOM-free so it is unit-testable and so the view
 // stays a thin renderer over a tested model.
+import { cpuSeverity } from './stat-format.js';
 import { fleetID } from './fleet-ui.js';
 
 // Wire statuses grouped into the four pulse buckets. Anything unmapped counts
@@ -277,7 +278,7 @@ function applyHostScale(metric, host, runningReplicas, metricsState) {
   metric.peakFraction = null;
   // Without a capacity there is no threshold to be near, so severity says
   // normal and the row's state label says "live" instead of claiming a verdict.
-  metric.severity = host ? severityFor(metric.fraction) : 'normal';
+  metric.severity = host ? severityFor(metric.fraction, metric.kind) : 'normal';
 
   // Coverage now means "reported", not "has a limit": an unlimited replica is
   // fully measured on this scale.
@@ -428,7 +429,7 @@ function collectAppPressure(app, replicas, metric, hotspots) {
     appCapacity += facts.limit;
     appLimitTotal += facts.limit;
     const fraction = facts.used / facts.limit;
-    const severity = severityFor(fraction);
+    const severity = severityFor(fraction, metric.kind);
     metric.peakFraction = metric.peakFraction == null ? fraction : Math.max(metric.peakFraction, fraction);
     if (severity !== 'normal' && (!hottest || fraction > hottest.fraction)) {
       hottest = {
@@ -493,7 +494,7 @@ function finishMetric(metric, runningApps, runningReplicas, metricsState) {
   metric.coverage.runningApps = runningApps;
   metric.coverage.runningReplicas = runningReplicas;
   metric.fraction = metric.capacity > 0 ? metric.used / metric.capacity : null;
-  metric.severity = severityFor(metric.peakFraction);
+  metric.severity = severityFor(metric.peakFraction, metric.kind);
 
   if (runningReplicas === 0) metric.state = 'idle';
   else if (metricsState === 'unavailable') metric.state = 'unavailable';
@@ -503,8 +504,9 @@ function finishMetric(metric, runningApps, runningReplicas, metricsState) {
   else metric.state = 'unavailable';
 }
 
-function severityFor(fraction) {
+function severityFor(fraction, kind) {
   if (!Number.isFinite(fraction)) return 'unknown';
+  if (kind === 'cpu') return cpuSeverity(fraction);
   if (fraction >= CRITICAL_FRACTION) return 'critical';
   if (fraction >= WARNING_FRACTION) return 'warning';
   return 'normal';

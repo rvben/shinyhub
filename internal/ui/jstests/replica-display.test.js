@@ -56,7 +56,7 @@ test('metricsText returns n/a + note when metrics_available is false', () => {
 test('metricsText returns formatted numbers when metrics_available is true', () => {
   const got = metricsText({ metrics_available: true, cpu_percent: 1.5, rss_bytes: 104857600,
     pss_bytes: 80 << 20, uss_bytes: 64 << 20, swap_pss_bytes: 0 });
-  assert.equal(got.cpuText, '1.5%');
+  assert.equal(got.cpuText, '0.015 cores');
   assert.equal(got.ramText, '100 MB');
   assert.equal(got.physicalText, '80 MB');
   assert.match(got.attributionNote, /PSS 80 MB · private 64 MB · swap PSS 0 KB/);
@@ -65,10 +65,42 @@ test('metricsText returns formatted numbers when metrics_available is true', () 
 
 test('metricsText returns dash for genuinely-zero RAM when metrics_available is true', () => {
   const got = metricsText({ metrics_available: true, cpu_percent: 0, rss_bytes: 0 });
-  assert.equal(got.cpuText, '0.0%');
+  assert.equal(got.cpuText, '0.0 cores');
   // The existing em-dash treatment for zero RAM is preserved.
   assert.match(got.ramText, /^[—-]$/);
   assert.equal(got.note, null);
+});
+
+test('metricsText shows CPU cores against an enforced replica quota', () => {
+  const got = metricsText({ metrics_available: true, cpu_percent: 125,
+    effective_cpu_quota_percent: 200, cpu_quota_enforced: true });
+  assert.equal(got.cpuText, '1.25 / 2 cores');
+  assert.match(got.cpuNote, /enforced CPU quota/);
+});
+
+test('CPU reference is not presented as a quota and tiny rates remain visible', () => {
+  const unquoted = metricsText({ metrics_available: true, cpu_percent: 95 });
+  assert.equal(unquoted.cpuText, '0.95 cores');
+  assert.match(unquoted.cpuNote, /no enforced CPU quota/);
+  assert.equal(metricsText({ metrics_available: true, cpu_percent: 0.00001 }).cpuText, '0.0000001 cores');
+  const limited = metricsText({ metrics_available: true, cpu_percent: 0.004,
+    cpu_quota_enforced: true, effective_cpu_quota_percent: 1 });
+  assert.equal(limited.cpuText, '0.00004 / 0.01 cores');
+});
+
+test('unavailable or invalid replica CPU values are never represented as measurements', () => {
+  for (const cpu_percent of [null, undefined, NaN, Infinity, -1]) {
+    assert.equal(metricsText({ metrics_available: true, cpu_percent }).cpuText, '—');
+  }
+  assert.equal(metricsText({ metrics_available: false, cpu_percent: 95 }).cpuText, 'n/a');
+});
+
+test('PID-backed sampling failure is temporary missing data, distinct from unsupported monitoring', () => {
+  const failed = metricsText({ pid: 10, metrics_available: false, cpu_percent: null, rss_bytes: 0 });
+  assert.equal(failed.cpuText, '—');
+  assert.equal(failed.ramText, '—');
+  assert.match(failed.note, /sampling failed.*Retry metrics/);
+  assert.equal(metricsText({ pid: 0, metrics_available: false }).cpuText, 'n/a');
 });
 
 test('metricsText: a PID-backed replica with no rate yet shows a dash, not 0.0%', () => {
@@ -93,7 +125,7 @@ test('metricsText: a null rate is distinct from an unsupported tier', () => {
 
 test('metricsText returns KB when rss_bytes < 1MB', () => {
   const got = metricsText({ metrics_available: true, cpu_percent: 2.3, rss_bytes: 512 * 1024 });
-  assert.equal(got.cpuText, '2.3%');
+  assert.equal(got.cpuText, '0.023 cores');
   assert.match(got.ramText, /KB/);
   assert.equal(got.note, null);
 });
@@ -120,7 +152,7 @@ test('metricsText three-state contract: false=n/a, true=real, undefined=pending 
 
   // State 2: PID-backed (native) - show real numbers
   const native = metricsText({ metrics_available: true, cpu_percent: 5.0, rss_bytes: 1 << 20 });
-  assert.equal(native.cpuText, '5.0%');
+  assert.equal(native.cpuText, '0.05 cores');
   assert.equal(native.ramText, '1 MB');
   assert.equal(native.note, null);
 
@@ -144,7 +176,7 @@ test('mixed-tier set: native replica shows real %, fargate shows n/a', () => {
   assert.equal(fargateLabel, 'fargate:burst');
 
   const nm = metricsText(native);
-  assert.equal(nm.cpuText, '3.7%');
+  assert.equal(nm.cpuText, '0.037 cores');
   assert.equal(nm.ramText, '200 MB');
   assert.equal(nm.note, null);
 

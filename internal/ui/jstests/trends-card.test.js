@@ -28,6 +28,36 @@ test('renders four labelled trend rows from a populated history', () => {
   assert.deepEqual(metrics, ['cpu', 'memory', 'sessions', 'instances']);
 });
 
+test('CPU trend distinguishes current capacity from historical capacity', () => {
+  const card = renderTrendsCard(doc(), fullHistory(), 1);
+  const cpu = card.querySelector('.trend-row[data-metric="cpu"]');
+  assert.equal(cpu.querySelectorAll('.trend-capacity-line').length, 1);
+  assert.match(cpu.textContent, /Current capacity: 1 core \(dashed; may have changed\)/);
+  assert.match(cpu.querySelector('svg').getAttribute('aria-label'), /Current capacity 100.0%; capacity may have differed during this history/);
+  assert.match(cpu.textContent, /100% = one core/);
+});
+
+test('CPU trend explains its denominator even when capacity is unavailable', () => {
+  const card = renderTrendsCard(doc(), fullHistory());
+  assert.equal(card.querySelector('.trend-row[data-metric="cpu"] .trend-capacity-label').textContent, '100% = one core');
+});
+
+test('trends preserve every exact sample in an adjacent semantic data table', () => {
+  const history = fullHistory();
+  history.series.cpu = [10.12345, null, 12.5];
+  const card = renderTrendsCard(doc(), history, 4);
+  const table = card.querySelector('table');
+  assert.ok(table.parentElement.classList.contains('sr-only'));
+  assert.equal(table.parentElement.tagName, 'DIV');
+  assert.match(table.querySelector('caption').textContent, /Current CPU capacity is 4 cores; historical capacity may differ/);
+  assert.match(table.querySelector('thead').textContent, /CPU \(100% = one core\)/);
+  assert.equal(table.querySelectorAll('tbody tr').length, 3);
+  assert.equal(table.querySelector('tbody tr th').textContent, '1970-01-01T00:00:01.000Z');
+  assert.equal(table.querySelector('tbody tr td').textContent, '10.12345%');
+  assert.equal(table.querySelectorAll('tbody tr')[1].querySelector('td').textContent, 'No sample');
+  assert.equal(table.querySelectorAll('tbody tr')[2].querySelectorAll('td')[1].textContent, String(210 * MB));
+});
+
 test('heading shows the retention window', () => {
   const card = renderTrendsCard(doc(), fullHistory());
   const h = card.querySelector('h2');

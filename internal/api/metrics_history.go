@@ -15,6 +15,7 @@ import (
 type metricsHistoryResponse struct {
 	WindowSeconds   int64          `json:"window_seconds"`
 	IntervalSeconds int64          `json:"interval_seconds"`
+	GeneratedAt     time.Time      `json:"generated_at"`
 	Series          history.Series `json:"series"`
 }
 
@@ -37,13 +38,15 @@ func (s *Server) handleMetricsHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.history == nil {
-		writeJSON(w, http.StatusOK, metricsHistoryResponse{Series: history.EmptySeries()})
+		writeJSON(w, http.StatusOK, metricsHistoryResponse{GeneratedAt: time.Now().UTC(), Series: history.EmptySeries()})
 		return
 	}
+	now := time.Now().UTC()
 	writeJSON(w, http.StatusOK, metricsHistoryResponse{
 		WindowSeconds:   s.history.WindowSeconds(),
 		IntervalSeconds: s.history.IntervalSeconds(),
-		Series:          s.history.Series(slug, time.Now().Unix()),
+		GeneratedAt:     now,
+		Series:          s.history.Series(slug, now.Unix()),
 	})
 }
 

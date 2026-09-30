@@ -876,3 +876,14 @@ func slugsOf(rows []topRow) string {
 }
 
 func i64(v int64) *int64 { return &v }
+
+func TestTopCPUCapacityText(t *testing.T) {
+	row := topRow{CPUPercent: f64(1020), CPUCapacityCores: f64(16)}
+	if got := topCPUCapacityText(styler{}, row); got != "1020.0 10.2/16c" {
+		t.Fatalf("CPU display = %q", got)
+	}
+	row.CPUPartial = true
+	if got := topCPUCapacityText(styler{ascii: true}, row); got != ">=1020.0 >=10.2/16c" {
+		t.Fatalf("partial CPU display = %q", got)
+	}
+}

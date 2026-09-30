@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import {
   summariseAutoscale,
+  scaleOutThreshold,
   formatRejectsByReason,
   rejectionGuidance,
   renderAutoscaleSummary,
@@ -35,9 +36,15 @@ test('summariseAutoscale reads the app + effective fields and flags inheritance'
     enabled: true,
     current: 3,
     min: 2,
+    configuredMin: 2,
     max: 8,
+    configuredMax: 8,
+    runtimeCapped: false,
+    isElastic: false,
+    minWarm: 0,
     target: 0.75,
     effectiveTarget: 0.75,
+    effectiveCap: 0,
     inheritsTarget: false,
     drift: false,
     lastActionAt: null,
@@ -46,6 +53,83 @@ test('summariseAutoscale reads the app + effective fields and flags inheritance'
     cooldownUntil: null,
     globalEnabled: true,
   });
+});
+
+test('scale-out threshold follows the controller session-load formula', () => {
+  const s = summariseAutoscale(
+    { autoscale_enabled: true, autoscale_min_replicas: 1, autoscale_max_replicas: 24, autoscale_target: 0.8, replicas: 16 },
+    { effective_autoscale_target: 0.8, effective_max_sessions_per_replica: 60 },
+  );
+  assert.deepEqual(scaleOutThreshold(s), {
+    state: 'ready', threshold: 769, text: 'Scale-out threshold · 769 sessions',
+  });
+  const dom = new JSDOM('<dl></dl>');
+  renderAutoscaleSummary(dom.window.document.querySelector('dl'), s);
+  assert.match(dom.window.document.querySelector('dl').textContent, /Session scale-out769 active sessions/);
+});
+
+test('scale-out threshold reports max, paused, off, and unresolved cap', () => {
+  const s = { enabled: true, globalEnabled: true, current: 16, max: 16, effectiveCap: 60, effectiveTarget: 0.8 };
+  assert.equal(scaleOutThreshold(s).state, 'max');
+  assert.equal(scaleOutThreshold({ ...s, globalEnabled: false }).state, 'paused');
+  assert.equal(scaleOutThreshold({ ...s, enabled: false }).state, 'off');
+  assert.equal(scaleOutThreshold({ ...s, max: 24, effectiveCap: 0 }).state, 'unknown');
+  assert.equal(scaleOutThreshold({ ...s, max: 24, minWarm: 18 }).state, 'floor');
+});
+
+test('runtime ceiling constrains the visible range and blocks impossible scale-out targets', () => {
+  const s = summariseAutoscale({ autoscale_enabled: true, replicas: 4,
+    autoscale_min_replicas: 8, autoscale_max_replicas: 24, min_warm_replicas: 10 },
+  { effective_autoscale_max_replicas: 4, effective_autoscale_target: 0.8,
+    effective_max_sessions_per_replica: 60 });
+  assert.equal(s.min, 4);
+  assert.equal(s.max, 4);
+  assert.equal(s.configuredMax, 24);
+  assert.equal(s.runtimeCapped, true);
+  assert.equal(scaleOutThreshold(s).state, 'max');
+  assert.match(scaleOutThreshold({ ...s, current: 2 }).text, /desired 4$/);
+});
+
+test('warm replica floor governs the displayed range, drift, and session trigger together', () => {
+  const summary = summariseAutoscale({ autoscale_enabled: true, replicas: 2,
+    autoscale_min_replicas: 1, autoscale_max_replicas: 8, min_warm_replicas: 3 },
+  { effective_autoscale_target: 0.8, effective_max_sessions_per_replica: 10 });
+  assert.equal(summary.configuredMin, 1);
+  assert.equal(summary.min, 3);
+  assert.equal(summary.drift, true);
+  assert.deepEqual(scaleOutThreshold(summary), { state: 'floor', text: 'Below minimum · desired 3' });
+  const dom = new JSDOM('<dl></dl>');
+  renderAutoscaleSummary(dom.window.document.querySelector('dl'), summary);
+  assert.match(dom.window.document.querySelector('dl').textContent, /2 \/ \[3-8\].*drift/);
+});
+
+test('session thresholds preserve the controller floating-point decision boundary', () => {
+  const s = { enabled: true, current: 1, min: 1, max: 4, effectiveCap: 1,
+    effectiveTarget: 0.9999999998 };
+  assert.equal(scaleOutThreshold(s).threshold, 1);
+  assert.equal(scaleOutThreshold({ ...s, effectiveCap: 100, effectiveTarget: 0.29 }).threshold, 29);
+  for (const [current, effectiveCap, effectiveTarget, expected] of [[25, 2, 0.58, 30], [30, 1, 0.7, 21]]) {
+    const threshold = scaleOutThreshold({ ...s, max: 100, current, effectiveCap, effectiveTarget }).threshold;
+    assert.equal(threshold, expected);
+    assert.ok(Math.ceil(threshold / (effectiveTarget * effectiveCap)) > current);
+    assert.ok(Math.ceil((threshold - 1) / (effectiveTarget * effectiveCap)) <= current);
+  }
+});
+
+test('elastic workers never inherit multiplex replica autoscale or stale controller warnings', () => {
+  const s = summariseAutoscale({ worker_isolation: 'per_session', autoscale_enabled: true,
+    replicas: 1, autoscale_min_replicas: 1, autoscale_max_replicas: 24 },
+  { effective_autoscale_max_replicas: 0, effective_autoscale_target: 0.8 });
+  assert.equal(s.isElastic, true);
+  assert.equal(s.enabled, false);
+  assert.equal(scaleOutThreshold(s).state, 'off');
+  const dom = new JSDOM('<section><dl></dl><p class="autoscale-killswitch-warning">stale</p></section>');
+  const dl = dom.window.document.querySelector('dl');
+  renderAutoscaleSummary(dl, s);
+  assert.equal(dl.textContent, 'CapacityWorkers allocated on demand');
+  assert.equal(dl.parentNode.querySelector('.autoscale-killswitch-warning'), null);
+  assert.equal(summariseAutoscale({ worker_isolation: '', effective_worker_isolation: 'grouped',
+    autoscale_enabled: true }, {}).isElastic, true);
 });
 
 test('summariseAutoscale flags an inherited target when app.autoscale_target is 0', () => {
@@ -124,7 +208,9 @@ test('summariseAutoscale tolerates missing fields with safe defaults', () => {
   const got = summariseAutoscale({}, {});
   assert.deepEqual(got, {
     enabled: false, current: 1, min: 1, max: 1, target: 0,
-    effectiveTarget: 0, inheritsTarget: true, drift: false,
+    configuredMin: 1, configuredMax: 1, runtimeCapped: false, isElastic: false,
+    minWarm: 0,
+    effectiveTarget: 0, effectiveCap: 0, inheritsTarget: true, drift: false,
     lastActionAt: null, lastAction: '', inCooldown: false,
     cooldownUntil: null, globalEnabled: true,
   });

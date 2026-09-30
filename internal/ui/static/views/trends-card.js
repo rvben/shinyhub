@@ -4,7 +4,7 @@
 // Memory, Sessions, Instances) showing the latest value plus the trend line.
 
 import { renderSparkline } from './sparkline.js';
-import { formatBytes } from './stat-format.js';
+import { formatBytes, formatCoreCount } from './stat-format.js';
 
 // At least two samples are needed to draw a meaningful trend; below that the
 // card shows a Collecting placeholder.
@@ -77,7 +77,7 @@ function formatCoverage(timestamps, fallbackSeconds) {
 
 // renderTrendsCard returns a <section> with one sparkline per metric, or a
 // Collecting placeholder when there are too few samples.
-export function renderTrendsCard(document, history) {
+export function renderTrendsCard(document, history, capacityCores = null) {
   const series = (history && history.series) || {};
   const windowSeconds = Number(history && history.window_seconds) || 0;
 
@@ -123,7 +123,8 @@ export function renderTrendsCard(document, history) {
   }
 
   const rows = [
-    { key: 'cpu', label: 'CPU', values: cpu, format: fmtPercent, step: false, integer: false },
+    { key: 'cpu', label: 'CPU', values: cpu, format: fmtPercent, step: false, integer: false,
+      capacity: Number.isFinite(capacityCores) && capacityCores > 0 ? capacityCores * 100 : null },
     { key: 'memory', label: 'Memory', values: rss, format: formatBytes, step: false, scale: niceMemoryMax },
     { key: 'sessions', label: 'Sessions', values: sessions, format: fmtInt, step: false, integer: true },
     { key: 'instances', label: 'Instances', values: instances, format: fmtInt, step: true, integer: true },
@@ -135,6 +136,46 @@ export function renderTrendsCard(document, history) {
     grid.appendChild(renderTrendRow(document, row, coverage));
   }
   section.appendChild(grid);
+  // Clip the table inside a block: a table's intrinsic width can otherwise
+  // escape a width:1px visually-hidden rule and widen narrow viewports.
+  const dataTwin = document.createElement('div');
+  dataTwin.className = 'sr-only';
+  const table = document.createElement('table');
+  const tableCaption = document.createElement('caption');
+  tableCaption.textContent = `Exact trend samples; timestamps in UTC.${Number.isFinite(capacityCores) && capacityCores > 0
+    ? ` Current CPU capacity is ${capacityCores} cores; historical capacity may differ.` : ''}`;
+  table.appendChild(tableCaption);
+  const thead = document.createElement('thead');
+  const headers = document.createElement('tr');
+  for (const label of ['Timestamp (UTC)', 'CPU (100% = one core)', 'Memory (bytes)', 'Sessions', 'Instances']) {
+    const th = document.createElement('th');
+    th.scope = 'col';
+    th.textContent = label;
+    headers.appendChild(th);
+  }
+  thead.appendChild(headers);
+  table.appendChild(thead);
+  const tbody = document.createElement('tbody');
+  const values = [cpu, rss, sessions, instances].map(normalizeSamples);
+  for (let index = 0; index < count; index++) {
+    const tr = document.createElement('tr');
+    const timestamp = document.createElement('th');
+    timestamp.scope = 'row';
+    const ts = timestamps[index];
+    timestamp.textContent = Number.isFinite(ts) && Number.isFinite(new Date(ts * 1000).getTime())
+      ? new Date(ts * 1000).toISOString() : `Sample ${index + 1}; timestamp unavailable`;
+    tr.appendChild(timestamp);
+    for (let column = 0; column < values.length; column++) {
+      const td = document.createElement('td');
+      const sample = values[column][index];
+      td.textContent = sample == null ? 'No sample' : `${sample}${column === 0 ? '%' : ''}`;
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  dataTwin.appendChild(table);
+  section.appendChild(dataTwin);
   return section;
 }
 
@@ -145,7 +186,7 @@ function renderTrendRow(document, row, coverage) {
   const valueText = latestAvailable ? row.format(latestSample) : 'No sample';
   const availableCount = samples.filter((sample) => sample !== null).length;
   const missingCount = samples.length - availableCount;
-  const scaleMax = row.scale ? row.scale(samples) : niceMax(samples, row.integer);
+  const scaleMax = Math.max(row.scale ? row.scale(samples) : niceMax(samples, row.integer), row.capacity ? row.capacity * 1.05 : 0);
   const scaleMaxText = row.format(scaleMax);
 
   const wrap = document.createElement('figure');
@@ -169,6 +210,12 @@ function renderTrendRow(document, row, coverage) {
 
   caption.appendChild(label);
   caption.appendChild(value);
+  if (row.key === 'cpu') {
+    const unitNote = document.createElement('span');
+    unitNote.className = 'trend-capacity-label';
+    unitNote.textContent = '100% = one core';
+    caption.appendChild(unitNote);
+  }
 
   const plot = document.createElement('div');
   plot.className = 'trend-plot';
@@ -208,6 +255,23 @@ function renderTrendRow(document, row, coverage) {
     ariaLabel: `${row.label} over ${coverage}. ${currentDescription} ${direction ? `${direction} from ${row.format(firstAvailable)}. ` : ''}Scale 0 to ${scaleMaxText}.${missingDescription}`,
     className: `sparkline sparkline-${row.key}`,
   });
+  if (row.capacity) {
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    const y = 54 - row.capacity / scaleMax * 54;
+    line.setAttribute('class', 'trend-capacity-line');
+    line.setAttribute('x1', '0');
+    line.setAttribute('x2', '160');
+    line.setAttribute('y1', String(y));
+    line.setAttribute('y2', String(y));
+    line.setAttribute('vector-effect', 'non-scaling-stroke');
+    spark.appendChild(line);
+    spark.setAttribute('aria-label', `${spark.getAttribute('aria-label')} Current capacity ${row.format(row.capacity)}; capacity may have differed during this history.`);
+    const ceiling = document.createElement('span');
+    ceiling.className = 'trend-capacity-label';
+    const cores = row.capacity / 100;
+    ceiling.textContent = `Current capacity: ${Number.isInteger(cores) ? cores + (cores === 1 ? ' core' : ' cores') : formatCoreCount(cores)} (dashed; may have changed)`;
+    caption.appendChild(ceiling);
+  }
 
   const xAxis = document.createElement('div');
   xAxis.className = 'trend-x-axis';

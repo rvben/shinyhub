@@ -58,11 +58,13 @@ func runAppsMetrics(cmd *cobra.Command, args []string, f *appsMetricsFlags) erro
 	}
 
 	var m struct {
-		Status           string `json:"status"`
-		SessionsCap      int    `json:"sessions_cap"`
-		WorkerIsolation  string `json:"worker_isolation"`
-		MaxWorkers       int    `json:"max_workers"`
-		MetricsAvailable bool   `json:"metrics_available"`
+		Status           string   `json:"status"`
+		CPUCores         *float64 `json:"cpu_cores"`
+		CPUCapacityCores *float64 `json:"cpu_capacity_cores"`
+		SessionsCap      int      `json:"sessions_cap"`
+		WorkerIsolation  string   `json:"worker_isolation"`
+		MaxWorkers       int      `json:"max_workers"`
+		MetricsAvailable bool     `json:"metrics_available"`
 		Replicas         []struct {
 			Index            int      `json:"index"`
 			Status           string   `json:"status"`
@@ -95,6 +97,13 @@ func runAppsMetrics(cmd *cobra.Command, args []string, f *appsMetricsFlags) erro
 			s.status(m.Status), m.WorkerIsolation, m.MaxWorkers*m.SessionsCap, m.MaxWorkers, m.SessionsCap, note)
 	} else {
 		fmt.Fprintf(w, "App: %s · sessions cap %d · metrics %s\n", s.status(m.Status), m.SessionsCap, note)
+	}
+	if m.CPUCores != nil {
+		if m.CPUCapacityCores != nil && *m.CPUCapacityCores > 0 {
+			fmt.Fprintf(w, "CPU: %s/%gc (%.1f%% of capacity)\n", cpuCoreUseText(*m.CPUCores), *m.CPUCapacityCores, *m.CPUCores / *m.CPUCapacityCores * 100)
+		} else {
+			fmt.Fprintf(w, "CPU: %sc (capacity unknown)\n", cpuCoreUseText(*m.CPUCores))
+		}
 	}
 	if len(m.Replicas) == 0 {
 		fmt.Fprintln(w, "No running replicas.")

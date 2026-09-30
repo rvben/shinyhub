@@ -514,25 +514,60 @@
           <span id="app-detail-slug" class="meta-chip"></span>
         </div>
         <div id="app-detail-release" class="app-detail-release" hidden></div>
-        <dl class="app-detail-stats" aria-label="Current app metrics">
-          <div class="stat">
-            <dt class="stat-label">CPU</dt>
-            <dd class="stat-value" id="app-detail-cpu">—</dd>
+        <div class="app-detail-capacity" data-metrics-state="loading">
+          <div class="capacity-freshness">
+            <p id="app-detail-metrics-status" class="app-detail-metrics-status" role="status"><span id="app-detail-metrics-message">Loading live metrics…</span> <button id="app-detail-metrics-retry" type="button" class="ov-btn" hidden>Retry metrics</button></p>
+            <span id="app-detail-metrics-updated" hidden></span>
           </div>
-          <div class="stat">
-            <dt class="stat-label">Memory</dt>
-            <dd class="stat-value" id="app-detail-ram">—</dd>
-          </div>
-          <div class="stat">
-            <dt class="stat-label">Replicas</dt>
-            <dd class="stat-value" id="app-detail-replicas">—</dd>
-          </div>
-          <div class="stat">
-            <dt class="stat-label">Sessions</dt>
-            <dd class="stat-value" id="app-detail-sessions">—</dd>
-          </div>
-        </dl>
-        <p id="app-detail-metrics-status" class="app-detail-metrics-status" role="status" hidden>Live metrics unavailable. Showing last known values.</p>
+          <dl class="app-detail-stats" aria-label="Current app metrics">
+            <div class="stat stat-cpu">
+              <dt class="stat-label">CPU</dt>
+              <dd class="stat-value" id="app-detail-cpu" tabindex="-1">—</dd>
+              <dd class="cpu-meter" id="app-detail-cpu-meter" hidden><meter aria-label="CPU capacity"></meter></dd>
+              <dd class="cpu-context" id="app-detail-cpu-context"></dd>
+            </div>
+            <div class="stat stat-replicas">
+              <dt class="stat-label" id="app-detail-capacity-label">Replicas</dt>
+              <dd class="stat-value" id="app-detail-replicas">—</dd>
+              <dd class="replicas-explain">running</dd>
+              <dd class="replica-desired" id="app-detail-replica-desired" hidden></dd>
+            </div>
+            <div class="stat stat-memory">
+              <dt class="stat-label">Memory</dt>
+              <dd class="stat-value" id="app-detail-ram">—</dd>
+            </div>
+            <div class="stat stat-sessions">
+              <dt class="stat-label">Sessions</dt>
+              <dd class="stat-value" id="app-detail-sessions">—</dd>
+            </div>
+          </dl>
+          <details id="app-detail-capacity-details" class="capacity-details" hidden>
+            <summary><span id="app-detail-capacity-details-label">Inspect replica CPU and autoscaling</span> <span id="app-detail-capacity-signal"></span></summary>
+            <div class="capacity-diagnostics">
+                <div id="app-detail-cpu-heat" class="cpu-heat" hidden>
+                  <div class="cpu-heat-label" title="Each value is measured against one core or its enforced CPU quota. A one-core reference is not a limit."><span class="cpu-heat-title">Replica CPU</span> <span class="cpu-heat-unit">per-core or quota</span></div>
+                  <p class="cpu-heat-guide" id="replica-cpu-help">Select a process to inspect it. Use arrow keys to move between processes. Percentages use one core or the enforced quota.</p>
+                  <div class="cpu-heat-cells" role="group" aria-label="CPU use by running replica" aria-describedby="replica-cpu-help"></div>
+                  <div class="cpu-heat-footer">
+                    <span class="cpu-heat-warning" role="status" hidden></span>
+                    <span class="cpu-heat-state" role="status" hidden></span>
+                  </div>
+                  <p class="cpu-heat-inspector" aria-live="off" hidden></p>
+                </div>
+              <section id="app-detail-autoscale-visual" class="autoscale-visual" aria-label="Autoscale capacity" hidden>
+                <p class="autoscale-range-heading"></p>
+                <div class="autoscale-range-track" role="img" aria-label="Autoscale replica range"><span class="autoscale-range-segments" aria-hidden="true"></span><span class="autoscale-range-fill"></span><span class="autoscale-range-marker"></span></div>
+                <div class="autoscale-range-labels"><span class="autoscale-min"></span><span class="autoscale-max"></span></div>
+                <div class="autoscale-session">
+                  <div class="autoscale-session-head"><strong class="autoscale-next"></strong><span class="autoscale-session-now"></span></div>
+                  <div class="autoscale-load-track" role="img" aria-label="Sessions toward next replica" hidden><span class="autoscale-load-fill"></span></div>
+                  <div class="autoscale-load-labels"><span class="autoscale-band-start"></span><span class="autoscale-session-target"></span></div>
+                  <span class="autoscale-session-state"></span>
+                </div>
+              </section>
+            </div>
+          </details>
+        </div>
       </header>
       <nav class="settings-tabs" role="tablist" aria-label="App sections">
         <a href="" data-nav class="settings-tab" role="tab" data-tab="overview"      id="detail-tab-overview"      aria-controls="detail-overview-panel"      aria-selected="true"  >Overview</a>

@@ -2,6 +2,7 @@ package history
 
 import (
 	"context"
+	"strconv"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/process"
@@ -116,6 +117,10 @@ func (c *Collector) collectOnce(now int64) {
 			byslug[info.Slug] = a
 		}
 		a.instances++
+		runID := info.LogRunID
+		if runID == "" {
+			runID = strconv.Itoa(info.PID)
+		}
 		if info.PID != 0 {
 			alive[int32(info.PID)] = struct{}{}
 		}
@@ -127,15 +132,20 @@ func (c *Collector) collectOnce(now int64) {
 			// publish a flat 0% line for an app running entirely off-host, or
 			// show a bursting app's usage dropping as it scales onto Fargate.
 			a.cpuMissing = true
+			c.store.RecordReplicaCPU(info.Slug, info.Index, runID, now, nil)
 			continue
 		}
 		if stats, err := c.sampler.Sample(handle); err == nil {
+			c.store.RecordReplicaCPU(info.Slug, info.Index, runID, now, stats.CPUPercent)
 			if stats.CPUPercent == nil {
 				a.cpuMissing = true
 			} else {
 				a.cpu += *stats.CPUPercent
 			}
 			a.rss += stats.RSSBytes
+		} else {
+			a.cpuMissing = true
+			c.store.RecordReplicaCPU(info.Slug, info.Index, runID, now, nil)
 		}
 	}
 

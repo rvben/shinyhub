@@ -38,17 +38,18 @@ func parseTopSort(v string) (topSort, error) {
 // topMetrics is the subset of one app's GET /api/apps/metrics entry this view
 // reads.
 type topMetrics struct {
-	Status          string       `json:"status"`
-	DesiredStatus   string       `json:"desired_status"`
-	Deploying       bool         `json:"deploying"`
-	SessionsCap     int          `json:"sessions_cap"`
-	SessionsCeiling int          `json:"sessions_ceiling"`
-	ReplicasDesired int          `json:"replicas_desired"`
-	ReplicasRunning int          `json:"replicas_running"`
-	WorkersRunning  int          `json:"workers_running"`
-	WorkerIsolation string       `json:"worker_isolation"`
-	MaxWorkers      int          `json:"max_workers"`
-	Replicas        []topReplica `json:"replicas"`
+	CPUCapacityCores *float64     `json:"cpu_capacity_cores"`
+	Status           string       `json:"status"`
+	DesiredStatus    string       `json:"desired_status"`
+	Deploying        bool         `json:"deploying"`
+	SessionsCap      int          `json:"sessions_cap"`
+	SessionsCeiling  int          `json:"sessions_ceiling"`
+	ReplicasDesired  int          `json:"replicas_desired"`
+	ReplicasRunning  int          `json:"replicas_running"`
+	WorkersRunning   int          `json:"workers_running"`
+	WorkerIsolation  string       `json:"worker_isolation"`
+	MaxWorkers       int          `json:"max_workers"`
+	Replicas         []topReplica `json:"replicas"`
 }
 
 // topReplica mirrors the server's per-replica row. CPUPercent is a pointer
@@ -84,6 +85,7 @@ type topReplica struct {
 // renders those with a "at least" marker rather than silently presenting a
 // lower bound as the whole.
 type topRow struct {
+	CPUCapacityCores   *float64
 	Slug               string
 	Status             string
 	Running            int
@@ -124,7 +126,8 @@ func topRowFor(slug string, m topMetrics) topRow {
 	}
 	row := topRow{
 		Slug: slug, Status: m.Status, Replicas: replicas, Workers: m.WorkersRunning,
-		ReplicaRows: append([]topReplica(nil), m.Replicas...),
+		CPUCapacityCores: m.CPUCapacityCores,
+		ReplicaRows:      append([]topReplica(nil), m.Replicas...),
 	}
 	if m.Deploying {
 		row.Status = "deploying"
@@ -470,6 +473,28 @@ func topCPUText(s styler, v *float64, partial bool) string {
 	return out
 }
 
+func topCPUCapacityText(s styler, r topRow) string {
+	value := topCPUText(s, r.CPUPercent, r.CPUPartial)
+	if r.CPUPercent == nil || r.CPUCapacityCores == nil || *r.CPUCapacityCores <= 0 {
+		return value
+	}
+	coreMark := ""
+	if r.CPUPartial {
+		coreMark = topAtLeastMark(s)
+	}
+	return fmt.Sprintf("%s %s%s/%gc", value, coreMark, cpuCoreUseText(*r.CPUPercent/100), *r.CPUCapacityCores)
+}
+
+func cpuCoreUseText(cores float64) string {
+	if cores > 0 && cores < 0.01 {
+		return fmt.Sprintf("%.3f", cores)
+	}
+	if cores > 0 && cores < 0.1 {
+		return fmt.Sprintf("%.2f", cores)
+	}
+	return fmt.Sprintf("%.1f", cores)
+}
+
 func topRSSText(s styler, v *int64, partial bool) string {
 	if v == nil {
 		return "-"
@@ -798,7 +823,7 @@ func topBody(s styler, v topView, overhead int) []string {
 			txt(r.Slug),
 			statusTxt(r.Status),
 			txt(fmt.Sprintf("%d/%d", r.Running, r.Replicas)),
-			txt(topCPUText(s, r.CPUPercent, r.CPUPartial)),
+			txt(topCPUCapacityText(s, r)),
 			txt(topRSSText(s, r.RSSBytes, r.RSSPartial)),
 			sessions,
 		)
@@ -952,7 +977,7 @@ func topTUIBody(s styler, v topView, overhead int) []string {
 		}
 		t.row(markerCell, txt(r.Slug), status,
 			txt(fmt.Sprintf("%d/%d", r.Running, r.Replicas)),
-			txt(topCPUText(s, r.CPUPercent, r.CPUPartial)),
+			txt(topCPUCapacityText(s, r)),
 			txt(topRSSText(s, r.RSSBytes, r.RSSPartial)), sessions)
 		if isSelected {
 			t.paintRow(styler.reverse)

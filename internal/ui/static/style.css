@@ -3485,10 +3485,7 @@ fieldset.settings-block { min-width: 0; }
   .app-detail-actions > a,
   .app-detail-actions > .btn-primary,
   .app-detail-actions .kebab-menu > button { min-height: 44px; height: 44px; }
-  /* 2x2 tiles on mobile. The extra .app-detail-header qualifier outranks the
-     later base .app-detail-stats .stat rule (media queries add no specificity,
-     so source order would otherwise win). */
-  .app-detail-header .app-detail-stats .stat { min-width: calc(50% - 0.375rem); max-width: none; }
+  .app-detail-header .app-detail-stats .stat { min-width: 0; max-width: none; }
 
   /* Wide admin tables scroll within themselves rather than overflowing body.
      :not([hidden]) so these ID-specificity rules don't override the hidden
@@ -5624,27 +5621,36 @@ fieldset.settings-block { min-width: 0; }
 .release-history::after { content: " \2192"; }
 .release-history:hover { text-decoration-color: currentColor; }
 
-/* Metric tiles: real fleet aggregates (CPU/Memory/Replicas/Sessions). */
-.app-detail-stats {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 0;
-  overflow: hidden;
-  margin: 1.15rem 0 0;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-lg);
-  background: rgba(var(--surface-rgb), 0.72);
-}
-.app-detail-stats .stat {
-  min-width: 0;
-  margin: 0;
-  padding: 0.8rem 1rem 0.85rem;
-  border-right: 1px solid var(--line);
-}
-.app-detail-stats .stat:last-child { border-right: none; }
-.app-detail-stats.is-stale .stat-value { color: var(--text-muted); }
-.app-detail-metrics-status { margin: 0.45rem 0 0; color: var(--yellow); font-size: var(--fs-label); }
-.app-detail-metrics-status[hidden] { display: none; }
+/* Persistent summary stays compact; diagnostic detail is operator-controlled. */
+.app-detail-capacity { --cpu-alert-ink: var(--red); margin-top: 1.15rem; border-block: 1px solid var(--line); background: var(--surface); }
+:root[data-theme="light"] .app-detail-capacity { --cpu-alert-ink: color-mix(in srgb, var(--red) 80%, var(--text)); }
+.capacity-freshness { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem 1rem; padding-top: 0.65rem; color: var(--text-soft); font-size: var(--fs-label); }
+.capacity-freshness:has(#app-detail-metrics-status[hidden]):has(#app-detail-metrics-updated[hidden]) { display: none; }
+.app-detail-stats { display: grid; grid-template-columns: minmax(0, 1.8fr) repeat(3, minmax(0, 1fr)); margin: 0; }
+.app-detail-stats .stat { min-width: 0; margin: 0; padding: 1rem 1.2rem; }
+.app-detail-stats .stat:first-child { padding-inline-start: 0; }
+.app-detail-stats .stat + .stat { border-inline-start: 1px solid var(--line); }
+.replica-desired { margin: 0.35rem 0 0; color: var(--text-soft); font-size: var(--fs-label); font-variant-numeric: tabular-nums; }
+.replica-desired[hidden] { display: none; }
+.app-detail-stats.is-stale .stat-value { color: var(--text-soft); }
+.app-detail-capacity[data-metrics-state="stale"] .cpu-meter,
+.app-detail-capacity[data-metrics-state="stale"] .capacity-diagnostics { filter: grayscale(1); }
+.app-detail-capacity[data-metrics-state="stale"] .capacity-diagnostics::before { content: "Last known measurements — live metrics unavailable"; grid-column: 1 / -1; color: var(--yellow); font-size: var(--fs-label); }
+.app-detail-metrics-status { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin: 0; color: var(--yellow); font-size: var(--fs-label); }
+.app-detail-metrics-status[hidden], #app-detail-metrics-retry[hidden], #app-detail-metrics-updated[hidden] { display: none; }
+.app-detail-capacity[data-metrics-state="current"] .app-detail-metrics-status,
+.app-detail-capacity[data-metrics-state="loading"] .app-detail-metrics-status { color: var(--text-soft); }
+.capacity-details { border-top: 1px solid var(--line); }
+.capacity-details[hidden] { display: none; }
+.capacity-details summary { min-height: 44px; padding: 0.75rem 0; cursor: pointer; color: var(--text-soft); font-size: var(--fs-body); }
+.capacity-details summary:hover { color: var(--text); }
+.capacity-details summary:focus-visible { outline: 2px solid var(--cyan-bright); outline-offset: 3px; }
+#app-detail-capacity-signal { margin-inline-start: 0.5rem; color: var(--yellow); font-size: var(--fs-label); }
+.capacity-diagnostics { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 1rem 2rem; padding: 0.25rem 0 1rem; }
+.capacity-diagnostics .autoscale-visual { margin: 0; padding: 0; border-top: 0; }
+.capacity-diagnostics .cpu-heat[hidden] + .autoscale-visual { grid-column: 1 / -1; }
+.cpu-heat-guide { margin: 0.45rem 0; color: var(--text-soft); font-size: var(--fs-label); line-height: 1.5; }
+
 .stat-label {
   margin: 0;
   font-size: var(--fs-label);
@@ -5660,6 +5666,68 @@ fieldset.settings-block { min-width: 0; }
   color: var(--text);
 }
 .stat-value.is-empty { color: var(--text-muted); }
+.app-detail-stats .stat-value:focus-visible { outline: 2px solid var(--cyan-bright); outline-offset: 3px; }
+.app-detail-stats .stat-value { font-size: var(--fs-title); line-height: 1.35; overflow-wrap: anywhere; }
+
+.cpu-meter { margin: 0; }
+.cpu-meter[hidden], .cpu-heat[hidden], .cpu-heat-warning[hidden], .cpu-heat-state[hidden], .cpu-heat-inspector[hidden] { display: none; }
+.cpu-meter meter { margin-top: 0.55rem; }
+.cpu-context, .replicas-explain { margin: 0.4rem 0 0; color: var(--text-soft); font-size: var(--fs-body); line-height: 1.35; }
+.autoscale-visual { margin: 1.1rem 0 0; padding: 0.9rem 0 0; border-top: 1px solid var(--line); }
+.autoscale-visual[hidden] { display: none; }
+.autoscale-range-heading { margin: 0; color: var(--text-soft); font-size: var(--fs-label); line-height: 1.5; }
+.autoscale-session-head, .autoscale-range-labels, .autoscale-load-labels { display: flex; justify-content: space-between; align-items: baseline; gap: 0.5rem 1rem; }
+.autoscale-range-track { position: relative; height: 0.4rem; margin: 0.8rem 0 0.45rem; border-radius: var(--radius-pill); background: var(--surface-3); }
+.autoscale-range-track.is-segmented { height: 0.65rem; background: transparent; }
+.autoscale-range-segments { display: none; }
+.autoscale-range-track.is-segmented .autoscale-range-segments { display: grid; grid-template-columns: repeat(var(--replica-slots), minmax(0, 1fr)); gap: 3px; height: 100%; }
+.autoscale-range-segments span { border-radius: var(--radius-sm); background: var(--surface-3); }
+.autoscale-range-segments span.is-running { background: var(--cyan-bright); }
+.autoscale-range-segments span.is-desired { outline: 1px solid var(--cyan-bright); outline-offset: -1px; }
+.autoscale-range-track.is-segmented .autoscale-range-fill, .autoscale-range-track.is-segmented .autoscale-range-marker { display: none; }
+.autoscale-range-fill { position: absolute; inset: 0 auto 0 0; width: var(--replica-running-position); border-radius: inherit; background: var(--cyan-bright); }
+.autoscale-range-marker { position: absolute; top: 50%; left: var(--replica-desired-position); width: 0.75rem; height: 0.75rem; border: 0.16rem solid var(--surface); border-radius: 50%; background: var(--cyan-bright); transform: translate(-50%, -50%); }
+.autoscale-range-track.is-pending .autoscale-range-marker { border: 2px solid var(--cyan-bright); background: var(--surface); box-shadow: 0 0 0 2px var(--surface); }
+.autoscale-range-labels { color: var(--text-soft); font-size: var(--fs-body); font-variant-numeric: tabular-nums; }
+.autoscale-session { margin-top: 1rem; padding-top: 0.85rem; border-top: 1px solid var(--line); }
+.autoscale-session-head { font-size: var(--fs-body); }
+.autoscale-next { color: var(--text); font-weight: 650; }
+.autoscale-session-now { color: var(--text-soft); font-variant-numeric: tabular-nums; }
+.autoscale-session-state { display: block; margin-top: 0.25rem; color: var(--yellow); font-size: var(--fs-label); }
+.autoscale-session-state:empty { display: none; }
+.autoscale-visual.is-max .autoscale-session, .autoscale-visual.is-paused .autoscale-session { opacity: 0.72; }
+.autoscale-load-track { height: 0.4rem; margin: 0.65rem 0 0.45rem; overflow: hidden; border-radius: var(--radius-pill); background: var(--surface-3); }
+.autoscale-load-track[hidden] { display: none; }
+.autoscale-load-fill { display: block; width: var(--session-position); height: 100%; border-radius: inherit; background: var(--cyan-bright); }
+.autoscale-load-labels { color: var(--text-soft); font-size: var(--fs-label); font-variant-numeric: tabular-nums; }
+.autoscale-load-labels[hidden] { display: none; }
+.cpu-replica-detail { margin: 0; }
+.cpu-replica-detail[hidden] { display: none; }
+.cpu-heat { margin: 0; }
+.cpu-heat-label { display: flex; justify-content: space-between; gap: 0.5rem; color: var(--text); font-size: var(--fs-body); font-weight: 650; }
+.cpu-heat-unit { color: var(--text-muted); font-size: var(--fs-label); font-weight: 500; }
+.cpu-heat-cells { display: grid; grid-template-columns: repeat(auto-fit, minmax(3rem, 1fr)); gap: 1px; margin-top: 0.55rem; background: var(--line); border-block: 1px solid var(--line); }
+.cpu-heat-cell { display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 0.1rem; min-width: 0; min-height: 56px; padding: 0.3rem 0.45rem; border: 0; background: var(--surface); color: var(--text); text-align: left; cursor: pointer; font-variant-numeric: tabular-nums; }
+.cpu-heat-cell.is-warning { background: var(--yellow-bg); }
+.cpu-heat-cell.is-critical { background: var(--red-bg); }
+.cpu-heat-cell.is-over { box-shadow: inset 0 0 0 1px var(--red); }
+.cpu-heat-cell.is-unknown { color: var(--text-muted); }
+.cpu-heat-cell.is-selected { box-shadow: inset 0 0 0 2px var(--cyan-bright); }
+.cpu-heat-cell:hover { background: var(--surface-3); }
+.cpu-heat-cell.is-critical:hover { background: var(--red-bg); }
+.cpu-heat-cell.is-warning:hover { background: var(--yellow-bg); }
+.cpu-heat-index { color: var(--text-muted); font-size: var(--fs-meta); line-height: 1; }
+.cpu-heat-value { font-family: var(--mono); font-size: var(--fs-body); font-weight: 650; line-height: 1.1; }
+.cpu-heat-cell.is-critical .cpu-heat-value { color: var(--cpu-alert-ink, var(--red)); }
+.cpu-heat-cell.is-warning .cpu-heat-value { color: var(--yellow); }
+.cpu-heat-cell:focus-visible { outline: 2px solid var(--cyan-bright); outline-offset: -2px; }
+.cpu-heat-footer { display: flex; align-items: center; gap: 0.35rem 0.8rem; flex-wrap: wrap; margin-top: 0.45rem; }
+.cpu-heat-footer[hidden] { display: none; }
+.cpu-heat-warning { color: var(--cpu-alert-ink, var(--red)); background: var(--red-bg); border-radius: var(--radius-pill); padding: 0.18rem 0.55rem; font-size: var(--fs-label); font-weight: 700; }
+.cpu-heat-state { color: var(--yellow); font-size: var(--fs-body); }
+.cpu-heat-inspector { margin: 0.8rem 0 0; padding-top: 0.65rem; border-top: 1px solid var(--line); color: var(--text-soft); font-size: var(--fs-body); line-height: 1.4; font-variant-numeric: tabular-nums; }
+.trend-capacity-line { stroke: var(--yellow); stroke-width: 1; stroke-dasharray: 3 3; }
+.trend-capacity-label { flex-basis: 100%; color: var(--text-muted); font-size: var(--fs-meta); }
 
 /* ── App detail: Usage tab ──────────────────────────────────────────────── */
 
@@ -6387,7 +6455,7 @@ fieldset.settings-block { min-width: 0; }
 .trend-row:nth-child(even) { padding-left: 18px; border-left: 1px solid var(--line); }
 .trend-row:nth-child(n + 3) { border-top: 1px solid var(--line); }
 .trend-row:nth-child(odd) { padding-right: 18px; }
-.trend-caption { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+.trend-caption { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 10px; margin-bottom: 8px; }
 .trend-label { color: var(--text-soft); font-size: var(--fs-mono); font-weight: 650; }
 .trend-value { color: var(--text); font: 600 var(--fs-body)/1.4 var(--mono); font-variant-numeric: tabular-nums; text-align: right; }
 .trend-value.is-missing { color: var(--text-muted); font-weight: 500; }
@@ -6491,6 +6559,11 @@ fieldset.settings-block { min-width: 0; }
   .overview-autoscale .overview-dl { grid-template-columns: minmax(0, 1fr) auto; max-width: 38rem; }
 }
 
+@media (max-width: 900px) {
+  .capacity-diagnostics { grid-template-columns: minmax(0, 1fr); }
+  .capacity-diagnostics .autoscale-visual { border-top: 1px solid var(--line); padding-top: 1rem; }
+}
+
 @media (max-width: 760px) {
   #app-detail-view { padding: 22px 16px 52px; }
   .app-detail-bar { align-items: flex-start; }
@@ -6499,9 +6572,10 @@ fieldset.settings-block { min-width: 0; }
   .app-detail-actions > a,
   .app-detail-actions > .btn-primary { flex: 1 1 auto; }
   .app-detail-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .app-detail-stats .stat { padding: 0.6rem 0.75rem; }
-  .app-detail-stats .stat:nth-child(2) { border-right: none; }
-  .app-detail-stats .stat:nth-child(-n + 2) { border-bottom: 1px solid var(--line); }
+  .app-detail-stats .stat { padding: 0.8rem 0.9rem; }
+  .app-detail-stats .stat:nth-child(odd) { padding-inline-start: 0; border-inline-start: 0; }
+  .app-detail-stats .stat:nth-child(n+3) { border-top: 1px solid var(--line); }
+  .cpu-heat-cells { grid-template-columns: repeat(auto-fit, minmax(3rem, 1fr)); }
   .overview-grid {
     grid-template-columns: minmax(0, 1fr);
     grid-template-areas:

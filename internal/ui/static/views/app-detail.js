@@ -19,6 +19,7 @@ import {
 } from '/static/views/deployment-row.js';
 import { releaseStripModel, renderReleaseStrip } from '/static/views/release-strip.js';
 import { statusPillClass } from '/static/views/stat-format.js';
+import { seedDetailCapacity } from '/static/views/detail-capacity.js';
 import { formatStatus } from '/static/views/status-label.js';
 import { appStatusView } from '/static/views/app-card-badge.js';
 import { awaitingFirstDeploy, firstDeployFailed } from '/static/views/app-deploy-state.js';
@@ -44,6 +45,11 @@ import {
 
 function pluralize(n, one, many) {
   return `${n} ${n === 1 ? one : many}`;
+}
+
+function capacityProcessUnit(app, metrics = null) {
+  const isolation = metrics?.worker_isolation || app.effective_worker_isolation || app.worker_isolation;
+  return ['grouped', 'per_session'].includes(isolation) ? 'worker' : 'replica';
 }
 
 // Write only when the value actually differs. Assigning textContent replaces
@@ -306,6 +312,7 @@ export function mountAppDetail(ctx) {
           canManage: ctx.canManageApp(ctx.state.user, app),
         };
         if (ctx.setDetailApp) ctx.setDetailApp(app);
+        if (ctx.setDetailEnvelope) ctx.setDetailEnvelope(body);
         applyHeader(app, body);
         if (!panels.overview.hidden) {
           const normal = !awaitingFirstDeploy(app) && !firstDeployFailed(app);
@@ -335,6 +342,8 @@ export function mountAppDetail(ctx) {
     const statusChanged = !!metrics.status && metrics.status !== showing.app.status;
     if (statusChanged) showing.app = { ...showing.app, status: metrics.status };
     liveMetrics = metrics;
+    const trends = document.getElementById('overview-trends');
+    if (trends) trends.dataset.cpuCapacityCores = String(metrics.cpu_capacity_cores || '');
     metricsStale = false;
     renderOverviewHealth(panels.overview, showing.app, showing.body, liveMetrics, metricsStale, overviewEnvelopeError || Date.now() - overviewCheckedAt > 60000);
     if (overviewRefreshPending || (!statusChanged && Date.now() - overviewRefreshAt < 30000)) return;
@@ -398,6 +407,7 @@ export function mountAppDetail(ctx) {
     // Record the app so the static header kebab (wired once in app.js) acts on
     // the right app.
     if (ctx.setDetailApp) ctx.setDetailApp(app);
+    if (ctx.setDetailEnvelope) ctx.setDetailEnvelope(body);
 
     applyTabs(slug, tab, canManage);
     // On narrow screens the tab bar scrolls horizontally. Keep the active tab
@@ -483,27 +493,9 @@ export function mountAppDetail(ctx) {
     });
   }
 
-  // Placeholder values for the metric tiles until the first metrics poll
-  // arrives. Replicas shows the configured count immediately (CPU/Memory/
-  // Sessions fill in on poll). Only a fresh mount does this: on a tab switch the
-  // tiles already hold live values and blanking them would be a visible flicker
-  // with nothing gained.
+  // A fresh mount has no live measurements; preserve values on tab switches.
   function seedStats(app) {
-    document.querySelector('.app-detail-stats')?.classList.remove('is-stale');
-    const metricsStatus = document.getElementById('app-detail-metrics-status');
-    if (metricsStatus) metricsStatus.hidden = true;
-    const seedStat = (id, val) => {
-      const el = document.getElementById(id);
-      if (el) {
-        el.textContent = val;
-        el.classList.toggle('is-empty', val === '—');
-        el.removeAttribute('title'); // clear any stale tooltip from a prior app
-      }
-    };
-    seedStat('app-detail-cpu', '—');
-    seedStat('app-detail-ram', '—');
-    seedStat('app-detail-sessions', '—');
-    seedStat('app-detail-replicas', '0 / ' + (app.replicas || 1));
+    seedDetailCapacity(document, app);
   }
 
   return mount;
@@ -934,6 +926,7 @@ async function renderDeployments(panel, app, ctx) {
 }
 
 function renderOverview(panel, app, replicasStatus, envelope, ctx) {
+  const processUnit = capacityProcessUnit(app);
   // Onboarding is for an app nobody has deployed yet. An app whose deploy was
   // attempted and failed gets the failure summary below instead: it has a
   // cause to explain, and showing it the brand-new-app snippet claimed nothing
@@ -1039,12 +1032,12 @@ function renderOverview(panel, app, replicasStatus, envelope, ctx) {
       <section class="overview-card overview-replicas">
         <div class="overview-card-heading overview-replicas-heading">
           <div>
-            <h2>Replicas</h2>
+            <h2 id="overview-replicas-heading">${processUnit === 'worker' ? 'Workers' : 'Replicas'}</h2>
             <p class="overview-card-description">Live process state and resource use</p>
           </div>
           <span id="overview-replicas-cap" class="overview-replicas-cap"></span>
         </div>
-        <p class="overview-replica-note">PSS estimates each replica's share of physical memory, including shared pages. It can be unavailable on remote workers.</p>
+        <p class="overview-replica-note">PSS estimates each process's share of physical memory, including shared pages. It can be unavailable on remote workers.</p>
         <div class="overview-replica-columns" aria-hidden="true">
           <span>Process</span>
           <div><span>Sessions</span><span>CPU</span><span>Memory</span><span>PSS</span></div>
@@ -1129,6 +1122,8 @@ function syncOverviewSignals(panel, app, envelope, ctx) {
 function renderOverviewHealth(panel, app, envelope, metrics, metricsStale, envelopeStale) {
   const box = panel.querySelector('#overview-health');
   if (!box) return;
+  const processUnit = capacityProcessUnit(app, metrics);
+  const processes = `${processUnit}s`;
   const status = app.status;
   const signals = formatRejectsByReason(envelope?.rejects_by_reason);
   const rejects = signals.filter(row => row.count > 0 && row.reason !== 'render-deferred');
@@ -1151,9 +1146,9 @@ function renderOverviewHealth(panel, app, envelope, metrics, metricsStale, envel
     action = ['View logs', `/apps/${app.slug}/logs`];
   } else if (status === 'degraded') {
     title = 'App is degraded';
-    detail = 'Some capacity may be unavailable. Inspect the replicas and recent logs.';
+    detail = `Some capacity may be unavailable. Inspect the ${processes} and recent logs.`;
     level = 'danger';
-    action = ['Inspect replicas', '#overview-replicas-list'];
+    action = [`Inspect ${processes}`, '#overview-replicas-list'];
   } else if (envelope?.connectivity?.serving_without_ws) {
     title = 'App is serving, but interactions may fail';
     detail = 'Realtime connections have not succeeded. Check the reverse proxy warning below.';
@@ -1168,20 +1163,20 @@ function renderOverviewHealth(panel, app, envelope, metrics, metricsStale, envel
     detail = `${deferred} render-capacity wait ${deferred === 1 ? 'signal' : 'signals'} in the last 10 minutes; these do not mean failed sessions.`;
     action = ['Review signals', '#overview-rejects-by-reason'];
   } else if (replicas && replicas.length > 0 && ready < replicas.length) {
-    title = 'Some replicas are not serving';
-    detail = `${ready} of ${replicas.length} replicas running. Inspect the process list below.`;
-    action = ['Inspect replicas', '#overview-replicas-list'];
+    title = `Some ${processes} are not serving`;
+    detail = `${ready} of ${replicas.length} ${processes} running. Inspect the process list below.`;
+    action = [`Inspect ${processes}`, '#overview-replicas-list'];
   } else if (status === 'running') {
     title = 'App is serving normally';
-    detail = replicas?.length ? `${ready} ${ready === 1 ? 'replica' : 'replicas'} running; no recent admission issue reported.`
-      : 'No recent admission issue reported. Waiting for live replica metrics.';
+    detail = replicas?.length ? `${ready} ${ready === 1 ? processUnit : processes} running; no recent admission issue reported.`
+      : `No recent admission issue reported. Waiting for live ${processUnit} metrics.`;
     level = 'healthy';
   } else if (status === 'idle' || status === 'hibernated') {
     title = 'App is idle';
     detail = 'It may need time to start when the next visitor opens it.';
   } else if (status === 'deploying' || status === 'starting' || status === 'waking') {
     title = 'App is starting';
-    detail = 'Watch replica readiness and startup logs.';
+    detail = `Watch ${processUnit} readiness and startup logs.`;
     action = ['View logs', `/apps/${app.slug}/logs`];
   } else if (status === 'stopped' || status === 'suspended') {
     title = 'App is not serving';
@@ -1205,28 +1200,80 @@ function renderOverviewHealth(panel, app, envelope, metrics, metricsStale, envel
 
 // History is a separate request from live metrics. Preserve the last chart on
 // refresh failure, but say plainly that it is no longer current.
-function refreshTrends(slug) {
+function refreshTrends(slug, initiator = null) {
   const container = document.getElementById('overview-trends');
   if (!container || container.closest('.settings-tab-panel')?.hidden) return;
+  // Let an explicit retry finish before a background check replaces its state.
+  if (container.dataset.historyRetryPending === 'true') return;
+  const restoreFocus = initiator === document.activeElement;
+  let announcement = container.querySelector('.trends-refresh-status');
+  if (initiator) {
+    container.dataset.historyRetryPending = 'true';
+    container.setAttribute('aria-busy', 'true');
+    initiator.disabled = true;
+    initiator.textContent = 'Checking…';
+    if (!announcement) {
+      announcement = document.createElement('p');
+      announcement.className = 'trends-refresh-status sr-only';
+      announcement.setAttribute('role', 'status');
+      container.appendChild(announcement);
+    }
+    announcement.textContent = 'Checking metrics history…';
+  }
   const request = Number(container.dataset.historyRequest || 0) + 1;
   container.dataset.historyRequest = String(request);
+  const current = () => Number(container.dataset.historyRequest) === request
+    && container.isConnected && document.getElementById('overview-trends') === container
+    && !container.closest('.settings-tab-panel')?.hidden;
+  const focus = target => {
+    // Moving to another control while loading revokes focus restoration.
+    if (restoreFocus && (document.activeElement === initiator || document.activeElement === document.body)) {
+      target?.focus({ preventScroll: true });
+    }
+  };
   return Promise.resolve().then(() => fetch(`/api/apps/${slug}/metrics/history`, { credentials: 'include' }))
     .then((r) => {
       if (!r.ok) throw new Error(`History request failed (${r.status})`);
       return r.json();
     })
     .then((body) => {
-      if (Number(container.dataset.historyRequest) !== request) return;
-      const card = renderTrendsCard(document, body);
+      if (!current()) return;
+      const series = body.series || {};
+      const timestamps = Array.isArray(series.ts) ? series.ts : [];
+      const serverNow = Date.parse(body.generated_at);
+      const cutoff = Math.floor((Number.isFinite(serverNow) ? serverNow : Date.now()) / 1000) - 15 * 60;
+      const firstRecent = timestamps.findIndex(ts => ts >= cutoff);
+      const first = firstRecent < 0 ? timestamps.length : firstRecent;
+      const recent = { ...body, window_seconds: Math.min(Number(body.window_seconds) || 0, 900),
+        series: Object.fromEntries(Object.entries(series).map(([key, values]) =>
+          [key, Array.isArray(values) ? values.slice(first) : values])) };
+      const card = renderTrendsCard(document, recent, Number(container.dataset.cpuCapacityCores));
       if (!card) {
+        if (initiator) {
+          const note = document.createElement('p');
+          note.className = 'trends-empty';
+          note.textContent = 'Metrics history is disabled.';
+          note.tabIndex = -1;
+          container.replaceChildren(note, announcement);
+          announcement.textContent = 'Metrics history is disabled.';
+          focus(note);
+          return;
+        }
         container.hidden = true;
         return;
       }
       container.hidden = false;
       container.replaceChildren(card);
+      if (initiator) {
+        container.appendChild(announcement);
+        announcement.textContent = 'Metrics history updated.';
+        const heading = card.querySelector('h2');
+        heading.tabIndex = -1;
+        focus(heading);
+      }
     })
     .catch(() => {
-      if (Number(container.dataset.historyRequest) !== request) return;
+      if (!current()) return;
       let state = container.querySelector('.trends-load-state');
       if (!state) {
         state = document.createElement('div');
@@ -1241,8 +1288,21 @@ function refreshTrends(slug) {
       const retry = document.createElement('button');
       retry.type = 'button';
       retry.textContent = 'Retry';
-      retry.addEventListener('click', () => refreshTrends(slug));
+      retry.addEventListener('click', () => refreshTrends(slug, retry));
       state.append(message, retry);
+      if (announcement) announcement.textContent = '';
+      if (initiator) focus(retry);
+    })
+    .finally(() => {
+      if (Number(container.dataset.historyRequest) !== request) return;
+      delete container.dataset.historyRetryPending;
+      container.removeAttribute('aria-busy');
+      // Navigation can leave the cached chart in place. Keep its retry usable
+      // when the operator returns, without moving focus into a hidden panel.
+      if (initiator?.isConnected) {
+        initiator.disabled = false;
+        initiator.textContent = 'Retry';
+      }
     });
 }
 
@@ -1251,7 +1311,7 @@ function seedReplicasFromStatus(app, replicasStatus) {
   const capEl = document.getElementById('overview-replicas-cap');
   if (!listEl || !capEl) return;
   const cap = Number(app.max_sessions_per_replica || 0);
-  if (cap > 0) capEl.textContent = `(cap ${cap} sessions/replica)`;
+  if (cap > 0) capEl.textContent = `(cap ${cap} sessions/${capacityProcessUnit(app)})`;
   if (replicasStatus.length === 0) return;
   listEl.innerHTML = '';
   for (const r of replicasStatus) {

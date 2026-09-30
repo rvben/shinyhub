@@ -169,8 +169,8 @@ func TestGetMetrics_SamplerError(t *testing.T) {
 	}
 	var resp map[string]any
 	json.NewDecoder(rec.Body).Decode(&resp)
-	if resp["status"] != "stopped" {
-		t.Errorf("expected status=stopped on sampler error, got %v", resp["status"])
+	if resp["status"] != "running" {
+		t.Errorf("expected manager status=running on sampler error, got %v", resp["status"])
 	}
 }
 
@@ -418,10 +418,9 @@ func TestGetMetrics_RunningWithStats(t *testing.T) {
 }
 
 // TestGetMetrics_SamplerError_MetricsAvailableFalse asserts that a replica whose
-// Sample call fails reports metrics_available=false and status="stopped". The
-// flag must not be set true before the sample result is known, because PID!=0
-// alone does not mean live metrics are available (the process may have exited
-// between HandleReplica and Sample).
+// Sample call fails reports metrics_available=false while retaining the
+// manager's running status. A sampling error is not proof of process exit;
+// process health remains the manager's responsibility.
 func TestGetMetrics_SamplerError_MetricsAvailableFalse(t *testing.T) {
 	srv, store, mgr := newMetricsTestServer(t)
 	hash, _ := testHashPassword("pass")
@@ -454,8 +453,8 @@ func TestGetMetrics_SamplerError_MetricsAvailableFalse(t *testing.T) {
 	if len(resp.Replicas) != 1 {
 		t.Fatalf("expected 1 replica, got %d", len(resp.Replicas))
 	}
-	if resp.Replicas[0].Status != "stopped" {
-		t.Errorf("replica status = %q, want stopped (sample failed)", resp.Replicas[0].Status)
+	if resp.Replicas[0].Status != "running" {
+		t.Errorf("replica status = %q, want manager status running (sample failed)", resp.Replicas[0].Status)
 	}
 	if resp.Replicas[0].MetricsAvailable {
 		t.Errorf("replica metrics_available = true, want false when sample fails")

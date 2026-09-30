@@ -46,7 +46,7 @@ import {
 } from '/static/views/sidebar-nav.js';
 import { createSidebarDrawer } from '/static/views/sidebar-drawer.js';
 import { createLogPane } from '/static/views/log-pane.js';
-import { headerStats } from '/static/views/stat-format.js';
+import { renderDetailCapacity, markDetailCapacityError } from '/static/views/detail-capacity.js';
 import { appCardFacts } from '/static/views/app-card-facts.js';
 import { renderAppAttention } from '/static/views/app-attention.js';
 import { appCardActions } from '/static/views/app-card-actions.js';
@@ -6148,10 +6148,7 @@ document.addEventListener('DOMContentLoaded', () => {
       syncCardFromModel(slug, m);
       // Detail header (only when the detail view for this slug is visible).
       const detailView = document.getElementById('app-detail-view');
-      if (!detailView.hidden && location.pathname.startsWith(`/apps/${slug}`)) {
-        document.querySelector('.app-detail-stats')?.classList.remove('is-stale');
-        const metricsStatus = document.getElementById('app-detail-metrics-status');
-        if (metricsStatus) metricsStatus.hidden = true;
+      if (!detailView.hidden && detailApp?.slug === slug && (location.pathname === `/apps/${slug}` || location.pathname.startsWith(`/apps/${slug}/`))) {
         // Keep the header status pill live too, on the same model merge the
         // card badge uses, so an open detail page flips to "Deploying" and
         // back during a deploy instead of freezing at its load-time state.
@@ -6162,41 +6159,26 @@ document.addEventListener('DOMContentLoaded', () => {
           // detailApp.status, so the header kebab has to follow it.
           syncDetailHeaderActions(detailApp);
         }
-        // Header metric tiles show fleet aggregates (per-replica detail lives in
-        // the Overview replicas panel below). Set bare values; the labels are
-        // static markup. CPU/Memory both summed across replicas → note that.
-        const configured = (detailApp && detailApp.replicas) || 1;
-        const stats = headerStats(m, configured);
-        const setStat = (id, val, title) => {
-          const el = document.getElementById(id);
-          if (!el) return;
-          el.textContent = val;
-          el.classList.toggle('is-empty', val === '—');
-          if (title !== undefined) el.title = title;
-        };
-        const naNote = 'Live CPU/RAM not collected for this backend (Fargate/remote tasks: see CloudWatch / the worker host)';
-        const cpuRamNote = (stats.running && !stats.metricsAvailable)
-          ? naNote
-          : (stats.multiReplica ? 'Summed across replicas' : '');
-        setStat('app-detail-cpu', stats.cpu, cpuRamNote);
-        setStat('app-detail-ram', stats.ram, cpuRamNote);
-        setStat('app-detail-sessions', stats.sessions, '');
-        setStat('app-detail-replicas', stats.replicas, '');
+        if (m.autoscale_status) detailLastEnvelope.autoscale_status = m.autoscale_status;
+        if (Number.isInteger(m.effective_autoscale_max_replicas)) {
+          detailLastEnvelope.effective_autoscale_max_replicas = m.effective_autoscale_max_replicas;
+        }
+        const liveApp = detailApp ? { ...detailApp,
+          replicas: Number.isInteger(m.replicas_desired) ? m.replicas_desired : detailApp.replicas,
+          worker_isolation: m.worker_isolation || detailApp.worker_isolation,
+          effective_worker_isolation: m.worker_isolation || detailApp.effective_worker_isolation,
+        } : null;
+        const autoscaleState = summariseAutoscale(liveApp, detailLastEnvelope);
+        renderDetailCapacity(document, m, detailApp?.replicas ?? 1, autoscaleState);
         renderReplicasPanel(m);
         appDetailMount.onLiveMetrics?.(slug, m);
 
         // Keep the stored envelope in sync with autoscale_status from the poll
         // so renderAutoscaleSummary's cooldown row reflects the latest event
         // without requiring a full GET /api/apps/:slug refetch.
-        if (m.autoscale_status) {
-          detailLastEnvelope.autoscale_status = m.autoscale_status;
-        }
         const autoscaleDl = document.getElementById('autoscale-summary');
-        if (autoscaleDl && detailLastEnvelope.autoscale_status) {
-          const app = state.apps ? state.apps.find(a => a.slug === slug) : null;
-          if (app) {
-            renderAutoscaleSummary(autoscaleDl, summariseAutoscale(app, detailLastEnvelope));
-          }
+        if (autoscaleDl && detailLastEnvelope.autoscale_status && liveApp) {
+          renderAutoscaleSummary(autoscaleDl, autoscaleState);
         }
       }
     },
@@ -6206,10 +6188,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // in the background; log the user out instead of polling a dead session
     // forever. metrics-controller.js reports a non-2xx as `Error('status N')`.
     onError: (slug, err) => {
-      if (location.pathname.startsWith(`/apps/${slug}`)) {
-        document.querySelector('.app-detail-stats')?.classList.add('is-stale');
-        const metricsStatus = document.getElementById('app-detail-metrics-status');
-        if (metricsStatus) metricsStatus.hidden = false;
+      if (detailApp?.slug === slug && (location.pathname === `/apps/${slug}` || location.pathname.startsWith(`/apps/${slug}/`))) {
+        markDetailCapacityError(document);
         appDetailMount.onMetricsError?.(slug);
       }
       if (err && /status 401/.test(err.message)) {
@@ -6218,15 +6198,32 @@ document.addEventListener('DOMContentLoaded', () => {
     },
   });
 
+  document.getElementById('app-detail-metrics-retry')?.addEventListener('click', async event => {
+    const button = event.currentTarget;
+    button.dataset.restoreFocus = 'true';
+    button.disabled = true;
+    button.textContent = 'Checking…';
+    document.getElementById('app-detail-metrics-message').textContent = 'Checking live metrics…';
+    await metrics.refresh();
+    button.disabled = false;
+    button.textContent = 'Retry metrics';
+    if (!button.hidden) button.focus({ preventScroll: true });
+    delete button.dataset.restoreFocus;
+  });
+
   function renderReplicasPanel(m) {
     const listEl = document.getElementById('overview-replicas-list');
     const capEl = document.getElementById('overview-replicas-cap');
     if (!listEl || !capEl) return;
     const cap = Number(m.sessions_cap || 0);
-    capEl.textContent = cap > 0 ? `(cap ${cap} sessions/replica)` : '(uncapped)';
+    const elastic = ['grouped', 'per_session'].includes(m.worker_isolation);
+    const unit = elastic ? 'worker' : 'replica';
+    const heading = listEl.closest('.overview-replicas')?.querySelector('h2');
+    if (heading) heading.textContent = elastic ? 'Workers' : 'Replicas';
+    capEl.textContent = cap > 0 ? `(cap ${cap} sessions/${unit})` : '(uncapped)';
     const replicas = Array.isArray(m.replicas) ? m.replicas : [];
     if (replicas.length === 0) {
-      listEl.innerHTML = '<li class="replicas-empty">No replicas tracked yet.</li>';
+      listEl.innerHTML = `<li class="replicas-empty">No ${unit}s tracked yet.</li>`;
       return;
     }
     listEl.innerHTML = '';
@@ -6240,7 +6237,7 @@ document.addEventListener('DOMContentLoaded', () => {
         : (cap > 0 ? `${sessions}/${cap}` : String(sessions));
       const saturated = cap > 0 && sessions >= cap;
       // Use metricsText for honest display: PID-less replicas get "n/a".
-      const { cpuText, ramText, physicalText, attributionNote, note } = metricsText(r);
+      const { cpuText, cpuNote, ramText, physicalText, attributionNote, note } = metricsText(r);
       const cpuDisplay = (status === 'running') ? cpuText : '—';
       const ramDisplay = (status === 'running') ? ramText : '—';
       const physicalDisplay = (status === 'running') ? physicalText : '—';
@@ -6262,7 +6259,7 @@ document.addEventListener('DOMContentLoaded', () => {
         ${reasonHTML}
         <div class="replica-measures">
           <span class="replica-measure replica-sessions${saturated ? ' replica-sessions-saturated' : ''}" title="Active sessions${cap > 0 ? ' / cap' : ''}"><span class="replica-measure-label">Sessions</span><span class="replica-measure-value">${sessionsText}</span></span>
-          <span class="replica-measure replica-cpu"><span class="replica-measure-label">CPU</span><span class="replica-measure-value">${cpuDisplay}</span></span>
+          <span class="replica-measure replica-cpu"${cpuNote ? ` title="${escapeHtml(cpuNote)}"` : ''}><span class="replica-measure-label">CPU</span><span class="replica-measure-value">${cpuDisplay}</span></span>
           <span class="replica-measure replica-ram"${note ? ` title="${note}"` : ''}><span class="replica-measure-label">Memory</span><span class="replica-measure-value">${ramDisplay}</span></span>
           <span class="replica-measure replica-physical"${attributionNote ? ` title="${escapeHtml(attributionNote)}"` : ''}><span class="replica-measure-label">PSS</span><span class="replica-measure-value">${physicalDisplay}</span></span>
         </div>

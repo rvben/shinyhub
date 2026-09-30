@@ -612,6 +612,7 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 		"replicas_status":                     replicas,
 		"effective_max_sessions_per_replica":  effectiveCap,
 		"effective_autoscale_target":          effectiveTarget,
+		"effective_autoscale_max_replicas":    s.effectiveAutoscaleMaxReplicas(app),
 		"effective_hibernate_timeout_minutes": app.EffectiveHibernateTimeoutMinutes,
 		"redeploy_in_flight":                  s.isRedeployInFlight(slug),
 		"can_manage":                          canManage,
@@ -4996,8 +4997,10 @@ type replicaMetrics struct {
 	// The key is always present, and never omitempty: an app sitting at a true 0%
 	// is a different fact from an app whose usage is unknown, and omitempty would
 	// render both as an absent key.
-	CPUPercent *float64 `json:"cpu_percent"`
-	RSSBytes   int64    `json:"rss_bytes,omitempty"`
+	CPUPercent   *float64 `json:"cpu_percent"`
+	CPUSaturated bool     `json:"cpu_saturated"`
+	RunID        string   `json:"-"`
+	RSSBytes     int64    `json:"rss_bytes,omitempty"`
 	// StartupPeakRSSBytes is the durable healthy cold-start high-water mark
 	// used by scheduled-roll surge admission. It remains visible when live
 	// metrics are temporarily unavailable.
@@ -5080,11 +5083,24 @@ type metricsResponse struct {
 	SessionsCeiling int `json:"sessions_ceiling"`
 	// WorkerIsolation and MaxWorkers describe the elastic pool when the app
 	// runs grouped/per_session isolation; omitted for multiplex.
-	WorkerIsolation  string           `json:"worker_isolation,omitempty"`
-	MaxWorkers       int              `json:"max_workers,omitempty"`
-	Replicas         []replicaMetrics `json:"replicas"`
-	MetricsAvailable bool             `json:"metrics_available"`
-	AutoscaleStatus  *autoscaleStatus `json:"autoscale_status"`
+	WorkerIsolation   string           `json:"worker_isolation,omitempty"`
+	MaxWorkers        int              `json:"max_workers,omitempty"`
+	Replicas          []replicaMetrics `json:"replicas"`
+	CPUCores          *float64         `json:"cpu_cores"`
+	CPUCapacityCores  *float64         `json:"cpu_capacity_cores"`
+	CPUCapacitySource string           `json:"cpu_capacity_source,omitempty"`
+	CPUHostCores      *float64         `json:"cpu_host_cores"`
+	// A disabled fixed-cadence collector cannot establish a sustained hot streak.
+	CPUSaturationAvailable bool             `json:"cpu_saturation_available"`
+	MetricsAvailable       bool             `json:"metrics_available"`
+	AutoscaleStatus        *autoscaleStatus `json:"autoscale_status"`
+	// AutoscaleActiveSessions uses the same local or fleet-wide session signal
+	// as the autoscale controller. Nil means no usable signal is available.
+	AutoscaleActiveSessions *int64 `json:"autoscale_active_sessions,omitempty"`
+	// EffectiveAutoscaleMaxReplicas includes the runtime ceiling, which may
+	// have been lowered since the app policy was saved. Elastic workers are
+	// demand-managed instead; zero means replica autoscaling does not apply.
+	EffectiveAutoscaleMaxReplicas int `json:"effective_autoscale_max_replicas"`
 	// Legacy fields preserved so existing clients (dashboard card poller)
 	// keep working while they adopt the per-replica view. These mirror the
 	// first running replica, and every one of them is meaningless (and
@@ -5130,7 +5146,61 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, s.buildAppMetrics(slug, app))
+	resp := s.buildAppMetrics(slug, app)
+	if app.AutoscaleEnabled && resp.WorkerIsolation == "" {
+		resp.AutoscaleActiveSessions = s.autoscaleActiveSessions(slug, app.ID)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) effectiveAutoscaleMaxReplicas(app *db.App) int {
+	if deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation) != "multiplex" {
+		return 0
+	}
+	maximum := app.AutoscaleMaxReplicas
+	runtimeMaximum := s.cfg.Runtime.MaxReplicas
+	if runtimeMaximum <= 0 {
+		runtimeMaximum = defaultMaxReplicas
+	}
+	if maximum > runtimeMaximum {
+		maximum = runtimeMaximum
+	}
+	return maximum
+}
+
+func sumAutoscaleSessionCounts(counts []int64) *int64 {
+	if len(counts) == 0 {
+		return nil
+	}
+	var total int64
+	for _, n := range counts {
+		if n >= 0 { // A missing replica slot is not an active session.
+			total += n
+		}
+	}
+	return &total
+}
+
+// Match the controller's session source. Clustered controllers use fresh
+// fleet rows; single-node controllers read the local proxy directly.
+func (s *Server) autoscaleActiveSessions(slug string, appID int64) *int64 {
+	if s.clustered {
+		// FleetSignal also requires a registered proxy pool to resolve the
+		// slug. Do not display a load that the controller cannot act on.
+		if s.proxy == nil || s.proxy.ReplicaSessionCounts(slug) == nil {
+			return nil
+		}
+		counts, _, err := s.store.AppFleetLoad(appID, int64(proxy.ReplicaSessionStaleCutoff.Seconds()), "")
+		if err != nil {
+			slog.Warn("autoscale session metrics query", "slug", slug, "err", err)
+			return nil
+		}
+		return sumAutoscaleSessionCounts(counts)
+	}
+	if s.proxy == nil {
+		return nil
+	}
+	return sumAutoscaleSessionCounts(s.proxy.ReplicaSessionCounts(slug))
 }
 
 // buildAppMetrics computes the live metrics envelope for one app: per-replica
@@ -5160,14 +5230,19 @@ func (s *Server) buildAppMetricsFrom(slug string, app *db.App, dbReplicas []*db.
 	observedApp := *app
 	s.decorateApp(&observedApp)
 	resp := metricsResponse{
-		GeneratedAt:          time.Now().UTC(),
-		Status:               app.Status,
-		DesiredStatus:        app.Status,
-		Deploying:            s.appDeploying(app),
-		LastDeploymentStatus: app.LastDeploymentStatus,
-		ReplicasDesired:      app.Replicas,
-		SessionsCeiling:      observedApp.SessionsCeiling,
-		Replicas:             []replicaMetrics{},
+		GeneratedAt:                   time.Now().UTC(),
+		Status:                        app.Status,
+		DesiredStatus:                 app.Status,
+		Deploying:                     s.appDeploying(app),
+		LastDeploymentStatus:          app.LastDeploymentStatus,
+		ReplicasDesired:               app.Replicas,
+		SessionsCeiling:               observedApp.SessionsCeiling,
+		Replicas:                      []replicaMetrics{},
+		EffectiveAutoscaleMaxReplicas: s.effectiveAutoscaleMaxReplicas(app),
+	}
+	if observedApp.EffectiveWorkerIsolation != "multiplex" {
+		resp.WorkerIsolation = observedApp.EffectiveWorkerIsolation
+		resp.MaxWorkers = app.WorkerMaxWorkers
 	}
 
 	if s.manager == nil {
@@ -5216,6 +5291,10 @@ func (s *Server) buildAppMetricsFrom(slug string, app *db.App, dbReplicas []*db.
 		}
 		rm.Status = string(info.Status)
 		rm.PID = info.PID
+		rm.RunID = info.LogRunID
+		if rm.RunID == "" {
+			rm.RunID = strconv.Itoa(info.PID)
+		}
 		rm.Tier = info.Tier
 		rm.Provider = info.Provider
 		if verdict, ok := s.manager.LastExit(slug, i); ok {
@@ -5245,7 +5324,12 @@ func (s *Server) buildAppMetricsFrom(slug string, app *db.App, dbReplicas []*db.
 					// failed sample both mean live CPU/RAM are not available.
 					rm.MetricsAvailable = handle.PID != 0
 				} else {
-					rm.Status = string(process.StatusStopped)
+					// Sampling is observability, not a process-health verdict.
+					// Permission, scan and runtime-stat failures do not prove
+					// this manager-running process stopped. Keep it in the
+					// running denominator with unavailable CPU so the app
+					// total cannot silently become a partial sum.
+					rm.MetricsAvailable = false
 				}
 			} else {
 				rm.Status = string(process.StatusStopped)
@@ -5282,6 +5366,7 @@ func (s *Server) buildAppMetricsFrom(slug string, app *db.App, dbReplicas []*db.
 	if s.proxy != nil {
 		if snap, ok := s.proxy.ElasticWorkersSnapshot(slug); ok {
 			elastic = true
+			resp.EffectiveAutoscaleMaxReplicas = 0
 			resp.SessionsCap = snap.SessionsPerWorker
 			resp.WorkerIsolation = snap.Mode
 			resp.MaxWorkers = snap.MaxWorkers
@@ -5374,6 +5459,7 @@ func (s *Server) buildAppMetricsFrom(slug string, app *db.App, dbReplicas []*db.
 	for i := range resp.Replicas {
 		s.decorateReplicaResources(app, &resp.Replicas[i])
 	}
+	s.decorateCPUCapacity(slug, &resp)
 
 	observationReplicas := make([]*db.Replica, 0, len(resp.Replicas))
 	pool := elasticPool{Known: elastic}
@@ -5413,6 +5499,57 @@ func (s *Server) decorateReplicaResources(app *db.App, rm *replicaMetrics) {
 	if s.manager != nil {
 		rm.ResourceEnforcementKnown = true
 		rm.MemoryLimitEnforced, rm.CPUQuotaEnforced = s.manager.ResourceEnforcement(tier)
+	}
+}
+
+// decorateCPUCapacity keeps the legacy cpu_percent mirror intact while adding
+// a complete, summed rate and the ceiling used by both browser and CLI views.
+func (s *Server) decorateCPUCapacity(slug string, resp *metricsResponse) {
+	resp.CPUCores = nil
+	resp.CPUCapacityCores = nil
+	resp.CPUCapacitySource = ""
+	resp.CPUHostCores = nil
+	resp.CPUSaturationAvailable = s.history != nil
+	if s.hostCapacity != nil && s.hostCapacity.Cores > 0 {
+		cores := s.hostCapacity.Cores
+		resp.CPUHostCores = &cores
+		resp.CPUCapacityCores = &cores
+		resp.CPUCapacitySource = s.hostCapacity.CoresSource
+	}
+	var used, quota float64
+	running, measured, limited := 0, 0, 0
+	now := time.Now().Unix()
+	for i := range resp.Replicas {
+		r := &resp.Replicas[i]
+		r.CPUSaturated = false
+		if r.Status != "running" {
+			continue
+		}
+		running++
+		if r.CPUQuotaEnforced && r.EffectiveCPUQuotaPercent > 0 {
+			limited++
+			quota += float64(r.EffectiveCPUQuotaPercent) / 100
+		}
+		if r.CPUPercent == nil || !r.MetricsAvailable {
+			continue
+		}
+		measured++
+		used += *r.CPUPercent / 100
+		ceiling := 100.0
+		if r.CPUQuotaEnforced && r.EffectiveCPUQuotaPercent > 0 {
+			ceiling = float64(r.EffectiveCPUQuotaPercent)
+		}
+		if s.history != nil {
+			r.CPUSaturated = *r.CPUPercent >= 0.9*ceiling &&
+				s.history.ReplicaCPUSaturated(slug, r.Index, r.RunID, now, ceiling)
+		}
+	}
+	if running > 0 && limited == running && (resp.CPUHostCores == nil || quota <= *resp.CPUHostCores) {
+		resp.CPUCapacityCores = &quota
+		resp.CPUCapacitySource = "quota"
+	}
+	if running > 0 && measured == running {
+		resp.CPUCores = &used
 	}
 }
 
@@ -5457,7 +5594,13 @@ func (s *Server) handleBatchMetrics(w http.ResponseWriter, r *http.Request) {
 	out := make(map[string]metricsResponse, len(apps))
 	for _, app := range apps {
 		ev, found := autoscaleBySlug[app.Slug]
-		out[app.Slug] = s.buildAppMetricsFrom(app.Slug, app, replicasByApp[app.ID], ev, found)
+		resp := s.buildAppMetricsFrom(app.Slug, app, replicasByApp[app.ID], ev, found)
+		// The detail page opts in for this live signal. Avoid a fleet DB query
+		// per card on the apps grid's ordinary batch poll.
+		if len(apps) == 1 && app.AutoscaleEnabled && resp.WorkerIsolation == "" && r.URL.Query().Get("autoscale_load") == "1" {
+			resp.AutoscaleActiveSessions = s.autoscaleActiveSessions(app.Slug, app.ID)
+		}
+		out[app.Slug] = resp
 	}
 	body := map[string]any{"metrics": out, "generated_at": time.Now().UTC()}
 	// The host block is the scale Overview measures against when no app carries

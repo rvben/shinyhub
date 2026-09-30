@@ -3303,8 +3303,10 @@ func TestAppDetailHeaderTiles(t *testing.T) {
 		"the status must render as a status pill")
 	// JS: fleet aggregation + bare tile values + status pill class.
 	assertContains(t, "views/stat-format.js", "export function headerStats", "stat-format must expose headerStats")
-	assertContains(t, "app.js", "headerStats(m, configured)",
-		"onMetrics must feed the tiles from headerStats fleet aggregates")
+	assertContains(t, "app.js", "renderDetailCapacity(document, m,",
+		"onMetrics must feed the shared detail capacity renderer")
+	assertContains(t, "views/detail-capacity.js", "headerStats(metrics, configured)",
+		"detail capacity must feed tiles from headerStats fleet aggregates")
 	assertContains(t, "views/app-detail.js", "statusPillClass(statusView.state)",
 		"the status pill class must come from statusPillClass, fed the shared appStatusView state")
 	// CPU and RAM stay on this detail surface rather than competing with release
@@ -3667,8 +3669,8 @@ func TestAppCardFactsStayOperational(t *testing.T) {
 func TestAbsentCPURateRendersAsUnknown(t *testing.T) {
 	assertContains(t, "views/overview-model.js", "replica.cpu_percent != null",
 		"the Overview allocation model must exclude an absent CPU rate instead of treating it as 0%")
-	assertContains(t, "views/replica-display.js", "typeof replica.cpu_percent === 'number'",
-		"a replica's CPU cell must type-check the rate so null renders as a dash instead of 0.0%")
+	assertContains(t, "views/replica-display.js", "Number.isFinite(replica.cpu_percent)",
+		"a replica's CPU cell must reject null and nonfinite rates instead of showing idle")
 	assertContains(t, "views/stat-format.js", "cpuAvailable",
 		"headerStats must track whether every running replica reported a rate; a partial sum understates the app")
 	assertContains(t, "views/sparkline.js", "drawn",

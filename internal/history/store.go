@@ -40,11 +40,22 @@ type Series struct {
 // mutates under Lock; readers copy out the requested window under RLock so JSON
 // marshaling never races the writer.
 type Store struct {
-	mu       sync.RWMutex
-	rings    map[string]*ring
-	capacity int
-	window   time.Duration
-	interval time.Duration
+	mu         sync.RWMutex
+	rings      map[string]*ring
+	capacity   int
+	window     time.Duration
+	interval   time.Duration
+	replicaCPU map[string]map[int]replicaCPUWindow
+}
+
+type replicaCPUPoint struct {
+	ts      int64
+	percent *float64
+}
+
+type replicaCPUWindow struct {
+	runID  string
+	points []replicaCPUPoint
 }
 
 // NewStore builds a Store whose per-app ring holds min(window/interval,
@@ -61,11 +72,73 @@ func NewStore(window, interval time.Duration) *Store {
 		capacity = 1
 	}
 	return &Store{
-		rings:    make(map[string]*ring),
-		capacity: capacity,
-		window:   window,
-		interval: interval,
+		rings:      make(map[string]*ring),
+		replicaCPU: make(map[string]map[int]replicaCPUWindow),
+		capacity:   capacity,
+		window:     window,
+		interval:   interval,
 	}
+}
+
+// RecordReplicaCPU keeps only three fixed-cadence samples per concrete run.
+// A missing rate breaks the streak. The history collector calls this once per
+// tick, independently of how many clients request live metrics.
+func (s *Store) RecordReplicaCPU(slug string, index int, runID string, ts int64, percent *float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows := s.replicaCPU[slug]
+	if rows == nil {
+		rows = make(map[int]replicaCPUWindow)
+		s.replicaCPU[slug] = rows
+	}
+	w := rows[index]
+	if w.runID != runID {
+		w = replicaCPUWindow{runID: runID}
+	}
+	if len(w.points) > 0 && ts <= w.points[len(w.points)-1].ts {
+		return
+	}
+	var recorded *float64
+	if percent != nil {
+		value := *percent
+		recorded = &value
+	}
+	w.points = append(w.points, replicaCPUPoint{ts: ts, percent: recorded})
+	if len(w.points) > 3 {
+		w.points = w.points[len(w.points)-3:]
+	}
+	rows[index] = w
+}
+
+// ReplicaCPUSaturated reports three recent consecutive samples at or above
+// 90% of the replica's own ceiling. The caller supplies its enforced quota (or
+// one core), so quota policy remains in the API rather than the collector.
+func (s *Store) ReplicaCPUSaturated(slug string, index int, runID string, now int64, ceilingPercent float64) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	w := s.replicaCPU[slug][index]
+	if w.runID != runID || len(w.points) != 3 || ceilingPercent <= 0 {
+		return false
+	}
+	maxAge := int64((2 * s.interval).Seconds())
+	if maxAge < 1 {
+		maxAge = 1
+	}
+	maxGap := int64((3 * s.interval / 2).Seconds())
+	if maxGap < 1 {
+		maxGap = 1
+	}
+	if now-w.points[2].ts > maxAge ||
+		w.points[1].ts-w.points[0].ts > maxGap ||
+		w.points[2].ts-w.points[1].ts > maxGap {
+		return false
+	}
+	for _, point := range w.points {
+		if point.percent == nil || *point.percent < 0.9*ceilingPercent {
+			return false
+		}
+	}
+	return true
 }
 
 // EmptySeries returns a Series with non-nil, empty slices so it marshals as []
@@ -140,6 +213,17 @@ func (s *Store) GC(now int64) {
 		newest, ok := r.newest()
 		if !ok || newest.TS < cutoff {
 			delete(s.rings, slug)
+		}
+	}
+	replicaCutoff := now - int64((2 * s.interval).Seconds())
+	for slug, rows := range s.replicaCPU {
+		for index, w := range rows {
+			if len(w.points) == 0 || w.points[len(w.points)-1].ts < replicaCutoff {
+				delete(rows, index)
+			}
+		}
+		if len(rows) == 0 {
+			delete(s.replicaCPU, slug)
 		}
 	}
 }

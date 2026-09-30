@@ -12,8 +12,9 @@
 // summary carries both values plus an inheritsTarget flag.
 //
 // It also carries the live pool size (app.replicas) and a drift flag set when
-// autoscale is enabled and the live pool is outside the configured [min, max]
-// band. The controller reconverges on its next tick, but the operator should
+// autoscale is enabled and the live pool is outside its effective [min, max]
+// band, including the warm floor and runtime ceiling. The controller
+// reconverges on its next tick, but the operator should
 // see the transient gap explicitly so an emergency manual scale or a freshly
 // lowered bound isn't invisible until the next scan.
 export function summariseAutoscale(app, envelope) {
@@ -21,10 +22,19 @@ export function summariseAutoscale(app, envelope) {
   const e = envelope && typeof envelope === 'object' ? envelope : {};
   const target = Number(a.autoscale_target) || 0;
   const effective = Number(e.effective_autoscale_target) || 0;
-  const min = Number(a.autoscale_min_replicas) || (a.autoscale_min_replicas === 0 ? 0 : 1);
-  const max = Number(a.autoscale_max_replicas) || (a.autoscale_max_replicas === 0 ? 0 : 1);
+  const effectiveCap = Number(e.effective_max_sessions_per_replica) || 0;
+  const configuredMin = Number(a.autoscale_min_replicas) || (a.autoscale_min_replicas === 0 ? 0 : 1);
+  const configuredMax = Number(a.autoscale_max_replicas) || (a.autoscale_max_replicas === 0 ? 0 : 1);
+  const effectiveMax = Number(e.effective_autoscale_max_replicas);
+  const max = Number.isInteger(effectiveMax) && effectiveMax > 0 ? Math.min(configuredMax, effectiveMax) : configuredMax;
   const current = Number(a.replicas) || (a.replicas === 0 ? 0 : 1);
-  const enabled = !!a.autoscale_enabled;
+  const minWarm = Number(a.min_warm_replicas) || 0;
+  // The controller preserves the warm pool even when the autoscale policy's
+  // own minimum is lower. Show that actionable floor in the range and drift.
+  const min = Math.min(max, Math.max(1, configuredMin, minWarm));
+  const isolation = a.effective_worker_isolation || a.worker_isolation || 'multiplex';
+  const isElastic = isolation === 'grouped' || isolation === 'per_session';
+  const enabled = !!a.autoscale_enabled && !isElastic;
 
   // New fields from autoscale_status + global_autoscale_enabled.
   // Safe defaults: null/''/ false/true so callers that omit these fields
@@ -42,9 +52,15 @@ export function summariseAutoscale(app, envelope) {
     enabled,
     current,
     min,
+    configuredMin,
     max,
+    configuredMax,
+    runtimeCapped: max < configuredMax,
+    isElastic,
+    minWarm,
     target,
     effectiveTarget: effective,
+    effectiveCap,
     inheritsTarget: target <= 0,
     drift: enabled && (current < min || current > max),
     lastActionAt,
@@ -53,6 +69,32 @@ export function summariseAutoscale(app, envelope) {
     cooldownUntil,
     globalEnabled,
   };
+}
+
+// The controller rounds active sessions / (cap × target) up to a desired
+// replica count. This is the first session count that asks for one more than
+// the current pool. Pool-saturated rejections can ask for another replica
+// sooner, while cooldown and scan timing can delay the change.
+export function scaleOutThreshold({ enabled, isElastic, globalEnabled, current, min = 1, minWarm = 0, max, effectiveCap, effectiveTarget }) {
+  if (isElastic) return { state: 'off', text: '' };
+  if (!enabled) return { state: 'off', text: '' };
+  if (globalEnabled === false) return { state: 'paused', text: 'Autoscale paused' };
+  const floor = Math.min(max, Math.max(1, min, minWarm));
+  if (current >= max) return { state: 'max', text: 'At autoscale max' };
+  if (!(Number.isFinite(current) && current > 0 && Number.isFinite(effectiveCap) && effectiveCap > 0 &&
+    Number.isFinite(effectiveTarget) && effectiveTarget > 0)) {
+    return { state: 'unknown', text: 'Session trigger unavailable' };
+  }
+  if (current < floor) return { state: 'floor', text: `Below minimum · desired ${floor}` };
+  const perReplica = effectiveTarget * effectiveCap;
+  let threshold = Math.floor(current * perReplica) + 1;
+  if (!Number.isSafeInteger(threshold) || perReplica <= 0) return { state: 'unknown', text: 'Session trigger unavailable' };
+  // Match the controller's actual ceil(load / perReplica) predicate. Floating
+  // multiplication and division can land on opposite sides of an integer.
+  const scalesOut = load => Math.ceil(load / perReplica) > current;
+  while (!scalesOut(threshold)) threshold++;
+  while (threshold > 1 && scalesOut(threshold - 1)) threshold--;
+  return { state: 'ready', threshold, text: `Scale-out threshold · ${threshold.toLocaleString('en-US')} sessions` };
 }
 
 // formatRejectsByReason normalises the optional rejects_by_reason rollup
@@ -185,14 +227,20 @@ export function formatCountdown(nowMs, untilMs) {
 export function renderAutoscaleSummary(dl, s) {
   dl.innerHTML = '';
   const doc = dl.ownerDocument;
-  const row = (label, value) => {
+  const row = (label, value, title = '') => {
     const dt = doc.createElement('dt');
     dt.textContent = label;
     const dd = doc.createElement('dd');
     dd.textContent = value;
+    if (title) dd.title = title;
     dl.appendChild(dt);
     dl.appendChild(dd);
   };
+  if (dl.parentNode) dl.parentNode.querySelectorAll('.autoscale-killswitch-warning').forEach(el => el.remove());
+  if (s.isElastic) {
+    row('Capacity', 'Workers allocated on demand');
+    return;
+  }
   row('Autoscale', s.enabled ? 'enabled' : 'disabled');
   let replicasValue;
   if (s.enabled) {
@@ -204,6 +252,7 @@ export function renderAutoscaleSummary(dl, s) {
     replicasValue = String(s.current);
   }
   row('Replicas', replicasValue);
+  if (s.runtimeCapped) row('Configured maximum', `${s.configuredMax}; runtime allows ${s.max}`);
   const targetLabel = s.inheritsTarget
     ? `${formatTarget(s.effectiveTarget)} (inherited)`
     : formatTarget(s.target);
@@ -212,6 +261,11 @@ export function renderAutoscaleSummary(dl, s) {
   // New rows: only rendered when autoscale is enabled so the disabled summary
   // stays unchanged (existing test coverage stays valid).
   if (s.enabled) {
+    const trigger = scaleOutThreshold(s);
+    row('Session scale-out', trigger.state === 'ready'
+      ? `${trigger.threshold.toLocaleString('en-US')} active sessions`
+      : trigger.text,
+    'Load threshold for another replica. Pool rejections can trigger sooner; cooldown and scan timing can delay scaling.');
     const now = Date.now();
     // "Last scaled" row.
     let lastScaledText;

@@ -170,16 +170,93 @@ test('Overview distinguishes failed history from collecting and can retry', asyn
   const app = { ...CRASHED_APP, status: 'running', deploy_count: 1, last_deployment_status: 'succeeded' };
   const h = await mountDetail({ app, tab: 'overview', historyFetch: async () => {
     if (!succeed) throw new Error('offline');
+    const now = Math.floor(Date.now() / 1000);
     return { ok: true, json: async () => ({ window_seconds: 3600, interval_seconds: 30,
-      series: { ts: [1, 2], cpu: [5, 7], rss: [10, 12], sessions: [1, 2], instances: [1, 1] } }) };
+      series: { ts: [now - 30, now], cpu: [5, 7], rss: [10, 12], sessions: [1, 2], instances: [1, 1] } }) };
   } });
   try {
     assert.match(h.doc.querySelector('#overview-trends').textContent, /Metrics history is unavailable/);
     succeed = true;
-    h.doc.querySelector('.trends-load-state button').click();
+    const retry = h.doc.querySelector('.trends-load-state button');
+    retry.focus();
+    retry.click();
+    assert.equal(retry.disabled, true);
+    assert.equal(retry.textContent, 'Checking…');
+    assert.equal(h.doc.querySelector('#overview-trends').getAttribute('aria-busy'), 'true');
     await flush();
     assert.equal(h.doc.querySelector('.trends-load-state'), null);
     assert.equal(h.doc.querySelectorAll('#overview-trends .trend-row').length, 4);
+    assert.equal(h.doc.activeElement, h.doc.querySelector('#trends-heading'));
+    assert.equal(h.doc.querySelector('.trends-refresh-status').textContent, 'Metrics history updated.');
+    assert.equal(h.doc.querySelector('#overview-trends').hasAttribute('aria-busy'), false);
+  } finally { h.restore(); }
+});
+
+test('history retry prevents duplicate requests and preserves focus after another failure', async () => {
+  let rejectRetry;
+  let requests = 0;
+  const app = { ...CRASHED_APP, status: 'running', deploy_count: 1, last_deployment_status: 'succeeded' };
+  const h = await mountDetail({ app, tab: 'overview', historyFetch: () => {
+    requests++;
+    if (requests === 1) return Promise.reject(new Error('offline'));
+    return new Promise((_resolve, reject) => { rejectRetry = reject; });
+  } });
+  try {
+    const retry = h.doc.querySelector('.trends-load-state button');
+    retry.focus();
+    retry.click();
+    retry.click();
+    await flush();
+    assert.equal(requests, 2);
+    assert.equal(h.doc.querySelector('.trends-refresh-status').textContent, 'Checking metrics history…');
+    rejectRetry(new Error('still offline'));
+    await flush();
+    const replacement = h.doc.querySelector('.trends-load-state button');
+    assert.equal(h.doc.activeElement, replacement);
+    assert.equal(replacement.disabled, false);
+    assert.equal(replacement.textContent, 'Retry');
+    assert.equal(h.doc.querySelector('#overview-trends').hasAttribute('aria-busy'), false);
+  } finally { h.restore(); }
+});
+
+test('history retry respects navigation to another control while loading', async () => {
+  let resolveRetry;
+  let requests = 0;
+  const app = { ...CRASHED_APP, status: 'running', deploy_count: 1, last_deployment_status: 'succeeded' };
+  const h = await mountDetail({ app, tab: 'overview', historyFetch: () => {
+    if (++requests === 1) return Promise.reject(new Error('offline'));
+    return new Promise(resolve => { resolveRetry = resolve; });
+  } });
+  try {
+    const retry = h.doc.querySelector('.trends-load-state button');
+    retry.focus();
+    retry.click();
+    await flush();
+    const otherControl = h.doc.querySelector('#detail-tab-logs');
+    otherControl.focus();
+    const now = Math.floor(Date.now() / 1000);
+    resolveRetry({ ok: true, json: async () => ({ window_seconds: 900, interval_seconds: 30,
+      series: { ts: [now - 30, now], cpu: [5, 7], rss: [10, 12], sessions: [1, 2], instances: [1, 1] } }) });
+    await flush();
+    assert.equal(h.doc.activeElement, otherControl);
+    assert.equal(h.doc.querySelector('.trends-refresh-status').textContent, 'Metrics history updated.');
+  } finally { h.restore(); }
+});
+
+test('elastic Overview identifies workers in process capacity and health readings', async () => {
+  const app = { ...CRASHED_APP, status: 'running', deploy_count: 1,
+    last_deployment_status: 'succeeded', effective_worker_isolation: 'grouped', max_sessions_per_replica: 20 };
+  const h = await mountDetail({ app, tab: 'overview' });
+  try {
+    assert.equal(h.doc.querySelector('#overview-replicas-heading').textContent, 'Workers');
+    assert.match(h.doc.querySelector('#overview-replicas-cap').textContent, /sessions\/worker/);
+    h.route.onLiveMetrics(app.slug, { status: 'running', worker_isolation: 'grouped',
+      replicas: [{ status: 'running' }, { status: 'running' }] });
+    assert.match(h.doc.querySelector('#overview-health-detail').textContent, /2 workers running/);
+    h.route.onLiveMetrics(app.slug, { status: 'running', worker_isolation: 'grouped',
+      replicas: [{ status: 'running' }, { status: 'starting' }] });
+    assert.equal(h.doc.querySelector('#overview-health-action').textContent, 'Inspect workers');
+    assert.match(h.doc.querySelector('#overview-health-detail').textContent, /1 of 2 workers running/);
   } finally { h.restore(); }
 });
 
@@ -190,7 +267,8 @@ test('an older history response cannot overwrite a newer chart', async () => {
     historyFetch: () => new Promise(resolve => pending.push(resolve)) });
   const realNow = Date.now;
   const response = cpu => ({ ok: true, json: async () => ({ window_seconds: 3600, interval_seconds: 30,
-    series: { ts: [1, 2], cpu: [1, cpu], rss: [10, 12], sessions: [1, 2], instances: [1, 1] } }) });
+    series: { ts: [Math.floor(Date.now() / 1000) - 30, Math.floor(Date.now() / 1000)],
+      cpu: [1, cpu], rss: [10, 12], sessions: [1, 2], instances: [1, 1] } }) });
   try {
     assert.equal(pending.length, 1);
     Date.now = () => realNow() + 31000;

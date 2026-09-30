@@ -14,8 +14,9 @@ import (
 )
 
 type historyResp struct {
-	WindowSeconds   int64 `json:"window_seconds"`
-	IntervalSeconds int64 `json:"interval_seconds"`
+	WindowSeconds   int64     `json:"window_seconds"`
+	IntervalSeconds int64     `json:"interval_seconds"`
+	GeneratedAt     time.Time `json:"generated_at"`
 	Series          struct {
 		TS []int64 `json:"ts"`
 		// Pointers, matching the wire: a null entry is a tick with no rate, not
@@ -65,6 +66,9 @@ func TestGetMetricsHistory_ReturnsSeries(t *testing.T) {
 	}
 	if resp.IntervalSeconds != 15 {
 		t.Errorf("interval_seconds = %d, want 15", resp.IntervalSeconds)
+	}
+	if resp.GeneratedAt.IsZero() {
+		t.Error("generated_at must identify the server's sample window")
 	}
 	if len(resp.Series.CPU) != 2 ||
 		resp.Series.CPU[0] == nil || *resp.Series.CPU[0] != 10 ||
