@@ -649,11 +649,16 @@ func (s *Server) cycleRedeploy(slug string) (outcome, reason string) {
 		return db.RedeployFailed, err.Error()
 	}
 
-	if s.manager != nil {
-		_ = s.manager.Stop(slug)
+	releaseConsumerBoot, gateErr := s.acquireConsumerBootGate(app.ID)
+	if gateErr != nil {
+		slog.Error("redeploy: acquire startup-data compatibility fence", "slug", slug, "err", gateErr)
+		return db.RedeployFailed, "acquire startup-data compatibility fence: " + gateErr.Error()
 	}
-	if s.proxy != nil {
-		s.proxy.Deregister(slug)
+	defer releaseConsumerBoot()
+	if err := s.stopForSettings(app); err != nil {
+		slog.Error("redeploy: drain and stop", "slug", slug, "err", err)
+		_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded", LastError: err.Error()})
+		return db.RedeployFailed, err.Error()
 	}
 	// Live settings edits retain trailing rows until their processes are
 	// stopped. A combined structural/size change cycles the pool, so prune
@@ -675,13 +680,6 @@ func (s *Server) cycleRedeploy(slug string) (outcome, reason string) {
 	}
 
 	redeployDefaultMem, redeployDefaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)
-	releaseConsumerBoot, gateErr := s.acquireConsumerBootGate(app.ID)
-	if gateErr != nil {
-		slog.Error("redeploy: acquire startup-data compatibility fence", "slug", slug, "err", gateErr)
-		_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"})
-		return db.RedeployFailed, "acquire startup-data compatibility fence: " + gateErr.Error()
-	}
-	defer releaseConsumerBoot()
 	redeployParams := s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             current.BundleDir,

@@ -70,8 +70,11 @@ type ElasticSpawner struct {
 }
 
 type elasticLifetime struct {
-	timer *time.Timer
-	epoch uint64
+	timer   *time.Timer
+	epoch   uint64
+	started time.Time
+	limit   time.Duration
+	slot    int
 }
 
 type elasticWarmRetry struct {
@@ -492,7 +495,7 @@ func (s *ElasticSpawner) armLifetime(app *db.App, slug string, slotID int) {
 	}
 	lifetime := time.Duration(app.WorkerMaxSessionLifetimeSecs) * time.Second
 	key := slug + "/" + strconv.Itoa(slotID)
-	backstop := &elasticLifetime{epoch: s.Proxy.PoolEpoch(slug)}
+	backstop := &elasticLifetime{epoch: s.Proxy.PoolEpoch(slug), started: time.Now(), limit: lifetime, slot: slotID}
 	// Serialize publication with cancellation, including an expiration that
 	// runs immediately. Old callbacks cannot consume a replacement backstop.
 	s.lifetimeMu.Lock()

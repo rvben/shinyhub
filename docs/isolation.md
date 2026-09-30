@@ -561,19 +561,22 @@ holds its resource slice until the client disconnects (or
    shinyhub apps set myapp --isolation per_session --max-workers 20 --warm-spares 1
    ```
 
-   The new routing policy is applied immediately, and any
-   currently-connected sessions cold-start in their new worker on their
-   next request.
+   On a running app, changing the effective isolation mode drains existing
+   sessions before replacing the pool. Sessions still active at
+   `server.drain_timeout` disconnect. An explicit mode equal to the inherited
+   mode preserves the pool.
 
-   On a **running** app, changing the isolation, group size, worker ceiling,
-   or lifetime triggers a redeploy in the background, which tears down and
-   re-registers the pool. Treat those changes as a pool restart: current
-   sessions are dropped. Changing only `warm_spares` is hot and preserves
-   assigned workers; the controller provisions or retires only pristine
-   spares. On a stopped or hibernated app every worker change is metadata-only
-   until the app starts. A settings-triggered redeploy does **not** re-run the
-   dependency build or manifest post-deploy hooks, because the bundle and its
-   environment are unchanged.
+   Group size, worker ceiling, and warm-spare settings apply live and preserve
+   assigned workers. Lowering a ceiling limits new admissions; only pristine
+   unused warm workers are retired. Increasing a lifetime extends armed
+   deadlines from their original start, while `0` cancels them. Reducing or
+   enabling a lifetime affects newly assigned workers without imposing a new
+   deadline on an existing unlimited worker.
+
+   On a stopped or hibernated app, worker settings remain metadata-only until
+   the app starts. A settings-triggered replacement does not re-run dependency
+   builds or manifest post-deploy hooks because the bundle and environment are
+   unchanged.
 
 2. **Or declare it in `shinyhub.toml`** (recommended for reproducible fleets):
 

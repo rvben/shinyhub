@@ -591,8 +591,8 @@ func TestResourceLimitsUIWiring(t *testing.T) {
 		"the Resources render must read the envelope's resource_enforcement to warn when native enforcement is absent; see internal/api/apps.go (resource_enforcement)")
 	assertContains(t, "app.js", "6400",
 		"saveResources must validate the CPU quota against the 6400 ceiling")
-	assertContains(t, "app.js", "will restart the app and drop all active sessions",
-		"saveResources must confirm the restart a resource-limit change triggers")
+	assertContains(t, "app.js", "runtimes that require replacement drain sessions first",
+		"saveResources must explain the drain deadline for resource changes that require replacement")
 }
 
 // TestEnvListUnwrapsResponse guards the env-list consumer.

@@ -252,7 +252,7 @@ func (p *Proxy) reconcileElasticWarmSpares(slug string, expectedEpoch *uint64) {
 		return
 	}
 	pool := p.pools[slug]
-	if pool == nil || !poolIsElastic(pool) {
+	if pool == nil || !poolIsElastic(pool) || pool.settingsDraining {
 		p.mu.Unlock()
 		return
 	}
@@ -374,7 +374,7 @@ func (p *Proxy) reserveWorker(slug, _ string) int {
 	defer p.mu.Unlock()
 
 	pool, ok := p.pools[slug]
-	if !ok || !poolIsElastic(pool) {
+	if !ok || !poolIsElastic(pool) || pool.settingsDraining {
 		return -1
 	}
 
@@ -500,6 +500,10 @@ func (p *Proxy) placeClient(slug, clientID string, memOK bool) placement {
 		if w := pool.workers[cs.slotID]; w != nil && w.status != workerDraining {
 			return placement{kind: placedBind, slotID: cs.slotID, deploymentID: w.deploymentID}
 		}
+	}
+
+	if pool.settingsDraining {
+		return placement{kind: placedGone}
 	}
 
 	d := decide(pool.workerStates(), pool.mode, pool.groupedSize, pool.maxWorkers, -1)
@@ -686,6 +690,9 @@ func (p *Proxy) ReleaseReservation(slug string, slotID int) {
 func (p *Proxy) DeregisterElasticWorker(slug string, slotID int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if cancel := p.cancelElasticLifetime; cancel != nil {
+		cancel(slug, slotID)
+	}
 
 	pool, ok := p.pools[slug]
 	if !ok {

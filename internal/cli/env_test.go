@@ -229,8 +229,8 @@ func TestEnvSet_RestartFlag(t *testing.T) {
 	if (*reqs)[1].Method != "POST" {
 		t.Errorf("second request method = %s, want POST", (*reqs)[1].Method)
 	}
-	if !strings.HasSuffix((*reqs)[1].Path, "/restart") {
-		t.Errorf("second request path = %q, want .../restart", (*reqs)[1].Path)
+	if !strings.HasSuffix((*reqs)[1].Path, "/env/apply") {
+		t.Errorf("second request path = %q, want .../env/apply", (*reqs)[1].Path)
 	}
 }
 
@@ -416,7 +416,7 @@ func TestEnvSet_RestartFlag_RestartFailure(t *testing.T) {
 		case r.Method == "PUT":
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"changed":true}`))
-		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/restart"):
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/env/apply"):
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = w.Write([]byte(`{"error":"process manager unavailable"}`))
 		default:

@@ -24,6 +24,33 @@ type envListItem struct {
 	UpdatedAt int64  `json:"updated_at"`
 }
 
+// handleApplyAppEnv applies previously saved edits without manufacturing a
+// changed value. Bulk CLI edits and the dashboard share this draining path.
+func (s *Server) handleApplyAppEnv(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+	app, ok := s.requireManageApp(w, r, slug)
+	if !ok {
+		return
+	}
+	query := r.URL.Query()
+	query.Set("restart", "true")
+	r.URL.RawQuery = query.Encode()
+	restarted, err := s.maybeRestartForChange(r, app, slug)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "Applying saved environment failed", "restart_error": err.Error(), "restart_required": true})
+		return
+	}
+	if restarted {
+		u := auth.UserFromContext(r.Context())
+		var userID *int64
+		if u != nil {
+			userID = &u.ID
+		}
+		s.logAuditEvent(r, db.AuditEventParams{UserID: userID, Action: "env.apply", ResourceType: "app", ResourceID: slug, Detail: db.AuditDetail(map[string]any{"operation": "apply_saved_environment", "draining": true}), IPAddress: s.ClientIP(r)})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"restarted": restarted})
+}
+
 func (s *Server) handleListAppEnv(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
 	// Manager-only: env vars are app configuration. Even non-secret values can
@@ -189,7 +216,7 @@ func (s *Server) handleUpsertAppEnv(w http.ResponseWriter, r *http.Request) {
 		"set":              true,
 		"changed":          changed,
 		"restarted":        restarted,
-		"restart_required": changed && !restarted && app.Status == "running",
+		"restart_required": changed && !restarted && (app.Status == "running" || app.Status == "degraded"),
 	}
 	if restartErr != nil {
 		resp["restart_error"] = restartErr.Error()
@@ -233,10 +260,14 @@ func (s *Server) handleDeleteAppEnv(w http.ResponseWriter, r *http.Request) {
 		IPAddress:    s.ClientIP(r),
 	})
 
-	restarted, _ := s.maybeRestartForChange(r, app, slug)
+	restarted, restartErr := s.maybeRestartForChange(r, app, slug)
+	if restartErr != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "Variable deleted, but applying the change failed", "restart_error": restartErr.Error(), "restart_required": true})
+		return
+	}
 	// The 204 carries no body, so advertise a needed restart via a header: a
 	// running app keeps the removed variable in its environment until cycled.
-	if !restarted && app.Status == "running" {
+	if !restarted && (app.Status == "running" || app.Status == "degraded") {
 		w.Header().Set("X-Shinyhub-Restart-Required", "true")
 	}
 
@@ -259,7 +290,7 @@ func (s *Server) maybeRestartForChange(r *http.Request, app *db.App, slug string
 	if s.manager == nil {
 		return false, nil
 	}
-	if app.Status != "running" {
+	if app.Status != "running" && app.Status != "degraded" {
 		return false, nil
 	}
 	// Serialize with any deploy/restart on the same slug. The active
@@ -267,11 +298,20 @@ func (s *Server) maybeRestartForChange(r *http.Request, app *db.App, slug string
 	// us relaunch a stale bundle after it promoted a newer one.
 	release := s.acquireDeployLock(slug)
 	defer release()
+	var fetchErr error
+	app, fetchErr = s.store.GetAppBySlug(slug)
+	if fetchErr != nil {
+		return false, fetchErr
+	}
 	if err := s.guardActivationLifecycle(app.ID, "restart after environment change "+slug); err != nil {
 		return false, err
 	}
 	if err := s.guardCompatibilityQuarantine(app.ID, "restart after environment change "+slug); err != nil {
 		return false, err
+	}
+
+	if app.Status != "running" && app.Status != "degraded" {
+		return false, nil
 	}
 
 	deployments, err := s.store.ListRecentDeployments(app.ID, 1)
@@ -288,16 +328,15 @@ func (s *Server) maybeRestartForChange(r *http.Request, app *db.App, slug string
 		return false, err
 	}
 
-	_ = s.manager.Stop(slug)
-	if s.proxy != nil {
-		s.proxy.Deregister(slug)
-	}
 	envDefaultMem, envDefaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)
 	releaseConsumerBoot, gateErr := s.acquireConsumerBootGate(app.ID)
 	if gateErr != nil {
 		return false, fmt.Errorf("acquire startup-data compatibility fence: %w", gateErr)
 	}
 	defer releaseConsumerBoot()
+	if err := s.stopForSettings(app); err != nil {
+		return false, err
+	}
 	restartParams := s.withTierPlacement(deploy.Params{
 		Slug:                  slug,
 		BundleDir:             current.BundleDir,

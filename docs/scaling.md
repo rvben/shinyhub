@@ -50,8 +50,35 @@ through the CLI or API retries convergence.
 
 Changing only `max_sessions_per_replica` applies live, without restarting any
 process. Existing sessions remain admitted even when the cap is lowered.
-Worker isolation, worker structure, placement, and resource-limit changes still
-require a restart.
+Worker admission settings (`worker_max_workers`, `worker_grouped_size`, and
+`worker_warm_spares`) also apply live. Lowering a ceiling preserves assigned
+workers and sessions; only unused warm workers are retired. A shorter worker
+lifetime applies to newly assigned workers. Increasing an existing lifetime
+extends its deadline from the original assignment time, and setting the lifetime
+to `0` cancels armed deadlines. Enabling a lifetime does not retroactively impose
+a deadline on a worker that was assigned without one.
+
+Placement changes preserve each replica whose global index and tier stay the
+same. Added slots start first. Removed slots and slots moving to a different
+tier drain before stopping; their sessions may disconnect at the deadline.
+Tier order determines indices, so growing an earlier tier can move later slots.
+A failed placement update preserves unaffected capacity; repeat the placement
+PATCH to retry reconciliation.
+
+Resource changes compare effective values: changing an inherited limit to the
+same explicit value preserves processes. CPU updates and memory increases apply
+live on existing native cgroups and Docker containers. Removing a native limit
+also applies live. Docker limit removal, memory reductions, native processes
+without a usable cgroup, and runtimes without live-update support drain before
+replacement. Hosts without delegated native controllers report limits as
+unenforced; restarting cannot enable them. A transient live-update error preserves
+sessions and reports the saved target plus an application error; repeat the same
+resource PATCH to retry.
+
+Changing the effective worker isolation mode requires draining replacement.
+Saving an explicit mode equal to the inherited mode preserves the pool. Drain
+periods are bounded by `server.drain_timeout`: remaining sessions disconnect when
+replacement is necessary and the deadline expires.
 
 **Via API** (for tooling integrations):
 

@@ -148,6 +148,8 @@ func newEnvApplyServer(t *testing.T, current []envServerVar) *envApplyServer {
 		switch {
 		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/env"):
 			_ = json.NewEncoder(w).Encode(map[string]any{"items": s.current})
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/env/apply"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"restarted": true})
 		case r.Method == "PUT":
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{}`))
@@ -365,12 +367,28 @@ func TestEnvApply_RestartFiresOnce(t *testing.T) {
 
 	restartCount := 0
 	for _, r := range srv.requests {
-		if r.Method == "PUT" && strings.Contains(r.Query, "restart=true") {
+		if r.Method == "POST" && strings.HasSuffix(r.Path, "/env/apply") {
 			restartCount++
 		}
 	}
 	if restartCount != 1 {
-		t.Errorf("expected exactly one restart=true PUT, got %d", restartCount)
+		t.Errorf("expected exactly one environment apply POST, got %d", restartCount)
+	}
+}
+
+func TestEnvApply_DeleteOnlyBatchAppliesSavedEnvironmentOnce(t *testing.T) {
+	srv := newEnvApplyServer(t, []envServerVar{{Key: "STALE", Value: "old", Set: true}})
+	setupCLIConfig(t, srv.srv.URL)
+	path := writeEnvFile(t, "")
+	cmd := newEnvCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"apply", "demo", path, "--prune", "--restart"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if len(srv.requests) != 3 || srv.requests[1].Method != "DELETE" || srv.requests[1].Query != "" || srv.requests[2].Method != "POST" || srv.requests[2].Path != "/api/apps/demo/env/apply" {
+		t.Fatalf("delete-only batch did not apply exactly once: %+v", srv.requests)
 	}
 }
 

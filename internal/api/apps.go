@@ -1420,6 +1420,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		Placement:                    placementJSON,
 		PlacementTotal:               placementTotal,
 		ArmRedeploy:                  true,
+		RetryResourceUpdate:          app.Status == "degraded" && strings.HasPrefix(app.LastError, "apply resource limits:") && (setMemoryLimitMB || setCPUQuotaPercent),
 	})
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
@@ -1438,9 +1439,16 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	// the redeploy even though the row still reads "running"; the goroutine
 	// clears it. Deferred after releaseSettings, so it runs first and the
 	// goroutine then waits for this handler to release the deploy lock.
+	launchRedeploy := true
 	if seq := patched.RedeploySeq; seq > 0 {
 		s.markRedeployInFlight(slug)
-		defer func() { go s.redeployApp(slug, seq) }()
+		defer func() {
+			if launchRedeploy {
+				go s.redeployApp(slug, seq)
+			} else {
+				s.clearRedeployInFlight(slug)
+			}
+		}()
 	}
 	if setUsageIdentityMode {
 		newOverride := ""
@@ -1521,8 +1529,8 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// A resource-limit change must reach the running replicas: the cgroup/
-	// container ceiling is set at spawn, so the pool is cycled. The prior
+	// A resource-limit change must reach running replicas, either live or via
+	// draining replacement when the runtime requires it. The prior
 	// values come from inside PatchAppSettings'
 	// transaction (not the pre-write app snapshot), so detection is free of a
 	// time-of-check/time-of-use race with a concurrent PATCH. Per-field "changed"
@@ -1531,6 +1539,9 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	oldMemoryLimitMB, oldCPUQuotaPercent := patched.PriorMem, patched.PriorCPU
 	memChanged := setMemoryLimitMB && !intPtrEqual(oldMemoryLimitMB, memoryLimitMB)
 	cpuChanged := setCPUQuotaPercent && !intPtrEqual(oldCPUQuotaPercent, cpuQuotaPercent)
+	resourceDefaultMem, resourceDefaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)
+	resourceChanged := (memChanged && deploy.ResolveMemoryLimitMB(oldMemoryLimitMB, resourceDefaultMem) != deploy.ResolveMemoryLimitMB(memoryLimitMB, resourceDefaultMem)) ||
+		(cpuChanged && deploy.ResolveCPUQuotaPercent(oldCPUQuotaPercent, resourceDefaultCPU) != deploy.ResolveCPUQuotaPercent(cpuQuotaPercent, resourceDefaultCPU))
 
 	// Same "changed", not merely "present", rule as the resource limits above:
 	// requesting the pool's current shape or a worker dial's current value is a
@@ -1540,6 +1551,9 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	placementChanged := (setPlacement && !maps.Equal(oldPlacementMap, newPlacementMap)) ||
 		(clearPlacement && len(oldPlacementMap) > 0)
 	workerIsolationChanged := setWorkerIsolation && oldWorkerIsolation != newWorkerIsolation
+	isolationModeChanged := setWorkerIsolation &&
+		deploy.ResolveWorkerIsolation(oldWorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation) !=
+			deploy.ResolveWorkerIsolation(newWorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation)
 	workerGroupedSizeChanged := setWorkerGroupedSize && oldWorkerGroupedSize != newWorkerGroupedSize
 	workerMaxWorkersChanged := setWorkerMaxWorkers && oldWorkerMaxWorkers != newWorkerMaxWorkers
 	workerWarmSparesChanged := setWorkerWarmSpares && oldWorkerWarmSpares != newWorkerWarmSpares
@@ -1558,11 +1572,11 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		s.proxy.SetPoolIdentityHeaders(slug,
 			deploy.ResolveIdentityHeaders(newIdentityHeaders, s.cfg.Auth.IdentityHeadersEnabled()))
 	}
-	// SetPoolMode on any worker-field change so a live isolation reconfiguration
-	// reshapes the pool without requiring a full redeploy cycle. The isolation
-	// change will also trigger redeployApp (below), which calls deploy.Run and
-	// therefore sets it again; this call covers the stopped-app case too.
-	if (setWorkerIsolation || setWorkerGroupedSize || setWorkerMaxWorkers || setWorkerWarmSpares) && s.proxy != nil {
+	// Admission changes update the current pool in place. An actual mode change
+	// waits for draining replacement: resetting an elastic pool here would
+	// discard bindings before its established sessions have finished.
+	if (setWorkerIsolation || setWorkerGroupedSize || setWorkerMaxWorkers || setWorkerWarmSpares) && s.proxy != nil &&
+		!(isolationModeChanged && (priorStatus == "running" || priorStatus == "degraded")) {
 		effectiveIsolation := app.WorkerIsolation
 		if setWorkerIsolation {
 			effectiveIsolation = newWorkerIsolation
@@ -1583,13 +1597,80 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			config.WorkerIsolationMode(deploy.ResolveWorkerIsolation(effectiveIsolation, s.cfg.Runtime.DefaultWorkerIsolation)),
 			effectiveGroupedSize, effectiveMaxWorkers)
 		s.proxy.SetPoolWarmSpares(slug, effectiveWarmSpares)
-		// A warm-target-only edit is hot: preserve assigned workers and converge
-		// the spare floor in place. Structural worker changes redeploy below and
-		// deploy.Run reconciles only after the bundle is prepared. Never provision
-		// from a settings edit while the app is stopped.
-		structuralWorkerChanged := setWorkerIsolation || setWorkerGroupedSize || setWorkerMaxWorkers
-		if setWorkerWarmSpares && !structuralWorkerChanged && priorStatus == "running" {
+		// Admission limits are hot: preserve assigned workers, including those
+		// above a lowered ceiling, and converge only pristine warm spares.
+		// Never provision from a settings edit while the app is stopped.
+		if (setWorkerWarmSpares || setWorkerMaxWorkers || setWorkerGroupedSize) && !isolationModeChanged &&
+			(priorStatus == "running" || priorStatus == "degraded") {
 			s.proxy.ReconcileElasticWarmSpares(slug)
+		}
+	}
+	if setWorkerMaxSessionLifetime && !isolationModeChanged && s.proxy != nil {
+		s.proxy.ApplyElasticLifetime(slug, newWorkerMaxSessionLifetime)
+	}
+	workerChanged := isolationModeChanged
+	retryResources := priorStatus == "degraded" && strings.HasPrefix(app.LastError, "apply resource limits:") && (setMemoryLimitMB || setCPUQuotaPercent)
+	var resourceUpdateErr error
+	if (resourceChanged || retryResources) && !isolationModeChanged && !placementChanged && s.manager != nil &&
+		(priorStatus == "running" || priorStatus == "degraded") {
+		updatedMemory := app.MemoryLimitMB
+		if setMemoryLimitMB {
+			updatedMemory = memoryLimitMB
+		}
+		updatedCPU := app.CPUQuotaPercent
+		if setCPUQuotaPercent {
+			updatedCPU = cpuQuotaPercent
+		}
+		resourceUpdateErr = s.applyLiveResources(r.Context(), app, oldMemoryLimitMB, updatedMemory, oldCPUQuotaPercent, updatedCPU, retryResources)
+
+		if resourceUpdateErr == nil {
+			resourceChanged = false
+			if retryResources {
+				_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "running"})
+			}
+		} else if errors.Is(resourceUpdateErr, process.ErrLiveResourcesUnsupported) {
+			resourceChanged = true
+		} else {
+			// A transient update failure must not kill sessions. Keep the saved
+			// target visible with an application error for an operator retry.
+			resourceChanged = false
+			warnings = append(warnings, "Resource limits saved, but live application failed: "+resourceUpdateErr.Error())
+			_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded", LastError: "apply resource limits: " + resourceUpdateErr.Error()})
+		}
+	}
+	if patched.RedeploySeq > 0 && !resourceChanged && !workerChanged {
+		needsResize := placementChanged || replicasChanged || ((setReplicas || setPlacement || clearPlacement) && priorStatus == "degraded")
+		if retryResources && resourceUpdateErr == nil && deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation) == "multiplex" {
+			target, err := s.store.GetAppBySlug(slug)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "read saved settings for resource retry")
+				return
+			}
+			rows, err := s.store.ListReplicas(app.ID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "read replicas for resource retry")
+				return
+			}
+			needsResize = needsResize || !s.replicaRowsMatchTarget(target, rows)
+		}
+		outcome, reason := "", ""
+		if resourceUpdateErr != nil {
+			outcome, reason = db.RedeployFailed, resourceUpdateErr.Error()
+		} else if !needsResize {
+			outcome = db.RedeployCompleted
+		}
+		// The settings have committed and live application has finished. A
+		// disconnected client must not turn bookkeeping into a replacement.
+		lease := s.currentOwnerLease()
+		resolved, err := s.retryRedeployStore(func() (bool, error) {
+			return s.store.ResolveLiveSettingsRedeploy(context.Background(), lease, slug, patched, outcome, reason)
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "settings saved but recording live application failed")
+			return
+		}
+		if resolved && outcome != "" {
+			launchRedeploy = false
 		}
 	}
 
@@ -1645,6 +1726,9 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{"app": app}
 	if patched.RedeploySeq > 0 {
 		resp["redeploy_seq"] = patched.RedeploySeq
+	}
+	if resourceUpdateErr != nil && !errors.Is(resourceUpdateErr, process.ErrLiveResourcesUnsupported) {
+		resp["resource_update_error"] = resourceUpdateErr.Error()
 	}
 	if block := s.buildRenderPacingBlock(effectiveRenderSeconds, effectiveCap); block != nil {
 		resp["render_pacing"] = block

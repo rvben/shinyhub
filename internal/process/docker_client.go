@@ -519,11 +519,15 @@ func (c *dockerClient) publishedHostPort(id string) (int, error) {
 // --- helpers ---
 
 func (c *dockerClient) post(path string, body any, out any) error {
+	return c.postContext(context.Background(), path, body, out)
+}
+
+func (c *dockerClient) postContext(ctx context.Context, path string, body any, out any) error {
 	b, err := json.Marshal(body)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPost, c.base+path, bytes.NewReader(b))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+path, bytes.NewReader(b))
 	if err != nil {
 		return fmt.Errorf("post %s: %w", path, err)
 	}

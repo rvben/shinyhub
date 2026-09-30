@@ -1,6 +1,7 @@
 import { mountAnnouncements } from '/static/views/announcements.js';
 import { createPersonActions } from '/static/views/person-actions.js';
 import { scalingSettingsSnapshot, scalingSettingsPatch } from '/static/views/scaling-settings.js';
+import { resourceSettingsPatch } from '/static/views/resource-settings.js';
 import { applyPeopleOnboarding, createInvitationList } from '/static/views/people-onboarding.js';
 import { createNewPersonController } from '/static/views/new-person.js';
 import { createSupportSessionAction } from '/static/views/support-session-settings.js';
@@ -3171,6 +3172,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // so all settings tabs behave identically.
   const settingsSections = {};
   let originalScalingSettings = {};
+  let originalResourceSettings = {};
   function registerSettingsSection(name, getEls, saveBtnId, dirtyId) {
     const els = getEls();
     const rec = {
@@ -3496,6 +3498,10 @@ document.addEventListener('DOMContentLoaded', () => {
     // value actually changes on a running app (mirrors the scaling guard).
     memInput.dataset.original = memInput.value;
     cpuInput.dataset.original = cpuInput.value;
+    originalResourceSettings = {
+      memory_limit_mb: memInput.value === '' ? null : Number(memInput.value),
+      cpu_quota_percent: cpuInput.value === '' ? null : Number(cpuInput.value),
+    };
     memInput.dataset.appStatus = app.status || '';
     const enf = app.resource_enforcement;
     const nativeMode = app.runtime_mode !== 'docker';
@@ -3893,16 +3899,16 @@ document.addEventListener('DOMContentLoaded', () => {
       setError(errEl, e.message);
       return;
     }
-    // A resource-limit change restarts the app (the cgroup ceiling is applied at
-    // spawn), dropping active sessions. Confirm before the disruptive case, only
-    // when a value actually changed on a running app (mirrors the scaling guard).
+    // Supported resource updates preserve processes. Memory reductions and
+    // immutable runtimes drain before replacement.
     const memInput = document.getElementById('resources-memory');
     const cpuInput = document.getElementById('resources-cpu');
-    const wasRunning = memInput.dataset.appStatus === 'running';
-    const changed = memInput.value.trim() !== (memInput.dataset.original ?? '') ||
-      cpuInput.value.trim() !== (cpuInput.dataset.original ?? '');
-    if (wasRunning && changed) {
-      const ok = window.confirm('Changing resource limits will restart the app and drop all active sessions. Continue?');
+    const wasRunning = ['running', 'degraded'].includes(memInput.dataset.appStatus);
+    const savedResources = { memory_limit_mb: memory, cpu_quota_percent: cpu };
+    const payload = resourceSettingsPatch(savedResources, originalResourceSettings);
+    if (Object.keys(payload).length === 0) return;
+    if (wasRunning) {
+      const ok = window.confirm('Supported resource changes apply live. Memory reductions and runtimes that require replacement drain sessions first; sessions still active at the drain deadline will disconnect. Continue?');
       if (!ok) return;
     }
     const btn = document.getElementById('resources-save-btn');
@@ -3911,7 +3917,7 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       resp = await api(`/api/apps/${encodeURIComponent(slug)}`, {
         method: 'PATCH',
-        body: JSON.stringify({ memory_limit_mb: memory, cpu_quota_percent: cpu }),
+        body: JSON.stringify(payload),
       });
     } catch {
       setError(errEl, 'Failed to save. Check your connection.');
@@ -3926,8 +3932,17 @@ document.addEventListener('DOMContentLoaded', () => {
       recomputeDirty('resources');
       return;
     }
+    const result = await resp.json();
+    if (result.resource_update_error) {
+      setError(errEl, 'Settings saved, but live application failed: ' + result.resource_update_error + '. Save again to retry.');
+      recomputeDirty('resources');
+      return;
+    }
     statusEl.textContent = 'Saved.';
     setHidden(statusEl, false);
+    originalResourceSettings = savedResources;
+    memInput.dataset.original = memInput.value.trim();
+    cpuInput.dataset.original = cpuInput.value.trim();
     snapshotSettingsSection('resources');
     await loadApps();
     await refreshDetailFleetState(slug);
@@ -4110,7 +4125,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const wasRunningIso = ['running', 'degraded'].includes(isolationSelect.dataset.appStatus);
     if (wasRunningIso && workerIsolation !== originalIsolation) {
       const ok = window.confirm(
-        `Changing worker isolation mode from ${originalIsolation} to ${workerIsolation} will restart the app and drop all active sessions. Continue?`,
+        `Changing worker isolation mode from ${originalIsolation} to ${workerIsolation} will drain sessions before replacing the pool. Sessions still active at the drain deadline will disconnect. Continue?`,
       );
       if (!ok) return;
     }
@@ -4130,12 +4145,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const savedScaling = scalingSettingsSnapshot(document);
     const payload = scalingSettingsPatch(savedScaling, originalScalingSettings);
     if (Object.keys(payload).length === 0) return;
-    const workerStructureChanged = ['worker_isolation', 'worker_grouped_size', 'worker_max_workers']
-      .some(key => Object.hasOwn(payload, key));
-    if (wasRunningIso && workerStructureChanged && workerIsolation === originalIsolation) {
-      const ok = window.confirm('Changing worker capacity will restart the app and drop all active sessions. Continue?');
-      if (!ok) return;
-    }
     const btn = document.getElementById('scaling-save-btn');
     btn.disabled = true;
     let resp;
@@ -4421,6 +4430,7 @@ document.addEventListener('DOMContentLoaded', () => {
       || state.apps.find(a => a.slug === slug);
     const canWrite = canManageApp(state.user, app);
     document.getElementById('env-add-btn').hidden = !canWrite;
+    document.getElementById('env-apply-btn').hidden = !canWrite;
 
     for (const v of vars) {
       const tr = document.createElement('tr');
@@ -4460,6 +4470,7 @@ document.addEventListener('DOMContentLoaded', () => {
     valueInput.placeholder = (existing && existing.secret) ? 'Enter new value (current value is write-only)' : '';
     secretInput.checked = existing ? existing.secret : false;
     secretInput.disabled = !!existing;
+    document.getElementById('env-form-restart').checked = false;
     document.getElementById('env-form-error').hidden = true;
     document.getElementById('env-form').hidden = false;
     keyInput.focus();
@@ -4485,6 +4496,7 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
+    if (restart && !window.confirm('Apply this environment change by draining and restarting the app? Sessions still active at the drain deadline will disconnect.')) return;
     await runInFlight(document.getElementById('env-form-save'), async () => {
       const url = `/api/apps/${encodeURIComponent(settingsSlug)}/env/${encodeURIComponent(key)}` + (restart ? '?restart=true' : '');
       let resp;
@@ -4502,6 +4514,12 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       }
 
+      const result = await resp.json();
+      if (result.restart_error) {
+        setError(errEl, 'Variable saved, but applying it failed: ' + result.restart_error + '. Use Apply saved changes to retry.');
+        return;
+      }
+      if (result.restart_required) flashToast('Variable saved. Existing sessions keep their environment until you apply saved changes.', 'success');
       closeEnvForm();
       await refreshEnvList(settingsSlug);
     });
@@ -4513,7 +4531,7 @@ document.addEventListener('DOMContentLoaded', () => {
     await runInFlight(btn, async () => {
       let resp;
       try {
-        resp = await api(`/api/apps/${encodeURIComponent(slug)}/env/${encodeURIComponent(key)}?restart=true`, { method: 'DELETE' });
+        resp = await api(`/api/apps/${encodeURIComponent(slug)}/env/${encodeURIComponent(key)}`, { method: 'DELETE' });
       } catch {
         setError(errEl, 'Network error.');
         return;
@@ -4524,6 +4542,9 @@ document.addEventListener('DOMContentLoaded', () => {
         try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
         setError(errEl, message);
         return;
+      }
+      if (resp.headers.get('X-Shinyhub-Restart-Required') === 'true') {
+        flashToast('Variable deleted. Existing sessions keep their environment until the app is restarted.', 'success');
       }
       await refreshEnvList(slug);
     });
@@ -5156,6 +5177,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Environment tab: add button, form submit/cancel.
   document.getElementById('env-add-btn').addEventListener('click', () => openEnvForm(null));
+  document.getElementById('env-apply-btn').addEventListener('click', () => {
+    if (!window.confirm('Apply saved environment by draining and restarting the app? Sessions still active at the drain deadline will disconnect.')) return;
+    runInFlight(document.getElementById('env-apply-btn'), async () => {
+      const errEl = document.getElementById('env-form-error');
+      setError(errEl, '');
+      try {
+        const resp = await api(`/api/apps/${encodeURIComponent(settingsSlug)}/env/apply`, { method: 'POST' });
+        if (resp.status === 401) { await handleUnauthorized(); return; }
+        const result = await resp.json();
+        if (!resp.ok) { setError(errEl, result.restart_error || result.error || 'Applying environment failed.'); return; }
+        flashToast(result.restarted ? 'Saved environment applied.' : 'Saved environment will apply when the app starts.', 'success');
+        await loadApps();
+      } catch { setError(errEl, 'Failed to apply saved environment. Check your connection.'); }
+    });
+  });
   document.getElementById('env-form').addEventListener('submit', submitEnvForm);
   document.getElementById('env-form-cancel').addEventListener('click', closeEnvForm);
 

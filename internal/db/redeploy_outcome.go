@@ -86,6 +86,32 @@ func leaseEpoch(lease *OwnerLease) int64 {
 	return lease.Epoch
 }
 
+// ResolveLiveSettingsRedeploy records an already-applied live update, or
+// downgrades a placement update to incremental reconciliation (outcome "").
+// It never clears an older full replacement that is still owed. Settings and
+// their seq remain durable if the caller dies before making this decision.
+func (s *Store) ResolveLiveSettingsRedeploy(ctx context.Context, lease *OwnerLease, slug string, patch PatchAppSettingsResult, outcome, reason string) (bool, error) {
+	if patch.RedeploySeq <= 0 || patch.PriorRedeployFullSeq > patch.PriorLastRedeploySeq {
+		return false, nil
+	}
+	return s.leasedWrite(ctx, lease, func(tx writeTx) (bool, error) {
+		query := `UPDATE apps SET redeploy_full_seq = ?`
+		args := []any{patch.PriorRedeployFullSeq}
+		if outcome != "" {
+			query += `, last_redeploy_seq = ?, last_redeploy_outcome = ?, last_redeploy_reason = ?, last_redeploy_at = ?`
+			args = append(args, patch.RedeploySeq, outcome, reason, time.Now().Unix())
+		}
+		query += ` WHERE slug = ? AND redeploy_seq_launched = ? AND last_redeploy_seq = ?`
+		args = append(args, slug, patch.RedeploySeq, patch.PriorLastRedeploySeq)
+		res, err := tx.ExecContext(ctx, query, args...)
+		if err != nil {
+			return false, err
+		}
+		n, err := res.RowsAffected()
+		return n == 1, err
+	})
+}
+
 // ClaimRedeploy records that the caller, at its lease epoch, is serving the
 // settings redeploy seq for slug. It returns false without error when the seq
 // must not be served: a newer seq has been launched (a later redeploy reads

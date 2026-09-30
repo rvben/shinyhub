@@ -237,90 +237,54 @@ func TestClusteredScaleDown_StopFailureRevertsDesiredState(t *testing.T) {
 	t.Errorf("replica row index 1 not found; rows=%+v", reps)
 }
 
-// TestSingleNodeScaleDown_NoDesiredStateWrite verifies that in single-node
-// (non-clustered) mode, ScaleDown does not write desired_state to the DB and
-// does not call AppFleetLoad. The scale-down must still succeed and remove the
-// replica row normally.
-func TestSingleNodeScaleDown_NoDesiredStateWrite(t *testing.T) {
-	cfg := &config.Config{}
-	cfg.Runtime.MaxReplicas = 8
-	// Not clustered: do NOT call srv.SetCluster.
-	srv, app := newScaleTestServer(t, "solo", 2, cfg)
-
-	// Seed the victim replica row with desired_state='running' so we can verify
-	// it was NOT changed to 'draining' during scale-down.
-	reps, err := srv.store.ListReplicas(app.ID)
+// TestSingleNodeScaleDown_PersistsDrainIntent verifies that a single node
+// exposes draining state while keeping its established session usable.
+func TestSingleNodeScaleDown_PersistsDrainIntent(t *testing.T) {
+	srv, app := newScaleTestServer(t, "solo", 2, &config.Config{})
+	info, err := srv.manager.Start(process.StartParams{Slug: "solo", Index: 1, Dir: t.TempDir(), Command: []string{"sleep", "30"}, Port: 20500})
 	if err != nil {
-		t.Fatalf("list replicas before: %v", err)
+		t.Fatal(err)
 	}
-	var initialDesiredState string
-	for _, r := range reps {
-		if r.Index == 1 {
-			initialDesiredState = r.DesiredState
-		}
-	}
-	if initialDesiredState == "" {
-		initialDesiredState = "running"
-	}
-
-	info, err := srv.manager.Start(process.StartParams{
-		Slug: "solo", Index: 1, Dir: t.TempDir(),
-		Command: []string{"sleep", "30"}, Port: 20500,
-	})
-	if err != nil {
-		t.Fatalf("seed victim process: %v", err)
-	}
+	t.Cleanup(func() { _ = srv.manager.Stop("solo") })
 	srv.proxy.SetPoolSize("solo", 2)
-
-	// Observe desired_state changes during scale-down via a concurrent watcher.
-	var desiredStateMutated bool
-	watchDone := make(chan struct{})
-	go func() {
-		defer close(watchDone)
-		deadline := time.Now().Add(500 * time.Millisecond)
-		for time.Now().Before(deadline) {
-			reps, err := srv.store.ListReplicas(app.ID)
-			if err != nil {
-				time.Sleep(5 * time.Millisecond)
-				continue
-			}
-			for _, r := range reps {
-				if r.Index == 1 && r.DesiredState == "draining" {
-					desiredStateMutated = true
-					return
-				}
-			}
-			time.Sleep(5 * time.Millisecond)
+	conn, check := resizeSession(t, srv, "solo", 1)
+	type outcome struct {
+		changed bool
+		err     error
+	}
+	done := make(chan outcome, 1)
+	go func() { changed, err := srv.ScaleDown("solo", time.Second); done <- outcome{changed, err} }()
+	waitResize(t, func() bool {
+		rows, err := srv.store.ListReplicas(app.ID)
+		if err != nil {
+			return false
 		}
-	}()
-
-	scaled, err := srv.ScaleDown("solo", 200*time.Millisecond)
-	if err != nil {
-		t.Fatalf("ScaleDown: %v", err)
-	}
-	if !scaled {
-		t.Fatal("ScaleDown reported no change for a 2-replica app")
-	}
-	if err := syscall.Kill(info.PID, 0); err == nil {
-		t.Errorf("victim process (pid %d) still alive after ScaleDown", info.PID)
-	}
-
-	// Wait for the watcher to finish.
-	<-watchDone
-
-	if desiredStateMutated {
-		t.Error("single-node ScaleDown wrote desired_state='draining' to the DB; single-node must not touch desired_state")
-	}
-
-	// Replica row must be deleted (normal scale-down behavior).
-	reps, err = srv.store.ListReplicas(app.ID)
-	if err != nil {
-		t.Fatalf("list replicas after: %v", err)
-	}
-	for _, r := range reps {
-		if r.Index == 1 {
-			t.Errorf("single-node ScaleDown left replica row index 1; want deleted")
+		for _, row := range rows {
+			if row.Index == 1 && row.DesiredState == "draining" {
+				return true
+			}
 		}
+		return false
+	})
+	check()
+	if !srv.proxy.IsDraining("solo", 1) {
+		t.Fatal("persisted drain was not applied locally")
+	}
+	if err := syscall.Kill(info.PID, 0); err != nil {
+		t.Fatal("process stopped while its session was draining")
+	}
+	_ = conn.Close()
+	select {
+	case result := <-done:
+		if result.err != nil || !result.changed {
+			t.Fatalf("scale down: %+v", result)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("scale down did not finish after the session ended")
+	}
+	rows, err := srv.store.ListReplicas(app.ID)
+	if err != nil || len(rows) != 1 || rows[0].Index != 0 {
+		t.Fatalf("drained slot not removed: %+v %v", rows, err)
 	}
 }
 

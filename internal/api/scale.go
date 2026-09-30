@@ -91,7 +91,7 @@ func (s *Server) scaleUpLocked(app *db.App, persistSize bool) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("scale up %s: list replicas: %w", slug, err)
 	}
-	if persistSize && replicaRowSize(reps) != app.Replicas {
+	if persistSize && !s.replicaRowsMatchTarget(app, reps) {
 		return false, nil // a failed manual resize still needs reconciliation
 	}
 	var warmVictims []warmVictim
@@ -151,7 +151,7 @@ func (s *Server) scaleUpLocked(app *db.App, persistSize bool) (bool, error) {
 	// stamp the grown placement onto the app before building the boot params.
 	placement := app.PlacementMap()
 	tierPlaced := len(placement) > 0
-	if tierPlaced {
+	if tierPlaced && persistSize {
 		tier := lastPopulatedTier(placement, s.cfg.Runtime.TierOrder())
 		if tier == "" {
 			return false, fmt.Errorf("scale up %s: no populated tier to grow", slug)
@@ -253,7 +253,7 @@ func (s *Server) scaleUpLocked(app *db.App, persistSize bool) (bool, error) {
 		rollbackStarted(false)
 		return false, fmt.Errorf("scale up %s: upsert replica %d: %w", slug, r.Index, err)
 	}
-	if tierPlaced {
+	if tierPlaced && persistSize {
 		if err := s.store.SetAppPlacement(app.ID, app.ReplicaPlacement, total); err != nil {
 			rollbackStarted(true)
 			return false, fmt.Errorf("scale up %s: persist placement: %w", slug, err)
@@ -316,7 +316,7 @@ func (s *Server) ScaleDown(slug string, grace time.Duration) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if replicaRowSize(rows) != app.Replicas {
+	if !s.replicaRowsMatchTarget(app, rows) {
 		return false, nil
 	}
 	return s.scaleDownLocked(app, grace, true)
@@ -376,7 +376,7 @@ func (s *Server) scaleDownLocked(app *db.App, grace time.Duration, persistSize b
 	// not expand from a stale placement map and recreate the removed replica.
 	// victim >= 1 guarantees at least one tier still has a positive count.
 	placement := app.PlacementMap()
-	if len(placement) > 0 {
+	if len(placement) > 0 && persistSize {
 		tier := lastPopulatedTier(placement, s.cfg.Runtime.TierOrder())
 		if tier == "" {
 			return false, fmt.Errorf("scale down %s: no populated tier to shrink", slug)
@@ -457,12 +457,18 @@ func (s *Server) resizeAppLocked(slug string) (outcome, reason string, err error
 	if deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation) != "multiplex" {
 		return db.RedeployCompleted, "", nil
 	}
-	if len(app.PlacementMap()) > 0 {
-		return "", "", fmt.Errorf("resize %s: explicit placement requires a topology change", slug)
-	}
 	rows, err := s.store.ListReplicas(app.ID)
 	if err != nil {
 		return "", "", err
+	}
+	if len(app.PlacementMap()) > 0 || s.placementDiffers(rows) {
+		if err := s.reconcilePlacementLocked(app, rows); err != nil {
+			return "", "", err
+		}
+		rows, err = s.store.ListReplicas(app.ID)
+		if err != nil {
+			return "", "", err
+		}
 	}
 	actual := replicaRowSize(rows)
 	target := app.Replicas

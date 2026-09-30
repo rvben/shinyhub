@@ -41,9 +41,23 @@ most 100 keys per app.
 
 ## UI
 
-Open an app's **Settings** modal and switch to the **Environment** tab to list,
-add, edit, and delete variables. Secret values are masked in the list and are
-write-only once created.
+Open an app's **Configuration** tab to list, add, edit, and delete variables.
+Secret values are masked in the list and are write-only once created.
+
+Saving or deleting a variable preserves current sessions by default. Existing
+processes keep their environment; newly started processes read the saved values.
+Use **Apply saved changes** to apply the whole saved environment, or explicitly
+select **Apply now** when saving an individual variable. Both actions drain
+existing sessions before restarting the app. Sessions still active after
+`server.drain_timeout` (default `60s`) disconnect. Stopped and sleeping apps stay
+stopped or asleep and use the new values when they next start.
+
+`env set --restart`, `env rm --restart`, and `env apply --restart` use the same
+draining application path. Bulk updates apply once after all edits, including
+batches that only delete variables. The API exposes it as
+`POST /api/apps/<slug>/env/apply`; individual PUT/DELETE requests may also request
+`?restart=true`. Saving succeeds independently of application: a failed restart
+is reported so the operator can retry without re-entering secret values.
 
 ## Reserved prefix
 

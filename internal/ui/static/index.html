@@ -951,11 +951,12 @@
 
           <section class="settings-block">
             <h2 class="settings-block-title">Environment variables</h2>
-            <p class="settings-block-desc">Key/value pairs passed to the app process when it starts. Secrets are encrypted at rest and write-only.</p>
+            <p class="settings-block-desc">Key/value pairs passed to the app process when it starts. Saving or deleting a variable preserves current sessions; restart the app to apply saved changes. Secrets are encrypted at rest and write-only.</p>
             <div class="settings-block-body">
               <div class="env-header">
                 <p class="env-empty" id="env-empty" hidden>No environment variables set for this app.</p>
                 <button id="env-add-btn" type="button" class="env-add-btn">+ Add variable</button>
+                <button id="env-apply-btn" type="button" class="env-add-btn" hidden>Apply saved changes</button>
               </div>
               <table id="env-list" class="env-list" hidden>
                 <thead><tr><th>Key</th><th>Value</th><th></th></tr></thead>
@@ -975,14 +976,14 @@
               </div>
               <div class="env-form-row env-form-checks">
                 <label><input type="checkbox" id="env-form-secret"><span>Secret (encrypted at rest, write-only)</span></label>
-                <label><input type="checkbox" id="env-form-restart" checked><span>Restart app after saving</span></label>
+                <label><input type="checkbox" id="env-form-restart"><span>Apply now by draining and restarting the app</span></label>
               </div>
-              <p class="error" id="env-form-error" hidden></p>
               <div class="env-form-actions">
                 <button type="submit" id="env-form-save" class="env-btn-primary">Save</button>
                 <button type="button" id="env-form-cancel" class="env-btn-secondary">Cancel</button>
               </div>
             </form>
+            <p class="error" id="env-form-error" role="alert" hidden></p>
           </section>
 
           <section id="danger-zone" class="settings-block danger-zone" hidden>

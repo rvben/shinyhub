@@ -5342,6 +5342,8 @@ type PatchAppSettingsParams struct {
 	// replica-only seq resizes the live pool. Writers that restore settings for
 	// a pool they manage themselves (the failed-deploy revert) leave it false.
 	ArmRedeploy bool
+	// RetryResourceUpdate arms a retry after a saved live update failed.
+	RetryResourceUpdate bool
 }
 
 // PatchAppSettingsResult carries the pre-write state read inside the
@@ -5357,7 +5359,9 @@ type PatchAppSettingsResult struct {
 	PoolShapeChanged bool
 	// RedeploySeq is the settings-redeploy seq this write armed, 0 when it
 	// armed none. The caller must launch that redeploy once it returns.
-	RedeploySeq int64
+	RedeploySeq          int64
+	PriorRedeployFullSeq int64
+	PriorLastRedeploySeq int64
 }
 
 // PatchAppSettings applies any subset of the user-editable app settings in a
@@ -5392,11 +5396,13 @@ func (s *Store) patchAppSettings(p PatchAppSettingsParams) (res PatchAppSettings
 	var prior App
 	if err := tx.QueryRow(
 		`SELECT id, status, replicas, memory_limit_mb, cpu_quota_percent, replica_placement,
-		        worker_isolation, worker_grouped_size, worker_max_workers, worker_max_session_lifetime_secs
+		        worker_isolation, worker_grouped_size, worker_max_workers, worker_max_session_lifetime_secs,
+		        redeploy_full_seq, last_redeploy_seq
 		   FROM apps WHERE slug = ?`,
 		p.Slug,
 	).Scan(&appID, &res.PriorStatus, &res.PriorReplicas, &curMem, &curCPU, &prior.ReplicaPlacement,
-		&prior.WorkerIsolation, &prior.WorkerGroupedSize, &prior.WorkerMaxWorkers, &prior.WorkerMaxSessionLifetimeSecs); err != nil {
+		&prior.WorkerIsolation, &prior.WorkerGroupedSize, &prior.WorkerMaxWorkers, &prior.WorkerMaxSessionLifetimeSecs,
+		&res.PriorRedeployFullSeq, &res.PriorLastRedeploySeq); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return res, ErrNotFound
 		}
@@ -5575,7 +5581,7 @@ func (s *Store) patchAppSettings(p PatchAppSettingsParams) (res PatchAppSettings
 	res.PoolShapeChanged = replicasChanged || needsFullCycle
 	// Setting the replica count of a degraded app, even to its current value,
 	// asks for the missing slots to be brought back.
-	repair := p.SetReplicas && res.PriorStatus == "degraded"
+	repair := (p.SetReplicas || p.SetPlacement || p.RetryResourceUpdate) && res.PriorStatus == "degraded"
 	live := res.PriorStatus == "running" || res.PriorStatus == "degraded"
 	if p.ArmRedeploy && live && (res.PoolShapeChanged || repair) {
 		// Both assignments read the pre-update redeploy_seq_launched, so

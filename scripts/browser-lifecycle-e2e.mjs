@@ -13,6 +13,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { checkBrowserScaling } from './browser-scaling-checks.mjs';
+import { checkBrowserSettings } from './browser-settings-checks.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(new URL('../loadtest/render/driver/package.json', import.meta.url));
@@ -165,7 +166,7 @@ try {
   await writeFile(join(app, 'requirements.txt'), requirements.replace(/^shinyhub-identity==[^\n]+$/m, `./${wheel}`));
   // The CLI uses its own config resolution; XDG_CONFIG_HOME alone does not
   // isolate it from an existing operator config or an inaccessible home.
-  const deploy = () => command([binary, 'deploy', app, '--config', clientConfig, '--slug', 'browser', '--visibility', 'private', '--output', 'json'], 'deploy',
+  const deploy = (slug = 'browser') => command([binary, 'deploy', app, '--config', clientConfig, '--slug', slug, '--visibility', 'private', '--output', 'json'], 'deploy',
     { env: { ...env, SHINYHUB_HOST: host, SHINYHUB_TOKEN: token } });
   await check('deploy real Shiny v1', deploy);
   await request('POST', '/api/users', { username: viewer, password: viewerPassword, role: 'viewer' }, 201);
@@ -208,8 +209,10 @@ try {
     await page.getByRole('button', { name: 'Recalculate' }).click();
     await output(page, 'v1', 2, 500, original);
   });
-  const originalCalculations = await checkBrowserScaling({ browser, context, page, host, username, password,
+  const scalingCalculations = await checkBrowserScaling({ browser, context, page, host, username, password,
     api, request, check, poll, output, original, sockets });
+  const originalCalculations = await checkBrowserSettings({ browser, page, host, username, password,
+    api, request, check, poll, output, original, sockets, calculations: scalingCalculations, deployFixture: deploy });
   let fresh, second;
   await check('rolling deployment preserves old sessions and serves v2 to new sessions', async () => {
     await writeFile(join(app, 'version.txt'), 'v2\n');

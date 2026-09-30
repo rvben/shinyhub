@@ -2071,6 +2071,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	prx.SetWarmSpareConsumedFunc(elasticSpawner.WarmSpareConsumed)
 	prx.SetTerminateFunc(elasticSpawner.Terminate)
 	prx.SetCancelElasticLifetimeFunc(elasticSpawner.CancelLifetime)
+	prx.SetElasticLifetimeUpdateFunc(elasticSpawner.UpdateSessionLifetime)
 
 	// Host-memory admission floor for elastic pools: while MemAvailable is
 	// below the configured floor, new worker allocation is shed (503) instead

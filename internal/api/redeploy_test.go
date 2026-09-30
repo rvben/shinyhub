@@ -337,7 +337,7 @@ func TestPatchApp_ReplicasUnchanged_NoRedeployNoAudit(t *testing.T) {
 // TestPatchApp_PlacementUnchanged_NoRedeployNoAudit proves that PATCHing
 // placement to the map the pool already runs is a no-op even though the keys
 // arrive in a different order, since comparison is by value, not by the raw
-// JSON string. A real change to the map still redeploys and audits.
+// JSON string. Incremental changes and their audit are covered by live_placement_test.
 func TestPatchApp_PlacementUnchanged_NoRedeployNoAudit(t *testing.T) {
 	const slug = "placement-noop"
 	store, app := newRedeployTestStore(t, slug, "running")
@@ -410,18 +410,6 @@ func TestPatchApp_PlacementUnchanged_NoRedeployNoAudit(t *testing.T) {
 	}
 	if n := countUpdateApp(); n != 0 {
 		t.Errorf("no-op placement PATCH logged %d update_app events, want 0", n)
-	}
-
-	patch(map[string]any{"placement": map[string]int{"local": 2, "burst": 2}})
-	if !redeployed() {
-		t.Fatal("changed placement did not trigger a pool redeploy")
-	}
-	if n := countUpdateApp(); n != 1 {
-		t.Errorf("real placement change logged %d update_app events, want 1", n)
-	}
-	events, _ := store.ListAuditEvents("update_app", 10, 0)
-	if len(events) == 0 || !strings.Contains(events[0].Detail, "placement") {
-		t.Errorf("audit detail missing placement: %+v", events)
 	}
 }
 

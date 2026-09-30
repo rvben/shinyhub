@@ -54,7 +54,7 @@ func waitResize(t *testing.T, predicate func() bool) {
 // Exercise a real upgraded connection through the production reverse proxy.
 // The backend echoes tunnel bytes so each check proves the same connection
 // remains usable, rather than merely checking the stored replica count.
-func resizeSession(t *testing.T, s *Server, slug string, index int) (net.Conn, func()) {
+func resizeSession(t *testing.T, s *Server, slug string, index int, elastic ...bool) (net.Conn, func()) {
 	t.Helper()
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, rw, err := w.(http.Hijacker).Hijack()
@@ -67,8 +67,15 @@ func resizeSession(t *testing.T, s *Server, slug string, index int) (net.Conn, f
 		_, _ = io.Copy(conn, rw)
 	}))
 	t.Cleanup(backend.Close)
-	if err := s.proxy.RegisterReplica(slug, index, backend.URL, nil, 0); err != nil {
-		t.Fatal(err)
+	deploymentID := s.proxy.ReplicaDeploymentID(slug, index)
+	var registerErr error
+	if len(elastic) > 0 && elastic[0] {
+		registerErr = s.proxy.RegisterElasticWorker(slug, index, backend.URL, nil, deploymentID)
+	} else {
+		registerErr = s.proxy.RegisterReplica(slug, index, backend.URL, nil, deploymentID)
+	}
+	if registerErr != nil {
+		t.Fatal(registerErr)
 	}
 	front := httptest.NewServer(s.proxy)
 	t.Cleanup(front.Close)
@@ -78,7 +85,7 @@ func resizeSession(t *testing.T, s *Server, slug string, index int) (net.Conn, f
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
-	_, err = fmt.Fprintf(conn, "GET /app/%s/ws HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nCookie: shinyhub_rep_%s=%d\r\n\r\n", slug, slug, index)
+	_, err = fmt.Fprintf(conn, "GET /app/%s/ws HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nCookie: shinyhub_rep_%s=%d.%d\r\n\r\n", slug, slug, index, deploymentID)
 	if err != nil {
 		t.Fatal(err)
 	}

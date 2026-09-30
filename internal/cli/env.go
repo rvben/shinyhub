@@ -112,13 +112,13 @@ func newEnvCmd() *cobra.Command {
 		}
 
 		// Value changed. If the caller requested a restart, hit the restart
-		// endpoint directly. Re-PUTing the env var would trigger changed=false
+		// environment application endpoint directly. Re-PUTing the env var would trigger changed=false
 		// (the value is now identical to what we just stored) and skip the
 		// restart inside maybeRestartForChange.
 		restartRequired := false
 		if setFlags.restart {
 			restartReq, err := http.NewRequest("POST",
-				cfg.Host+"/api/apps/"+slug+"/restart", nil)
+				cfg.Host+"/api/apps/"+slug+"/env/apply", nil)
 			if err != nil {
 				return fmt.Errorf("build restart request: %w", err)
 			}

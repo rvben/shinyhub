@@ -342,8 +342,8 @@ func TestEnvSet_Changed_CallsRestartEndpoint(t *testing.T) {
 	if paths[0] != "PUT /api/apps/my-app/env/PORT" {
 		t.Errorf("first request = %q, want PUT .../env/PORT", paths[0])
 	}
-	if paths[1] != "POST /api/apps/my-app/restart" {
-		t.Errorf("second request = %q, want POST .../restart", paths[1])
+	if paths[1] != "POST /api/apps/my-app/env/apply" {
+		t.Errorf("second request = %q, want POST .../env/apply", paths[1])
 	}
 }
 

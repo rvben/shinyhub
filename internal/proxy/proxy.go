@@ -343,8 +343,9 @@ type replicaBackend struct {
 // can key replica_sessions rows without a DB lookup at snapshot time. Zero
 // means not yet set (reporter skips pools without an appID).
 type backendPool struct {
-	size     int
-	replicas []*replicaBackend
+	settingsDraining bool // suppress demand-driven allocation during an explicit settings restart
+	size             int
+	replicas         []*replicaBackend
 	// activeDeploymentID identifies the generation selected for browsers that
 	// do not already carry affinity. candidates are complete but unpublished
 	// replica sets; drainingGenerations remain addressable only through their
@@ -610,7 +611,8 @@ type Proxy struct {
 	resume func(slug string, slotID int)
 	// warmSpareConsumed notifies lifecycle when a pristine running spare is
 	// assigned without a resume, so its max-session-lifetime timer starts then.
-	warmSpareConsumed func(slug string, slotID int, epoch uint64)
+	warmSpareConsumed     func(slug string, slotID int, epoch uint64)
+	updateElasticLifetime func(slug string, seconds int)
 
 	// memGuard is the optional host-memory admission floor for elastic pools:
 	// while the host reports less available memory than the floor, NO new
@@ -3163,6 +3165,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if w := pool.workers[cs.slotID]; w != nil && w.status != workerDraining {
 				pinnedSlot = cs.slotID
 			}
+		}
+
+		if pool.settingsDraining && pinnedSlot < 0 {
+			p.mu.RUnlock()
+			rec.rejectReason = "settings_drain"
+			http.Error(rec, "App is draining for a settings change", http.StatusServiceUnavailable)
+			return
 		}
 
 		d := decide(pool.workerStatesForClient(pinnedSlot), pool.mode, pool.groupedSize, pool.maxWorkers, pinnedSlot)

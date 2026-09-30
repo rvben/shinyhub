@@ -1373,8 +1373,9 @@ func TestDeployWithRetry_CommittedAttemptDoesNotUploadAgain(t *testing.T) {
 			_, _ = io.WriteString(w, `{"status":"ok"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/demo":
 			if healthHits.Add(1) == 1 {
-				time.Sleep(20 * time.Millisecond)
-				_, _ = io.WriteString(w, `{"app":{"status":"starting"}}`)
+				// The first readiness attempt always times out. A later healthy
+				// response gets a realistic budget even on a busy test host.
+				<-r.Context().Done()
 				return
 			}
 			_, _ = io.WriteString(w, `{"app":{"status":"running"}}`)
@@ -1389,7 +1390,7 @@ func TestDeployWithRetry_CommittedAttemptDoesNotUploadAgain(t *testing.T) {
 	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
 	promoted, attempts, committed, _, failed, err := deployWithRetry(
 		&cliConfig{Host: srv.URL, Token: "test"}, "demo", bundleBuildSpec{Dir: dir},
-		"private", "", convergeOpts{retries: 1, preconditions: true, healthTimeout: 5 * time.Millisecond, runID: "run"},
+		"private", "", convergeOpts{retries: 1, preconditions: true, healthTimeout: time.Second, runID: "run"},
 		io.Discard, "sha256:old", "fleet:prod",
 	)
 	if err != nil || promoted != "sha256:new" || !committed || attempts != 2 || len(failed) != 1 {

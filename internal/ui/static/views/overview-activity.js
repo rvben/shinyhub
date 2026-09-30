@@ -14,6 +14,7 @@ const ACTION_LABELS = new Map([
   ['set_access', 'Access changed'],
   ['env.set', 'Environment updated'],
   ['env.delete', 'Environment updated'],
+  ['env.apply', 'Environment applied'],
   ['data.push', 'Data updated'],
   // Deliberately not "Data updated": a pull changes nothing, and grouping it
   // under the same label would make a read look like a write in the timeline.

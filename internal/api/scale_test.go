@@ -234,6 +234,16 @@ func TestScaleUp_TierPlaced_KeepsPlacementInSync(t *testing.T) {
 	if err := srv.store.SetAppPlacement(app.ID, `{"burst":2}`, 2); err != nil {
 		t.Fatal(err)
 	}
+	// The existing pool is already placed on burst before autoscaling it.
+	rows, err := srv.store.ListReplicas(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if err := srv.store.UpsertReplica(db.UpsertReplicaParams{AppID: app.ID, Index: row.Index, PID: row.PID, Port: row.Port, Status: row.Status, Provider: row.Provider, Tier: "burst", EndpointURL: row.EndpointURL, WorkerID: row.WorkerID, DesiredState: row.DesiredState, DeploymentID: row.DeploymentID}); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	var gotPlacement map[string]int
 	bootedIndex := -1
@@ -282,6 +292,16 @@ func TestScaleDown_TierPlaced_KeepsPlacementInSync(t *testing.T) {
 	srv, app := newScaleTestServer(t, "demo", 2, cfg)
 	if err := srv.store.SetAppPlacement(app.ID, `{"burst":2}`, 2); err != nil {
 		t.Fatal(err)
+	}
+	// The existing pool is already placed on burst before autoscaling it.
+	rows, err := srv.store.ListReplicas(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if err := srv.store.UpsertReplica(db.UpsertReplicaParams{AppID: app.ID, Index: row.Index, PID: row.PID, Port: row.Port, Status: row.Status, Provider: row.Provider, Tier: "burst", EndpointURL: row.EndpointURL, WorkerID: row.WorkerID, DesiredState: row.DesiredState, DeploymentID: row.DeploymentID}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	info, err := srv.manager.Start(process.StartParams{
 		Slug: "demo", Index: 1, Tier: "burst", Dir: t.TempDir(),

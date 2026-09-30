@@ -269,33 +269,25 @@ func applyEnvPlan(cfg *cliConfig, slug string, plan envApplyPlan, desiredByKey m
 		}
 		applied++
 	}
-	// Issue a final no-op request with ?restart=true so the restart happens
-	// once at the end of the batch rather than after every key. We piggyback
-	// on the last applied key when available; if the plan is empty there is
-	// nothing to restart for.
+	// A no-op PUT cannot apply already-saved changes, and a delete-only batch
+	// has no key to PUT. Apply the saved environment exactly once after saving.
 	if restart && applied > 0 {
-		last := lastAppliedKey(plan)
-		if last != "" {
-			if d, ok := desiredByKey[last]; ok {
-				if err := putEnv(cfg, slug, last, d.Value, d.Secret, true); err != nil {
-					return applied, fmt.Errorf("restart: %w", err)
-				}
-			}
+		req, err := http.NewRequest(http.MethodPost, cfg.Host+"/api/apps/"+slug+"/env/apply", nil)
+		if err != nil {
+			return applied, err
+		}
+		req.Header.Set("Authorization", authHeader(cfg.Token))
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return applied, fmt.Errorf("changes saved, but apply failed: %w", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode >= 400 {
+			body, _ := io.ReadAll(resp.Body)
+			return applied, fmt.Errorf("changes saved, but apply failed: %w", httpError(cfg.Token, "apply environment", resp, body))
 		}
 	}
 	return applied, nil
-}
-
-// lastAppliedKey returns a key that the apply path will have just written
-// to the server. Order matches applyEnvPlan: adds, then updates, then deletes.
-func lastAppliedKey(plan envApplyPlan) string {
-	if n := len(plan.Updates); n > 0 {
-		return plan.Updates[n-1].Key
-	}
-	if n := len(plan.Adds); n > 0 {
-		return plan.Adds[n-1].Key
-	}
-	return ""
 }
 
 // putEnv issues a PUT for a single env var. restart=true sets ?restart=true.

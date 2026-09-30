@@ -33,7 +33,7 @@ export const AUDIT_ACTIONS = [
   'create_token', 'delete_token', 'trusted_publish',
   'create_service_credential', 'delete_service_credential',
   // Environment (blue - config)
-  'env.set', 'env.delete',
+  'env.set', 'env.delete', 'env.apply',
   // Data (blue - config)
   'data.push', 'data.pull', 'data.delete', 'cache.clear',
   // Schedules (blue - config)
