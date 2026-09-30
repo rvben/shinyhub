@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.18.5](https://github.com/rvben/shinyhub/compare/v0.18.4...v0.18.5) - 2026-09-30
+
+### Added
+
+- **ui**: cache dashboard assets immutably under versioned URLs ([183eb55](https://github.com/rvben/shinyhub/commit/183eb55433ee9563faae6c3bb0897f65a15e9ec1))
+- **ui**: self-host the dashboard webfonts ([f96d555](https://github.com/rvben/shinyhub/commit/f96d555d30ffaa9ed361ac137a73c0a482b19421))
+- **ui**: scope admin overview by named fleet ([e6234ea](https://github.com/rvben/shinyhub/commit/e6234eae6cd93b470e24b057b7b14b2a4c74e981))
+- **demo**: add cost-free public agent experience ([32dd45a](https://github.com/rvben/shinyhub/commit/32dd45a596e000fca9da82fd6d45d0ef76fa6007))
+- **agent**: show reversible action receipts in chat ([dda0d06](https://github.com/rvben/shinyhub/commit/dda0d0693755b8939335414fe8c83fd825a35470))
+- **agent**: render chat in native ShinyHub overlay ([eb26b8e](https://github.com/rvben/shinyhub/commit/eb26b8e8c2119416e38d676b554063862616b2db))
+- **proxy**: correlate interrupted Shiny sockets with session logs ([53bfc85](https://github.com/rvben/shinyhub/commit/53bfc8590c40af2c28970ab288840e07109c292e))
+- **proxy**: attribute planned websocket shutdowns and detect bursts ([eaaa3f6](https://github.com/rvben/shinyhub/commit/eaaa3f6f8980954271800703aa2cf0ef87e82121))
+
+### Fixed
+
+- **proxy**: show a waking app as soon as it is routable ([e87b69f](https://github.com/rvben/shinyhub/commit/e87b69f7d659bcb49aa7d4342fda41ee80f58fd7))
+- **agent**: keep experimental label app-specific ([f24d355](https://github.com/rvben/shinyhub/commit/f24d35517e8c53f813fd672d195bf695d4d62021))
+- **agent-demo**: align action receipt with native chat ([d957864](https://github.com/rvben/shinyhub/commit/d9578641507fcb581d3aff29231577108aad8cb8))
+- **agent**: size native chat close icon ([95739d2](https://github.com/rvben/shinyhub/commit/95739d2c3c35cc12d1dc640d0f6a3427b5b136ff))
+- **agent-demo**: restore chat panel top edge ([cdac9eb](https://github.com/rvben/shinyhub/commit/cdac9eb92bd8c3e291bfda3e6ef374d56cf29cea))
+
 ## [0.18.4](https://github.com/rvben/shinyhub/compare/v0.18.3...v0.18.4) - 2026-09-29
 
 ### Added
