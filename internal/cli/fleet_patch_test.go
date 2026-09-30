@@ -112,44 +112,6 @@ func TestApplyConfigDriftWithRetry_Retries500AndCountsAttempts(t *testing.T) {
 	}
 }
 
-func TestFleetConfigBody_OnlyDeclaredKeys(t *testing.T) {
-	h := 30
-	body := fleetConfigBody(fleet.Config{HibernateTimeoutMinutes: &h})
-	if len(body) != 1 || body["hibernate_timeout_minutes"] != 30 {
-		t.Fatalf("body = %#v, want only hibernate_timeout_minutes=30", body)
-	}
-	if len(fleetConfigBody(fleet.Config{})) != 0 {
-		t.Fatal("empty config must yield empty body")
-	}
-}
-
-func TestFleetConfigBody_BundleDurableKeys(t *testing.T) {
-	iso, icon, ident := "grouped", "🧪", true
-	grouped, workers := 6, 40
-	body := fleetConfigBody(fleet.Config{
-		Icon: &icon, IdentityHeaders: &ident, WorkerIsolation: &iso,
-		WorkerGroupedSize: &grouped, WorkerMaxWorkers: &workers,
-	})
-	if body["icon_emoji"] != "🧪" || body["identity_headers"] != true ||
-		body["worker_isolation"] != "grouped" || body["worker_grouped_size"] != 6 || body["worker_max_workers"] != 40 {
-		t.Fatalf("bundle config body = %#v", body)
-	}
-}
-
-func TestFleetConfigBody_Autoscale(t *testing.T) {
-	en := true
-	body := fleetConfigBody(fleet.Config{
-		Autoscale: &fleet.AutoscaleConfig{Enabled: &en, MinReplicas: 1, MaxReplicas: 8, Target: 0.8},
-	})
-	as, ok := body["autoscale"].(map[string]any)
-	if !ok {
-		t.Fatalf("body[autoscale] = %#v, want a map", body["autoscale"])
-	}
-	if as["enabled"] != true || as["min_replicas"] != 1 || as["max_replicas"] != 8 || as["target"] != 0.8 {
-		t.Fatalf("autoscale body = %#v, want {enabled:true min:1 max:8 target:0.8}", as)
-	}
-}
-
 // applyConfigDrift must reconstruct the autoscale PATCH object from the declared
 // Config (not by parsing the human display string), so a drifted "autoscale"
 // key sends a full {enabled,min_replicas,max_replicas,target} object.
@@ -175,21 +137,5 @@ func TestApplyConfigDrift_Autoscale(t *testing.T) {
 	}
 	if as["enabled"] != true || as["max_replicas"].(float64) != 8 || as["target"].(float64) != 0.8 {
 		t.Fatalf("autoscale patch = %#v", as)
-	}
-}
-
-func TestFleetConfigBodyProject(t *testing.T) {
-	if got := fleetConfigBody(fleet.Config{Project: strp("p")}); got["project_slug"] != "p" {
-		t.Errorf("body = %v, want project_slug=p", got)
-	}
-	// Sent whenever declared, including "": an empty declared project means the
-	// fleet owns it and wants the app ungrouped.
-	got := fleetConfigBody(fleet.Config{Project: strp("")})
-	v, present := got["project_slug"]
-	if !present || v != "" {
-		t.Errorf(`body = %v, want an explicit empty project_slug`, got)
-	}
-	if _, present := fleetConfigBody(fleet.Config{})["project_slug"]; present {
-		t.Error("an undeclared project must not appear in the body")
 	}
 }

@@ -281,7 +281,11 @@ When the same setting can come from more than one place, the fleet manifest
 wins:
 
 1. **Fleet manifest `[app.config]`** - highest. A declared key is enforced on
-   every apply; out-of-band drift is corrected back.
+   every apply; out-of-band drift is corrected back. This includes the
+   deploy apply performs itself: when a new bundle stores its own value for a
+   key the fleet declares, apply re-reads the app after the deploy, sends the
+   keys that now differ, and reports the app as failed (exit 4) if the server
+   still does not hold the declared value.
 2. **Bundle `shinyhub.toml` `[app]`** - durable settings are checked on every
    plan/apply and corrected with a config PATCH even when the bundle digest is
    unchanged. Boot-only settings such as `command` and startup/build timeouts

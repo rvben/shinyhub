@@ -399,34 +399,6 @@ func declaredString(c fleet.Config, key string) *string {
 	return nil
 }
 
-// reassertFleetConfig re-PATCHes the fleet-declared keys that a bundle deploy
-// may have overwritten from the new bundle's shinyhub.toml: the autoscale
-// policy and the display metadata (name, description, project), all of which
-// the bundle [app] block can also declare. The fleet manifest is the outer
-// authority, so it wins over the bundle. Every key here is one whose PATCH
-// does NOT trigger a redeploy (unlike replicas), so this is safe to run after
-// any deploy, and it is idempotent when the value was already applied via
-// drift. No-op when the manifest declares none of them.
-func reassertFleetConfig(cfg *cliConfig, slug string, c fleet.Config, ifD, ifMB *string, runID string) error {
-	body := map[string]any{}
-	if c.Autoscale != nil {
-		body["autoscale"] = autoscalePatchBody(c.Autoscale)
-	}
-	if c.Name != nil {
-		body["name"] = *c.Name
-	}
-	if c.Description != nil {
-		body["description"] = *c.Description
-	}
-	if c.Project != nil {
-		body["project_slug"] = *c.Project
-	}
-	if len(body) == 0 {
-		return nil
-	}
-	return patchApp(cfg, slug, body, ifD, ifMB, runID)
-}
-
 // adoptBundleWentLive answers whether an adopt redeploy that returned an error
 // nonetheless durably promoted a new bundle. The deploy endpoint returns 500 on
 // both pre-promotion and post-promotion paths, so the HTTP status cannot decide
@@ -694,15 +666,12 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 			return fail(ffErr, attempts)
 		}
 		res.attempts = attempts
-		// Assert the manifest's full declared config on top of the bundle's.
+		// Converge the declaration against what the deploy left stored, gated on
+		// the freshly promoted digest.
 		ifD, ifM := precondPtrs(opt, promoted, marker)
-		if err := patchApp(cfg, d.Slug, fleetConfigBody(entry.Config), ifD, ifM, opt.runID); err != nil {
-			return fail(err, attempts)
-		}
-		if entry.Visibility != "" && entry.Visibility != obs.Access {
-			if err := patchAppAccess(cfg, d.Slug, entry.Visibility, ifD, ifM, opt.runID); err != nil {
-				return fail(err, attempts)
-			}
+		if _, err := convergeDeclaredConfig(cfg, d.Slug, entry, ifD, ifM, opt); err != nil {
+			res.failureKind = failureConfigReassertFailed
+			return fail(fmt.Errorf("adopted but declared config was not applied: %w", err), attempts)
 		}
 		return finish(statusAdopted, attempts)
 
@@ -755,25 +724,15 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 			return fail(fmt.Errorf("deployed but ownership marker was not stamped: %w", err), attempts)
 		}
 		// Apply the manifest's declared [app.config] to the freshly created app.
-		// The deploy set the source bundle and visibility; the numeric config
-		// (hibernate_timeout, replicas, max_sessions) is applied here so the new
-		// app fully matches the manifest and the next plan is a clean no-op rather
-		// than spurious "update(config)" drift. Gated on the marker we just
-		// stamped (and the promoted digest when known) so a concurrent writer
-		// cannot be clobbered. Best-effort: on failure the next plan reapplies it.
-		if cfgDrift := fleet.DeclaredConfig(entry); len(cfgDrift) > 0 {
-			var ifDc, ifMc *string
-			if opt.preconditions {
-				m := marker
-				ifMc = &m
-				if promoted != "" {
-					p := promoted
-					ifDc = &p
-				}
-			}
-			if err := applyConfigDrift(cfg, d.Slug, cfgDrift, entry.Config, ifDc, ifMc, opt.runID); err != nil {
-				return fail(fmt.Errorf("created but declared config was not fully applied: %w", err), attempts)
-			}
+		// The deploy set the source bundle and visibility; every declared value
+		// the new app does not already hold is PATCHed here so it fully matches
+		// the manifest and the next plan is a clean no-op rather than spurious
+		// "update(config)" drift. Gated on the marker we just stamped (and the
+		// promoted digest when known) so a concurrent writer cannot be clobbered.
+		ifDc, ifMc := precondPtrs(opt, promoted, marker)
+		if _, err := convergeDeclaredConfig(cfg, d.Slug, entry, ifDc, ifMc, opt); err != nil {
+			res.failureKind = failureConfigReassertFailed
+			return fail(fmt.Errorf("created but declared config was not fully applied: %w", err), attempts)
 		}
 		return finish(statusCreated, attempts)
 
@@ -796,11 +755,12 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 			return fail(ffErr, attempts)
 		}
 		// A source-only diff means the pre-deploy config matched the manifest, but
-		// the new bundle's shinyhub.toml can overwrite the autoscale columns and
-		// the display metadata. Reassert those (gated on the freshly promoted
-		// digest).
+		// the new bundle's shinyhub.toml can overwrite any value it declares
+		// (replicas, hibernation, sessions, autoscale, display metadata). Converge
+		// against what the deploy left stored, gated on the promoted digest.
 		ifD, ifM := precondPtrs(opt, promoted, marker)
-		if err := reassertFleetConfig(cfg, d.Slug, entry.Config, ifD, ifM, opt.runID); err != nil {
+		if _, err := convergeDeclaredConfig(cfg, d.Slug, entry, ifD, ifM, opt); err != nil {
+			res.failureKind = failureConfigReassertFailed
 			return fail(fmt.Errorf("source updated but declared config was not reasserted: %w", err), attempts)
 		}
 		return finish(statusUpdated, attempts)
@@ -838,21 +798,14 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 			return fail(ffErr, attempts)
 		}
 		ifD, ifM := precondPtrs(opt, promoted, marker)
-		// The deploy has just asserted every bundle-declared [app] value. Apply
-		// only the outer fleet config on top: it is the higher-precedence layer,
-		// and avoiding a second bundle PATCH prevents redundant worker/resource
-		// redeploys for fields the deploy already converged.
-		if err := patchApp(cfg, d.Slug, fleetConfigBody(entry.Config), ifD, ifM, opt.runID); err != nil {
-			return fail(err, attempts)
-		}
-		// d.ConfigDrift was computed pre-deploy: if autoscale or the display
-		// metadata matched then but the new bundle overwrites it, it is not in the
-		// drift list. Reassert those (a no-op re-PATCH when they were already
-		// applied above; idempotent and non-redeploy-triggering) so the fleet
-		// manifest still wins.
-		if err := reassertFleetConfig(cfg, d.Slug, entry.Config, ifD, ifM, opt.runID); err != nil {
+		// d.ConfigDrift was computed before the deploy, which has since written
+		// the new bundle's [app] values. Converge against the post-deploy state:
+		// only keys that differ now are sent, so a value the deploy already set
+		// correctly is not re-sent (a redundant replicas key is rejected on a
+		// tier-placed app and a redundant worker key cycles the pool again).
+		if _, err := convergeDeclaredConfig(cfg, d.Slug, entry, ifD, ifM, opt); err != nil {
 			res.failureKind = failureConfigReassertFailed
-			return fail(fmt.Errorf("source updated but declared config was not fully reasserted: %w", err), attempts)
+			return fail(fmt.Errorf("source updated but declared config was not fully applied: %w", err), attempts)
 		}
 		return finish(statusUpdated, attempts)
 	}

@@ -247,6 +247,14 @@ func unmanagedConfig(app AppEntry, o ObservedApp) []UnmanagedConfigItem {
 	return out
 }
 
+// ConfigDrift returns the declared keys (fleet over bundle) whose observed
+// server value differs from the desired one. It is the comparison Diff uses,
+// exposed so apply can re-evaluate an app after a deploy has rewritten the
+// bundle's own settings.
+func ConfigDrift(app AppEntry, o ObservedApp) []ConfigDriftItem {
+	return configDrift(app, o)
+}
+
 // configDrift returns the fleet-declared keys whose observed server value
 // differs from the manifest's desired value. Only declared (non-nil) keys are
 // compared (drift covers only fleet-declared keys).

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/fleet"
 )
@@ -187,41 +188,7 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 	observed := make([]fleet.ObservedApp, 0, len(apps))
 	observedBySlug := make(map[string]fleet.ObservedApp, len(apps))
 	for _, a := range apps {
-		oa := fleet.ObservedApp{
-			Slug: a.Slug,
-			// Taken by address so a stored empty description reads as the real
-			// value "" rather than "not observed"; the API omits the key when
-			// empty, which decodes to the same "".
-			Name:                         &a.Name,
-			Description:                  &a.Description,
-			Icon:                         &a.IconEmoji,
-			ProjectSlug:                  &a.ProjectSlug,
-			Access:                       a.Access,
-			HibernateTimeoutMinutes:      a.HibernateTimeoutMinutes,
-			Replicas:                     intPtrIfPositive(a.Replicas),
-			MaxSessionsPerReplica:        intPtr(a.MaxSessionsPerReplica),
-			RenderSeconds:                floatPtr(a.RenderSeconds),
-			IdentityHeaders:              a.IdentityHeaders,
-			UsageIdentityMode:            a.UsageIdentityMode,
-			MinWarmReplicas:              intPtr(a.MinWarmReplicas),
-			MemoryLimitMB:                a.MemoryLimitMB,
-			CPUQuotaPercent:              a.CPUQuotaPercent,
-			WorkerIsolation:              stringPtr(a.WorkerIsolation),
-			WorkerGroupedSize:            intPtr(a.WorkerGroupedSize),
-			WorkerMaxWorkers:             intPtr(a.WorkerMaxWorkers),
-			WorkerWarmSpares:             intPtr(a.WorkerWarmSpares),
-			WorkerMaxSessionLifetimeSecs: intPtr(a.WorkerMaxSessionLifetimeSecs),
-			ContentDigest:                a.ContentDigest,
-			ManagedBy:                    a.ManagedBy,
-			// A live GET /api/apps observation is always populated (never nil),
-			// so an on-server off policy stays distinct from "not observed".
-			Autoscale: &fleet.ObservedAutoscale{
-				Enabled:     a.AutoscaleEnabled,
-				MinReplicas: a.AutoscaleMinReplicas,
-				MaxReplicas: a.AutoscaleMaxReplicas,
-				Target:      a.AutoscaleTarget,
-			},
-		}
+		oa := observedFromApp(a)
 		observed = append(observed, oa)
 		observedBySlug[a.Slug] = oa
 	}
@@ -275,6 +242,47 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 		manifest: m, caps: caps, host: cfg.Host, diff: diff, projectDiff: projectDiff,
 		bundles: bundles, observed: observedBySlug, cleanup: runCleanups,
 	}, nil
+}
+
+// observedFromApp maps one server app record onto the differ's observation.
+// Plan and the post-deploy convergence read the same projection, so a value
+// apply converges is exactly the value the next plan compares.
+func observedFromApp(a db.App) fleet.ObservedApp {
+	return fleet.ObservedApp{
+		Slug: a.Slug,
+		// Taken by address so a stored empty description reads as the real
+		// value "" rather than "not observed"; the API omits the key when
+		// empty, which decodes to the same "".
+		Name:                         &a.Name,
+		Description:                  &a.Description,
+		Icon:                         &a.IconEmoji,
+		ProjectSlug:                  &a.ProjectSlug,
+		Access:                       a.Access,
+		HibernateTimeoutMinutes:      a.HibernateTimeoutMinutes,
+		Replicas:                     intPtrIfPositive(a.Replicas),
+		MaxSessionsPerReplica:        intPtr(a.MaxSessionsPerReplica),
+		RenderSeconds:                floatPtr(a.RenderSeconds),
+		IdentityHeaders:              a.IdentityHeaders,
+		UsageIdentityMode:            a.UsageIdentityMode,
+		MinWarmReplicas:              intPtr(a.MinWarmReplicas),
+		MemoryLimitMB:                a.MemoryLimitMB,
+		CPUQuotaPercent:              a.CPUQuotaPercent,
+		WorkerIsolation:              stringPtr(a.WorkerIsolation),
+		WorkerGroupedSize:            intPtr(a.WorkerGroupedSize),
+		WorkerMaxWorkers:             intPtr(a.WorkerMaxWorkers),
+		WorkerWarmSpares:             intPtr(a.WorkerWarmSpares),
+		WorkerMaxSessionLifetimeSecs: intPtr(a.WorkerMaxSessionLifetimeSecs),
+		ContentDigest:                a.ContentDigest,
+		ManagedBy:                    a.ManagedBy,
+		// A live GET /api/apps observation is always populated (never nil),
+		// so an on-server off policy stays distinct from "not observed".
+		Autoscale: &fleet.ObservedAutoscale{
+			Enabled:     a.AutoscaleEnabled,
+			MinReplicas: a.AutoscaleMinReplicas,
+			MaxReplicas: a.AutoscaleMaxReplicas,
+			Target:      a.AutoscaleTarget,
+		},
+	}
 }
 
 func intPtr(v int) *int           { return &v }

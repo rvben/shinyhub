@@ -1174,7 +1174,7 @@ func ensureAppCore(cfg *cliConfig, slug, visibility, project string, errOut io.W
 	}
 	// Only on create, exactly like visibility: ensureAppCore returns early on
 	// HTTP 200, so an existing app's project is never changed here. Reconciling
-	// an existing app's project is applyConfigDrift's and reassertFleetConfig's
+	// an existing app's project is applyConfigDrift's and convergeDeclaredConfig's
 	// job.
 	if project != "" {
 		createBody["project_slug"] = project

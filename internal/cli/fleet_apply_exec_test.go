@@ -537,43 +537,100 @@ func TestConvergeApp_UpdateConfigPatchesWithServerDigestPrecondition(t *testing.
 	}
 }
 
-func TestConvergeApp_UpdateSourceConfigGatesOnPostDeployDigest(t *testing.T) {
-	// The single most important correctness property: update(source+config)
-	// must deploy first, then patch fleet config with a precondition built
-	// from the FRESHLY promoted digest - never the stale pre-deploy one. If
-	// the ordering were swapped, the patch would carry the stale digest and
-	// 409 against the deployment this very run just performed.
-	const staleDigest = "sha256:STALE"
-	const promotedDigest = "sha256:PROMOTED"
+// statefulAppHooks customises singleAppServer. Every hook is optional.
+type statefulAppHooks struct {
+	// deployWrites is what the bundle's own shinyhub.toml [app] block stores
+	// on each deploy, as the real deploy handler does.
+	deployWrites map[string]any
+	// onDeploy and onPatch observe each request in arrival order. onPatch
+	// returns the status to answer; a non-2xx status stores nothing.
+	onDeploy func()
+	onPatch  func(r *http.Request, body map[string]any) int
+	// ignorePatch accepts PATCHes without storing them, modelling a server
+	// that answers 200 but does not persist the value.
+	ignorePatch bool
+}
 
-	var deployedAt, patchedAt int
-	var seq int
-	var patchDigest string
+// singleAppServer serves one app whose stored settings follow the requests it
+// receives: a deploy promotes the given digest and stores deployWrites, a
+// PATCH stores its keys, and both reads report the current state. It is the
+// smallest fake on which "what the server ends up holding" is observable.
+func singleAppServer(t *testing.T, app *fakeApp, promoted string, h statefulAppHooks) *cliConfig {
+	t.Helper()
+	var mu sync.Mutex
+	base := "/api/apps/" + app.Slug
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
 		switch {
-		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/deploy"):
-			seq++
-			deployedAt = seq
-			w.WriteHeader(200)
-			_, _ = w.Write([]byte(`{"status":"ok"}`))
-		case r.Method == "GET" && r.URL.Path == "/api/apps/srccfg":
-			_ = json.NewEncoder(w).Encode(map[string]any{"app": map[string]any{"status": "running"}})
+		case r.Method == "POST" && r.URL.Path == base+"/deploy":
+			if h.onDeploy != nil {
+				h.onDeploy()
+			}
+			app.ContentDigest = promoted
+			app.status = "running"
+			if len(h.deployWrites) > 0 {
+				app.store(h.deployWrites)
+			}
+			_, _ = io.WriteString(w, `{"status":"ok"}`)
+		case r.Method == "GET" && r.URL.Path == base:
+			_ = json.NewEncoder(w).Encode(map[string]any{"app": app.view()})
 		case r.Method == "GET" && r.URL.Path == "/api/apps":
-			_ = json.NewEncoder(w).Encode([]map[string]any{{"slug": "srccfg", "content_digest": promotedDigest}})
-		case r.Method == "PATCH" && r.URL.Path == "/api/apps/srccfg":
-			seq++
-			patchedAt = seq
-			patchDigest = r.Header.Get("X-Shinyhub-If-Content-Digest")
-			w.WriteHeader(200)
+			_ = json.NewEncoder(w).Encode([]map[string]any{app.view()})
+		case r.Method == "PATCH" && r.URL.Path == base+"/access":
+			var b struct{ Access string }
+			_ = json.NewDecoder(r.Body).Decode(&b)
+			app.Access = b.Access
+		case r.Method == "PATCH" && r.URL.Path == base:
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			status := http.StatusOK
+			if h.onPatch != nil {
+				status = h.onPatch(r, body)
+			}
+			if status >= 300 {
+				w.WriteHeader(status)
+				_, _ = io.WriteString(w, `{"error":"patch refused"}`)
+				return
+			}
+			if !h.ignorePatch {
+				app.store(body)
+			}
 		default:
-			w.WriteHeader(200)
-			_, _ = w.Write([]byte(`{}`))
+			_, _ = io.WriteString(w, `{}`)
 		}
 	}))
 	t.Cleanup(srv.Close)
-	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
+	return &cliConfig{Host: srv.URL, Token: "shk_test"}
+}
+
+func sourceDir(t *testing.T) string {
+	t.Helper()
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
+	return dir
+}
+
+func TestConvergeApp_UpdateSourceConfigGatesOnPostDeployDigest(t *testing.T) {
+	// update(source+config) must deploy first, then patch fleet config with a
+	// precondition built from the FRESHLY promoted digest - never the stale
+	// pre-deploy one. If the ordering were swapped, the patch would carry the
+	// stale digest and 409 against the deployment this very run just performed.
+	const staleDigest = "sha256:STALE"
+	const promotedDigest = "sha256:PROMOTED"
+
+	var seq, deployedAt, patchedAt int
+	var patchDigest string
+	app := &fakeApp{Slug: "srccfg", Access: "private", ContentDigest: staleDigest, Replicas: 1}
+	cfg := singleAppServer(t, app, promotedDigest, statefulAppHooks{
+		onDeploy: func() { seq++; deployedAt = seq },
+		onPatch: func(r *http.Request, _ map[string]any) int {
+			seq++
+			patchedAt = seq
+			patchDigest = r.Header.Get("X-Shinyhub-If-Content-Digest")
+			return http.StatusOK
+		},
+	})
 	d := fleet.AppDiff{
 		Slug: "srccfg", Action: fleet.ActionUpdateSourceConfig, Owned: true,
 		ServerDigest: staleDigest,
@@ -581,7 +638,7 @@ func TestConvergeApp_UpdateSourceConfigGatesOnPostDeployDigest(t *testing.T) {
 	}
 	entry := fleet.AppEntry{Slug: "srccfg", Source: "./x", Visibility: "private",
 		Config: fleet.Config{Replicas: stateInt(2)}}
-	r := convergeApp(cfg, d, entry, fleet.ObservedApp{Slug: "srccfg"}, dir,
+	r := convergeApp(cfg, d, entry, fleet.ObservedApp{Slug: "srccfg"}, sourceDir(t),
 		convergeOpts{preconditions: true, fleetID: "eu", runID: "r"}, "fleet:eu", io.Discard)
 	if r.status != statusUpdated {
 		t.Fatalf("status = %s (%v), want updated", r.status, r.err)
@@ -593,148 +650,157 @@ func TestConvergeApp_UpdateSourceConfigGatesOnPostDeployDigest(t *testing.T) {
 		t.Fatalf("config patch precondition = %q, want post-deploy promoted digest %q (not stale %q)",
 			patchDigest, promotedDigest, staleDigest)
 	}
+	if app.Replicas != 2 {
+		t.Fatalf("server replicas = %d after apply, want the declared 2", app.Replicas)
+	}
 }
 
-func TestConvergeApp_UpdateSourceReassertsAutoscaleOnly(t *testing.T) {
-	// A source-only deploy can overwrite the autoscale columns from the new
-	// bundle's shinyhub.toml. convergeApp reasserts ONLY autoscale (gated on the
-	// promoted digest): autoscale does not trigger a redeploy, so fleet
-	// precedence is restored in one pass. Crucially, `replicas` (declared here)
-	// must NOT be re-PATCHed - that would cycle the pool a second time.
-	var patchBody map[string]any
-	var patchDigest string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/deploy"):
-			w.WriteHeader(200)
-			_, _ = w.Write([]byte(`{"status":"ok"}`))
-		case r.Method == "GET" && r.URL.Path == "/api/apps/srconly":
-			_ = json.NewEncoder(w).Encode(map[string]any{"app": map[string]any{"status": "running"}})
-		case r.Method == "GET" && r.URL.Path == "/api/apps":
-			_ = json.NewEncoder(w).Encode([]map[string]any{{"slug": "srconly", "content_digest": "sha256:PROMOTED"}})
-		case r.Method == "PATCH" && r.URL.Path == "/api/apps/srconly":
-			b, _ := io.ReadAll(r.Body)
-			_ = json.Unmarshal(b, &patchBody)
-			patchDigest = r.Header.Get("X-Shinyhub-If-Content-Digest")
-			w.WriteHeader(200)
-		default:
-			w.WriteHeader(200)
-			_, _ = w.Write([]byte(`{}`))
-		}
-	}))
-	t.Cleanup(srv.Close)
-	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
-	dir := t.TempDir()
-	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
-
-	en := true
+func TestConvergeApp_UpdateSourceRestoresValueTheBundleOverwrote(t *testing.T) {
+	// The plan saw no config drift (the server held the declared replicas=3),
+	// so the action is source-only. The new bundle's shinyhub.toml declares
+	// replicas=1, and the deploy stores it. Apply must converge the server back
+	// to the fleet's 3 rather than report success over the bundle's value.
+	app := &fakeApp{Slug: "srconly", Access: "private", ContentDigest: "sha256:OLD", Replicas: 3,
+		settings: map[string]any{"hibernate_timeout_minutes": 30.0}}
+	var patches []map[string]any
+	cfg := singleAppServer(t, app, "sha256:PROMOTED", statefulAppHooks{
+		deployWrites: map[string]any{"replicas": 1.0},
+		onPatch: func(_ *http.Request, body map[string]any) int {
+			patches = append(patches, body)
+			return http.StatusOK
+		},
+	})
 	entry := fleet.AppEntry{Slug: "srconly", Source: "./x", Visibility: "private",
-		Config: fleet.Config{Replicas: stateInt(2), Autoscale: &fleet.AutoscaleConfig{Enabled: &en, MinReplicas: 1, MaxReplicas: 8, Target: 0.8}}}
+		Config: fleet.Config{Replicas: stateInt(3), HibernateTimeoutMinutes: stateInt(30)}}
 	d := fleet.AppDiff{Slug: "srconly", Action: fleet.ActionUpdateSource, Owned: true, ServerDigest: "sha256:OLD"}
 
-	r := convergeApp(cfg, d, entry, fleet.ObservedApp{Slug: "srconly"}, dir,
+	r := convergeApp(cfg, d, entry, fleet.ObservedApp{Slug: "srconly"}, sourceDir(t),
 		convergeOpts{preconditions: true, fleetID: "eu", runID: "r"}, "fleet:eu", io.Discard)
 	if r.status != statusUpdated {
 		t.Fatalf("status = %s (%v), want updated", r.status, r.err)
 	}
-	if _, ok := patchBody["autoscale"]; !ok {
-		t.Errorf("expected an autoscale reassert PATCH, body = %#v", patchBody)
+	if app.Replicas != 3 {
+		t.Fatalf("server replicas = %d after apply, want the fleet-declared 3 (bundle wrote 1)", app.Replicas)
 	}
-	if _, ok := patchBody["replicas"]; ok {
-		t.Error("replicas must NOT be re-PATCHed on a source-only deploy (would cause a second pool cycle)")
+	if len(patches) != 1 {
+		t.Fatalf("PATCH count = %d, want exactly 1: %#v", len(patches), patches)
 	}
-	if patchDigest != "sha256:PROMOTED" {
-		t.Errorf("reassert precondition = %q, want the promoted digest", patchDigest)
+	// Only the key the deploy actually changed is sent: hibernation still held
+	// the declared value, and re-sending an unchanged key costs a needless
+	// write (and for worker keys, a pool cycle).
+	if _, ok := patches[0]["hibernate_timeout_minutes"]; ok {
+		t.Errorf("unchanged hibernate_timeout_minutes must not be re-sent, body = %#v", patches[0])
 	}
 }
 
-func TestConvergeApp_UpdateSourceConfigReassertsAutoscale(t *testing.T) {
-	// Source+config change where autoscale matched at plan time (so it is NOT in
-	// d.ConfigDrift) but another key (replicas) drifted. The redeployed bundle can
-	// still overwrite autoscale, so it must be reasserted after the deploy even
-	// though it was absent from the pre-deploy drift list.
-	var sawAutoscalePatch bool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/deploy"):
-			w.WriteHeader(200)
-			_, _ = w.Write([]byte(`{"status":"ok"}`))
-		case r.Method == "GET" && r.URL.Path == "/api/apps/srccfg":
-			_ = json.NewEncoder(w).Encode(map[string]any{"app": map[string]any{"status": "running"}})
-		case r.Method == "GET" && r.URL.Path == "/api/apps":
-			_ = json.NewEncoder(w).Encode([]map[string]any{{"slug": "srccfg", "content_digest": "sha256:PROMOTED"}})
-		case r.Method == "PATCH" && r.URL.Path == "/api/apps/srccfg":
-			b, _ := io.ReadAll(r.Body)
-			var body map[string]any
-			_ = json.Unmarshal(b, &body)
-			if _, ok := body["autoscale"]; ok {
-				sawAutoscalePatch = true
-			}
-			w.WriteHeader(200)
-		default:
-			w.WriteHeader(200)
-			_, _ = w.Write([]byte(`{}`))
-		}
-	}))
-	t.Cleanup(srv.Close)
-	cfg := &cliConfig{Host: srv.URL, Token: "shk_test"}
-	dir := t.TempDir()
-	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
+func TestConvergeApp_UpdateSourceSendsNothingWhenDeployKeptDeclaredValues(t *testing.T) {
+	// A source-only deploy whose bundle does not touch any declared value must
+	// cost no PATCH at all: the post-deploy read already shows convergence.
+	app := &fakeApp{Slug: "quiet", Access: "private", ContentDigest: "sha256:OLD", Replicas: 2}
+	var patches int
+	cfg := singleAppServer(t, app, "sha256:PROMOTED", statefulAppHooks{
+		onPatch: func(*http.Request, map[string]any) int { patches++; return http.StatusOK },
+	})
+	entry := fleet.AppEntry{Slug: "quiet", Source: "./x", Visibility: "private",
+		Config: fleet.Config{Replicas: stateInt(2)}}
+	d := fleet.AppDiff{Slug: "quiet", Action: fleet.ActionUpdateSource, Owned: true, ServerDigest: "sha256:OLD"}
+	r := convergeApp(cfg, d, entry, fleet.ObservedApp{Slug: "quiet"}, sourceDir(t),
+		convergeOpts{preconditions: true, fleetID: "eu", runID: "r"}, "fleet:eu", io.Discard)
+	if r.status != statusUpdated {
+		t.Fatalf("status = %s (%v), want updated", r.status, r.err)
+	}
+	if patches != 0 {
+		t.Fatalf("PATCH count = %d, want 0 when the deploy left every declared value in place", patches)
+	}
+}
 
+func TestConvergeApp_UpdateSourceConfigRestoresAutoscaleAbsentFromPlanDrift(t *testing.T) {
+	// Source+config change where autoscale matched at plan time (so it is NOT in
+	// d.ConfigDrift) but replicas drifted. The redeployed bundle turns autoscale
+	// off, so it must be restored after the deploy even though the pre-deploy
+	// drift list never mentioned it.
+	app := &fakeApp{Slug: "srccfg", Access: "private", ContentDigest: "sha256:OLD", Replicas: 1,
+		settings: map[string]any{"autoscale_enabled": true, "autoscale_min_replicas": 1.0,
+			"autoscale_max_replicas": 8.0, "autoscale_target": 0.8}}
+	cfg := singleAppServer(t, app, "sha256:PROMOTED", statefulAppHooks{
+		deployWrites: map[string]any{"autoscale": map[string]any{"enabled": false, "min_replicas": 0.0, "max_replicas": 0.0, "target": 0.0}},
+	})
 	en := true
 	entry := fleet.AppEntry{Slug: "srccfg", Source: "./x", Visibility: "private",
 		Config: fleet.Config{Replicas: stateInt(2), Autoscale: &fleet.AutoscaleConfig{Enabled: &en, MinReplicas: 1, MaxReplicas: 8, Target: 0.8}}}
-	// Pre-deploy drift is replicas only; autoscale matched at plan time.
 	d := fleet.AppDiff{Slug: "srccfg", Action: fleet.ActionUpdateSourceConfig, Owned: true,
 		ServerDigest: "sha256:OLD", ConfigDrift: []fleet.ConfigDriftItem{{Key: "replicas", Server: "1", Desired: "2"}}}
 
-	r := convergeApp(cfg, d, entry, fleet.ObservedApp{Slug: "srccfg"}, dir,
+	r := convergeApp(cfg, d, entry, fleet.ObservedApp{Slug: "srccfg"}, sourceDir(t),
 		convergeOpts{preconditions: true, fleetID: "eu", runID: "r"}, "fleet:eu", io.Discard)
 	if r.status != statusUpdated {
 		t.Fatalf("status = %s (%v), want updated", r.status, r.err)
 	}
-	if !sawAutoscalePatch {
-		t.Error("autoscale must be reasserted after a source+config deploy even when absent from the pre-deploy drift")
+	if app.settings["autoscale_enabled"] != true || app.Replicas != 2 {
+		t.Fatalf("server autoscale_enabled=%v replicas=%d, want true/2", app.settings["autoscale_enabled"], app.Replicas)
 	}
 }
 
-func TestConvergeApp_UpdateSourceConfigReassertFailureIsPartial(t *testing.T) {
-	var patches int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/deploy"):
-			_, _ = io.WriteString(w, `{"status":"ok"}`)
-		case r.Method == "GET" && r.URL.Path == "/api/apps/sc":
-			_ = json.NewEncoder(w).Encode(map[string]any{"app": map[string]any{"status": "running"}})
-		case r.Method == "GET" && r.URL.Path == "/api/apps":
-			_ = json.NewEncoder(w).Encode([]map[string]any{{"slug": "sc", "content_digest": "sha256:NEW"}})
-		case r.Method == "PATCH" && r.URL.Path == "/api/apps/sc":
-			patches++
-			if patches == 2 {
-				w.WriteHeader(http.StatusInternalServerError)
-				_, _ = io.WriteString(w, `{"error":"reassert failed"}`)
-			}
-		default:
-			w.WriteHeader(http.StatusOK)
-		}
-	}))
-	t.Cleanup(srv.Close)
-	dir := t.TempDir()
-	mustWrite(t, filepath.Join(dir, "app.py"), "print(1)\n")
-	enabled := true
-	entry := fleet.AppEntry{Slug: "sc", Config: fleet.Config{
-		Replicas:  stateInt(2),
-		Autoscale: &fleet.AutoscaleConfig{Enabled: &enabled, MinReplicas: 1, MaxReplicas: 3, Target: .8},
-	}}
+func TestConvergeApp_UpdateSourceConfigPatchFailureIsPartial(t *testing.T) {
+	app := &fakeApp{Slug: "sc", Access: "private", ContentDigest: "sha256:OLD", Replicas: 1}
+	cfg := singleAppServer(t, app, "sha256:NEW", statefulAppHooks{
+		onPatch: func(*http.Request, map[string]any) int { return http.StatusInternalServerError },
+	})
+	entry := fleet.AppEntry{Slug: "sc", Config: fleet.Config{Replicas: stateInt(2)}}
 	d := fleet.AppDiff{Slug: "sc", Action: fleet.ActionUpdateSourceConfig, LocalDigest: "sha256:NEW",
 		ConfigDrift: []fleet.ConfigDriftItem{{Key: "replicas", Server: "1", Desired: "2"}}}
-	r := convergeApp(&cliConfig{Host: srv.URL, Token: "tok"}, d, entry, fleet.ObservedApp{}, dir,
+	r := convergeApp(cfg, d, entry, fleet.ObservedApp{}, sourceDir(t),
 		convergeOpts{preconditions: true, fleetID: "eu", runID: "r"}, "fleet:eu", io.Discard)
 	if r.status != statusFailed || r.failureKind != failureConfigReassertFailed || r.mutation != mutationPartial {
 		t.Fatalf("result = %+v, want failed/config_reassert_failed/partial", r)
 	}
 	if code, _ := applyExitCode([]applyResult{r}); code != 4 {
 		t.Fatalf("exit = %d, want 4", code)
+	}
+}
+
+func TestConvergeApp_UpdateSourceFailsWhenServerDoesNotKeepPatch(t *testing.T) {
+	// A 200 is not proof: the confirming re-read must show the declared value.
+	// A server that accepts the PATCH but keeps the bundle's value fails the
+	// app instead of reporting it updated.
+	app := &fakeApp{Slug: "sticky", Access: "private", ContentDigest: "sha256:OLD", Replicas: 3}
+	cfg := singleAppServer(t, app, "sha256:NEW", statefulAppHooks{
+		deployWrites: map[string]any{"replicas": 1.0},
+		ignorePatch:  true,
+	})
+	entry := fleet.AppEntry{Slug: "sticky", Source: "./x", Visibility: "private",
+		Config: fleet.Config{Replicas: stateInt(3)}}
+	d := fleet.AppDiff{Slug: "sticky", Action: fleet.ActionUpdateSource, Owned: true, ServerDigest: "sha256:OLD"}
+	r := convergeApp(cfg, d, entry, fleet.ObservedApp{}, sourceDir(t),
+		convergeOpts{preconditions: true, fleetID: "eu", runID: "r"}, "fleet:eu", io.Discard)
+	if r.status != statusFailed || r.failureKind != failureConfigReassertFailed || r.mutation != mutationPartial {
+		t.Fatalf("result = %+v, want failed/config_reassert_failed/partial", r)
+	}
+	if r.err == nil || !strings.Contains(r.err.Error(), "replicas 1 -> 3") {
+		t.Fatalf("error = %v, want it to name the unconverged key", r.err)
+	}
+}
+
+func TestConvergeApp_AdoptRestoresValueTheBundleOverwrote(t *testing.T) {
+	// Adopt redeploys the fleet's bundle, which stores its own replicas=1 over
+	// the value the fleet declares. The adopted app must end on the fleet's 3.
+	app := &fakeApp{Slug: "legacy", Access: "private", ContentDigest: "sha256:OLD", Replicas: 3}
+	cfg := singleAppServer(t, app, "sha256:NEW", statefulAppHooks{
+		deployWrites: map[string]any{"replicas": 1.0},
+	})
+	entry := fleet.AppEntry{Slug: "legacy", Source: "./x", Visibility: "private",
+		Config: fleet.Config{Replicas: stateInt(3)}}
+	d := fleet.AppDiff{Slug: "legacy", Action: fleet.ActionAdopt, ServerDigest: "sha256:OLD", LocalDigest: "sha256:NEW"}
+	r := convergeApp(cfg, d, entry, fleet.ObservedApp{Slug: "legacy", Access: "private"}, sourceDir(t),
+		convergeOpts{preconditions: true, adopt: true, fleetID: "eu", runID: "r"}, "fleet:eu", io.Discard)
+	if r.status != statusAdopted {
+		t.Fatalf("status = %s (%v), want adopted", r.status, r.err)
+	}
+	if app.Replicas != 3 {
+		t.Fatalf("server replicas = %d after adopt, want the fleet-declared 3 (bundle wrote 1)", app.Replicas)
+	}
+	if app.ManagedBy == nil || *app.ManagedBy != "fleet:eu" {
+		t.Fatalf("managed_by = %v, want fleet:eu", app.ManagedBy)
 	}
 }
 
@@ -1588,35 +1654,6 @@ func TestApplyConfigDriftSendsProjectSlug(t *testing.T) {
 	drift = []fleet.ConfigDriftItem{{Key: "project", Server: `"old"`, Desired: `""`}}
 	if err := applyConfigDrift(cfg, "a", drift, fleet.Config{Project: strp("")}, nil, nil, "run"); err != nil {
 		t.Fatalf("applyConfigDrift: %v", err)
-	}
-	v, present := got["project_slug"]
-	if !present || v != "" {
-		t.Errorf(`body = %#v (present=%v), want an explicit empty project_slug`, v, present)
-	}
-}
-
-func TestReassertFleetConfigIncludesProject(t *testing.T) {
-	var got map[string]any
-	cfg := fleetProjectSrv(t, func(w http.ResponseWriter, r *http.Request) {
-		got = jsonBody(t, r)
-		w.WriteHeader(http.StatusOK)
-	})
-	// Without this, a bundle declaring [app] project = "bundle-project" wins
-	// over a fleet manifest declaring project = "fleet-project": the deploy
-	// applies the bundle's value and nothing corrects it, inverting the
-	// documented "fleet manifest is the outer authority" order.
-	if err := reassertFleetConfig(cfg, "a", fleet.Config{Project: strp("fleet-project")}, nil, nil, "run"); err != nil {
-		t.Fatalf("reassertFleetConfig: %v", err)
-	}
-	if got["project_slug"] != "fleet-project" {
-		t.Errorf("body = %v, want project_slug=fleet-project", got)
-	}
-
-	// A fleet manifest declaring project = "" means the fleet wants the app
-	// ungrouped, and that must be reasserted like any other declared value;
-	// keying off *Project != "" would treat it as undeclared and skip it.
-	if err := reassertFleetConfig(cfg, "a", fleet.Config{Project: strp("")}, nil, nil, "run"); err != nil {
-		t.Fatalf("reassertFleetConfig: %v", err)
 	}
 	v, present := got["project_slug"]
 	if !present || v != "" {

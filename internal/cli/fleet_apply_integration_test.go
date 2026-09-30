@@ -25,6 +25,60 @@ type fakeApp struct {
 	ManagedBy     *string `json:"managed_by"`
 	Replicas      int     `json:"replicas"`
 	status        string
+	// settings holds every other stored PATCH key under its GET /api/apps
+	// field name, so a read after a PATCH reflects it as the real server does.
+	settings map[string]any
+}
+
+// view renders the app as GET /api/apps and GET /api/apps/{slug} report it.
+func (a *fakeApp) view() map[string]any {
+	m := map[string]any{}
+	for k, v := range a.settings {
+		m[k] = v
+	}
+	m["slug"] = a.Slug
+	m["name"] = a.Name
+	m["access"] = a.Access
+	m["content_digest"] = a.ContentDigest
+	m["managed_by"] = a.ManagedBy
+	m["replicas"] = a.Replicas
+	m["status"] = a.status
+	return m
+}
+
+// store applies PATCH body keys the way the server persists them: the
+// autoscale object lands in its four columns and a null clears a key.
+func (a *fakeApp) store(body map[string]any) {
+	if a.settings == nil {
+		a.settings = map[string]any{}
+	}
+	for k, v := range body {
+		switch k {
+		case "managed_by":
+			if v == nil {
+				a.ManagedBy = nil
+			} else {
+				s := v.(string)
+				a.ManagedBy = &s
+			}
+		case "replicas":
+			a.Replicas = int(v.(float64))
+		case "name":
+			a.Name, _ = v.(string)
+		case "autoscale":
+			as, _ := v.(map[string]any)
+			a.settings["autoscale_enabled"] = as["enabled"]
+			a.settings["autoscale_min_replicas"] = as["min_replicas"]
+			a.settings["autoscale_max_replicas"] = as["max_replicas"]
+			a.settings["autoscale_target"] = as["target"]
+		default:
+			if v == nil {
+				delete(a.settings, k)
+			} else {
+				a.settings[k] = v
+			}
+		}
+	}
 }
 
 // fleetFakeServer is a minimal but contract-accurate ShinyHub server: it
@@ -38,6 +92,9 @@ type fleetFakeServer struct {
 	nextDigest string // digest a deploy will promote to
 	deploys    int
 	url        string
+	// deployWrites models the bundle's own shinyhub.toml [app] values: every
+	// deploy stores them, as the real deploy handler does, before answering.
+	deployWrites map[string]any
 	// deployPreflight advertises the deploy_preflight capability; every
 	// POST .../deploy-preflight then answers preflightReply verbatim and is
 	// recorded in preflights (slug -> request body) in arrival order.
@@ -107,9 +164,9 @@ func (s *fleetFakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(s.preflightReply))
 
 	case r.Method == "GET" && r.URL.Path == "/api/apps":
-		list := make([]fakeApp, 0, len(s.apps))
+		list := make([]map[string]any, 0, len(s.apps))
 		for _, a := range s.apps {
-			list = append(list, *a)
+			list = append(list, a.view())
 		}
 		_ = json.NewEncoder(w).Encode(list)
 
@@ -128,7 +185,7 @@ func (s *fleetFakeServer) handle(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(404)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"app": map[string]any{"status": a.status}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"app": a.view()})
 
 	case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/deploy"):
 		s.deploys++
@@ -164,6 +221,9 @@ func (s *fleetFakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		a.ContentDigest = digest
 		a.status = "running"
+		if len(s.deployWrites) > 0 {
+			a.store(s.deployWrites)
+		}
 		w.WriteHeader(200)
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 
@@ -190,20 +250,7 @@ func (s *fleetFakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		var b map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&b)
-		if mb, present := b["managed_by"]; present {
-			if mb == nil {
-				a.ManagedBy = nil
-			} else {
-				s := mb.(string)
-				a.ManagedBy = &s
-			}
-		}
-		if rv, present := b["replicas"]; present {
-			a.Replicas = int(rv.(float64))
-		}
-		if name, present := b["name"].(string); present {
-			a.Name = name
-		}
+		a.store(b)
 		w.WriteHeader(200)
 
 	case r.Method == "DELETE" && strings.HasPrefix(r.URL.Path, "/api/apps/"):
@@ -475,6 +522,40 @@ func TestFleetApply_Acceptance_CreateAppliesDeclaredConfig(t *testing.T) {
 	}
 	if !strings.Contains(out2, "1 unchanged") {
 		t.Fatalf("second apply must be idempotent after a config-bearing create:\n%s", out2)
+	}
+}
+
+// A source-only update whose bundle declares its own replicas must still end
+// with the fleet's value on the server: the plan saw no config drift, the
+// deploy then stored the bundle's replicas, and apply converges it back. The
+// second apply proves the server really holds the declared value.
+func TestFleetApply_Acceptance_SourceUpdateKeepsFleetConfigOverBundle(t *testing.T) {
+	fake := newFleetFake(true)
+	_ = fake.httptest(t)
+	owner := "fleet:eu"
+	fake.apps["ops"] = &fakeApp{Slug: "ops", Name: "ops", Access: "private", ContentDigest: "sha256:OLDSOURCE",
+		ManagedBy: &owner, Replicas: 3, status: "running"}
+	fake.deployWrites = map[string]any{"replicas": 1.0}
+	man := "fleet_id=\"eu\"\n\n[[app]]\nslug=\"ops\"\nsource=\"./src\"\nvisibility=\"private\"\n\n  [app.config]\n  replicas = 3\n"
+
+	out, err := applyManifest(t, fake, man)
+	if err != nil {
+		t.Fatalf("apply: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "1 updated") {
+		t.Fatalf("want 1 updated:\n%s", out)
+	}
+	if got := fake.apps["ops"].Replicas; got != 3 {
+		t.Fatalf("server replicas = %d after apply, want the fleet-declared 3 over the bundle's 1", got)
+	}
+
+	fake.deployWrites = nil
+	out2, err2 := applyManifest(t, fake, man)
+	if err2 != nil {
+		t.Fatalf("second apply: %v\n%s", err2, out2)
+	}
+	if !strings.Contains(out2, "1 unchanged") {
+		t.Fatalf("second apply must find nothing to do:\n%s", out2)
 	}
 }
 
