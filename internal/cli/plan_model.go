@@ -394,7 +394,13 @@ func fleetPlanDocument(command, file string, manifest *fleet.Manifest, host stri
 	for _, resource := range resources {
 		impacts = append(impacts, resource.Impacts...)
 	}
-	doc := newPlanDocument("fleet", command, host, "", resources, impacts, nil, nil)
+	var warnings []planNotice
+	for _, app := range diff {
+		for _, w := range app.Warnings {
+			warnings = append(warnings, planNotice{Severity: planSeverityWarning, Summary: app.Slug + ": " + w})
+		}
+	}
+	doc := newPlanDocument("fleet", command, host, "", resources, impacts, warnings, nil)
 	doc.Outcome = fleetPlanOutcome(doc.Counts)
 	if doc.Counts.pending() {
 		applyCommand, description := applySuggestion(file, doc.Counts)

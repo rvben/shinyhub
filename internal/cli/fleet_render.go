@@ -243,6 +243,7 @@ type jsonApp struct {
 	AdoptRequired bool                `json:"adopt_required"`
 	AdoptFrom     string              `json:"adopt_from,omitempty"`
 	PruneEligible bool                `json:"prune_eligible"`
+	Warnings      []string            `json:"warnings,omitempty"`
 }
 
 type jsonProject struct {
@@ -347,6 +348,7 @@ func writeFleetPlanJSONWithFile(out interface{ Write([]byte) (int, error) }, m *
 			ConfigDrift:   drift,
 			Unmanaged:     unmanaged,
 			AdoptRequired: d.AdoptRequired, AdoptFrom: d.AdoptFrom, PruneEligible: d.PruneEligible,
+			Warnings: d.Warnings,
 		})
 	}
 	model := fleetPlanDocument("shinyhub fleet plan", file, m, host, diff, projects)

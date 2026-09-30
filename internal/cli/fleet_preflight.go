@@ -193,6 +193,15 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 		observedBySlug[a.Slug] = oa
 	}
 	diff := fleet.Diff(m, localDigests, observed)
+	if caps.RedeployOutcome {
+		for i := range diff {
+			if o, ok := observedBySlug[diff[i].Slug]; ok {
+				if w := redeployWarning(diff[i].Slug, o.Redeploy); w != "" {
+					diff[i].Warnings = append(diff[i].Warnings, w)
+				}
+			}
+		}
+	}
 
 	var projectDiff []fleet.ProjectDiff
 	if len(m.Projects) > 0 {
@@ -282,6 +291,7 @@ func observedFromApp(a db.App) fleet.ObservedApp {
 			MaxReplicas: a.AutoscaleMaxReplicas,
 			Target:      a.AutoscaleTarget,
 		},
+		Redeploy: redeployStateOf(&a),
 	}
 }
 

@@ -42,6 +42,7 @@ type convergeOpts struct {
 	runID                    string
 	fleetState               bool // server persists per-app declaration/convergence state
 	fleetStateChangeTracking bool // server distinguishes a no-op check from a desired-state change
+	redeployOutcome          bool // server reports the outcome of each settings redeploy
 }
 
 const (
@@ -589,6 +590,9 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 
 	switch d.Action {
 	case fleet.ActionUnchanged:
+		if err := checkRedeployBacklog(cfg, d.Slug, entry, obs, opt, &resultWarningWriter{Writer: out, result: &res}); err != nil {
+			return fail(err, 0)
+		}
 		return finish(statusUnchanged, 0)
 
 	case fleet.ActionAdopt:
@@ -626,6 +630,15 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 		// health check is needed and no redundant deployment is manufactured. Older
 		// servers without preconditions retain the conservative redeploy path.
 		if opt.preconditions && d.LocalDigest != "" && d.LocalDigest == d.ServerDigest && len(d.ConfigDrift) == 0 {
+			// This path returns without the apply's health gate, so the
+			// backlog check runs its own instead of deferring to it.
+			backlogOpt := opt
+			backlogOpt.verifyHealth = false
+			if err := checkRedeployBacklog(cfg, d.Slug, entry, obs, backlogOpt, &resultWarningWriter{Writer: out, result: &res}); err != nil {
+				// Ownership was committed; the pool is not on its settings.
+				res.mutation = mutationPartial
+				return fail(err, 1)
+			}
 			res.attempts = 1
 			res.note = "ownership adopted; source and declared config already matched"
 			return done(statusAdopted)
@@ -669,7 +682,7 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 		// Converge the declaration against what the deploy left stored, gated on
 		// the freshly promoted digest.
 		ifD, ifM := precondPtrs(opt, promoted, marker)
-		if _, err := convergeDeclaredConfig(cfg, d.Slug, entry, ifD, ifM, opt); err != nil {
+		if _, err := convergeDeclaredConfig(cfg, d.Slug, entry, ifD, ifM, opt, &resultWarningWriter{Writer: out, result: &res}); err != nil {
 			res.failureKind = failureConfigReassertFailed
 			return fail(fmt.Errorf("adopted but declared config was not applied: %w", err), attempts)
 		}
@@ -730,7 +743,7 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 		// "update(config)" drift. Gated on the marker we just stamped (and the
 		// promoted digest when known) so a concurrent writer cannot be clobbered.
 		ifDc, ifMc := precondPtrs(opt, promoted, marker)
-		if _, err := convergeDeclaredConfig(cfg, d.Slug, entry, ifDc, ifMc, opt); err != nil {
+		if _, err := convergeDeclaredConfig(cfg, d.Slug, entry, ifDc, ifMc, opt, &resultWarningWriter{Writer: out, result: &res}); err != nil {
 			res.failureKind = failureConfigReassertFailed
 			return fail(fmt.Errorf("created but declared config was not fully applied: %w", err), attempts)
 		}
@@ -759,7 +772,7 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 		// (replicas, hibernation, sessions, autoscale, display metadata). Converge
 		// against what the deploy left stored, gated on the promoted digest.
 		ifD, ifM := precondPtrs(opt, promoted, marker)
-		if _, err := convergeDeclaredConfig(cfg, d.Slug, entry, ifD, ifM, opt); err != nil {
+		if _, err := convergeDeclaredConfig(cfg, d.Slug, entry, ifD, ifM, opt, &resultWarningWriter{Writer: out, result: &res}); err != nil {
 			res.failureKind = failureConfigReassertFailed
 			return fail(fmt.Errorf("source updated but declared config was not reasserted: %w", err), attempts)
 		}
@@ -774,6 +787,12 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 		}
 		res.attempts = attempts
 		res.mutation = mutationPartial
+		// The plan's observation is the read that preceded this PATCH, so any
+		// redeploy launched since then is this apply's or a concurrent one;
+		// either must settle before the settings count as live.
+		if err := settleConfigPatch(cfg, d.Slug, entry, obs.Redeploy.Served, d.ConfigDrift, opt, &resultWarningWriter{Writer: out, result: &res}); err != nil {
+			return fail(err, attempts)
+		}
 		return finish(statusUpdated, attempts)
 
 	case fleet.ActionUpdateSourceConfig:
@@ -803,7 +822,7 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 		// only keys that differ now are sent, so a value the deploy already set
 		// correctly is not re-sent (a redundant replicas key is rejected on a
 		// tier-placed app and a redundant worker key cycles the pool again).
-		if _, err := convergeDeclaredConfig(cfg, d.Slug, entry, ifD, ifM, opt); err != nil {
+		if _, err := convergeDeclaredConfig(cfg, d.Slug, entry, ifD, ifM, opt, &resultWarningWriter{Writer: out, result: &res}); err != nil {
 			res.failureKind = failureConfigReassertFailed
 			return fail(fmt.Errorf("source updated but declared config was not fully applied: %w", err), attempts)
 		}

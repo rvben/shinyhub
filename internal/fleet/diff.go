@@ -59,7 +59,26 @@ type ObservedApp struct {
 	// explicit `autoscale = { enabled = false }` still wins over a bundle that
 	// enables autoscale. This mirrors the *int scalar fields above.
 	Autoscale *ObservedAutoscale
+
+	// Redeploy is the server's settings-redeploy bookkeeping. Its zero value
+	// is what a server without redeploy outcome reporting shows, so callers
+	// consult it only when the server advertises that capability.
+	Redeploy RedeployState
 }
+
+// RedeployState is the server's record of the settings redeploys owed to an
+// app. Launched counts the redeploys a settings change has armed; Served is
+// the seq of the latest one that reported, with its Outcome and Reason. A
+// redeploy is still owed while Served < Launched.
+type RedeployState struct {
+	Launched int64
+	Served   int64
+	Outcome  string
+	Reason   string
+}
+
+// Owed reports whether a launched settings redeploy has not reported yet.
+func (r RedeployState) Owed() bool { return r.Served < r.Launched }
 
 // ObservedAutoscale is the server's stored autoscale policy.
 type ObservedAutoscale struct {
@@ -103,6 +122,10 @@ type AppDiff struct {
 	// genuinely unmanaged app (no prior owner) and for non-adopt actions.
 	AdoptFrom     string
 	PruneEligible bool
+	// Warnings are observations about the app's live state that the plan
+	// reports alongside its action. Diff never sets them; the caller attaches
+	// them from what the server reported.
+	Warnings []string
 }
 
 // Diff computes the reconcile plan. localDigests maps slug -> the client-side

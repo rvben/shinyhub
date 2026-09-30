@@ -404,6 +404,17 @@ before the first mutation: a bundle any app's deploy would reject stops the
 run with exit `1` and nothing changed, instead of leaving the apps ahead of it
 converged and the rest untouched.
 
+A config PATCH that changes the pool shape of a running app (replicas,
+placement, resource limits, worker settings) is stored at once and applied in
+the background. On servers that advertise the `redeploy_outcome` capability,
+apply waits for that background redeploy and judges its recorded outcome
+within the `--health-timeout` budget (seconds, default 120). `completed`, or a skip because nothing was running,
+passes once the app is serving. `partial`, `failed`, or any other skip fails
+the app with the server's reason and a `shinyhub apps restart` remedy, and the
+fleet is not recorded in sync. `fleet plan` warns about any app whose last
+settings redeploy did not apply. Against an older server, apply warns that the
+change was not verified to reach the running pool.
+
 Adopting an existing app does not create a deployment when its non-empty
 content digest and every declared setting already match. On servers that
 support fleet preconditions, apply transfers ownership with one conditional

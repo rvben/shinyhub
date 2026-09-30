@@ -149,6 +149,13 @@ func renderFleetPlanHumanWithBundleFiles(out io.Writer, model planDocument, flee
 		lines = append(lines, fmt.Sprintf("Apps (%d)   legend: %s", appCount, planLegend))
 	}
 	lines = append(lines, fleetResourceLines(s, apps, width, false)...)
+	if len(model.Warnings) > 0 {
+		lines = append(lines, "", planPaint(s, planSeverityWarning, fmt.Sprintf("Warnings (%d)", len(model.Warnings))))
+		for _, warning := range model.Warnings {
+			prefix := "  " + planPaint(s, warning.Severity, "!") + " "
+			lines = append(lines, wrapPlanValue(prefix, warning.Summary, width)...)
+		}
+	}
 	if len(deletes) > 0 {
 		heading := fmt.Sprintf("Deletes (%d) — irreversible; requires --prune and confirmation", len(deletes))
 		if s.ascii {

@@ -517,6 +517,10 @@ func TestConvergeApp_UpdateConfigPatchesWithServerDigestPrecondition(t *testing.
 			gotDigest = r.Header.Get("X-Shinyhub-If-Content-Digest")
 			gotMB = r.Header.Get("X-Shinyhub-If-Managed-By")
 		}
+		if r.Method == "GET" && r.URL.Path == "/api/apps/cfg" {
+			_, _ = w.Write([]byte(`{"app":{"slug":"cfg","replicas":2}}`))
+			return
+		}
 		w.WriteHeader(200)
 	}))
 	t.Cleanup(srv.Close)
@@ -621,7 +625,7 @@ func TestConvergeApp_UpdateSourceConfigGatesOnPostDeployDigest(t *testing.T) {
 
 	var seq, deployedAt, patchedAt int
 	var patchDigest string
-	app := &fakeApp{Slug: "srccfg", Access: "private", ContentDigest: staleDigest, Replicas: 1}
+	app := &fakeApp{Slug: "srccfg", Access: "private", ManagedBy: stringPtr("fleet:eu"), ContentDigest: staleDigest, Replicas: 1}
 	cfg := singleAppServer(t, app, promotedDigest, statefulAppHooks{
 		onDeploy: func() { seq++; deployedAt = seq },
 		onPatch: func(r *http.Request, _ map[string]any) int {
@@ -660,7 +664,7 @@ func TestConvergeApp_UpdateSourceRestoresValueTheBundleOverwrote(t *testing.T) {
 	// so the action is source-only. The new bundle's shinyhub.toml declares
 	// replicas=1, and the deploy stores it. Apply must converge the server back
 	// to the fleet's 3 rather than report success over the bundle's value.
-	app := &fakeApp{Slug: "srconly", Access: "private", ContentDigest: "sha256:OLD", Replicas: 3,
+	app := &fakeApp{Slug: "srconly", Access: "private", ManagedBy: stringPtr("fleet:eu"), ContentDigest: "sha256:OLD", Replicas: 3,
 		settings: map[string]any{"hibernate_timeout_minutes": 30.0}}
 	var patches []map[string]any
 	cfg := singleAppServer(t, app, "sha256:PROMOTED", statefulAppHooks{
@@ -696,7 +700,7 @@ func TestConvergeApp_UpdateSourceRestoresValueTheBundleOverwrote(t *testing.T) {
 func TestConvergeApp_UpdateSourceSendsNothingWhenDeployKeptDeclaredValues(t *testing.T) {
 	// A source-only deploy whose bundle does not touch any declared value must
 	// cost no PATCH at all: the post-deploy read already shows convergence.
-	app := &fakeApp{Slug: "quiet", Access: "private", ContentDigest: "sha256:OLD", Replicas: 2}
+	app := &fakeApp{Slug: "quiet", Access: "private", ManagedBy: stringPtr("fleet:eu"), ContentDigest: "sha256:OLD", Replicas: 2}
 	var patches int
 	cfg := singleAppServer(t, app, "sha256:PROMOTED", statefulAppHooks{
 		onPatch: func(*http.Request, map[string]any) int { patches++; return http.StatusOK },
@@ -719,7 +723,7 @@ func TestConvergeApp_UpdateSourceConfigRestoresAutoscaleAbsentFromPlanDrift(t *t
 	// d.ConfigDrift) but replicas drifted. The redeployed bundle turns autoscale
 	// off, so it must be restored after the deploy even though the pre-deploy
 	// drift list never mentioned it.
-	app := &fakeApp{Slug: "srccfg", Access: "private", ContentDigest: "sha256:OLD", Replicas: 1,
+	app := &fakeApp{Slug: "srccfg", Access: "private", ManagedBy: stringPtr("fleet:eu"), ContentDigest: "sha256:OLD", Replicas: 1,
 		settings: map[string]any{"autoscale_enabled": true, "autoscale_min_replicas": 1.0,
 			"autoscale_max_replicas": 8.0, "autoscale_target": 0.8}}
 	cfg := singleAppServer(t, app, "sha256:PROMOTED", statefulAppHooks{
@@ -763,7 +767,7 @@ func TestConvergeApp_UpdateSourceFailsWhenServerDoesNotKeepPatch(t *testing.T) {
 	// A 200 is not proof: the confirming re-read must show the declared value.
 	// A server that accepts the PATCH but keeps the bundle's value fails the
 	// app instead of reporting it updated.
-	app := &fakeApp{Slug: "sticky", Access: "private", ContentDigest: "sha256:OLD", Replicas: 3}
+	app := &fakeApp{Slug: "sticky", Access: "private", ManagedBy: stringPtr("fleet:eu"), ContentDigest: "sha256:OLD", Replicas: 3}
 	cfg := singleAppServer(t, app, "sha256:NEW", statefulAppHooks{
 		deployWrites: map[string]any{"replicas": 1.0},
 		ignorePatch:  true,
@@ -1137,7 +1141,7 @@ func TestConvergeApp_PostDeployPatchFailureHasNoLogTail(t *testing.T) {
 			logsHit = true
 			_, _ = io.WriteString(w, "should not be fetched\n")
 		case r.Method == "GET" && r.URL.Path == "/api/apps/sc":
-			_ = json.NewEncoder(w).Encode(map[string]any{"app": map[string]any{"status": "running"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"app": map[string]any{"status": "running", "managed_by": "fleet:eu"}})
 		default:
 			w.WriteHeader(200)
 			_, _ = w.Write([]byte(`{}`))
@@ -1180,7 +1184,7 @@ func TestConvergeApp_CreateDeploysThenStampsMarker(t *testing.T) {
 			w.WriteHeader(200)
 			_, _ = w.Write([]byte(`{"status":"ok"}`))
 		case r.Method == "GET" && r.URL.Path == "/api/apps/new":
-			_ = json.NewEncoder(w).Encode(map[string]any{"app": map[string]any{"status": "running"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"app": map[string]any{"status": "running", "managed_by": "fleet:eu"}})
 		case r.Method == "GET" && r.URL.Path == "/api/apps":
 			_ = json.NewEncoder(w).Encode([]map[string]any{{"slug": "new", "content_digest": "sha256:NEW"}})
 		case r.Method == "PATCH" && r.URL.Path == "/api/apps/new":
@@ -1223,7 +1227,7 @@ func TestConvergeApp_CreateWithoutDeployRunRefFailsWarmPostcondition(t *testing.
 			// declared schedule's bundle-specific postcondition.
 			_, _ = io.WriteString(w, `{"status":"ok","manifest":{"schedules":[{"name":"warm","schedule_id":7}]}}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/new":
-			_, _ = io.WriteString(w, `{"app":{"status":"running"},"compatibility_quarantined":false,"producer_repair_required":false}`)
+			_, _ = io.WriteString(w, `{"app":{"status":"running","managed_by":"fleet:eu"},"compatibility_quarantined":false,"producer_repair_required":false}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/apps":
 			_, _ = io.WriteString(w, `[{"slug":"new","content_digest":"sha256:NEW"}]`)
 		case r.Method == http.MethodPatch && r.URL.Path == "/api/apps/new":
@@ -1272,7 +1276,7 @@ func TestConvergeApp_RestartsOnlyAfterWarmLevelPostconditionPasses(t *testing.T)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/new/schedules":
 			_, _ = io.WriteString(w, `{"items":[{"id":7,"name":"warm","enabled":true,"last_run_id":9,"last_run_status":"succeeded","last_success_at":"2026-08-24T12:00:00Z","producer_content_digest":"sha256:NEW","current_content_digest":"sha256:NEW","deploy_trigger_satisfied":true,"stale":false,"refreshing":false}]}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/new":
-			_, _ = io.WriteString(w, `{"app":{"status":"running"},"compatibility_quarantined":false,"producer_repair_required":false}`)
+			_, _ = io.WriteString(w, `{"app":{"status":"running","managed_by":"fleet:eu"},"compatibility_quarantined":false,"producer_repair_required":false}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/apps":
 			_, _ = io.WriteString(w, `[{"slug":"new","content_digest":"sha256:NEW"}]`)
 		case r.Method == http.MethodPatch && r.URL.Path == "/api/apps/new":
@@ -1327,7 +1331,7 @@ func TestConvergeApp_RetriedSuccessRecordsFailedAttemptKind(t *testing.T) {
 			w.WriteHeader(200)
 			_, _ = w.Write([]byte(`{"status":"ok"}`))
 		case r.Method == "GET" && r.URL.Path == "/api/apps/flaky":
-			_ = json.NewEncoder(w).Encode(map[string]any{"app": map[string]any{"status": "running"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"app": map[string]any{"status": "running", "managed_by": "fleet:eu"}})
 		case r.Method == "GET" && r.URL.Path == "/api/apps":
 			_ = json.NewEncoder(w).Encode([]map[string]any{{"slug": "flaky", "content_digest": "sha256:NEW"}})
 		default:
@@ -1521,7 +1525,7 @@ func concurrencyTestServer(t *testing.T, n int, maxInflight *atomic.Int32, sleep
 			}
 			_ = json.NewEncoder(w).Encode(apps)
 		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/api/apps/"):
-			_ = json.NewEncoder(w).Encode(map[string]any{"app": map[string]any{"status": "running"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"app": map[string]any{"status": "running", "managed_by": "fleet:eu"}})
 		default:
 			w.WriteHeader(200)
 			_, _ = w.Write([]byte(`{}`))
@@ -1605,7 +1609,7 @@ func TestConvergeFleet_ExitCodeParityParallelSerial(t *testing.T) {
 			case strings.HasSuffix(r.URL.Path, "/logs"):
 				_, _ = io.WriteString(w, "boom\n")
 			case strings.HasPrefix(r.URL.Path, "/api/apps/"):
-				_ = json.NewEncoder(w).Encode(map[string]any{"app": map[string]any{"status": "running"}})
+				_ = json.NewEncoder(w).Encode(map[string]any{"app": map[string]any{"status": "running", "managed_by": "fleet:eu"}})
 			default:
 				w.WriteHeader(200)
 				_, _ = w.Write([]byte(`{}`))
