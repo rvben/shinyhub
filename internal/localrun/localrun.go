@@ -287,6 +287,12 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 
 	current, err := startCandidate(ctx, w, slug, userEnv, o.NoSync, depsChanged, stdout, stderr)
 	if err != nil {
+		// exec.CommandContext refuses to start once ctx is cancelled, so a
+		// Ctrl-C that lands before the first start is a requested shutdown,
+		// not a failed launch.
+		if ctx.Err() != nil {
+			return nil
+		}
 		return err
 	}
 	defer func() { stopChild(current.cmd, current.exitCh, stderr) }()

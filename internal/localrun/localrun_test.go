@@ -704,6 +704,28 @@ func TestRun_CheckBundle(t *testing.T) {
 	})
 }
 
+// TestRun_CancelBeforeFirstStartIsClean: a Ctrl-C that lands after the
+// workspace is prepared but before the first process starts is a requested
+// shutdown. exec.CommandContext refuses to start under a cancelled context,
+// and that refusal must not surface as a failed launch. NoReload makes the
+// ordering deterministic: without it, the source watcher's readiness races the
+// cancellation and only sometimes reaches the start.
+func TestRun_CancelBeforeFirstStartIsClean(t *testing.T) {
+	dir := writeHealthyFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	err := Run(ctx, Options{
+		BundleDir: dir, StateDir: t.TempDir(), NoReload: true,
+		CheckBundle: func(string, []bundle.FileInputSnapshot) error {
+			cancel()
+			return nil
+		},
+	}, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("a run cancelled before its first start must end cleanly, got %v", err)
+	}
+}
+
 // lockedBuffer is a bytes.Buffer a running Run may write while the test reads.
 type lockedBuffer struct {
 	mu  sync.Mutex
