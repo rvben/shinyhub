@@ -484,7 +484,11 @@ func TestPatchApp_WorkerIsolationUnchanged_NoRedeployNoAudit(t *testing.T) {
 	}
 
 	patch(map[string]any{"worker_isolation": "grouped", "worker_grouped_size": 2})
-	if !redeployed() {
+	// The asynchronous redeploy reads from the database before entering the
+	// runner. Allow PostgreSQL to finish those reads under integration-test load.
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
 		t.Fatal("changed worker_isolation did not trigger a pool redeploy")
 	}
 	if n := countUpdateApp(); n != 1 {
