@@ -26,6 +26,9 @@ export const AUDIT_ACTIONS = [
   // User management (blue - config)
   'replace_user_invitation', 'invite_user', 'accept_user_invitation', 'revoke_user_invitation', 'create_user', 'update_user', 'delete_user', 'reset_user_password', 'revoke_sessions',
   'support_session.start', 'support_session.stop',
+  // Platform announcements
+  'announcement.create', 'announcement.update', 'announcement.draft',
+  'announcement.published', 'announcement.disabled', 'announcement.archived',
   // Token and service-credential management (amber - security)
   'create_token', 'delete_token', 'trusted_publish',
   'create_service_credential', 'delete_service_credential',

@@ -463,7 +463,8 @@ type Proxy struct {
 	// death caused it. Off unless main.go wires it from config, matching
 	// SetWakeTrigger: an embedder or test is never implicitly rewriting the
 	// HTML of an app it serves. Atomic for a lock-free read per response.
-	statusOverlay atomic.Bool
+	statusOverlay        atomic.Bool
+	announcementsEnabled atomic.Bool
 
 	// supportSessions enables the non-optional safety banner for requests that
 	// carry an app-scoped support identity. The request context decides whether
@@ -3856,3 +3857,6 @@ func extractSlug(path string) string {
 	}
 	return strings.SplitN(trimmed, "/", 2)[0]
 }
+
+// SetAnnouncements enables optional notices when the host provides a public feed.
+func (p *Proxy) SetAnnouncements(enabled bool) { p.announcementsEnabled.Store(enabled) }

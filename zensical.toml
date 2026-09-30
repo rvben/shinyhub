@@ -88,6 +88,7 @@ nav = [
     { "CLI" = "cli.md" },
     { "Several servers" = "hosts.md" },
     { "Branding" = "branding.md" },
+    { "Platform announcements" = "announcements.md" },
     { "Load testing" = "load-testing.md" },
     { "Managed runner contract" = "fargate-runner-contract.md" },
     { "Security" = "security.md" },

@@ -38,6 +38,7 @@ import (
 	"github.com/rvben/shinyhub/internal/access"
 	"github.com/rvben/shinyhub/internal/activation"
 	"github.com/rvben/shinyhub/internal/admission"
+	"github.com/rvben/shinyhub/internal/announcementui"
 	"github.com/rvben/shinyhub/internal/api"
 	"github.com/rvben/shinyhub/internal/appenv"
 	"github.com/rvben/shinyhub/internal/auth"
@@ -1446,6 +1447,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// Give the visitor a way out of the app they opened. Without it an app page
 	// is a dead end: it fills the tab and links nowhere else in the fleet.
 	prx.SetAppNav(cfg.Server.AppNavEnabled(), appNavHomeURL(cfg))
+	prx.SetAnnouncements(true)
 	// Give every app a stable tab identity without overriding a favicon the app
 	// authored itself. The proxy only injects the fallback into HTML pages that
 	// do not already declare rel=icon.
@@ -2764,6 +2766,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// are, so they carry the same switcher. Nothing but the switcher varies:
 	// Support recovery stays available independently of the optional app switcher.
 	navOpts := []access.Option{access.WithSupportDashboard(strings.TrimRight(cfg.Server.BaseURL, "/") + "/users")}
+	navOpts = append(navOpts, access.WithAnnouncements())
 	if cfg.Server.AppNavEnabled() {
 		navOpts = append(navOpts, access.WithAppNav(appNavHomeURL(cfg)))
 	}
@@ -2789,6 +2792,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		appHandler = trustedAppSupportDispatch(appHandler, store, cfg.Auth.Secret, cfg.TrustedProxyNets)
 	}
 	mux.Handle("/app/", appHandler)
+	mux.HandleFunc("GET /app/{slug}/.shinyhub/announcements.json", srv.HandleActiveAnnouncements)
 	if cfg.Auth.SupportSessions {
 		mux.HandleFunc("POST /app/{slug}/.shinyhub/support-session/stop",
 			supportSessionStopHandler(store, cfg.Auth.Secret, strings.TrimRight(cfg.Server.BaseURL, "/")+"/users?support=ended", cfg.TrustedProxyNets))
@@ -2838,6 +2842,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	})))
 	mux.Handle("/readyz", probeMethods(readyzHandler(prx, readyCh, store)))
 	mux.Handle("/activez", probeMethods(activezHandler(ownerAndReady)))
+	mux.HandleFunc("GET "+announcementui.ClientPath, announcementui.ScriptHandler)
 	mux.Handle("/static/", ui.Handler())
 	mux.Handle("/invite", ui.InvitationHandler())
 

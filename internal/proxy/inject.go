@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/rvben/shinyhub/internal/announcementui"
 	"github.com/rvben/shinyhub/internal/appnav"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/favicon"
@@ -356,7 +357,7 @@ func (p *Proxy) relaxEncodingForInjection(req *http.Request) {
 
 // injectsPageHTML reports whether any page-level enhancement is enabled.
 func (p *Proxy) injectsPageHTML() bool {
-	return p.statusOverlay.Load() || p.appNav.Load() != nil || p.appFavicon.Load() || p.supportSessions.Load()
+	return p.announcementsEnabled.Load() || p.statusOverlay.Load() || p.appNav.Load() != nil || p.appFavicon.Load() || p.supportSessions.Load()
 }
 
 // decorateAppPage gives one of ShinyHub's own app pages its contextual favicon
@@ -378,6 +379,9 @@ func (p *Proxy) decorateAppPage(page, slug string, r *http.Request) string {
 		out, _ = favicon.SetTitle(out, p.appPageTitle(slug))
 	}
 	var snippets strings.Builder
+	if p.announcementsEnabled.Load() {
+		snippets.WriteString(announcementui.Snippet(slug))
+	}
 	support := p.supportPageScript(r, slug)
 	if support != nil {
 		snippets.WriteString(support.snippet)
@@ -410,6 +414,9 @@ func (p *Proxy) pageScriptsFor(r *http.Request, slug string, deploymentID int64)
 		return nil
 	}
 	var scripts []pageScript
+	if p.announcementsEnabled.Load() {
+		scripts = append(scripts, pageScript{render: func() string { return announcementui.Snippet(slug) }, cspHash: announcementui.CSPHash})
+	}
 	support := p.supportPageScript(r, slug)
 	if support != nil {
 		scripts = append(scripts, *support)

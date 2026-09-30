@@ -586,3 +586,10 @@ load-test-mixed: ## Profile a disposable Linux server with mixed HTTP, WebSocket
 test-load-mixed: ## Validate the mixed-load verdicts and database telemetry without Docker
 	python3 -m unittest discover -s loadtest/mixed -p 'test_*.py'
 	go test ./internal/metrics ./loadtest/mixed/fixture -run 'TestDatabasePoolTelemetryTracksCurrentStats|TestTargetResources'
+
+.PHONY: test-browser-announcements-e2e
+# Production-server announcement checks use a disposable local database and TLS
+# proxy. Set SHINYHUB_ANNOUNCEMENT_FRAMEWORKS=1 for the real framework matrix.
+test-browser-announcements-e2e: build
+	@if [ ! -d loadtest/render/driver/node_modules/playwright ]; then cd loadtest/render/driver && npm ci --no-audit --no-fund; fi
+	SHINYHUB_E2E_BINARY=$(CURDIR)/bin/shinyhub node scripts/announcements-browser-e2e.mjs

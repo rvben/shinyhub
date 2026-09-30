@@ -130,6 +130,9 @@
           <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="4.6" cy="7" r="1.1"/><circle cx="4.6" cy="12" r="1.1"/><circle cx="4.6" cy="17" r="1.1"/><line x1="9" y1="7" x2="20" y2="7"/><line x1="9" y1="12" x2="20" y2="12"/><line x1="9" y1="17" x2="20" y2="17"/></svg>
           <span class="nav-label">Audit Log</span>
         </a>
+        <a href="/announcements" data-nav class="nav-item" id="tab-announcements" aria-label="Announcements" data-tooltip="Announcements" hidden>
+          <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10h4l11-5v14l-11-5H4z"/><path d="M8 14v6h4l-2-5"/></svg><span class="nav-label">Announcements</span>
+        </a>
       </nav>
 
       <nav id="sidebar-apps" class="sidebar-apps" aria-label="Applications"></nav>
@@ -188,6 +191,7 @@
     </section>
     <p id="support-session-recovery-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
 
+    <div id="platform-announcements"></div>
     <section id="app-isolation-banner" class="conn-banner" hidden role="region" aria-labelledby="app-isolation-banner-heading">
       <p class="conn-banner-title" id="app-isolation-banner-heading">Apps run same-origin with the dashboard</p>
       <p class="conn-banner-body">No dedicated application origin (<code>server.app_origin</code>) is configured, so every deployed app is trusted with dashboard users' sessions.
@@ -237,6 +241,7 @@
       </div>
     </section>
 
+    <section id="announcements-view" hidden aria-label="Announcements"></section>
     <section id="overview-view" hidden aria-labelledby="overview-heading">
       <div class="toolbar">
         <h1 id="overview-heading">Overview</h1>
@@ -1672,5 +1677,6 @@
   <!-- Shared by #general-project and #new-app-project. Free text stays
        accepted in both, which is what allows creating a project inline. -->
   <datalist id="project-slugs"></datalist>
+<script id="shinyhub-announcements-loader" src="/announcements.js" data-announcements-url="/api/announcements/active" data-announcements-target="#platform-announcements"></script>
 </body>
 </html>

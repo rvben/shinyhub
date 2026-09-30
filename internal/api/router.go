@@ -39,6 +39,7 @@ import (
 
 // Server holds the dependencies shared by all API handlers.
 type Server struct {
+	announcements   announcementCache
 	trustedVerifier *trustedpublish.Verifier
 	cfg             *config.Config
 	store           *db.Store
@@ -910,6 +911,7 @@ func (s *Server) buildRouter() chi.Router {
 	r.With(s.rateLimitByIP(s.oauthLimiter)).Get("/api/auth/oidc/login", s.handleOIDCLogin)
 	r.With(s.rateLimitByIP(s.oauthLimiter)).Get("/api/auth/oidc/callback", s.handleOIDCCallback)
 	r.Get("/api/server-info", s.handleServerInfo)
+	r.Get("/api/announcements/active", s.HandleActiveAnnouncements)
 
 	// All other endpoints require either an auth header or a valid session cookie.
 	bearer := auth.BearerMiddleware(s.cfg.Auth.Secret, s.keyLookup, s.userLookup, s.revocationChecker())
@@ -1054,6 +1056,10 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/api/support-sessions/current", s.handleGetCurrentSupportSession)
 		r.Delete("/api/support-sessions/current", s.handleDeleteCurrentSupportSession)
 
+		r.Get("/api/announcements", s.handleListAnnouncements)
+		r.Get("/api/announcements/{id}", s.handleGetAnnouncement)
+		r.With(rateLimitByUser(s.actionLimiter)).Post("/api/announcements", s.handleSaveAnnouncement)
+		r.With(rateLimitByUser(s.actionLimiter)).Patch("/api/announcements/{id}", s.handleSaveAnnouncement)
 		r.Get("/api/audit", s.handleListAuditEvents) // admin: audit log
 
 		r.Get("/api/workers", s.handleListWorkers)                        // admin: list joined workers

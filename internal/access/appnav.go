@@ -1,6 +1,9 @@
 package access
 
-import "github.com/rvben/shinyhub/internal/appnav"
+import (
+	"github.com/rvben/shinyhub/internal/announcementui"
+	"github.com/rvben/shinyhub/internal/appnav"
+)
 
 // Option adjusts optional middleware behaviour. Options are variadic so a
 // middleware that gains a feature does not force every existing call site to
@@ -13,7 +16,8 @@ type options struct {
 	// nav carries the switcher's home URL and, by being non-nil, the fact that
 	// it is enabled at all. One pointer rather than a bool beside a string, so
 	// there is no state where the switcher is on with a home link nobody set.
-	nav *navSettings
+	nav           *navSettings
+	announcements bool
 }
 
 type navSettings struct{ homeURL string }
@@ -47,10 +51,17 @@ func newOptions(opts []Option) options {
 // put it. Declining leaves the page byte for byte as it was: the switcher is an
 // addition to these pages, never a precondition for serving them.
 func (o options) withAppNav(page []byte, slug, name string) []byte {
-	if o.nav == nil || slug == "" {
+	if slug == "" || (o.nav == nil && !o.announcements) {
 		return page
 	}
-	out, ok := appnav.SpliceIntoBody(page, appnav.SnippetWithName(slug, name, o.nav.homeURL))
+	snippet := ""
+	if o.announcements {
+		snippet += announcementui.Snippet(slug)
+	}
+	if o.nav != nil {
+		snippet += appnav.SnippetWithName(slug, name, o.nav.homeURL)
+	}
+	out, ok := appnav.SpliceIntoBody(page, snippet)
 	if !ok {
 		return page
 	}
@@ -62,3 +73,6 @@ func (o options) withAppNav(page []byte, slug, name string) []byte {
 func WithSupportDashboard(dashboardURL string) Option {
 	return func(o *options) { o.supportDashboardURL = dashboardURL }
 }
+
+// WithAnnouncements includes optional public notices on platform-owned app pages.
+func WithAnnouncements() Option { return func(o *options) { o.announcements = true } }

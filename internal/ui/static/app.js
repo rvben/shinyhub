@@ -1,3 +1,4 @@
+import { mountAnnouncements } from '/static/views/announcements.js';
 import { createPersonActions } from '/static/views/person-actions.js';
 import { scalingSettingsSnapshot, scalingSettingsPatch } from '/static/views/scaling-settings.js';
 import { applyPeopleOnboarding, createInvitationList } from '/static/views/people-onboarding.js';
@@ -1031,6 +1032,9 @@ document.addEventListener('DOMContentLoaded', () => {
     auditRequests.invalidate();
     state.canCreateApps = false;
     state.canManageApps = false;
+    state.canManageAnnouncements = false;
+    document.getElementById('tab-announcements').hidden = true;
+    document.getElementById('announcements-view').hidden = true;
     state.appIsolationWarning = false;
     if (appIsolationBanner) appIsolationBanner.hidden = true;
     supportRecovery.clear();
@@ -1068,6 +1072,8 @@ document.addEventListener('DOMContentLoaded', () => {
     state.canCreateApps = !!payload.can_create_apps;
     state.canManageApps = !!payload.can_manage_apps;
     state.canReadAudit = !!payload.can_read_audit;
+    state.canManageAnnouncements = !!payload.can_manage_announcements;
+    document.getElementById('tab-announcements').hidden = !state.canManageAnnouncements;
     state.appIsolationWarning = !!payload.app_isolation_warning;
     renderIdentity(payload.user);
     setHidden(logoutButton, false);
@@ -3221,6 +3227,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // leave (nothing unsaved, or the user confirmed). On confirm it re-snapshots
   // so the guard doesn't fire again during teardown.
   function confirmDiscardIfDirty() {
+    if (announcementEditor && !announcementEditor.allowLeave()) return false;
     if (!anySettingsDirty()) return true;
     const ok = window.confirm('You have unsaved changes in this app’s settings. Leave without saving?');
     if (ok) clearSettingsDirty();
@@ -6282,6 +6289,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function clearRouteError() {
     if (routeErrorView) routeErrorView.hidden = true;
   }
+  let announcementEditor = null;
   const router = createRouter({ onError: showRouteError, onMounted: clearRouteError });
 
   // Last-resort net for throws outside the router mount path (event handlers,
@@ -6301,7 +6309,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // settings edits, so the explicit-save model never silently loses work.
   router.setNavGuard(confirmDiscardIfDirty);
   window.addEventListener('beforeunload', (e) => {
-    if (!suppressUnloadGuard && anySettingsDirty()) { e.preventDefault(); e.returnValue = ''; }
+    if (!suppressUnloadGuard && (anySettingsDirty() || announcementEditor?.isDirty())) { e.preventDefault(); e.returnValue = ''; }
   });
 
   function updateActiveNav(pathname) {
@@ -6508,6 +6516,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // /users) there is no previous view to clean up — the sections inherit
   // whatever showLoggedIn left them in.
   function hideAllPageViews() {
+    document.getElementById('announcements-view').hidden = true;
     overviewView.hidden = true;
     launchpadView.hidden = true;
     appsView.hidden = true;
@@ -6570,6 +6579,12 @@ document.addEventListener('DOMContentLoaded', () => {
     // Matches the page's own <h1>, so a tab, a bookmark and a history entry
     // name this page instead of falling back to the bare product name.
     return { title: 'API tokens', unmount() { if (tokensView) tokensView.hidden = true; } };
+  });
+  router.register('/announcements', () => {
+    if (!ctx.state.canManageAnnouncements) return ctx.navigate('/', { replace: true });
+    hideAllPageViews();
+    announcementEditor = mountAnnouncements({ ...ctx, onUnmount: () => { announcementEditor = null; } });
+    return announcementEditor;
   });
   router.register('/workers', () => {
     const workersAccess = resolveAdminOnlyAccess(ctx.state.user);

@@ -25,7 +25,7 @@ var projectDetailPath = regexp.MustCompile(`^/projects/` + slugpkg.Pattern + `/?
 // /identity is the page that covers people, roles and service accounts; /users
 // is kept as a working alias for old bookmarks and links (see app.js's router).
 func ExactUIRoutes() []string {
-	return []string{"/login", "/home", "/launchpad", "/apps", "/identity", "/users", "/workers", "/audit-log", "/tokens"}
+	return []string{"/login", "/home", "/launchpad", "/apps", "/identity", "/users", "/workers", "/announcements", "/audit-log", "/tokens"}
 }
 
 // IsUIPath reports whether path is a client-side-rendered SPA route that

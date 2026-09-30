@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **announcements**: schedule public platform notices from an administrator workspace or API, with live delivery to the console and hosted apps, versioned dismissal, and audited edits.
+
 ## [0.18.7](https://github.com/rvben/shinyhub/compare/v0.18.6...v0.18.7) - 2026-09-30
 
 ### Added
