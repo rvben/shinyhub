@@ -30,13 +30,15 @@
   </script>
   <!-- Start the boot API requests now instead of after every module has loaded.
        Placed before the stylesheets, which would otherwise hold this script
-       until they arrive. The session goes first; once it is known, the requests
-       the dashboard makes for that user follow. app.js takes these responses
-       through views/boot-prefetch.js, which documents the contract.
-       Every follow-up path is registered synchronously in the first reaction
+       until they arrive. The app list and server info go out with the session
+       rather than after it, because the first card waits on the app list; for
+       a visitor who turns out to be logged out that costs one unused 401,
+       which app.js discards when it shows the login form. app.js takes these
+       responses through views/boot-prefetch.js, which documents the contract.
+       The admin-only paths are registered synchronously in the first reaction
        to the session response, which runs before app.js's own reaction to it,
-       so app.js always finds them. The admin-only ones wait on the role and
-       reject for anyone else, which makes app.js fetch them itself. -->
+       so app.js always finds them. They wait on the role and reject for
+       anyone else, which makes app.js fetch them itself. -->
   <script>
     (function () {
       if (!window.fetch || !window.Promise) return;
@@ -51,10 +53,10 @@
       park('/api/auth/providers', get('/api/auth/providers'));
       var me = get('/api/auth/me');
       park('/api/auth/me', me);
+      park('/api/apps', get('/api/apps'));
+      park('/api/server-info', get('/api/server-info'));
       me.then(function (resp) {
         if (!resp.ok) return;
-        park('/api/apps', get('/api/apps'));
-        park('/api/server-info', get('/api/server-info'));
         var admin = resp.clone().json().then(function (body) {
           if (!body || !body.user || body.user.role !== 'admin') throw new Error('not admin');
         });

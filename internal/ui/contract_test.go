@@ -486,6 +486,15 @@ func TestBootPrefetchWired(t *testing.T) {
 			t.Errorf("the shell prefetches %s, whose remaining_seconds would be anchored after the prefetch delay", m[1])
 		}
 	}
+	// The first card waits on the app list, so it must go out in the same
+	// round as the session instead of after it; parked inside me.then it
+	// costs every cold load a full extra round trip.
+	appsAt := strings.Index(shell, "park('/api/apps', get('/api/apps'));")
+	meThenAt := strings.Index(shell, "me.then(")
+	meAt := strings.Index(shell, "park('/api/auth/me', me);")
+	if appsAt < 0 || meThenAt < 0 || meAt < 0 || appsAt < meAt || appsAt > meThenAt {
+		t.Errorf("the shell must request /api/apps alongside /api/auth/me, not in the reaction to it (me=%d apps=%d me.then=%d)", meAt, appsAt, meThenAt)
+	}
 	if !strings.Contains(shell, "if (B.r) B.r[path] = p;") {
 		t.Error("the shell must park through window.__shinyhubBoot.r and only while it is set, so discard() releases every parked response, late ones included")
 	}
