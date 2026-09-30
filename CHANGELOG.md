@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.18.7](https://github.com/rvben/shinyhub/compare/v0.18.6...v0.18.7) - 2026-09-30
+
+### Added
+
+- **ui**: request the app list alongside the session on a cold load ([a6fc5a4](https://github.com/rvben/shinyhub/commit/a6fc5a481937e84001c68a87e3e1ce70c95c53f0))
+
 ## [0.18.6](https://github.com/rvben/shinyhub/compare/v0.18.5...v0.18.6) - 2026-09-30
 
 ### Added
