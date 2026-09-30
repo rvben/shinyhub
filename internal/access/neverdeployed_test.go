@@ -125,6 +125,22 @@ func TestNeverDeployed_ManagerSeesCLISnippet(t *testing.T) {
 	if strings.Contains(body, "<style>") {
 		t.Errorf("expected no inline <style> block — page should use shared stylesheet")
 	}
+	// The webfonts are self-hosted like the dashboard's: the page must not
+	// reach out to a third-party font host, and must load the shared
+	// @font-face sheet before the stylesheet that names the families.
+	for _, host := range []string{"fonts.googleapis.com", "fonts.gstatic.com"} {
+		if strings.Contains(body, host) {
+			t.Errorf("expected no third-party font host %s, got %q", host, body)
+		}
+	}
+	fontsAt := strings.Index(body, `<link rel="stylesheet" href="/static/fonts/fonts.css">`)
+	styleAt := strings.Index(body, `<link rel="stylesheet" href="/static/style.css">`)
+	if fontsAt < 0 || styleAt < 0 || fontsAt > styleAt {
+		t.Errorf("expected /static/fonts/fonts.css linked before /static/style.css, got %q", body)
+	}
+	if !strings.Contains(body, `<link rel="preload" href="/static/fonts/manrope-latin.woff2" as="font" type="font/woff2" crossorigin>`) {
+		t.Errorf("expected body-face preload, got %q", body)
+	}
 	if !strings.Contains(body, "What should my bundle contain?") {
 		t.Errorf("expected scaffold help summary, got %q", body)
 	}
