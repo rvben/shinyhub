@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
@@ -201,13 +202,12 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		user = fresh
 	}
 
-	jwtToken, err := auth.IssueSessionToken(user.ContextUser(), s.cfg.Auth.Secret)
+	_, err = s.setBrowserSession(w, r, user.ContextUser(), time.Time{})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 
-	auth.SetSessionCookie(w, r, jwtToken, s.cfg.TrustedProxyNets)
 	s.logAuditEvent(r, db.AuditEventParams{
 		UserID: &user.ID, Action: "login", ResourceType: "user",
 		ResourceID: user.Username, IPAddress: s.ClientIP(r),

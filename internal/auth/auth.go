@@ -117,7 +117,8 @@ func newJTI() (string, error) {
 // the user's current token epoch so a later revoke-sessions/password-change
 // bump invalidates it. Production login paths MUST use this (or
 // SlideSessionToken) rather than IssueJWT: a token issued without the user's
-// live epoch is rejected on the first request after any bump.
+// live epoch is rejected on the first request after any bump. Browser logins
+// use IssueBrowserSession to apply their configured renewal and lifetime policy.
 func IssueSessionToken(u *ContextUser, secret string) (string, error) {
 	token, _, err := IssueSessionTokenWithInfo(u, secret)
 	return token, err
@@ -171,12 +172,19 @@ func issueUserJWT(u *ContextUser, secret string, authTime time.Time) (string, *T
 }
 
 func issueUserJWTAt(u *ContextUser, secret string, authTime, expiresAt time.Time) (string, *TokenInfo, error) {
+	return issueUserJWTAtWithID(u, secret, authTime, expiresAt, "")
+}
+
+func issueUserJWTAtWithID(u *ContextUser, secret string, authTime, expiresAt time.Time, jti string) (string, *TokenInfo, error) {
 	if !expiresAt.After(time.Now()) {
 		return "", nil, ErrSupportSessionInvalid
 	}
-	jti, err := newJTI()
-	if err != nil {
-		return "", nil, err
+	if jti == "" {
+		var err error
+		jti, err = newJTI()
+		if err != nil {
+			return "", nil, err
+		}
 	}
 	now := time.Now()
 	claims := Claims{

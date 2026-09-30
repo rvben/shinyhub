@@ -223,8 +223,9 @@ type sessionResponse struct {
 	// AppIsolationWarning is true only for an admin when server.app_origin is
 	// unset, so the dashboard can surface the same same-origin trust risk the
 	// startup log warns about (see appOriginTrustWarning in cmd/shinyhub).
-	AppIsolationWarning bool                `json:"app_isolation_warning,omitempty"`
-	Credential          *credentialResponse `json:"credential,omitempty"`
+	AppIsolationWarning bool                    `json:"app_isolation_warning,omitempty"`
+	Credential          *credentialResponse     `json:"credential,omitempty"`
+	Session             *browserSessionResponse `json:"session,omitempty"`
 }
 
 // credentialResponse is safe to return to the authenticated caller. It names
@@ -408,7 +409,7 @@ func (s *Server) handleSessionLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := auth.IssueSessionToken(user.ContextUser(), s.cfg.Auth.Secret)
+	session, err := s.setBrowserSession(w, r, user.ContextUser(), time.Time{})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
@@ -422,9 +423,9 @@ func (s *Server) handleSessionLogin(w http.ResponseWriter, r *http.Request) {
 		Detail:       db.AuditDetail(map[string]any{"grant": grantSessionCookie, "provider": providerLocal}),
 		IPAddress:    s.ClientIP(r),
 	})
-	auth.SetSessionCookie(w, r, token, s.cfg.TrustedProxyNets)
 	ctxUser := user.ContextUser()
 	writeJSON(w, http.StatusOK, sessionResponse{
+		Session:                session,
 		User:                   newSessionUser(user),
 		CanCreateApps:          canCreateApps(ctxUser),
 		CanManageApps:          s.canUseAppsManagement(ctxUser),
@@ -442,9 +443,14 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		// of its signed lifetime. Only JWT-authenticated requests populate
 		// TokenInfo; API-key callers have no jti to revoke.
 		tokenRevoked := false
+		revocationFailed := false
 		if t := auth.TokenInfoFromContext(r.Context()); t != nil && t.JTI != "" {
-			if err := s.store.RevokeToken(t.JTI, u.ID, t.ExpiresAt); err != nil {
+			// A browser JWT can also be presented as Bearer. Retain revocation
+			// through the session deadline regardless of its request transport.
+			expiresAt := s.browserSessionRevocationExpiry(t.AuthTime, t.ExpiresAt)
+			if err := s.store.RevokeToken(t.JTI, u.ID, expiresAt); err != nil {
 				slog.Warn("revoke token on logout", "user", u.Username, "err", err)
+				revocationFailed = true
 			} else {
 				tokenRevoked = true
 			}
@@ -461,6 +467,10 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 			Detail:    db.AuditDetail(map[string]any{"token_revoked": tokenRevoked}),
 			IPAddress: s.ClientIP(r),
 		})
+		if revocationFailed {
+			writeError(w, http.StatusServiceUnavailable, "could not end session; try again")
+			return
+		}
 	}
 	auth.ClearSessionCookie(w, r, s.cfg.TrustedProxyNets)
 	w.WriteHeader(http.StatusNoContent)
@@ -469,7 +479,8 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 // handleRevokeOwnSessions ends every session and bearer token for the calling
 // account, not just the credential that called it.
 //
-// Logout is deliberately narrow: it revokes the one JWT it was called with, so
+// Logout is deliberately narrow: it revokes the browser session (including
+// its renewals), or the one bearer JWT it was called with, so
 // signing out of a shared machine does not kick you off your own laptop. That
 // is the wrong scope for the case it is easy to confuse it with - a credential
 // you believe someone else now has - and until this endpoint existed, the only
@@ -520,32 +531,24 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	// Slide the session window: only refresh when the request authenticated
-	// via the session cookie. Authorization-header callers (Bearer JWT or
-	// Token API key) take that branch first in AuthenticateRequest, so when
-	// no header is present the user must have come from the cookie — which is
-	// the only case where we should re-issue one.
+	w.Header().Set("Cache-Control", "no-store")
+	var session *browserSessionResponse
+	// A forward-auth identity can coexist with a stale cookie. Only a JWT
+	// authenticated from that cookie is eligible for browser renewal.
 	if r.Header.Get("Authorization") == "" {
-		if _, err := r.Cookie(auth.SessionCookieName); err == nil {
-			// Slide the 1h window, but preserve the original login time so the
-			// session cannot be kept alive indefinitely. Past the absolute cap we
-			// stop renewing; the current token then expires within its TTL and the
-			// user re-logs in, which re-runs SSO group reconciliation (so a role
-			// revoked at the IdP takes effect within the cap rather than never).
-			var authTime time.Time
-			if ti := auth.TokenInfoFromContext(r.Context()); ti != nil {
-				authTime = ti.AuthTime
-			}
-			if auth.CanSlideSession(authTime) {
-				if authTime.IsZero() {
-					authTime = time.Now()
+		if ti := auth.TokenInfoFromContext(r.Context()); ti != nil {
+			if _, err := r.Cookie(auth.SessionCookieName); err == nil {
+				var err error
+				session, err = s.setBrowserSession(w, r, u, ti.AuthTime, ti.JTI)
+				if errors.Is(err, auth.ErrSessionExpired) {
+					auth.ClearSessionCookie(w, r, s.cfg.TrustedProxyNets)
+					writeError(w, http.StatusUnauthorized, "session expired; sign in again")
+					return
 				}
-				freshToken, err := auth.SlideSessionToken(u, s.cfg.Auth.Secret, authTime)
 				if err != nil {
 					writeError(w, http.StatusInternalServerError, "internal server error")
 					return
 				}
-				auth.SetSessionCookie(w, r, freshToken, s.cfg.TrustedProxyNets)
 			}
 		}
 	}
@@ -565,6 +568,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		su.Role = u.Role
 	}
 	writeJSON(w, http.StatusOK, sessionResponse{
+		Session:                session,
 		User:                   su,
 		CanCreateApps:          canCreateApps(u),
 		CanManageApps:          s.canUseAppsManagement(u),
@@ -684,8 +688,8 @@ func (s *Server) handlePatchMe(w http.ResponseWriter, r *http.Request) {
 					authTime = time.Now()
 				}
 				if liveUser, lerr := s.store.LookupContextUser(u.ID); lerr == nil {
-					if freshToken, terr := auth.SlideSessionToken(liveUser, s.cfg.Auth.Secret, authTime); terr == nil {
-						auth.SetSessionCookie(w, r, freshToken, s.cfg.TrustedProxyNets)
+					if _, terr := s.setBrowserSession(w, r, liveUser, authTime); terr != nil {
+						auth.ClearSessionCookie(w, r, s.cfg.TrustedProxyNets)
 					}
 				}
 			}
@@ -1204,33 +1208,51 @@ func (s *Server) handleSessionHandoff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Best-effort: revoke the JWT so it can't be reused for the rest of its
-	// signed lifetime. A bad/expired/missing cookie is fine — we still clear
-	// it and redirect; the goal is "next request starts unauthenticated", not
-	// "we successfully revoked something specific".
+	// Revoke a valid session before clearing it. A failed write must not report
+	// a successful handoff while leaving a renewable credential behind. Invalid,
+	// expired, or missing cookies can safely be cleared without revocation.
 	if c, err := r.Cookie(auth.SessionCookieName); err == nil && c.Value != "" {
-		if claims, err := auth.ValidateJWT(c.Value, s.cfg.Auth.Secret, s.revocationChecker()); err == nil {
-			expiry := time.Time{}
-			if claims.ExpiresAt != nil {
-				expiry = claims.ExpiresAt.Time
+		// Verify signature and expiry independently of the database. A failed
+		// revocation lookup must not be mistaken for an invalid cookie and
+		// silently turn a storage outage into a successful logout redirect.
+		if claims, err := auth.ValidateJWT(c.Value, s.cfg.Auth.Secret, nil); err == nil {
+			_, lookupErr := s.store.GetUserByID(claims.UserID)
+			if lookupErr != nil && !errors.Is(lookupErr, db.ErrNotFound) {
+				writeError(w, http.StatusServiceUnavailable, "could not end session; try again")
+				return
 			}
-			if err := s.store.RevokeToken(claims.ID, claims.UserID, expiry); err != nil {
-				slog.Warn("revoke token on handoff", "user", claims.Subject, "err", err)
+			// A deleted account cannot authenticate. It needs no revocation
+			// row, whose foreign key would prevent saving it anyway.
+			if lookupErr == nil {
+				expiry := time.Time{}
+				if claims.ExpiresAt != nil {
+					expiry = claims.ExpiresAt.Time
+				}
+				var authTime time.Time
+				if claims.AuthTime != nil {
+					authTime = claims.AuthTime.Time
+				}
+				expiry = s.browserSessionRevocationExpiry(authTime, expiry)
+				if err := s.store.RevokeToken(claims.ID, claims.UserID, expiry); err != nil {
+					slog.Warn("revoke token on handoff", "user", claims.Subject, "err", err)
+					writeError(w, http.StatusServiceUnavailable, "could not end session; try again")
+					return
+				}
+				s.logAuditEvent(r, db.AuditEventParams{
+					UserID:       &claims.UserID,
+					Action:       "logout_handoff",
+					ResourceType: "user",
+					ResourceID:   claims.Subject,
+					// The token id is what ties this event to the session that was
+					// revoked, so a reader tracing a specific session can follow it
+					// from issue to revocation rather than seeing only that some
+					// session of this user ended.
+					Detail: auditDetailJSON(map[string]any{
+						"token_id": claims.ID,
+					}),
+					IPAddress: s.ClientIP(r),
+				})
 			}
-			s.logAuditEvent(r, db.AuditEventParams{
-				UserID:       &claims.UserID,
-				Action:       "logout_handoff",
-				ResourceType: "user",
-				ResourceID:   claims.Subject,
-				// The token id is what ties this event to the session that was
-				// revoked, so a reader tracing a specific session can follow it
-				// from issue to revocation rather than seeing only that some
-				// session of this user ended.
-				Detail: auditDetailJSON(map[string]any{
-					"token_id": claims.ID,
-				}),
-				IPAddress: s.ClientIP(r),
-			})
 		}
 	}
 

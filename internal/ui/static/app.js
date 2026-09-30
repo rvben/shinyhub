@@ -1,4 +1,5 @@
 import { mountAnnouncements } from '/static/views/announcements.js';
+import { createSessionController } from '/static/views/session-controller.js';
 import { createPersonActions } from '/static/views/person-actions.js';
 import { scalingSettingsSnapshot, scalingSettingsPatch } from '/static/views/scaling-settings.js';
 import { resourceSettingsPatch } from '/static/views/resource-settings.js';
@@ -543,7 +544,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const token = readCookie('csrf_token');
       if (token) init.headers['X-CSRF-Token'] = token;
     }
-    const coalesceable = !mutating && !init.body && Object.keys(init.headers).length === 0;
+    const coalesceable = !mutating && !init.body && !init.signal && init.cache !== 'no-store' && Object.keys(init.headers).length === 0;
     const resp = coalesceable ? await coalescedGET(path, init) : await fetch(path, init);
     // A successful mutating request means anything a view is holding may no
     // longer be true. Announce it here, at the one place every request passes
@@ -1022,7 +1023,25 @@ document.addEventListener('DOMContentLoaded', () => {
     );
   }
 
+  const sessionController = createSessionController({
+    request: api,
+    onExpired: handleUnauthorized,
+    onSession: payload => {
+      // Cookies are shared by tabs. An account switch in another tab must not
+      // silently make this tab's pending edits act as a different person.
+      if (state.user && payload.user.id !== state.user.id) {
+        handleUnauthorized();
+        return;
+      }
+      const wasAdmin = state.user?.role === 'admin';
+      applySessionCapabilities(payload);
+      if (payload.user.role !== 'admin') supportRecovery.clear();
+      else if (!wasAdmin) supportRecovery.load({ announce: false });
+    },
+  });
+
   function showLoggedOut() {
+    sessionController.stop();
     closeLogs();
     metrics.setTargets([]);
     state.user = null;
@@ -1068,45 +1087,40 @@ document.addEventListener('DOMContentLoaded', () => {
     if (usernameInput.offsetParent !== null) usernameInput.focus();
   }
 
-  function showLoggedIn(payload) {
+  // Initial sign-in and renewal share every server-computed capability and
+  // control. Updating identity must never reset an operator's open work.
+  function applySessionCapabilities(payload) {
     state.user = payload.user;
     state.canCreateApps = !!payload.can_create_apps;
     state.canManageApps = !!payload.can_manage_apps;
     state.canReadAudit = !!payload.can_read_audit;
     state.canManageAnnouncements = !!payload.can_manage_announcements;
-    document.getElementById('tab-announcements').hidden = !state.canManageAnnouncements;
     state.appIsolationWarning = !!payload.app_isolation_warning;
     renderIdentity(payload.user);
-    setHidden(logoutButton, false);
-    setHidden(loginView, true);
-    document.body.dataset.auth = 'in';
-    // Audit access is a server-computed capability (admin, or operator when
-    // auth.operator_audit_access is on), not a client-side role check.
     tabAudit.hidden = !state.canReadAudit;
+    tabUsers.hidden = payload.user.role !== 'admin';
+    tabWorkers.hidden = payload.user.role !== 'admin';
+    tabOverview.hidden = !isOperatorRole(payload.user);
+    tabApps.hidden = false;
+    newAppButton.hidden = !state.canCreateApps;
+    document.getElementById('tab-announcements').hidden = !state.canManageAnnouncements;
     if (appIsolationBanner) {
       appIsolationBanner.hidden = !shouldShowAppIsolationBanner(state.appIsolationWarning);
     }
-    tabUsers.hidden = payload.user.role !== 'admin';
-    tabWorkers.hidden = payload.user.role !== 'admin';
-    // The home (/) is role-adaptive: fleet operators (admin/operator) get the
-    // Overview, while Apps is the one application destination for every role.
-    // Its route renders an opening gallery for viewers and the management grid
-    // for developers/operators/admins.
-    const isOperator = payload.user.role === 'admin' || payload.user.role === 'operator';
-    tabOverview.hidden = !isOperator;
-    tabApps.hidden = false;
-    newAppButton.hidden = !state.canCreateApps;
-    if (payload.user.role === 'admin') supportRecovery.load({ announce: true });
-    else supportRecovery.clear();
     const selfService = payload.user.can_manage_self !== false;
     if (newTokenButton) newTokenButton.hidden = !selfService;
-    // Shared/managed accounts get a 403 from the approve endpoint, so there is
-    // nothing this panel can do for them; every other role can always type a
-    // code, regardless of whether a request happens to be pending right now.
     if (cliConnectPanel) cliConnectPanel.hidden = !selfService;
-    // Apply the new session's sidebar policy before any asynchronous list load
-    // so switching identities in one tab cannot flash the previous catalog.
     syncSidebar();
+  }
+
+  function showLoggedIn(payload) {
+    sessionController.start(payload);
+    applySessionCapabilities(payload);
+    setHidden(logoutButton, false);
+    setHidden(loginView, true);
+    document.body.dataset.auth = 'in';
+    if (payload.user.role === 'admin') supportRecovery.load({ announce: true });
+    else supportRecovery.clear();
     // Load the admin fleet-health banner now that state.user is set; loadApps
     // can fire before this during boot, when the admin gate would skip it.
     loadFleetHealth();
@@ -1267,6 +1281,8 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function handleUnauthorized() {
+    if (!state.user) return;
+    sessionController.end();
     // A 401 wipes all client state unconditionally. If the operator had unsaved
     // settings edits in flight, silently discarding them with no explanation
     // looks like data loss; check for dirty edits before the logout clears
@@ -1275,8 +1291,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const hadUnsavedChanges = anySettingsDirty();
     showLoggedOut();
     setError(loginError, hadUnsavedChanges
-      ? 'Your session expired and you were logged out. Unsaved changes were lost - please log in again.'
-      : '');
+      ? 'Your session ended. Unsaved changes were lost. Please sign in again.'
+      : 'Your session ended. Please sign in again.');
   }
 
   async function loadFleetHealth() {
@@ -6073,6 +6089,7 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
     if (resp.ok || resp.status === 401) {
+      sessionController.end();
       // Land on the front door. With auth-aware `/`, a now-sessionless request to
       // `/` serves the branding landing page when configured, otherwise the SPA
       // shell falls through to the login view - so a full navigation does the

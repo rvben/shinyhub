@@ -4,10 +4,12 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // CSRFCookieName is the cookie that holds the CSRF token. Not HttpOnly so
@@ -122,17 +124,56 @@ func ensureCSRFCookie(w http.ResponseWriter, r *http.Request, trustedNets []*net
 	if c, err := r.Cookie(CSRFCookieName); err == nil && c.Value != "" {
 		return
 	}
-	var b [32]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return
+	setCSRFCookieUntil(w, r, time.Now().Add(jwtExpiry), trustedNets)
+}
+
+// Renewal preserves the double-submit value so concurrent tabs and requests
+// remain valid, while extending its cookie alongside the HttpOnly session.
+func setCSRFCookieUntil(w http.ResponseWriter, r *http.Request, expiresAt time.Time, trustedNets []*net.IPNet) {
+	value := ""
+	if c, err := r.Cookie(CSRFCookieName); err == nil {
+		value = c.Value
+	}
+	// Safe-method middleware may already have minted this cookie on the same
+	// response. Reuse its value and replace its expiry rather than send two
+	// different tokens for the same cookie name.
+	if value == "" {
+		response := &http.Response{Header: w.Header()}
+		for _, c := range response.Cookies() {
+			if c.Name == CSRFCookieName {
+				value = c.Value
+			}
+		}
+	}
+	if value == "" {
+		var b [32]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			return
+		}
+		value = hex.EncodeToString(b[:])
+	}
+	maxAge := int(math.Ceil(time.Until(expiresAt).Seconds()))
+	if maxAge <= 0 {
+		maxAge = -1
+	}
+	var cookies []string
+	for _, c := range w.Header().Values("Set-Cookie") {
+		if !strings.HasPrefix(c, CSRFCookieName+"=") {
+			cookies = append(cookies, c)
+		}
+	}
+	w.Header().Del("Set-Cookie")
+	for _, c := range cookies {
+		w.Header().Add("Set-Cookie", c)
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     CSRFCookieName,
-		Value:    hex.EncodeToString(b[:]),
+		Value:    value,
 		Path:     "/",
 		HttpOnly: false,
 		SameSite: http.SameSiteLaxMode,
 		Secure:   cookieSecure(r, trustedNets),
-		MaxAge:   int(jwtExpiry.Seconds()),
+		MaxAge:   maxAge,
+		Expires:  expiresAt,
 	})
 }

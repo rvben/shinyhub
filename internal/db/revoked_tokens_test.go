@@ -126,3 +126,28 @@ func TestRevokeToken_PrunesExpiredEntries(t *testing.T) {
 		t.Errorf("expected 2 live rows after prune, got %d", count)
 	}
 }
+
+func TestRevokeTokenRetainsLongestRenewalDeadline(t *testing.T) {
+	store := mustOpenDB(t)
+	if err := store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: "unused", Role: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	user, err := store.GetUserByUsername("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	short := time.Now().Add(time.Hour).Truncate(time.Second)
+	long := short.Add(11 * time.Hour)
+	for _, expires := range []time.Time{short, long, short} {
+		if err := store.RevokeToken("renewable-session", user.ID, expires); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var stored int64
+	if err := store.DB().QueryRow(`SELECT expires_at FROM revoked_tokens WHERE jti = ?`, "renewable-session").Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored != long.Unix() {
+		t.Fatal("repeated revocation shortened the session deadline")
+	}
+}

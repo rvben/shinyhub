@@ -256,11 +256,13 @@ func TestMeSlidesFreshSessionButNotPastAbsoluteCap(t *testing.T) {
 	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: old})
 	rec = httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("over-cap /me = %d, want 200 (token itself still valid)", rec.Code)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("over-cap /me = %d, want 401", rec.Code)
 	}
-	if hasCookie(rec.Result().Cookies(), auth.SessionCookieName) {
-		t.Error("a session past the absolute cap must not be renewed (no session Set-Cookie expected)")
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == auth.SessionCookieName && c.MaxAge >= 0 {
+			t.Error("a session past the absolute cap must be cleared, not renewed")
+		}
 	}
 }
 

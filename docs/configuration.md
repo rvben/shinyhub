@@ -502,6 +502,38 @@ Disk cost is bounded by the product of these numbers: at the defaults, at most
 about 200 MiB of logs per replica slot for an application that fills every file,
 and far less in practice, since most runs never approach the cap.
 
+## Browser session lifetimes
+
+Browser sessions have a renewable validity window and a strict maximum age:
+
+```yaml
+auth:
+  session_ttl: 1h       # SHINYHUB_AUTH_SESSION_TTL
+  session_max_age: 12h  # SHINYHUB_AUTH_SESSION_MAX_AGE
+```
+
+`session_ttl` is the time a signed browser token remains valid between
+renewals. The visible dashboard renews it every third of that window, up to
+once every five minutes. Background tabs pause renewal and verify their
+session when they return. An expired session cannot be renewed.
+
+`session_max_age` is measured from the original login and never slides.
+Renewed JWTs and cookies expire at that deadline, even if their normal TTL
+would extend beyond it. Signing in again reruns SSO group reconciliation.
+
+Both settings accept durations from `1m` to `720h` (30 days), and
+`session_ttl` must not exceed `session_max_age`. Zero and negative values are
+rejected; neither limit can be disabled. Environment variables override YAML.
+The defaults are one hour and twelve hours. Choose shorter limits for shared
+devices or privileged deployments; longer limits reduce sign-in frequency but
+delay mandatory SSO reauthentication.
+
+These settings apply to local-password, GitHub, Google, and OIDC browser
+sessions. They do not change API/CLI credential expiry, support-session
+deadlines, or upstream forward-auth policy. A hosted app alone does not renew
+the dashboard cookie. See [sessions and logout](native-oidc.md#sessions-cookies-and-logout)
+for background-tab, WebSocket, and identity-provider behavior.
+
 ## Fleet run and development session retention
 
 Two more `maintenance:` settings bound history unrelated to application logs,

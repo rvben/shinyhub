@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
@@ -134,13 +135,12 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 		reqLog(r).Warn("oauth_email_failed", "provider", "github", "err", err)
 	}
 
-	jwtToken, err := auth.IssueSessionToken(user.ContextUser(), s.cfg.Auth.Secret)
+	_, err = s.setBrowserSession(w, r, user.ContextUser(), time.Time{})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 
-	auth.SetSessionCookie(w, r, jwtToken, s.cfg.TrustedProxyNets)
 	s.logAuditEvent(r, db.AuditEventParams{
 		UserID: &user.ID, Action: "login", ResourceType: "user",
 		ResourceID: user.Username, IPAddress: s.ClientIP(r),
@@ -258,13 +258,12 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 		reqLog(r).Warn("oauth_email_failed", "provider", "google", "err", err)
 	}
 
-	jwtToken, err := auth.IssueSessionToken(user.ContextUser(), s.cfg.Auth.Secret)
+	_, err = s.setBrowserSession(w, r, user.ContextUser(), time.Time{})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 
-	auth.SetSessionCookie(w, r, jwtToken, s.cfg.TrustedProxyNets)
 	s.logAuditEvent(r, db.AuditEventParams{
 		UserID: &user.ID, Action: "login", ResourceType: "user",
 		ResourceID: user.Username, IPAddress: s.ClientIP(r),

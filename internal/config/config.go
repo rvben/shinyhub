@@ -769,6 +769,10 @@ type GroupRoleMapping struct {
 type AuthConfig struct {
 	Secret            string                  `yaml:"secret"`
 	TrustedPublishers []trustedpublish.Policy `yaml:"trusted_publishers"`
+	// Browser session renewal window and strict lifetime from the original login.
+	// Pointers distinguish omitted defaults from an explicitly invalid zero.
+	SessionTTL    *time.Duration `yaml:"session_ttl"`
+	SessionMaxAge *time.Duration `yaml:"session_max_age"`
 
 	// SecretFile, when set, supplies Secret from a file the server reads once
 	// at startup, instead of from the environment. On the native runtime a
@@ -1705,6 +1709,9 @@ func loadRaw(path string) (*Config, error) {
 	// a healthy startup log on the default port with nothing anywhere naming the
 	// variable they set.
 	warnUnrecognizedEnv()
+	if err := cfg.Auth.validateSessionLifetimes(); err != nil {
+		return nil, err
+	}
 
 	// Validate the listen port range. Port 0 is allowed here (OS-assigned), but
 	// the serve command further rejects it because zero-downtime upgrades need a
@@ -2822,6 +2829,20 @@ func parseRuntime(r rawRuntimeConfig) (RuntimeConfig, error) {
 }
 
 func applyEnv(cfg *Config) error {
+	if v := os.Getenv("SHINYHUB_AUTH_SESSION_TTL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_AUTH_SESSION_TTL: %w", err)
+		}
+		cfg.Auth.SessionTTL = &d
+	}
+	if v := os.Getenv("SHINYHUB_AUTH_SESSION_MAX_AGE"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_AUTH_SESSION_MAX_AGE: %w", err)
+		}
+		cfg.Auth.SessionMaxAge = &d
+	}
 	if v := os.Getenv("SHINYHUB_AUTH_SECRET"); v != "" {
 		cfg.Auth.Secret = v
 		cfg.Auth.SecretSource = "env"

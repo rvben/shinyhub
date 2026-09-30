@@ -193,12 +193,34 @@ Cookie attributes, secure by default:
 - **`Secure`** - set whenever the request is HTTPS. Behind a TLS-terminating
   proxy this is decided from `X-Forwarded-Proto`, honored only from a configured
   `trusted_proxies` peer (see below).
-- **Lifetime** - the JWT expires after 1 hour. It is renewed (slid forward) when
-  the dashboard polls `/api/auth/me` with a still-valid session, capped by a
-  12-hour absolute session age, after which the user must re-authenticate.
+- **Lifetime** - by default, the JWT expires 1 hour after login or renewal.
+  A visible dashboard automatically renews it through `/api/auth/me`, normally
+  every 5 minutes. Background tabs pause renewal and check the session when
+  they return; a closed dashboard does not keep its session alive. Renewal
+  requires a still-valid cookie and preserves the original login time.
+  Token and cookie expiry are capped at exactly 12 hours from that login,
+  after which the user must sign in again. Both limits are
+  [configurable](configuration.md#browser-session-lifetimes).
+
+Transient network or server errors retry without treating the user as signed
+out. An authentication rejection returns the dashboard to sign-in, with a
+message explaining that the session ended. Browsers supporting BroadcastChannel
+also notify other dashboard tabs when a session ends or the user signs out.
+
+This renewal runs in the dashboard; a hosted application alone does not run
+the dashboard's renewal timer. Existing app WebSockets have their own access
+revocation checks; cookie expiry is enforced on their next HTTP request or
+reconnect. API keys, CLI credentials, bearer JWTs, and administrator support
+sessions do not become renewable browser sessions. Forward-auth sessions are
+governed by the upstream proxy and identity provider.
 
 **Logout** (`POST /api/auth/logout`) ends the ShinyHub session: it revokes the
 session token by its JTI (so the cookie cannot be replayed) and clears the cookie.
+Renewals retain that session's JTI, and browser-session revocations are kept
+through the absolute deadline. A concurrent renewal therefore cannot revive a
+session after logout. A new login creates a new session identity.
+If revocation cannot be saved, logout returns a retryable error and keeps the
+cookie available for a retry instead of reporting that the session ended.
 
 **IdP-logout boundary (by design):** ShinyHub does **not** perform RP-initiated
 (single) logout against the IdP. After a ShinyHub logout the browser may still

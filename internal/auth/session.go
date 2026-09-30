@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"math"
 	"net"
 	"net/http"
 	"strings"
@@ -39,6 +40,19 @@ func sessionCookie(token string, secure bool) *http.Cookie {
 // cfg.TrustedProxyNets. See cookieSecure for why this matters.
 func SetSessionCookie(w http.ResponseWriter, r *http.Request, token string, trustedNets []*net.IPNet) {
 	http.SetCookie(w, sessionCookie(token, cookieSecure(r, trustedNets)))
+}
+
+// SetSessionCookieUntil keeps the browser cookie aligned with the signed expiry,
+// including a renewal close to the absolute session deadline.
+func SetSessionCookieUntil(w http.ResponseWriter, r *http.Request, token string, expiresAt time.Time, trustedNets []*net.IPNet) {
+	c := sessionCookie(token, cookieSecure(r, trustedNets))
+	c.Expires = expiresAt
+	c.MaxAge = int(math.Ceil(time.Until(expiresAt).Seconds()))
+	if c.MaxAge <= 0 {
+		c.MaxAge = -1
+	}
+	http.SetCookie(w, c)
+	setCSRFCookieUntil(w, r, expiresAt, trustedNets)
 }
 
 // ClearSessionCookie removes the browser session cookie.
