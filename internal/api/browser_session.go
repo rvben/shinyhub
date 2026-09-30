@@ -1,11 +1,46 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/auth"
 )
+
+// HandleAppSession is the deliberately small renewal endpoint on the app
+// origin. Production wraps it with app access middleware, which resolves only
+// the browser cookie or upstream identity and checks current app permissions.
+// It never exposes dashboard capabilities or accepts support-session renewal.
+func (s *Server) HandleAppSession(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	u := auth.UserFromContext(r.Context())
+	if u == nil {
+		writeError(w, http.StatusUnauthorized, "sign in again")
+		return
+	}
+	if u.SupportSession != nil {
+		writeError(w, http.StatusForbidden, "support sessions cannot be renewed")
+		return
+	}
+	var session *browserSessionResponse
+	if ti := auth.TokenInfoFromContext(r.Context()); ti != nil {
+		var err error
+		session, err = s.setBrowserSession(w, r, u, ti.AuthTime, ti.JTI)
+		if errors.Is(err, auth.ErrSessionExpired) {
+			auth.ClearSessionCookie(w, r, s.cfg.TrustedProxyNets)
+			writeError(w, http.StatusUnauthorized, "session expired; sign in again")
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "could not renew session")
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user": map[string]any{"id": u.ID}, "session": session,
+	})
+}
 
 // The browser gets timing information, never the HttpOnly credential. Server
 // time lets it schedule renewal independently of the workstation's clock.

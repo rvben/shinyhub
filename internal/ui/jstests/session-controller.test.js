@@ -108,6 +108,27 @@ test('a 401 ends renewal once and cancels future timers', async () => {
   assert.equal(f.calls.length, 1);
 });
 
+test('identity changes stop the old page without broadcasting logout of the new account', async () => {
+  let broadcasts = 0;
+  const f = fixture(async () => ok({ ...payload(), user: { id: 2 } }), {
+    BroadcastChannel: class { postMessage() { broadcasts++; } close() {} },
+  });
+  f.controller.start(payload());
+  await f.advance(60000);
+  assert.equal(f.expired, 1);
+  assert.equal(f.sessions.length, 0);
+  assert.equal(broadcasts, 0);
+  assert.equal(f.timers.size, 0);
+});
+
+test('an app access denial stops renewal without signing out other tabs', async () => {
+  const f = fixture(async () => ({ status: 403, ok: false }));
+  f.controller.start(payload());
+  await f.advance(60000);
+  assert.equal(f.expired, 1);
+  assert.equal(f.timers.size, 0);
+});
+
 test('renewal does not overlap and a stale response cannot restore a logged-out session', async () => {
   let resolve;
   const f = fixture(() => new Promise(r => { resolve = r; }));

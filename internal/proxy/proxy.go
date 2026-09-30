@@ -466,6 +466,7 @@ type Proxy struct {
 	// HTML of an app it serves. Atomic for a lock-free read per response.
 	statusOverlay        atomic.Bool
 	announcementsEnabled atomic.Bool
+	browserSessions      atomic.Pointer[browserSessionSettings]
 
 	// supportSessions enables the non-optional safety banner for requests that
 	// carry an app-scoped support identity. The request context decides whether
@@ -2851,6 +2852,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// ever seeing it again.
 	rec.trackHijack = func(c net.Conn) net.Conn {
 		principal := connPrincipal(r, slug, routedAppID)
+		principal.SessionExpiresAt = p.browserSessionDeadline(r)
 		var onClose func()
 		if ws != nil {
 			var fn wsEndFn
@@ -3483,15 +3485,20 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !p.chargeRenderAdmission(rec, r, slug) {
 		return // shed: 503 already written, defer unwinds the accounting
 	}
-	if u := auth.UserFromContext(r.Context()); u != nil && u.SupportSession != nil && !u.SupportSession.ExpiresAt.IsZero() {
-		// Bound every support request to the session deadline. The reverse
-		// proxy cancels its outbound request, and closes an upgraded backend
+	deadline := p.browserSessionDeadline(r)
+	if u := auth.UserFromContext(r.Context()); u != nil && u.SupportSession != nil {
+		deadline = u.SupportSession.ExpiresAt
+	}
+	if !deadline.IsZero() {
+		// Bound authenticated browser and support requests to their hard login
+		// deadline. The reverse proxy cancels its outbound request and closes
+		// an upgraded backend
 		// connection, when this context ends. Only hijacked connections carry
 		// a deadline timer of their own; a plain response the app keeps open
 		// (long polling, server-sent events) would otherwise stream under the
-		// support identity for as long as the app cared to keep writing. A
+		// authenticated identity for as long as the app cared to keep writing. A
 		// zero deadline means none, exactly as the hijack tracker reads it.
-		ctx, cancel := context.WithDeadline(r.Context(), u.SupportSession.ExpiresAt)
+		ctx, cancel := context.WithDeadline(r.Context(), deadline)
 		defer cancel()
 		r = r.WithContext(ctx)
 	}

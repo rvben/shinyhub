@@ -3816,12 +3816,26 @@ func (s *Store) ConsumeOAuthState(state string) error {
 // CreateAppLaunchCode persists only the SHA-256 hash of a short-lived launch
 // capability. The raw code exists only in the redirect URL and is never stored.
 func (s *Store) CreateAppLaunchCode(codeHash string, userID int64, appSlug string) error {
+	return s.CreateAppLaunchCodeWithSession(codeHash, userID, appSlug, nil, 0)
+}
+
+// CreateAppLaunchCodeWithSession also binds the original login and revocation
+// family. No browser credential is put in the URL or stored in this table.
+func (s *Store) CreateAppLaunchCodeWithSession(codeHash string, userID int64, appSlug string, session *auth.TokenInfo, epoch int64) error {
 	// Keep the table bounded even when users abandon redirects. Cleanup is
 	// deliberately best-effort; creation itself still fails closed.
 	s.db.Exec(`DELETE FROM app_launch_codes WHERE created_at < ` + s.d.nowMinusSeconds(120)) //nolint:errcheck
+	var authTime int64
+	var jti string
+	if session != nil {
+		jti = session.JTI
+		if !session.AuthTime.IsZero() {
+			authTime = session.AuthTime.Unix()
+		}
+	}
 	_, err := s.db.Exec(
-		`INSERT INTO app_launch_codes (code_hash, user_id, app_slug) VALUES (?, ?, ?)`,
-		codeHash, userID, appSlug,
+		`INSERT INTO app_launch_codes (code_hash, user_id, app_slug, auth_time, session_jti, session_epoch) VALUES (?, ?, ?, ?, ?, ?)`,
+		codeHash, userID, appSlug, authTime, jti, epoch,
 	)
 	if err != nil {
 		return fmt.Errorf("create app launch code: %w", err)
@@ -3833,20 +3847,48 @@ func (s *Store) CreateAppLaunchCode(codeHash string, userID int64, appSlug strin
 // Codes are bound to one app slug, expire after 60 seconds, and cannot be
 // replayed even when multiple control-plane instances share the database.
 func (s *Store) ConsumeAppLaunchCode(codeHash, appSlug string) (*auth.ContextUser, error) {
+	u, _, err := s.ConsumeAppLaunchCodeWithSession(codeHash, appSlug)
+	return u, err
+}
+
+// ConsumeAppLaunchCodeWithSession refuses a pending launch after logout or a
+// session-epoch change, and returns the login metadata for ordinary browsers.
+func (s *Store) ConsumeAppLaunchCodeWithSession(codeHash, appSlug string) (*auth.ContextUser, *auth.TokenInfo, error) {
 	row := s.db.QueryRow(
 		`DELETE FROM app_launch_codes
 		 WHERE code_hash = ? AND app_slug = ? AND created_at >= `+s.d.nowMinusSeconds(60)+`
-		 RETURNING user_id`,
+		 RETURNING user_id, auth_time, session_jti, session_epoch`,
 		codeHash, appSlug,
 	)
 	var userID int64
-	if err := row.Scan(&userID); err != nil {
+	var authTime, epoch int64
+	var jti string
+	if err := row.Scan(&userID, &authTime, &jti, &epoch); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return s.consumeSupportLaunch(codeHash, appSlug)
+			u, err := s.consumeSupportLaunch(codeHash, appSlug)
+			return u, nil, err
 		}
-		return nil, fmt.Errorf("consume app launch code: %w", err)
+		return nil, nil, fmt.Errorf("consume app launch code: %w", err)
 	}
-	return s.LookupContextUser(userID)
+	u, err := s.LookupContextUser(userID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if jti == "" {
+		return u, nil, nil
+	}
+	revoked, err := s.IsTokenRevoked(jti)
+	if err != nil {
+		return nil, nil, err
+	}
+	if revoked || u.TokenEpoch != epoch {
+		return nil, nil, ErrNotFound
+	}
+	ti := &auth.TokenInfo{JTI: jti}
+	if authTime != 0 {
+		ti.AuthTime = time.Unix(authTime, 0)
+	}
+	return u, ti, nil
 }
 
 // --- Audit Events ---

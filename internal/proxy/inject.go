@@ -141,6 +141,9 @@ func extendCSPForScripts(policy string, hashes []string) (string, bool) {
 		if hasNoneSource(val) {
 			return policy, false
 		}
+		if cspAllowsAllInlineScripts(val) {
+			return policy, true
+		}
 		out := appendCSPHashes(val, hashes)
 		parts[scriptElemIdx] = out
 		return strings.Join(parts, ";"), true
@@ -151,6 +154,9 @@ func extendCSPForScripts(policy string, hashes []string) (string, bool) {
 			// beside any other source, so a hash cannot be added without
 			// rewriting the author's intent. Decline instead.
 			return policy, false
+		}
+		if cspAllowsAllInlineScripts(val) {
+			return policy, true
 		}
 		out := appendCSPHashes(val, hashes)
 		if out == val {
@@ -167,6 +173,9 @@ func extendCSPForScripts(policy string, hashes []string) (string, bool) {
 		if hasNoneSource(val) {
 			return policy, false
 		}
+		if cspAllowsAllInlineScripts(val) {
+			return policy, true
+		}
 		_, sources, _ := strings.Cut(val, " ")
 		sources = strings.TrimSpace(sources)
 		if sources == "" {
@@ -178,6 +187,22 @@ func extendCSPForScripts(policy string, hashes []string) (string, bool) {
 		// Neither directive: scripts are unrestricted by this policy already.
 		return policy, true
 	}
+}
+
+// Adding the first hash to a policy that already admits all inline scripts
+// disables 'unsafe-inline' in browsers and breaks the app's own bootstrap.
+// Such a policy already admits our script; preserve it byte-for-byte. A nonce,
+// existing hash or strict-dynamic already overrides unsafe-inline, so those
+// policies still need our exact script hash.
+func cspAllowsAllInlineScripts(directive string) bool {
+	allowed := false
+	for _, source := range strings.Fields(strings.ToLower(directive))[1:] {
+		if source == "'strict-dynamic'" || strings.HasPrefix(source, "'nonce-") || strings.HasPrefix(source, "'sha256-") || strings.HasPrefix(source, "'sha384-") || strings.HasPrefix(source, "'sha512-") {
+			return false
+		}
+		allowed = allowed || source == "'unsafe-inline'"
+	}
+	return allowed
 }
 
 // cspAllowsSupportForm reports whether the mandatory same-origin native stop
@@ -357,7 +382,7 @@ func (p *Proxy) relaxEncodingForInjection(req *http.Request) {
 
 // injectsPageHTML reports whether any page-level enhancement is enabled.
 func (p *Proxy) injectsPageHTML() bool {
-	return p.announcementsEnabled.Load() || p.statusOverlay.Load() || p.appNav.Load() != nil || p.appFavicon.Load() || p.supportSessions.Load()
+	return p.browserSessions.Load() != nil || p.announcementsEnabled.Load() || p.statusOverlay.Load() || p.appNav.Load() != nil || p.appFavicon.Load() || p.supportSessions.Load()
 }
 
 // decorateAppPage gives one of ShinyHub's own app pages its contextual favicon
@@ -379,6 +404,9 @@ func (p *Proxy) decorateAppPage(page, slug string, r *http.Request) string {
 		out, _ = favicon.SetTitle(out, p.appPageTitle(slug))
 	}
 	var snippets strings.Builder
+	if session := p.browserPageScript(r, slug); session != nil {
+		snippets.WriteString(session.snippet)
+	}
 	if p.announcementsEnabled.Load() {
 		snippets.WriteString(announcementui.Snippet(slug))
 	}
@@ -414,6 +442,9 @@ func (p *Proxy) pageScriptsFor(r *http.Request, slug string, deploymentID int64)
 		return nil
 	}
 	var scripts []pageScript
+	if session := p.browserPageScript(r, slug); session != nil {
+		scripts = append(scripts, *session)
+	}
 	if p.announcementsEnabled.Load() {
 		scripts = append(scripts, pageScript{render: func() string { return announcementui.Snippet(slug) }, cspHash: announcementui.CSPHash})
 	}

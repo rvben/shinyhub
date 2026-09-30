@@ -81,6 +81,22 @@ func TestConnTracker_SupportDeadlineClosesWithoutRecheckSweep(t *testing.T) {
 	}
 }
 
+func TestConnTracker_BrowserDeadlineClosesWithoutRecheckSweep(t *testing.T) {
+	for _, delay := range []time.Duration{-time.Second, 40 * time.Millisecond} {
+		tr := newConnTracker()
+		underlying := &stubConn{}
+		tc := tr.track(underlying, ConnPrincipal{SessionExpiresAt: time.Now().Add(delay)}).(*trackedConn)
+		defer tc.Close()
+		deadline := time.Now().Add(time.Second)
+		for !underlying.isClosed() && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		if !underlying.isClosed() || tr.count() != 0 {
+			t.Fatal("browser connection survived its absolute login deadline")
+		}
+	}
+}
+
 func TestConnTracker_EarlyCloseCancelsSupportDeadlineTimer(t *testing.T) {
 	tr := newConnTracker()
 	tc := tr.track(&stubConn{}, ConnPrincipal{SupportExpiresAt: time.Now().Add(15 * time.Minute)}).(*trackedConn)

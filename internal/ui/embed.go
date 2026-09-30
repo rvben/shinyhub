@@ -17,6 +17,13 @@ import (
 //go:embed static
 var embedded embed.FS
 
+// BrowserSessionController is also embedded into hosted pages. Both surfaces
+// execute the same renewal controller; its single ESM export is removed by the
+// inline wrapper in sessionui, without maintaining a second implementation.
+//
+//go:embed static/views/session-controller.js
+var BrowserSessionController string
+
 // assetsETagOnce computes a single ETag over the whole embedded static tree,
 // once. Because all assets ship together in one binary, a per-build content
 // hash is a correct shared validator: it changes exactly when a release changes

@@ -30,6 +30,9 @@ type ConnPrincipal struct {
 	SupportAppID           int64
 	RoutedAppID            int64
 	SupportExpiresAt       time.Time
+	// SessionExpiresAt is the immutable browser login deadline, not the
+	// renewable JWT expiry. Cookie renewal never disconnects a working socket.
+	SessionExpiresAt time.Time
 }
 
 // Reauthorizer re-decides whether a live upgraded connection may stay open.

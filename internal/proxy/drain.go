@@ -37,9 +37,15 @@ func (t *connTracker) trackWithClose(c net.Conn, principal ConnPrincipal, onClos
 func (t *connTracker) trackWithSession(c net.Conn, principal ConnPrincipal, onClose func(), session *wsSession) net.Conn {
 	tc := &trackedConn{Conn: c, tracker: t, principal: principal, onClose: onClose, session: session}
 	delay := time.Duration(0)
-	hasDeadline := !principal.SupportExpiresAt.IsZero()
+	deadline := principal.SessionExpiresAt
+	reason := "session_expired"
+	if !principal.SupportExpiresAt.IsZero() && (deadline.IsZero() || principal.SupportExpiresAt.Before(deadline)) {
+		deadline = principal.SupportExpiresAt
+		reason = "support_expired"
+	}
+	hasDeadline := !deadline.IsZero()
 	if hasDeadline {
-		delay = time.Until(principal.SupportExpiresAt)
+		delay = time.Until(deadline)
 	}
 	t.mu.Lock()
 	t.conns[tc] = struct{}{}
@@ -48,12 +54,12 @@ func (t *connTracker) trackWithSession(c net.Conn, principal ConnPrincipal, onCl
 		// callback may start immediately, but Close will wait until the pointer is
 		// assigned; an early manual Close can then cancel and release the closure.
 		tc.timerMu.Lock()
-		tc.deadlineTimer = time.AfterFunc(delay, func() { _ = tc.closeWithReason("support_expired") })
+		tc.deadlineTimer = time.AfterFunc(delay, func() { _ = tc.closeWithReason(reason) })
 		tc.timerMu.Unlock()
 	}
 	t.mu.Unlock()
 	if hasDeadline && delay <= 0 {
-		_ = tc.closeWithReason("support_expired")
+		_ = tc.closeWithReason(reason)
 	}
 	return tc
 }

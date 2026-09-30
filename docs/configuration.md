@@ -513,9 +513,11 @@ auth:
 ```
 
 `session_ttl` is the time a signed browser token remains valid between
-renewals. The visible dashboard renews it every third of that window, up to
-once every five minutes. Background tabs pause renewal and verify their
-session when they return. An expired session cannot be renewed.
+renewals. Visible dashboards and hosted app pages renew it every third of that
+window, up to once every five minutes. Hosted pages use an app-local endpoint
+that remains available when the app switcher is disabled or apps run on an
+isolated origin. Background tabs pause renewal and verify their session when
+they return. An expired session cannot be renewed.
 
 `session_max_age` is measured from the original login and never slides.
 Renewed JWTs and cookies expire at that deadline, even if their normal TTL
@@ -530,9 +532,15 @@ delay mandatory SSO reauthentication.
 
 These settings apply to local-password, GitHub, Google, and OIDC browser
 sessions. They do not change API/CLI credential expiry, support-session
-deadlines, or upstream forward-auth policy. A hosted app alone does not renew
-the dashboard cookie. See [sessions and logout](native-oidc.md#sessions-cookies-and-logout)
-for background-tab, WebSocket, and identity-provider behavior.
+deadlines, or upstream forward-auth policy. On an isolated app origin, app
+activity renews that origin's cookie; it does not renew the separate dashboard
+cookie. Both retain the original login time and logout identity. Existing
+authenticated app WebSockets and streaming responses end at the maximum login
+age even without another browser request. Apps whose HTML or CSP prevents
+script injection or same-origin requests cannot run automatic renewal; their
+signed cookies still expire and the server still enforces the maximum age. See
+[sessions and logout](native-oidc.md#sessions-cookies-and-logout) for
+background-tab, WebSocket, and identity-provider behavior.
 
 ## Fleet run and development session retention
 

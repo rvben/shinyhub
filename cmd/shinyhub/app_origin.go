@@ -13,6 +13,7 @@ import (
 
 	"github.com/rvben/shinyhub/internal/apporigin"
 	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/originhost"
 	"github.com/rvben/shinyhub/internal/proxytrust"
@@ -32,8 +33,8 @@ func appOriginTrustWarning(appOrigin string) string {
 }
 
 type appLaunchStore interface {
-	CreateAppLaunchCode(codeHash string, userID int64, appSlug string) error
-	ConsumeAppLaunchCode(codeHash, appSlug string) (*auth.ContextUser, error)
+	CreateAppLaunchCodeWithSession(codeHash string, userID int64, appSlug string, session *auth.TokenInfo, epoch int64) error
+	ConsumeAppLaunchCodeWithSession(codeHash, appSlug string) (*auth.ContextUser, *auth.TokenInfo, error)
 	ActivateSupportSession(id, jti string, expiresAt time.Time) error
 	AbortSupportSession(id, reason string) error
 }
@@ -69,11 +70,12 @@ func appOriginDispatch(
 	store appLaunchStore,
 	jwtSecret string,
 	controlHandler, appHandler http.Handler,
+	policies ...config.AuthConfig,
 ) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if sameHost(proxytrust.Host(r, trustedNets), appOrigin.Host) {
 			if rawCode := r.URL.Query().Get(appLaunchQueryParam); rawCode != "" {
-				consumeAppLaunch(w, r, store, jwtSecret, trustedNets, rawCode)
+				consumeAppLaunchWithSharedHost(w, r, store, jwtSecret, trustedNets, rawCode, false, policies...)
 				return
 			}
 			appHandler.ServeHTTP(w, r)
@@ -106,7 +108,7 @@ func appOriginRedirectHandler(store appLaunchStore, appOrigin *url.URL) http.Han
 		// keep working on the isolated origin.
 		if user := auth.UserFromContext(r.Context()); user != nil {
 			rawCode, codeHash, err := newAppLaunchCode()
-			if err != nil || store.CreateAppLaunchCode(codeHash, user.ID, slug) != nil {
+			if err != nil || store.CreateAppLaunchCodeWithSession(codeHash, user.ID, slug, auth.TokenInfoFromContext(r.Context()), user.TokenEpoch) != nil {
 				http.Error(w, "could not create app session", http.StatusInternalServerError)
 				return
 			}
@@ -136,7 +138,7 @@ func trustedAppSupportDispatch(next http.Handler, store appLaunchStore, jwtSecre
 	})
 }
 
-func consumeAppLaunchWithSharedHost(w http.ResponseWriter, r *http.Request, store appLaunchStore, jwtSecret string, trustedNets []*net.IPNet, rawCode string, sharedHost bool) {
+func consumeAppLaunchWithSharedHost(w http.ResponseWriter, r *http.Request, store appLaunchStore, jwtSecret string, trustedNets []*net.IPNet, rawCode string, sharedHost bool, policies ...config.AuthConfig) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "invalid app launch", http.StatusBadRequest)
 		return
@@ -147,7 +149,7 @@ func consumeAppLaunchWithSharedHost(w http.ResponseWriter, r *http.Request, stor
 		return
 	}
 	sum := sha256.Sum256([]byte(rawCode))
-	user, err := store.ConsumeAppLaunchCode(hex.EncodeToString(sum[:]), slug)
+	user, original, err := store.ConsumeAppLaunchCodeWithSession(hex.EncodeToString(sum[:]), slug)
 	if err != nil || user == nil {
 		// Do not disclose database health or whether a code ever existed.
 		http.Error(w, "app launch expired or already used", http.StatusUnauthorized)
@@ -159,10 +161,29 @@ func consumeAppLaunchWithSharedHost(w http.ResponseWriter, r *http.Request, stor
 		http.Error(w, "support launch required", http.StatusForbidden)
 		return
 	}
-	token, tokenInfo, err := auth.IssueSessionTokenWithInfo(user, jwtSecret)
+	var token string
+	var tokenInfo *auth.TokenInfo
+	if user.SupportSession != nil {
+		token, tokenInfo, err = auth.IssueSessionTokenWithInfo(user, jwtSecret)
+	} else {
+		policy := config.AuthConfig{}
+		if len(policies) > 0 {
+			policy = policies[0]
+		}
+		var authTime time.Time
+		var jti string
+		if original != nil {
+			authTime, jti = original.AuthTime, original.JTI
+		}
+		token, tokenInfo, err = auth.IssueBrowserSession(user, jwtSecret, authTime, policy.BrowserSessionTTL(), policy.BrowserSessionMaxAge(), jti)
+	}
 	if err != nil {
 		if user.SupportSession != nil {
 			_ = store.AbortSupportSession(user.SupportSession.ID, "launch_failed")
+		}
+		if err == auth.ErrSessionExpired {
+			http.Error(w, "session expired; sign in again", http.StatusUnauthorized)
+			return
 		}
 		http.Error(w, "could not create app session", http.StatusInternalServerError)
 		return
@@ -183,7 +204,7 @@ func consumeAppLaunchWithSharedHost(w http.ResponseWriter, r *http.Request, stor
 		auth.SetSupportSessionGuardCookie(w, r, support.ID, tokenInfo.ExpiresAt, trustedNets)
 		auth.SetSupportSessionCookie(w, r, token, slug, tokenInfo.ExpiresAt, trustedNets)
 	} else {
-		auth.SetSessionCookie(w, r, token, trustedNets)
+		auth.SetSessionCookieUntil(w, r, token, tokenInfo.ExpiresAt, trustedNets)
 	}
 	query := r.URL.Query()
 	query.Del(appLaunchQueryParam)

@@ -1,7 +1,7 @@
-// The session cookie remains HttpOnly. Only server-provided timing metadata is
-// kept here; no credential or account data is persisted in browser storage.
+// The session cookie remains HttpOnly. Timing and identity stay in memory;
+// no credential or account data is persisted in browser storage.
 export function createSessionController({
-  request, onExpired, onSession = () => {}, document: doc = document,
+  request, onExpired, onDenied = onExpired, onSession = () => {}, endpoint = '/api/auth/me', document: doc = document,
   window: win = window, now = () => Date.now(),
   setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = id => clearTimeout(id),
 }) {
@@ -13,6 +13,7 @@ export function createSessionController({
   let nextRefresh = 0;
   let failures = 0;
   let channel = null;
+  let identity = null;
 
   function cancelTimer() {
     if (timer !== null) clearTimer(timer);
@@ -52,6 +53,7 @@ export function createSessionController({
     stop();
     active = true;
     failures = 0;
+    identity = payload?.user?.id ?? null;
     if (win.BroadcastChannel) {
       try {
         channel = new win.BroadcastChannel('shinyhub-session');
@@ -81,17 +83,30 @@ export function createSessionController({
     const timeout = setTimer(() => controller.abort(), 15000);
     let delay = refreshAfter;
     try {
-      const response = await request('/api/auth/me', { cache: 'no-store', signal: controller.signal });
+      const response = await request(endpoint, { cache: 'no-store', credentials: 'same-origin', headers: { Accept: 'application/json' }, signal: controller.signal });
       if (!active || current !== generation) return;
       if (response.status === 401) {
         end();
         onExpired();
         return;
       }
+      if (response.status === 403) {
+        stop();
+        onDenied();
+        return;
+      }
       if (!response.ok) throw new Error(`status ${response.status}`);
       const payload = await response.json();
       if (!active || current !== generation) return;
       if (!payload?.user) throw new Error('missing session user');
+      if (identity !== null && payload.user.id !== identity) {
+        // Another account may have signed in from a different tab. Keep the
+        // existing page from silently operating under that account.
+        stop();
+        onExpired();
+        return;
+      }
+      identity = payload.user.id;
       failures = 0;
       delay = timing(payload.session);
       onSession(payload);

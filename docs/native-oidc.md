@@ -194,9 +194,10 @@ Cookie attributes, secure by default:
   proxy this is decided from `X-Forwarded-Proto`, honored only from a configured
   `trusted_proxies` peer (see below).
 - **Lifetime** - by default, the JWT expires 1 hour after login or renewal.
-  A visible dashboard automatically renews it through `/api/auth/me`, normally
-  every 5 minutes. Background tabs pause renewal and check the session when
-  they return; a closed dashboard does not keep its session alive. Renewal
+  A visible dashboard automatically renews it through `/api/auth/me`, and
+  hosted apps use `/app/<slug>/.shinyhub/session.json`, normally every 5 minutes.
+  Both execute the same renewal controller. Background tabs pause renewal and
+  check the session when they return; closed pages do not keep it alive. Renewal
   requires a still-valid cookie and preserves the original login time.
   Token and cookie expiry are capped at exactly 12 hours from that login,
   after which the user must sign in again. Both limits are
@@ -205,12 +206,19 @@ Cookie attributes, secure by default:
 Transient network or server errors retry without treating the user as signed
 out. An authentication rejection returns the dashboard to sign-in, with a
 message explaining that the session ended. Browsers supporting BroadcastChannel
-also notify other dashboard tabs when a session ends or the user signs out.
+also notify dashboard and app tabs on the same origin when a session ends or
+the user signs out. Hosted pages keep their contents intact and offer sign-in
+in a new tab, so expiry does not automatically discard unsaved work.
 
-This renewal runs in the dashboard; a hosted application alone does not run
-the dashboard's renewal timer. Existing app WebSockets have their own access
-revocation checks; cookie expiry is enforced on their next HTTP request or
-reconnect. API keys, CLI credentials, bearer JWTs, and administrator support
+Hosted-app renewal is independent of the optional app switcher. On an isolated
+app origin the launch exchange preserves the original login time and session
+identity; app activity renews only the app-origin cookie, and dashboard logout
+revokes both origins. Existing app WebSockets retain the original maximum-age
+deadline and close at that deadline without waiting for a request or reconnect.
+Streaming HTTP responses are bounded by the same deadline. Short-lived cookie
+renewal does not interrupt a working WebSocket. If an app's HTML or CSP prevents
+script injection, automatic renewal is unavailable but server deadlines remain
+enforced. API keys, CLI credentials, bearer JWTs, and administrator support
 sessions do not become renewable browser sessions. Forward-auth sessions are
 governed by the upstream proxy and identity provider.
 

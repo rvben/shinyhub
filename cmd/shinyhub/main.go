@@ -1447,6 +1447,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// Give the visitor a way out of the app they opened. Without it an app page
 	// is a dead end: it fills the tab and links nowhere else in the fleet.
 	prx.SetAppNav(cfg.Server.AppNavEnabled(), appNavHomeURL(cfg))
+	prx.SetBrowserSessions(cfg.Auth.BrowserSessionMaxAge(), cfg.Server.BaseURL)
 	prx.SetAnnouncements(true)
 	// Give every app a stable tab identity without overriding a favicon the app
 	// authored itself. The proxy only injects the fallback into HTML pages that
@@ -2795,12 +2796,20 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		redirect := appOriginRedirectHandler(store, parsedAppOrigin)
 		redirectEmptyState := access.NeverDeployedMiddleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup, cfg.TrustedProxyNets, navOpts...)(redirect)
 		controlAppHandler := access.Middleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup, navOpts...)(redirectEmptyState)
-		appHandler = appOriginDispatch(parsedAppOrigin, cfg.TrustedProxyNets, store, cfg.Auth.Secret, controlAppHandler, appHandler)
+		appHandler = appOriginDispatch(parsedAppOrigin, cfg.TrustedProxyNets, store, cfg.Auth.Secret, controlAppHandler, appHandler, cfg.Auth)
 	} else if cfg.Auth.SupportSessions && cfg.Auth.SupportSessionsTrustedApps {
 		slog.Warn("trusted-app support sessions enabled: malicious or compromised app JavaScript may act with the administrator's browser authority; only deploy trusted app code")
 		appHandler = trustedAppSupportDispatch(appHandler, store, cfg.Auth.Secret, cfg.TrustedProxyNets)
 	}
 	mux.Handle("/app/", appHandler)
+	// App-local renewal is always available, including on the isolated app
+	// origin and when the optional app switcher is disabled. Access middleware
+	// revalidates the browser identity and app permissions on every request.
+	appSessionHandler := access.Middleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup)(http.HandlerFunc(srv.HandleAppSession))
+	mux.Handle("GET /app/{slug}/.shinyhub/session.json", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		appSessionHandler.ServeHTTP(w, r)
+	}))
 	mux.HandleFunc("GET /app/{slug}/.shinyhub/announcements.json", srv.HandleActiveAnnouncements)
 	if cfg.Auth.SupportSessions {
 		mux.HandleFunc("POST /app/{slug}/.shinyhub/support-session/stop",

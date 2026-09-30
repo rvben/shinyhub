@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/dbtest"
 )
@@ -26,6 +27,17 @@ type fakeAppLaunchStore struct {
 	activatedJTI string
 	activateErr  error
 	abortedID    string
+	session      *auth.TokenInfo
+}
+
+func (f *fakeAppLaunchStore) CreateAppLaunchCodeWithSession(hash string, userID int64, slug string, session *auth.TokenInfo, _ int64) error {
+	f.session = session
+	return f.CreateAppLaunchCode(hash, userID, slug)
+}
+
+func (f *fakeAppLaunchStore) ConsumeAppLaunchCodeWithSession(hash, slug string) (*auth.ContextUser, *auth.TokenInfo, error) {
+	u, err := f.ConsumeAppLaunchCode(hash, slug)
+	return u, f.session, err
 }
 
 func (f *fakeAppLaunchStore) CreateAppLaunchCode(hash string, userID int64, slug string) error {
@@ -131,6 +143,42 @@ func TestAppOriginBoundaryHidesControlPlaneRoutes(t *testing.T) {
 			t.Errorf("%s status = %d, want 204", path, rec.Code)
 		}
 	}
+}
+
+func TestAppOriginLaunchPreservesConfiguredBrowserLifetime(t *testing.T) {
+	ttl, maxAge := 10*time.Minute, 2*time.Hour
+	original := time.Now().Add(-110 * time.Minute).Truncate(time.Second)
+	appOrigin, _ := url.Parse("https://apps.example.com")
+	u := &auth.ContextUser{ID: 42, Username: "browser", Role: "viewer"}
+	store := &fakeAppLaunchStore{user: u}
+	handler := appOriginDispatch(appOrigin, nil, store, "secret", appOriginRedirectHandler(store, appOrigin), http.NotFoundHandler(), config.AuthConfig{SessionTTL: &ttl, SessionMaxAge: &maxAge})
+	req := httptest.NewRequest("GET", "https://hub.example.com/app/sales/", nil)
+	ctx := auth.WithUser(req.Context(), u)
+	ctx = auth.WithTokenInfo(ctx, &auth.TokenInfo{JTI: "original-family", AuthTime: original})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req.WithContext(ctx))
+	if rec.Code != 303 {
+		t.Fatalf("launch: %d %s", rec.Code, rec.Body.String())
+	}
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, httptest.NewRequest("GET", rec.Header().Get("Location"), nil))
+	if rec2.Code != 303 {
+		t.Fatalf("exchange: %d %s", rec2.Code, rec2.Body.String())
+	}
+	for _, cookie := range rec2.Result().Cookies() {
+		if cookie.Name != auth.SessionCookieName {
+			continue
+		}
+		claims, err := auth.ValidateJWT(cookie.Value, "secret", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if claims.ID != "original-family" || !claims.AuthTime.Time.Equal(original) || !claims.ExpiresAt.Time.Equal(original.Add(maxAge)) || !cookie.Expires.Equal(claims.ExpiresAt.Time) {
+			t.Fatalf("exchange reset login or expiry: %+v cookie=%+v", claims, cookie)
+		}
+		return
+	}
+	t.Fatal("missing browser session cookie")
 }
 
 func TestAppOriginLaunchMintsAppScopedSupportCookie(t *testing.T) {

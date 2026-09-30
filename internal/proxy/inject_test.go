@@ -20,6 +20,29 @@ import (
 	"github.com/rvben/shinyhub/internal/supportui"
 )
 
+func TestInjectionPreservesAlreadyAllowedAppInlineScripts(t *testing.T) {
+	for _, policy := range []string{
+		"script-src 'self' 'unsafe-inline'; connect-src 'self'",
+		"script-src-elem 'self' 'unsafe-inline'; script-src 'self'",
+		"default-src 'self' 'unsafe-inline'",
+	} {
+		got, ok := extendCSPForScripts(policy, []string{overlayCSPHash})
+		if !ok || got != policy {
+			t.Fatalf("injection disabled app inline scripts: %q -> %q (ok=%v)", policy, got, ok)
+		}
+	}
+	for _, policy := range []string{
+		"script-src 'unsafe-inline' 'nonce-existing'",
+		"script-src 'unsafe-inline' 'sha256-existing'",
+		"script-src 'unsafe-inline' 'strict-dynamic'",
+	} {
+		got, ok := extendCSPForScripts(policy, []string{overlayCSPHash})
+		if !ok || !strings.Contains(got, overlayCSPHash) {
+			t.Fatalf("restricted policy omitted the injected script hash: %q", got)
+		}
+	}
+}
+
 // overlayOnly is the injection set for a proxy with just the status overlay
 // enabled, which is what most of these tests exercise.
 func overlayOnly(slug string) func(*http.Request) []pageScript {
