@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -375,6 +376,22 @@ func TestPrepareSkip_RebuildsWhenRenvLibraryIsMissing(t *testing.T) {
 	}
 }
 
+// stubUVLauncher puts a stand-in uv first on PATH. RunReplica really starts the
+// inferred `uv run` launch command, so without it the test depends on the host
+// having uv installed. The stand-in only has to stay up like a server would;
+// the dependency build it would otherwise trigger is observed via prepProbes.
+func stubUVLauncher(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the stub is a POSIX shell script")
+	}
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "uv"), []byte("#!/bin/sh\nexec sleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
 // TestRunReplica_HonoursPreparationMode: a replica booted on demand (a wake from
 // hibernation, a crash restart) goes through RunReplica, not Run. A prepared
 // deployment must come up against its existing environment there too, or every
@@ -389,6 +406,7 @@ func TestRunReplica_HonoursPreparationMode(t *testing.T) {
 		{"deployment without a preparation record builds", false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			stubUVLauncher(t)
 			bundle := prepProjectBundle(t, true) // project mode, .venv exists
 			built, hooked := prepProbes(t, nil)
 			p := prepParams(t, "replica-prep", bundle, deploy.ActivationPreparation(tc.prepared), "multiplex")
