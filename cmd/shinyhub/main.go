@@ -1950,6 +1950,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		p.ContentDigest = current.ContentDigest
 		p.DeploymentID = current.ID
 		p.AppVersion = current.Version
+		p.Preparation = deploy.ActivationPreparation(current.Prepared)
 		p.GuardUntilAcknowledged = true
 		p.ReplicaStarted = func(result deploy.Result) error {
 			rows, listErr := store.ListReplicas(app.ID)

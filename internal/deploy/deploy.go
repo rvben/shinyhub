@@ -1000,6 +1000,29 @@ const (
 	PrepareBestEffort
 )
 
+// ActivationPreparation picks the preparation mode for bringing an
+// already-promoted bundle back up on a path with someone waiting on the result:
+// restart, rollback, a settings change, and a replica booted on demand (a wake
+// from hibernation, a crash restart).
+//
+// A bundle recorded as prepared has a built environment and has already run its
+// post-deploy hooks, so repeating either is wrong: hooks are app-controlled and
+// nothing guarantees a second run is safe, and a rebuild puts a full `uv sync`
+// or `renv::restore` in front of every boot. PrepareSkip still verifies the
+// environment is on disk and rebuilds it when it is not. A bundle whose
+// preparation state predates the record gets the full treatment, which is
+// exactly what it has been getting until now.
+//
+// It differs from the restore path in the fallback only. Restore is unattended
+// recovery and must never fail, so it degrades to PrepareBestEffort. Here a
+// preparation failure should surface rather than be swallowed.
+func ActivationPreparation(prepared bool) PreparationMode {
+	if prepared {
+		return PrepareSkip
+	}
+	return PrepareRequired
+}
+
 // runsHooks reports whether this mode should execute post-deploy hooks. Only a
 // promotion does.
 func (m PreparationMode) runsHooks() bool { return m == PrepareRequired }

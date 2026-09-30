@@ -604,7 +604,7 @@ func (s *Server) redeployApp(slug string) {
 		// the app's env vars are what changed, and hooks receive that env (as do
 		// dependency builds, via private-index credentials), so its inputs really
 		// are different and re-preparing is the correct behaviour.
-		Preparation: activationPreparation(current.Prepared),
+		Preparation: deploy.ActivationPreparation(current.Prepared),
 	}, app)
 	redeployParams = s.guardDeploymentConsumerStart(app, current, redeployParams)
 	redeployParams = s.traceDeploy(context.Background(), redeployParams)

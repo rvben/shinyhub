@@ -374,3 +374,35 @@ func TestPrepareSkip_RebuildsWhenRenvLibraryIsMissing(t *testing.T) {
 		})
 	}
 }
+
+// TestRunReplica_HonoursPreparationMode: a replica booted on demand (a wake from
+// hibernation, a crash restart) goes through RunReplica, not Run. A prepared
+// deployment must come up against its existing environment there too, or every
+// wake pays a full `uv sync` / `renv::restore` before the app can start.
+func TestRunReplica_HonoursPreparationMode(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		prepared  bool
+		wantBuild bool
+	}{
+		{"prepared deployment reuses its environment", true, false},
+		{"deployment without a preparation record builds", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bundle := prepProjectBundle(t, true) // project mode, .venv exists
+			built, hooked := prepProbes(t, nil)
+			p := prepParams(t, "replica-prep", bundle, deploy.ActivationPreparation(tc.prepared), "multiplex")
+			p.Command = nil // inferred path, where the build lives
+			p.Proxy.SetPoolSize(p.Slug, 1)
+			if _, err := deploy.RunReplica(p, 0); err != nil {
+				t.Fatalf("RunReplica: %v", err)
+			}
+			if built.Load() != tc.wantBuild {
+				t.Errorf("dependency build ran = %v, want %v", built.Load(), tc.wantBuild)
+			}
+			if hooked.Load() {
+				t.Error("a replica boot must never run post-deploy hooks")
+			}
+		})
+	}
+}

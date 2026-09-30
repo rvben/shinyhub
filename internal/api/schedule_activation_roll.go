@@ -384,7 +384,7 @@ func (s *Server) restartActivationPool(ctx context.Context, app *db.App, current
 	}
 
 	params := s.activationDeployParams(app, current)
-	params.Preparation = activationPreparation(current.Prepared)
+	params.Preparation = deploy.ActivationPreparation(current.Prepared)
 	params.GuardUntilAcknowledged = true
 	params.ReplicaStarted = func(result deploy.Result) error {
 		return s.persistStartingActivationReplica(app, current, &result, a)
