@@ -267,3 +267,36 @@ func TestStatusRecorderReadFromPropagatesError(t *testing.T) {
 type nonReaderFrom struct{ http.ResponseWriter }
 
 var _ http.ResponseWriter = nonReaderFrom{}
+
+func TestUpgradeHeadersCompleteOnlyAfterSuccessfulFlush(t *testing.T) {
+	var output strings.Builder
+	calls := 0
+	w := &upgradeHeaderWriter{writer: bufio.NewWriter(&output), complete: func() {
+		calls++
+		if !strings.HasSuffix(output.String(), "\r\n\r\n") {
+			t.Fatal("callback preceded header flush")
+		}
+	}}
+	for _, part := range []string{"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n", "\r", "\n"} {
+		if _, err := w.Write([]byte(part)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("completion calls = %d", calls)
+	}
+	if _, err := w.Write([]byte("\r\n\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatal("duplicate completion")
+	}
+	w = &upgradeHeaderWriter{writer: bufio.NewWriter(alwaysFailWriter{}), complete: func() { t.Fatal("failed flush reported success") }}
+	if _, err := w.Write([]byte("HTTP/1.1 101 Switching Protocols\r\n\r\n")); err == nil {
+		t.Fatal("write error lost")
+	}
+}
+
+type alwaysFailWriter struct{}
+
+func (alwaysFailWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }

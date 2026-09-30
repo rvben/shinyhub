@@ -19,6 +19,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rvben/shinyhub/internal/storage"
+	"github.com/rvben/shinyhub/internal/tracing"
 )
 
 // EnvResolver returns the per-app environment for the given slug as two
@@ -445,6 +446,16 @@ func (m *Manager) SetPlatformDefaultEnvResolver(r PlatformDefaultEnvResolver) {
 	m.platformEnv = r
 }
 
+// PlatformDefaultEnvFor resolves tracing/identity defaults for one concrete
+// launch. A negative Index identifies a hook rather than a serving replica.
+// Like SetPlatformDefaultEnvResolver, it is used after startup configuration.
+func (m *Manager) PlatformDefaultEnvFor(p StartParams) []string {
+	if m.platformEnv == nil {
+		return nil
+	}
+	return tracing.WithDeployment(m.platformEnv(p.Slug, p.Index), p.DeploymentID, p.AppVersion, p.ContentDigest)
+}
+
 // SetAutoInstrumentAppsDefault sets the fleet-wide default for launching
 // Python apps under opentelemetry-instrument. Wired once at startup from
 // tracing.auto_instrument_apps, before any deploys run, like the platform
@@ -812,10 +823,11 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		// user's per-app override wins on duplicate keys. We rebuild p.Env in
 		// the order: [defaults, user env, deploy-supplied p.Env] — last write
 		// wins, so deploy env beats user env beats defaults.
-		if defaults := m.platformEnv(p.Slug, p.Index); len(defaults) > 0 {
+		if defaults := m.PlatformDefaultEnvFor(p); len(defaults) > 0 {
 			p.Env = append(defaults, p.Env...)
 		}
 	}
+	p.Env, p.SecretEnv = tracing.MergeResourceAttributes(p.Env, p.SecretEnv)
 	if err := applyRequirementsLaunchEnv(&p); err != nil {
 		return nil, err
 	}

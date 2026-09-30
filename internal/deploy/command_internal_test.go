@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/process"
+	"github.com/rvben/shinyhub/internal/pythontrace"
 )
 
 func TestBuildCommand_AutoInstrumentWrapsRequirementsMode(t *testing.T) {
@@ -23,7 +24,7 @@ func TestBuildCommand_AutoInstrumentWrapsRequirementsMode(t *testing.T) {
 		"--with", "opentelemetry-instrumentation-starlette",
 		"--with", "opentelemetry-instrumentation-requests",
 		"--with", "opentelemetry-instrumentation-httpx",
-		"opentelemetry-instrument", "python", "-m",
+		"opentelemetry-instrument", "python", "-c", pythontrace.Bootstrap, "app-module",
 		"shiny", "run", "app.py", "--host", "127.0.0.1", "--port", "41000",
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -50,7 +51,7 @@ func TestBuildCommand_AutoInstrumentWrapsProjectMode(t *testing.T) {
 		"--with", "opentelemetry-instrumentation-starlette",
 		"--with", "opentelemetry-instrumentation-requests",
 		"--with", "opentelemetry-instrumentation-httpx",
-		"opentelemetry-instrument", "python", "-m",
+		"opentelemetry-instrument", "python", "-c", pythontrace.Bootstrap, "app-module",
 		"shiny", "run", "app.py", "--host", "127.0.0.1", "--port", "41000",
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -65,7 +66,7 @@ func TestBuildFastAPICommand_AutoInstrumentRunsUnderOverlayInterpreter(t *testin
 	synthProject(t, dir)
 	got := buildFastAPICommand(dir, 41000, "127.0.0.1", "", instrumentOverlay(true, nil), true, false)
 	joined := strings.Join(got, " ")
-	if !strings.Contains(joined, "opentelemetry-instrument python -m uvicorn app:app") {
+	if !strings.Contains(joined, "opentelemetry-instrument python -c "+pythontrace.Bootstrap+" app-module uvicorn app:app") {
 		t.Fatalf("instrumented FastAPI command must run uvicorn under the overlay interpreter: %s", joined)
 	}
 }
@@ -274,7 +275,7 @@ func TestBuildCommand_AutoInstrumentAddsExtraPackagesAfterBuiltins(t *testing.T)
 	joined := strings.Join(cmd, " ")
 	iBuiltin := strings.Index(joined, "--with opentelemetry-instrumentation-httpx")
 	iExtra := strings.Index(joined, "--with opentelemetry-instrumentation-botocore")
-	iWrap := strings.Index(joined, "opentelemetry-instrument python -m shiny run")
+	iWrap := strings.Index(joined, "opentelemetry-instrument python -c "+pythontrace.Bootstrap+" app-module shiny run")
 	if iBuiltin < 0 || iExtra < 0 || iWrap < 0 || !(iBuiltin < iExtra && iExtra < iWrap) {
 		t.Fatalf("order wrong: %s", joined)
 	}

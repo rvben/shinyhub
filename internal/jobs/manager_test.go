@@ -54,6 +54,7 @@ func (u *unfencedRuntime) InheritsLifetimeFiles() bool { return false }
 // HostProvidesAppData reports whether the host provides app data. Remote
 // fakes return false; local fakes return true (default).
 func (f *fakeRuntime) HostProvidesAppData() bool   { return !f.remote }
+func (f *fakeRuntime) HostPreparesDeps() bool      { return !f.remote }
 func (f *fakeRuntime) InheritsLifetimeFiles() bool { return true }
 
 func (f *fakeRuntime) RunOnce(ctx context.Context, p process.StartParams, _ io.Writer) (process.ExitInfo, error) {

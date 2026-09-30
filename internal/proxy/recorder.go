@@ -42,6 +42,9 @@ type statusRecorder struct {
 	// the hijacked goroutine to finish - which it never does until the
 	// client disconnects.
 	onUpgrade func()
+	// onHandshake fires after the 101 response headers have been flushed to
+	// the client. Hijack alone precedes that write in ReverseProxy.
+	onHandshake func()
 	// trackHijack, when non-nil, wraps the hijacked connection so the proxy can
 	// track its lifetime for graceful drain on shutdown. It returns the conn to
 	// hand back to the hijacking caller (httputil.ReverseProxy's upgrade path).
@@ -119,6 +122,9 @@ func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 		if r.trackHijack != nil {
 			conn = r.trackHijack(conn)
 		}
+		if r.status == http.StatusSwitchingProtocols && r.onHandshake != nil {
+			rw.Writer = bufio.NewWriter(&upgradeHeaderWriter{writer: rw.Writer, complete: r.onHandshake})
+		}
 	}
 	return conn, rw, err
 }
@@ -166,3 +172,39 @@ var (
 	_ http.Hijacker = (*statusRecorder)(nil)
 	_ io.ReaderFrom = (*statusRecorder)(nil)
 )
+
+// ReverseProxy writes the upgrade response directly to the hijacked buffer.
+// Flush through its original writer before reporting completion. Only headers
+// traverse this wrapper; the tunnel subsequently writes to the connection.
+type upgradeHeaderWriter struct {
+	writer   *bufio.Writer
+	complete func()
+	matched  int
+}
+
+func (w *upgradeHeaderWriter) Write(p []byte) (int, error) {
+	n, err := w.writer.Write(p)
+	if err == nil {
+		err = w.writer.Flush()
+	}
+	if err != nil || w.complete == nil {
+		return n, err
+	}
+	const delimiter = "\r\n\r\n"
+	for _, b := range p[:n] {
+		if b == delimiter[w.matched] {
+			w.matched++
+		} else if b == '\r' {
+			w.matched = 1
+		} else {
+			w.matched = 0
+		}
+		if w.matched == len(delimiter) {
+			fn := w.complete
+			w.complete = nil
+			fn()
+			break
+		}
+	}
+	return n, err
+}

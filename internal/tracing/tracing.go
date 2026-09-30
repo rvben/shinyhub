@@ -337,10 +337,11 @@ func EncodeResourceAttributes(pairs [][2]string) string {
 // attributes (cfg.ResourceAttributes) follow the built-in shinyhub.* pair,
 // keys sorted for a deterministic value.
 func EnvFor(cfg config.TracingConfig, slug string, replica int) []string {
-	return otelEnv(cfg, slug, [][2]string{
-		{"shinyhub.app", slug},
-		{"shinyhub.replica", strconv.Itoa(replica)},
-	})
+	pairs := [][2]string{{"shinyhub.app", slug}, {"shinyhub.app.slug", slug}}
+	if replica >= 0 {
+		pairs = append(pairs, [2]string{"shinyhub.replica", strconv.Itoa(replica)})
+	}
+	return otelEnv(cfg, slug, pairs)
 }
 
 // JobEnvFor returns the OTEL_* defaults for one scheduled job run. The
@@ -349,6 +350,7 @@ func EnvFor(cfg config.TracingConfig, slug string, replica int) []string {
 func JobEnvFor(cfg config.TracingConfig, slug, schedule string, runID int64) []string {
 	return otelEnv(cfg, slug, [][2]string{
 		{"shinyhub.app", slug},
+		{"shinyhub.app.slug", slug},
 		{"shinyhub.schedule", schedule},
 		{"shinyhub.schedule.run_id", strconv.FormatInt(runID, 10)},
 	})
@@ -373,9 +375,74 @@ func otelEnv(cfg config.TracingConfig, service string, builtin [][2]string) []st
 		"OTEL_TRACES_SAMPLER=parentbased_traceidratio",
 		fmt.Sprintf("OTEL_TRACES_SAMPLER_ARG=%g", cfg.SampleRatio),
 		"OTEL_PYTHON_STARLETTE_EXCLUDED_URLS=" + StarletteExcludedURLs,
+		"SHINYHUB_TRACING_ASGI_EVENTS=" + strconv.FormatBool(cfg.ASGIEvents),
 	}
 	if cfg.OTLPHeaders != "" {
 		env = append(env, "OTEL_EXPORTER_OTLP_HEADERS="+cfg.OTLPHeaders)
 	}
 	return env
+}
+
+// WithDeployment enriches platform resource defaults with the immutable launch
+// identity. It never consults the active deployment, which may already have
+// changed while a previous generation is draining. No instance ID is set: the
+// Python SDK retains its unique per-process identity.
+func WithDeployment(env []string, id int64, version, digest string) []string {
+	var pairs [][2]string
+	if id > 0 {
+		pairs = append(pairs, [2]string{"shinyhub.deployment.id", strconv.FormatInt(id, 10)})
+	}
+	if version == "" {
+		version = digest
+	}
+	if version != "" {
+		pairs = append(pairs, [2]string{"service.version", version})
+	}
+	if len(pairs) == 0 {
+		return env
+	}
+	out := slices.Clone(env)
+	for i, kv := range out {
+		if strings.HasPrefix(kv, "OTEL_RESOURCE_ATTRIBUTES=") {
+			separator := ","
+			if kv == "OTEL_RESOURCE_ATTRIBUTES=" {
+				separator = ""
+			}
+			out[i] = kv + separator + EncodeResourceAttributes(pairs)
+		}
+	}
+	return out
+}
+
+// MergeResourceAttributes layers resource entries rather than replacing the
+// entire resource map when an app supplies OTEL_RESOURCE_ATTRIBUTES. SDKs resolve
+// duplicate attribute keys last-wins, so explicit app values still override
+// defaults while unrelated deployment/replica identity survives. A secret
+// resource override keeps the merged value in SecretEnv.
+func MergeResourceAttributes(env, secretEnv []string) ([]string, []string) {
+	const prefix = "OTEL_RESOURCE_ATTRIBUTES="
+	var values []string
+	count := 0
+	hasSecret := false
+	for layerIndex, layer := range [][]string{env, secretEnv} {
+		for _, kv := range layer {
+			if value, ok := strings.CutPrefix(kv, prefix); ok {
+				count++
+				if value != "" {
+					values = append(values, value)
+				}
+				if layerIndex == 1 {
+					hasSecret = true
+				}
+			}
+		}
+	}
+	if count < 2 {
+		return env, secretEnv
+	}
+	merged := prefix + strings.Join(values, ",")
+	if hasSecret {
+		return env, append(slices.Clone(secretEnv), merged)
+	}
+	return append(slices.Clone(env), merged), secretEnv
 }

@@ -174,6 +174,9 @@ type TracingConfig struct {
 	// directions. Requires Enabled; R apps and custom-command apps are
 	// never wrapped.
 	AutoInstrumentApps bool
+	// ASGIEvents restores low-level ASGI send/receive spans in auto-instrumented
+	// Python commands. Disabled by default; server and application spans remain.
+	ASGIEvents bool
 	// ResourceAttributes are operator-chosen OpenTelemetry resource
 	// attributes (e.g. deployment.environment.name) added to every span this
 	// instance emits and to every app and job process's
@@ -1398,6 +1401,7 @@ type rawTracingConfig struct {
 	RingBufferSize              *int              `yaml:"ring_buffer_size"`
 	TraceLinkTemplate           string            `yaml:"trace_link_template"`
 	AutoInstrumentApps          bool              `yaml:"auto_instrument_apps"`
+	ASGIEvents                  bool              `yaml:"asgi_events"`
 	ResourceAttributes          map[string]string `yaml:"resource_attributes"`
 	AutoInstrumentExtraPackages []string          `yaml:"auto_instrument_extra_packages"`
 }
@@ -1638,6 +1642,7 @@ func loadRaw(path string) (*Config, error) {
 			RingBufferSize:              derefOr(raw.Tracing.RingBufferSize, 200),
 			TraceLinkTemplate:           raw.Tracing.TraceLinkTemplate,
 			AutoInstrumentApps:          raw.Tracing.AutoInstrumentApps,
+			ASGIEvents:                  raw.Tracing.ASGIEvents,
 			ResourceAttributes:          raw.Tracing.ResourceAttributes,
 			AutoInstrumentExtraPackages: raw.Tracing.AutoInstrumentExtraPackages,
 		},
@@ -3464,6 +3469,13 @@ func applyEnv(cfg *Config) error {
 			return fmt.Errorf("SHINYHUB_TRACING_AUTO_INSTRUMENT_APPS: %w", err)
 		}
 		cfg.Tracing.AutoInstrumentApps = b
+	}
+	if v := os.Getenv("SHINYHUB_TRACING_ASGI_EVENTS"); v != "" {
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_TRACING_ASGI_EVENTS: %w", err)
+		}
+		cfg.Tracing.ASGIEvents = b
 	}
 	if v := os.Getenv("SHINYHUB_METRICS_ENABLED"); v != "" {
 		b, err := parseBoolEnv(v)

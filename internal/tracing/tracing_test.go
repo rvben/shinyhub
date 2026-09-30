@@ -254,13 +254,14 @@ func TestEnvFor_EnabledFull(t *testing.T) {
 	env := EnvFor(cfg, "my-app", 2)
 	want := map[string]string{
 		"OTEL_SERVICE_NAME":                   "my-app",
-		"OTEL_RESOURCE_ATTRIBUTES":            "shinyhub.app=my-app,shinyhub.replica=2",
+		"OTEL_RESOURCE_ATTRIBUTES":            "shinyhub.app=my-app,shinyhub.app.slug=my-app,shinyhub.replica=2",
 		"OTEL_EXPORTER_OTLP_ENDPOINT":         "http://collector:4318",
 		"OTEL_EXPORTER_OTLP_PROTOCOL":         "http/protobuf",
 		"OTEL_EXPORTER_OTLP_HEADERS":          "x-key=secret",
 		"OTEL_TRACES_SAMPLER":                 "parentbased_traceidratio",
 		"OTEL_TRACES_SAMPLER_ARG":             "0.25",
 		"OTEL_PYTHON_STARLETTE_EXCLUDED_URLS": StarletteExcludedURLs,
+		"SHINYHUB_TRACING_ASGI_EVENTS":        "false",
 	}
 	got := envToMap(env)
 	for k, v := range want {
@@ -378,7 +379,7 @@ func TestEnvFor_AppendsResourceAttributesSortedAndEncoded(t *testing.T) {
 	cfg := enabledCfg()
 	cfg.ResourceAttributes = map[string]string{"team": "data, eng", "deployment.environment.name": "prd", "owner": "Zoë=x%"}
 	got := envValue(t, EnvFor(cfg, "a", 0), "OTEL_RESOURCE_ATTRIBUTES")
-	want := "shinyhub.app=a,shinyhub.replica=0,deployment.environment.name=prd,owner=Zo%C3%AB%3Dx%25,team=data%2C%20eng"
+	want := "shinyhub.app=a,shinyhub.app.slug=a,shinyhub.replica=0,deployment.environment.name=prd,owner=Zo%C3%AB%3Dx%25,team=data%2C%20eng"
 	if got != want {
 		t.Fatalf("got %q\nwant %q", got, want)
 	}
@@ -386,7 +387,7 @@ func TestEnvFor_AppendsResourceAttributesSortedAndEncoded(t *testing.T) {
 
 func TestEnvFor_NoResourceAttributesUnchanged(t *testing.T) {
 	got := envValue(t, EnvFor(enabledCfg(), "a", 0), "OTEL_RESOURCE_ATTRIBUTES")
-	if got != "shinyhub.app=a,shinyhub.replica=0" {
+	if got != "shinyhub.app=a,shinyhub.app.slug=a,shinyhub.replica=0" {
 		t.Fatalf("got %q", got)
 	}
 }
@@ -422,7 +423,7 @@ func TestJobEnvFor(t *testing.T) {
 	if envValue(t, env, "OTEL_SERVICE_NAME") != "sales" {
 		t.Fatal("service name must be the app slug")
 	}
-	want := "shinyhub.app=sales,shinyhub.schedule=nightly%20refresh,shinyhub.schedule.run_id=42,deployment.environment.name=prd"
+	want := "shinyhub.app=sales,shinyhub.app.slug=sales,shinyhub.schedule=nightly%20refresh,shinyhub.schedule.run_id=42,deployment.environment.name=prd"
 	if got := envValue(t, env, "OTEL_RESOURCE_ATTRIBUTES"); got != want {
 		t.Fatalf("got %q want %q", got, want)
 	}

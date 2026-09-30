@@ -310,6 +310,7 @@ func TestProxy_TracedWebSocketUpgradeSucceeds(t *testing.T) {
 				return
 			}
 			defer conn.Close()
+			time.Sleep(10 * time.Millisecond) // make handshake admission to the slow buffer deterministic
 			_, _ = brw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
 			_ = brw.Flush()
 			// Echo one client line back so the test confirms the tunnel is live.
@@ -326,7 +327,7 @@ func TestProxy_TracedWebSocketUpgradeSucceeds(t *testing.T) {
 		if err := p.Register("app", backend.URL); err != nil {
 			t.Fatal(err)
 		}
-		buf := tracing.NewBuffer(10, time.Second)
+		buf := tracing.NewBuffer(10, time.Millisecond)
 		p.SetTracing(config.TracingConfig{Enabled: true, SampleRatio: 1}, buf)
 		spans := wire(p)
 
@@ -359,6 +360,29 @@ func TestProxy_TracedWebSocketUpgradeSucceeds(t *testing.T) {
 				break
 			}
 		}
+		// The HTTP span must export while the backend is still waiting for
+		// the first message; the session span must remain open.
+		if spans != nil {
+			deadline := time.Now().Add(5 * time.Second)
+			for len(spans.Ended()) == 0 && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			ended := spans.Ended()
+			if len(ended) != 1 || ended[0].Name() != "GET /app/{slug}" {
+				t.Fatalf("HTTP handshake must end before the session: %v", ended)
+			}
+			if got := attrMap(ended[0].Attributes())["http.response.status_code"]; got != "101" {
+				t.Fatalf("handshake status = %s", got)
+			}
+		}
+		buffered := buf.Snapshot("app")
+		for deadline := time.Now().Add(5 * time.Second); len(buffered) == 0 && time.Now().Before(deadline); {
+			time.Sleep(time.Millisecond)
+			buffered = buf.Snapshot("app")
+		}
+		if len(buffered) != 1 || buffered[0].Status != 101 {
+			t.Fatalf("handshake must reach the buffer before the session closes: %v", buffered)
+		}
 		// Confirm the byte tunnel actually carries traffic both ways.
 		fmt.Fprintf(conn, "hello\n")
 		echo, err := r.ReadString('\n')
@@ -371,14 +395,31 @@ func TestProxy_TracedWebSocketUpgradeSucceeds(t *testing.T) {
 		if spans == nil {
 			return
 		}
-		// The backend closes the tunnel after the echo, which ends the proxy
-		// request and with it the one span covering the whole upgrade.
+		// The backend closes the tunnel after the echo, ending the session.
 		deadline := time.Now().Add(5 * time.Second)
-		for len(spans.Ended()) == 0 && time.Now().Before(deadline) {
+		for len(spans.Ended()) < 2 && time.Now().Before(deadline) {
 			time.Sleep(10 * time.Millisecond)
 		}
-		if n := len(spans.Ended()); n != 1 {
-			t.Fatalf("want 1 span covering the upgrade, got %d", n)
+		ended := spans.Ended()
+		if len(ended) != 2 {
+			t.Fatalf("want handshake and session spans, got %d", len(ended))
+		}
+		httpSpan, sessionSpan := ended[0], ended[1]
+		if sessionSpan.Name() != "WS /app/{slug}" || sessionSpan.SpanKind() != trace.SpanKindInternal {
+			t.Fatalf("unexpected session span: %s (%s)", sessionSpan.Name(), sessionSpan.SpanKind())
+		}
+		if sessionSpan.Parent().SpanID() != httpSpan.SpanContext().SpanID() || sessionSpan.SpanContext().TraceID() != httpSpan.SpanContext().TraceID() {
+			t.Fatal("session must be a child of the handshake in the same trace")
+		}
+		attrs := attrMap(sessionSpan.Attributes())
+		if _, ok := attrs["http.route"]; ok {
+			t.Fatal("session must not contribute to HTTP route latency")
+		}
+		if attrs["shinyhub.ws.bytes_to_client"] == "0" || attrs["shinyhub.ws.bytes_to_upstream"] == "0" {
+			t.Fatalf("missing tunnel byte counts: %v", attrs)
+		}
+		if got := buf.Snapshot("app"); len(got) != 1 || got[0].DurationMS != buffered[0].DurationMS {
+			t.Fatalf("session close must not overwrite or duplicate the HTTP buffer entry: %v", got)
 		}
 	})
 }

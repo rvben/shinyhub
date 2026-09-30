@@ -59,7 +59,8 @@ tracing:
   slow_request_ms: 1000             # slow-threshold for buffer admission
   ring_buffer_size: 200             # spans retained per app
   trace_link_template: "https://tempo.example.com/explore?trace={trace_id}"
-  auto_instrument_apps: false       # wrap Python apps in opentelemetry-instrument
+  auto_instrument_apps: false       # wrap supported Python apps, jobs and hooks
+  asgi_events: false                # omit low-level ASGI send/receive spans
   auto_instrument_extra_packages:   # extras for the auto-instrument overlay
     - opentelemetry-instrumentation-botocore
   resource_attributes:              # tags added to every span, here and in apps
@@ -79,6 +80,7 @@ Every field has an env-var override (last-wins over YAML):
 | `ring_buffer_size` | `SHINYHUB_TRACING_RING_BUFFER_SIZE` |
 | `trace_link_template` | `SHINYHUB_TRACING_TRACE_LINK_TEMPLATE` |
 | `auto_instrument_apps` | `SHINYHUB_TRACING_AUTO_INSTRUMENT_APPS` |
+| `asgi_events` | `SHINYHUB_TRACING_ASGI_EVENTS` |
 | `auto_instrument_extra_packages` | `SHINYHUB_TRACING_AUTO_INSTRUMENT_EXTRA_PACKAGES` |
 | `resource_attributes` | `SHINYHUB_TRACING_RESOURCE_ATTRIBUTES` |
 
@@ -110,17 +112,18 @@ When tracing is enabled, every app replica is launched with:
 
 ```
 OTEL_SERVICE_NAME=<app-slug>
-OTEL_RESOURCE_ATTRIBUTES=shinyhub.app=<slug>,shinyhub.replica=<index>[,<your resource_attributes, sorted by key>]
+OTEL_RESOURCE_ATTRIBUTES=shinyhub.app=<slug>,shinyhub.app.slug=<slug>,shinyhub.replica=<index>[,<your resource_attributes, sorted by key>],shinyhub.deployment.id=<id>,service.version=<app version or bundle digest>
 OTEL_EXPORTER_OTLP_ENDPOINT=<your collector>
 OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf | grpc
 OTEL_TRACES_SAMPLER=parentbased_traceidratio
 OTEL_TRACES_SAMPLER_ARG=<sample_ratio>
 OTEL_PYTHON_STARLETTE_EXCLUDED_URLS=/websocket/?$
 OTEL_EXPORTER_OTLP_HEADERS=<headers if configured>
+SHINYHUB_TRACING_ASGI_EVENTS=false | true
 ```
 
 `tracing.resource_attributes` pairs are appended after the built-in
-`shinyhub.app`/`shinyhub.replica` pair, sorted by key, and percent-encoded the
+app identity attributes, sorted by key, and percent-encoded the
 same way as the config env override above. `OTEL_PYTHON_STARLETTE_EXCLUDED_URLS`
 keeps Shiny's session WebSocket out of the auto-instrumented Starlette spans
 (see [What you get, and what you don't](#what-you-get-and-what-you-dont)
@@ -128,11 +131,21 @@ below); it is set for every app whenever tracing is enabled, whether or not
 auto-instrumentation is on, since it is harmless for an app that reads no
 `OTEL_*` vars.
 
+Deployment attributes come from the process's own launch parameters, including
+rollback and overlapping deployment generations. `service.version` uses the app
+version, falling back to its content digest; unknown deployment/version values
+are omitted. `service.instance.id` remains the SDK's unique process identity.
+The existing `shinyhub.app` resource attribute remains available alongside
+`shinyhub.app.slug` for compatibility.
+
 These are **platform defaults**. Per-app env vars (set via UI or
 `PUT /api/apps/<slug>/env/<KEY>`) win on duplicate keys, so any app can
 override the collector endpoint, service name, sampler, or headers
 independently. The `SHINYHUB_` prefix is the only reserved namespace;
-`OTEL_*` is intentionally user-settable.
+`OTEL_*` is intentionally user-settable. `OTEL_RESOURCE_ATTRIBUTES` is merged
+by attribute: app values override matching keys while unrelated platform
+identity and fleet tags remain. Secret resource values remain in the runtime's
+secret environment. An empty resource variable does not clear platform tags.
 
 ## Multiple instances, one backend
 
@@ -199,10 +212,10 @@ uv run [--with-requirements requirements.txt] \
   --with opentelemetry-instrumentation-requests \
   --with opentelemetry-instrumentation-httpx \
   [--with <tracing.auto_instrument_extra_packages>] \
-  opentelemetry-instrument python -m shiny run app.py --host ... --port ...
+  opentelemetry-instrument python -c <ShinyHub bootstrap> app-module shiny run app.py --host ... --port ...
 ```
 
-The entrypoint runs as `python -m shiny` so it executes under the overlay's
+The bootstrap executes `shiny` as a module under the overlay's
 interpreter; the app's own `shiny` console script would run under its own
 environment's interpreter, which cannot see the overlay packages.
 
@@ -216,6 +229,14 @@ This applies identically to a pool replica's initial boot and to an elastic
 worker spawned on demand: both resolve the launch command through the same
 seam, honor the same fleet default and manifest override, and get the same
 uninstrumented retry (below) if the instrumented launch fails.
+
+ASGI send/receive spans are suppressed by default. The shared bootstrap applies
+`exclude_spans=["receive", "send"]` before the app constructs its middleware;
+Starlette's instrumentor does not expose that middleware option itself. Set
+`tracing.asgi_events: true` to restore the events for debugging. This keeps
+request and library spans, and does not remove Shiny's reactive/output spans.
+Explicit app middleware `exclude_spans` lists remain authoritative; an empty
+list restores all events for that middleware.
 
 ### What you get, and what you don't
 
@@ -295,7 +316,7 @@ platform defaults, so tuning is a few settings (UI → app → Configuration, or
 | `OTEL_TRACES_SAMPLER_ARG=1.0` | Sample this app harder than the fleet `sample_ratio` |
 | `OTEL_PYTHON_STARLETTE_EXCLUDED_URLS=<regex>` | Change which paths the Starlette instrumentor skips; the platform default excludes only the session WebSocket |
 | `OTEL_PYTHON_DISABLED_INSTRUMENTATIONS=starlette` | Drop **all** Starlette/ASGI spans, including the per-request server spans, not just the WebSocket; most apps want the exclusion above instead |
-| `OTEL_RESOURCE_ATTRIBUTES=team=analytics,owner=data-eng` | Ownership tags on every span. Replaces the entire platform value, including `shinyhub.app`/`shinyhub.replica` and any fleet `resource_attributes` (e.g. `deployment.environment.name`) - re-add anything you still want alongside your own pairs |
+| `OTEL_RESOURCE_ATTRIBUTES=team=analytics,owner=data-eng` | Ownership tags on every span. Merges with the platform resource attributes; explicit matching keys override defaults, while deployment/replica identity and fleet tags remain |
 | `OTEL_SERVICE_NAME=my-name` | Override the default service name (the app slug) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT=...` | Send this app's spans to a different collector |
 | `OTEL_LOGS_EXPORTER=none`, `OTEL_METRICS_EXPORTER=none` | Stop the distro exporting logs and metrics, for a collector that only accepts traces |
@@ -404,8 +425,16 @@ no client is watching.
   decision (`ParentBased(TraceIDRatioBased(sample_ratio))`) as everything
   else, so the trace ID and sampled flag it hands to the app in the outbound
   `traceparent` are the exported span's own: the app's spans always find their
-  parent in the backend. An open WebSocket session produces **one** such span
-  covering the whole session, not one per message.
+  parent in the backend. For an accepted WebSocket upgrade the HTTP span ends
+  once the 101 headers have been flushed. The trace buffer also records only
+  this handshake duration. Rejected upgrades retain normal HTTP spans.
+- **A separate WebSocket session span**, named `WS /app/{slug}`, is a child
+  of the handshake span. It is an internal span with no `http.route`, so its
+  duration does not enter HTTP route latency aggregates. It records
+  `shinyhub.ws.bytes_to_client`, `shinyhub.ws.bytes_to_upstream`, close code
+  when available, close initiator, transport-ending side, and abnormal status.
+  Application-provided close reasons are not copied into traces. Existing
+  WebSocket lifecycle metrics and access logs retain session duration.
 - **Background lifecycle spans** for the watchdog's wake, restart, and
   hibernate operations (`lifecycle.wake`, `lifecycle.restart`,
   `lifecycle.hibernate`), each tagged with `shinyhub.app.slug`, so cold-start
@@ -513,22 +542,44 @@ trace. Attributes: `shinyhub.app.slug`, `shinyhub.schedule.name`,
 `process.exit.code`. Sampling follows the fleet `sample_ratio` like any other
 root span (`ParentBased(TraceIDRatioBased(sample_ratio))`).
 
-The job process itself gets no automatic instrumentation - there is no
-overlay equivalent of `auto_instrument_apps` for jobs. Instead, the run's
-trace context reaches the process as environment variables, `TRACEPARENT` and
-`TRACESTATE` (set last, so they always win over any per-app env of the same
-name), which the job extracts to parent its own spans under `schedule.run`.
-The recommended job command layers the same OTEL packages the app overlay
-uses via `uv run --with`:
+When `auto_instrument_apps` is enabled (or `[tracing] auto = true` in the
+bundle), supported Python job commands use the app's instrumentation overlay,
+including `auto_instrument_extra_packages`. Examples:
 
-```bash
-uv run --with-requirements requirements.txt \
-  --with opentelemetry-distro \
-  --with opentelemetry-exporter-otlp \
-  opentelemetry-instrument python refresh.py
+```toml
+[[schedule]]
+name = "refresh-data"
+cron = "0 * * * *"
+cmd = "uv run python helpers/fetch_data.py"
 ```
 
-and the script extracts the propagated context to parent its own spans:
+The shared bootstrap extracts `TRACEPARENT` and `TRACESTATE`, starts an active
+`process.run` child span, and runs the script or module in that context. AWS
+calls instrumented by botocore therefore appear beneath
+`schedule.run -> process.run`. The process span covers Python execution,
+whereas `schedule.run` also includes admission/lock waits and uv startup.
+The SDK flushes completed spans at normal interpreter exit, including nonzero
+Python exits. Forced termination can lose buffered child spans; the platform
+still records the terminal schedule status.
+
+The same bootstrap applies to native post-deploy Python hooks, with
+`deploy.post_deploy_hooks` as parent. Hooks receive the shared exporter defaults
+and their deployment identity, without a serving-replica attribute. Container
+hooks remain skipped under the existing runtime policy. Jobs and hooks are
+never retried as an instrumentation fallback: their side effects may already
+have occurred. Process error spans record the exception type and a generic
+status, without exception messages or stack traces.
+
+Supported commands explicitly invoke `python` or `python3` with a script,
+`-m module`, or `-c code`, directly or through `uv run`. Common uv run options
+and basic interpreter flags are retained. Shell wrappers, explicit/venv or
+version-specific interpreter paths, uv script mode, and unsupported options
+are passed through unchanged. `[tracing] auto = false` opts both apps and
+one-shot commands out; tracing disabled leaves scheduled commands unchanged.
+
+For unsupported commands or manual instrumentation, extract the environment
+context in the job yourself. `TRACEPARENT`/`TRACESTATE` identify the current run
+and override static per-app values. Exporter settings remain overridable:
 
 ```python
 import os
@@ -562,3 +613,19 @@ own root trace.
   separately, as noted above.)
 - **No sidecar.** The OTEL\_\* env approach uses the OpenTelemetry SDK that
   Shiny already loads, with no separate agent and no exporter binary on the host.
+
+## Admission rejection alerts
+
+The existing Prometheus counter
+`shinyhub_admission_rejects_total{slug,reason}` records proxy admission decisions
+independently of trace sampling. For refused capacity admissions, for example:
+
+```promql
+sum by (slug, reason) (
+  rate(shinyhub_admission_rejects_total{reason=~"pool-saturated|render-paced|memory-pressure|cpu-saturation"}[5m])
+)
+```
+
+Keep `render-deferred` separate: a wait page can re-poll several times for a
+single visit, so that counter measures deferral responses rather than distinct
+refused sessions.

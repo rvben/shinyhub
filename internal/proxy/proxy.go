@@ -2854,6 +2854,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if ptr := p.wsEnd.Load(); ptr != nil {
 				fn = *ptr
 			}
+			if tr := p.loadSpanTracer(); p.traceCfg.Enabled && tr != nil {
+				_, sessionSpan := tr.Start(r.Context(), "WS /app/{slug}", trace.WithSpanKind(trace.SpanKindInternal))
+				prior := fn
+				fn = func(e WSSessionEnd) {
+					endWSSpan(sessionSpan, e)
+					if prior != nil {
+						prior(e)
+					}
+				}
+			}
 			ws.start(slug, replicaIndex, deploymentID, fn)
 			onClose = ws.end
 		}
@@ -2950,7 +2960,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	defer func() {
+	httpEnded := false
+	finishHTTP := func() {
+		if httpEnded {
+			return
+		}
+		httpEnded = true
+		endedAt := time.Now()
 		// The buffer and the exported span are independent sinks: a nil buffer
 		// must not suppress the export, and no tracer must not suppress the
 		// buffer.
@@ -3002,7 +3018,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if otelSpan != nil {
-			otelSpan.End()
+			otelSpan.End(trace.WithTimestamp(endedAt))
 		}
 		if traceEnabled && p.traceBuffer != nil {
 			p.traceBuffer.Record(tracing.Span{
@@ -3015,12 +3031,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				Method:       r.Method,
 				Path:         path,
 				Status:       rec.status,
-				DurationMS:   time.Since(start).Milliseconds(),
+				DurationMS:   endedAt.Sub(start).Milliseconds(),
 				StartedAt:    start,
 				Sampled:      traceSampled,
 				Error:        spanErr,
 			})
 		}
+	}
+	rec.onHandshake = finishHTTP
+	defer func() {
+		finishHTTP()
 		logPtr := p.accessLog.Load()
 		if logPtr == nil {
 			return

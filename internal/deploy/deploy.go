@@ -25,8 +25,11 @@ import (
 	"github.com/rvben/shinyhub/internal/deployevent"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
+	"github.com/rvben/shinyhub/internal/pythontrace"
 	"github.com/rvben/shinyhub/internal/sandbox"
+	"github.com/rvben/shinyhub/internal/tracing"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -1498,7 +1501,19 @@ func runManifestPostDeployHooks(p Params, hostDeps bool) (declared, run, skipped
 	if err != nil {
 		return declared, 0, 0, fmt.Errorf("resolve app env: %w", err)
 	}
-	hookEnv := append(append([]string{}, p.Env...), appEnv...)
+	hookEnv := p.Manager.PlatformDefaultEnvFor(process.StartParams{
+		Slug: p.Slug, Index: -1, DeploymentID: p.DeploymentID,
+		AppVersion: p.AppVersion, ContentDigest: p.ContentDigest,
+	})
+	hookEnv = append(append(hookEnv, p.Env...), appEnv...)
+	hookEnv, _ = tracing.MergeResourceAttributes(hookEnv, nil)
+	if p.TraceCtx != nil && p.Tracer != nil {
+		carrier := propagation.MapCarrier{}
+		propagation.TraceContext{}.Inject(p.TraceCtx, carrier)
+		if tp := carrier.Get("traceparent"); tp != "" {
+			hookEnv = append(hookEnv, "TRACEPARENT="+tp, "TRACESTATE="+carrier.Get("tracestate"))
+		}
+	}
 
 	logPath := filepath.Join(p.BundleDir, "deploy-hooks.log")
 	logFile, ferr := os.Create(logPath)
@@ -1509,6 +1524,10 @@ func runManifestPostDeployHooks(p Params, hostDeps bool) (declared, run, skipped
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	ctx = context.WithValue(ctx, hookInstrumentationKey{}, hookInstrumentation{
+		overlay:  instrumentOverlay(resolveAutoInstrument(p, manifest), p.Manager.AutoInstrumentExtraPackages()),
+		hostDeps: hostDeps,
+	})
 	started := time.Now()
 	e := deployevent.Phase("hooks", deployevent.StatusStarted, fmt.Sprintf("Running %d post-deploy hook(s)", len(hooks)))
 	e.Total = len(hooks)
@@ -2183,6 +2202,14 @@ func buildCommand(bundleDir string, port, workers int, bindHost string, overlay 
 }
 
 func pythonCommandPrefix(bundleDir string, overlay []string, hostDeps bool) []string {
+	base := pythonEnvironmentPrefix(bundleDir, overlay, hostDeps)
+	if len(overlay) > 0 {
+		base = append(base, pythontrace.ModulePrefix()...)
+	}
+	return base
+}
+
+func pythonEnvironmentPrefix(bundleDir string, overlay []string, hostDeps bool) []string {
 	base := []string{"uv", "run", "--no-project"}
 	if useProjectMode(bundleDir, hostDeps) {
 		switch _, lockErr := os.Stat(filepath.Join(bundleDir, "uv.lock")); {
@@ -2205,15 +2232,6 @@ func pythonCommandPrefix(bundleDir string, overlay []string, hostDeps bool) []st
 		for _, pkg := range overlay {
 			base = append(base, "--with", pkg)
 		}
-		// The entrypoint runs as `python -m <module>` rather than as a
-		// console script. uv layers the overlay as a separate environment
-		// over the app's own, and a console script's shebang names the
-		// interpreter of the environment that installed it: in project mode
-		// that is the .venv, which cannot import the overlay, so the
-		// instrumentation would fail to load and the app would run
-		// uninstrumented. `python` resolves to the overlay's interpreter,
-		// which sees both environments.
-		base = append(base, "opentelemetry-instrument", "python", "-m")
 	}
 	return base
 }

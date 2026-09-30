@@ -21,6 +21,7 @@ import (
 	"github.com/rvben/shinyhub/internal/autoscalespec"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/process"
+	"github.com/rvben/shinyhub/internal/pythontrace"
 	"github.com/rvben/shinyhub/internal/schedulespec"
 	slugpkg "github.com/rvben/shinyhub/internal/slug"
 )
@@ -615,6 +616,13 @@ func (m *Manifest) PostDeploy() []Hook {
 // processes. Kept as a package-level var so a test can swap it in t.Cleanup.
 var hookRunner = runHookExec
 
+type hookInstrumentationKey struct{}
+
+type hookInstrumentation struct {
+	overlay  []string
+	hostDeps bool
+}
+
 // RunPostDeployHooks executes each hook sequentially in bundleDir, streaming
 // stdout/stderr to logOut. It stops on the first failure so a deploy never
 // proceeds past a broken setup step. Hooks inherit `extraEnv` on top of the
@@ -636,7 +644,11 @@ func runPostDeployHooks(ctx context.Context, bundleDir string, hooks []Hook, ext
 		}
 		hookCtx, cancel := context.WithTimeout(ctx, timeout)
 		started := time.Now()
-		err := hookRunner(hookCtx, bundleDir, h.Command, extraEnv, logOut)
+		argv := h.Command
+		if opts, ok := ctx.Value(hookInstrumentationKey{}).(hookInstrumentation); ok {
+			argv, _ = pythontrace.Wrap(argv, opts.overlay, pythonEnvironmentPrefix(bundleDir, opts.overlay, opts.hostDeps))
+		}
+		err := hookRunner(hookCtx, bundleDir, argv, extraEnv, logOut)
 		cancel()
 		if err != nil {
 			fmt.Fprintf(logOut, "✗ hook[%d]: failed (duration %s): %v\n", i, time.Since(started).Round(time.Millisecond), err)
@@ -684,4 +696,20 @@ func runHookExec(ctx context.Context, bundleDir string, argv []string, extraEnv 
 	cmd.Stdout = logOut
 	cmd.Stderr = logOut
 	return cmd.Run()
+}
+
+// InstrumentPythonCommand shares the fleet/manifest decision and package overlay
+// with app launches. Unsupported commands retain their exact argv. Unlike an app
+// boot, a one-shot command is never retried after an instrumentation failure.
+func InstrumentPythonCommand(bundleDir string, argv []string, auto bool, extra []string, hostDeps bool) ([]string, bool, error) {
+	manifest, err := LoadManifest(bundleDir)
+	if err != nil {
+		return nil, false, err
+	}
+	if manifest != nil && manifest.Tracing.Auto != nil {
+		auto = *manifest.Tracing.Auto
+	}
+	overlay := instrumentOverlay(auto, extra)
+	command, instrumented := pythontrace.Wrap(argv, overlay, pythonEnvironmentPrefix(bundleDir, overlay, hostDeps))
+	return command, instrumented, nil
 }

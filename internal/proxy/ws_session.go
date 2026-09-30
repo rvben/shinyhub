@@ -12,6 +12,10 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // WSSessionEnd describes one successfully hijacked WebSocket tunnel. ClosedBy
@@ -423,4 +427,28 @@ func (f *wsFrameScanner) finish(onClose func(*uint16, string)) {
 		f.seenClose = true
 	}
 	f.have, f.need, f.remaining, f.frameLen, f.closeN = 0, 0, 0, 0, 0
+}
+
+// Session spans are internal spans without http.route or HTTP status attributes:
+// their durations must never enter HTTP request latency aggregates.
+func endWSSpan(span trace.Span, e WSSessionEnd) {
+	span.SetAttributes(
+		attribute.String("shinyhub.app.slug", e.Slug),
+		attribute.Int("shinyhub.replica", e.ReplicaIndex),
+		attribute.Int64("shinyhub.deployment.id", e.DeploymentID),
+		attribute.Int64("shinyhub.ws.bytes_to_client", e.BytesToClient),
+		attribute.Int64("shinyhub.ws.bytes_to_upstream", e.BytesToUpstream),
+		attribute.String("shinyhub.ws.closed_by", e.ClosedBy),
+		attribute.String("shinyhub.ws.end_signal", e.EndSignal),
+		attribute.String("shinyhub.ws.transport_end_side", e.TransportEndSide),
+		attribute.Bool("shinyhub.ws.abnormal", e.Abnormal),
+	)
+	if e.CloseCode != nil {
+		span.SetAttributes(attribute.Int("shinyhub.ws.close_code", int(*e.CloseCode)))
+	}
+	// Close reasons are app-controlled text and may contain sensitive data.
+	if e.Abnormal {
+		span.SetStatus(codes.Error, "abnormal websocket termination")
+	}
+	span.End()
 }

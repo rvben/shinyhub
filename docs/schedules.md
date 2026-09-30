@@ -357,7 +357,7 @@ skipped overlap) gets a `schedule.run` span tagged with the app, schedule,
 run ID, and trigger, and the run command is handed a W3C `TRACEPARENT` so its
 own spans nest under that run. See
 [Tracing -> Scheduled jobs](tracing.md#scheduled-jobs) for the attributes,
-the hand-off mechanism, and a job snippet that adopts it.
+the shared Python instrumentation bootstrap and manual context extraction.
 
 ## Deploy-triggered data convergence
 

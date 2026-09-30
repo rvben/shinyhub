@@ -732,8 +732,7 @@ func TestStart_PlatformDefaultsLoseToUserEnv(t *testing.T) {
 	})
 	m.SetEnvResolver(func(slug string) ([]string, []string, error) {
 		// User wants a different OTLP endpoint for this app, and a
-		// per-app OTEL_RESOURCE_ATTRIBUTES that replaces the platform
-		// value wholesale rather than merging into it.
+		// per-app OTEL_RESOURCE_ATTRIBUTES that extends the platform value.
 		return []string{
 			"OTEL_EXPORTER_OTLP_ENDPOINT=http://user-collector:4318",
 			"OTEL_RESOURCE_ATTRIBUTES=team=x",
@@ -756,11 +755,10 @@ func TestStart_PlatformDefaultsLoseToUserEnv(t *testing.T) {
 	if got := lastValue(rt.lastEnv, "OTEL_SERVICE_NAME"); got != "demo" {
 		t.Errorf("platform-only OTEL_SERVICE_NAME = %q, want demo", got)
 	}
-	// A per-app OTEL_RESOURCE_ATTRIBUTES replaces the platform value wholesale
-	// (last-occurrence-wins), so the instance tag disappears for that app
-	// rather than being merged with the platform's.
-	if got := lastValue(rt.lastEnv, "OTEL_RESOURCE_ATTRIBUTES"); got != "team=x" {
-		t.Errorf("user OTEL_RESOURCE_ATTRIBUTES should replace platform value wholesale: got %q", got)
+	// User attributes are layered over the resource defaults, preserving
+	// unrelated app/replica identity and fleet tags.
+	if got := lastValue(rt.lastEnv, "OTEL_RESOURCE_ATTRIBUTES"); got != "shinyhub.app=a,shinyhub.replica=0,deployment.environment.name=prd,team=x" {
+		t.Errorf("resource attributes should merge with defaults: got %q", got)
 	}
 }
 

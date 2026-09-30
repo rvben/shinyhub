@@ -18,6 +18,7 @@ import (
 	"github.com/rvben/shinyhub/internal/appenv"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/schedulespec"
 	"github.com/rvben/shinyhub/internal/spanerr"
@@ -1620,7 +1621,7 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	if v, ok := m.runSpans.Load(runID); ok {
 		// Platform OTEL_* defaults go first so per-app values win under
 		// last-occurrence-wins.
-		env = append(tracing.JobEnvFor(m.traceCfg, app.Slug, sched.Name, runID), env...)
+		env = append(tracing.WithDeployment(tracing.JobEnvFor(m.traceCfg, app.Slug, sched.Name, runID), deployment.ID, deployment.Version, deployment.ContentDigest), env...)
 		carrier := propagation.MapCarrier{}
 		propagation.TraceContext{}.Inject(trace.ContextWithSpan(context.Background(), v.(trace.Span)), carrier)
 		// TRACEPARENT goes last: it identifies this run, so a static per-app
@@ -1683,6 +1684,16 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 		jobTier = assignments[0].Tier
 	}
 	rt := m.procMgr.RuntimeForTier(jobTier)
+	if m.traceCfg.Enabled {
+		cmd, _, err = deploy.InstrumentPythonCommand(bundleDir, cmd, m.traceCfg.AutoInstrumentApps,
+			m.traceCfg.AutoInstrumentExtraPackages, m.procMgr.HostPreparesDepsFor(jobTier))
+		if err != nil {
+			fmt.Fprintln(logFile, "shinyhub: resolve job instrumentation: invalid manifest")
+			m.finishRun(sched, runID, "failed", nil, trigger, userID, false)
+			return
+		}
+	}
+
 	if schedulePublishesData(sched, trigger) {
 		// A producer publishes behind locks that only processes inheriting the
 		// server's descriptors can honour, whatever the app's worker isolation.
@@ -1754,6 +1765,8 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 			params.SharedMounts[i].HostPath = ""
 		}
 	}
+
+	params.Env, params.SecretEnv = tracing.MergeResourceAttributes(params.Env, params.SecretEnv)
 
 	// Run the command.
 	var logWriter io.Writer = logFile
