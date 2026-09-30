@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.18.6](https://github.com/rvben/shinyhub/compare/v0.18.5...v0.18.6) - 2026-09-30
+
+### Added
+
+- **ui**: start the dashboard's boot API requests while the shell parses ([87ab41e](https://github.com/rvben/shinyhub/commit/87ab41edfdbce19c639301a1281c48c14afda03f))
+- **ui**: self-host the webfonts on the never-deployed app page ([5c28d91](https://github.com/rvben/shinyhub/commit/5c28d91ee175a4bd8f35cb458af27fb6028a078c))
+
 ## [0.18.5](https://github.com/rvben/shinyhub/compare/v0.18.4...v0.18.5) - 2026-09-30
 
 ### Added
