@@ -6,9 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.18.8](https://github.com/rvben/shinyhub/compare/v0.18.7...v0.18.8) - 2026-09-30
+
 ### Added
 
 - **announcements**: schedule public platform notices from an administrator workspace or API, with live delivery to the console and hosted apps, versioned dismissal, and audited edits.
+- **tracing**: connect Python jobs and separate websocket sessions ([692c11b](https://github.com/rvben/shinyhub/commit/692c11b9f5e8e4214a484f6d5b0559ee42d9cca0))
+- **metrics**: clarify CPU capacity and autoscaling status ([5050312](https://github.com/rvben/shinyhub/commit/505031253d0200df2fb3759bad84bacd9de8814c))
+
+### Fixed
+
+- **settings**: preserve sessions across live configuration updates ([f7790b3](https://github.com/rvben/shinyhub/commit/f7790b3c1e6a804ab1d96b346c61cff4fc309be8))
+- **cli**: exit cleanly when shinyhub run is interrupted before the app starts ([d66012a](https://github.com/rvben/shinyhub/commit/d66012a6137e88892142bcd845220cc893678f69))
+- **fleet**: fail apply when a settings redeploy does not apply ([8c97ad4](https://github.com/rvben/shinyhub/commit/8c97ad49bd5873ace1320c465d32b68b737ec6d3))
+- **api**: report the outcome of settings redeploys ([1239954](https://github.com/rvben/shinyhub/commit/1239954c07e18602f05c239569482b320f614379))
+- **fleet**: converge declared config after a bundle deploy ([107cdaf](https://github.com/rvben/shinyhub/commit/107cdaf05001c32fe8e5ab3aac988106e961bcb8))
+- **scaling**: preserve live sessions during capacity changes ([28a3824](https://github.com/rvben/shinyhub/commit/28a3824ef8c5a24756a98173d000e2a215a81d02))
+- **lifecycle**: skip the dependency build when waking a prepared app ([4ee1128](https://github.com/rvben/shinyhub/commit/4ee1128e6472fc235cb94053687635ef938e6e81))
 
 ## [0.18.7](https://github.com/rvben/shinyhub/compare/v0.18.6...v0.18.7) - 2026-09-30
 
