@@ -532,8 +532,8 @@ type ServerConfig struct {
 	LeaseTTL        time.Duration `yaml:"lease_ttl"`
 	LeaseRenewEvery time.Duration `yaml:"lease_renew_every"`
 
-	// DrainTimeout bounds how long a graceful shutdown waits for live WebSocket
-	// (hijacked) app sessions to close before force-closing them. Sites with
+	// DrainTimeout bounds graceful shutdown and manual replica removal waits
+	// for live sessions to finish before forcing disconnection. Sites with
 	// long-lived sessions should raise it. Defaults to 60s.
 	DrainTimeout time.Duration `yaml:"drain_timeout"`
 

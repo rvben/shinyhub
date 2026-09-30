@@ -1338,8 +1338,8 @@ func TestAppsPayloadExposesFleetFields(t *testing.T) {
 // TestWorkerIsolationControlsWired guards the Configuration -> Scaling worker
 // isolation controls. app.js must read app.worker_isolation and
 // app.worker_max_workers and app.worker_warm_spares from the GET envelope,
-// include worker_isolation in the
-// scaling PATCH payload, and call workerCapacityLine so the host-capacity
+// include edited worker settings in the scaling PATCH payload, and call
+// workerCapacityLine so the host-capacity
 // helper line stays live. If any of these wires drift the controls silently
 // stop reflecting or persisting the isolation mode.
 func TestWorkerIsolationControlsWired(t *testing.T) {
@@ -1357,11 +1357,14 @@ func TestWorkerIsolationControlsWired(t *testing.T) {
 	assertContains(t, "app.js", "worker_warm_spares",
 		"app.js scaling populate must read app.worker_warm_spares from the GET envelope")
 
-	// Save path: include the isolation mode in the PATCH payload.
-	assertContains(t, "app.js", "worker_isolation: workerIsolation",
-		"saveScalingSettings must include worker_isolation in the PATCH payload")
-	assertContains(t, "app.js", "worker_warm_spares: workerWarmSpares",
-		"saveScalingSettings must include worker_warm_spares in the PATCH payload")
+	// Save path: submit edited fields without overwriting inherited worker
+	// settings or replica counts changed by autoscaling since the form loaded.
+	assertContains(t, "app.js", "scalingSettingsPatch(savedScaling, originalScalingSettings)",
+		"saveScalingSettings must submit only changed settings")
+	assertContains(t, "views/scaling-settings.js", "worker_isolation: 'worker-isolation'",
+		"the scaling snapshot must include the isolation control")
+	assertContains(t, "views/scaling-settings.js", "worker_warm_spares: 'worker-warm-spares'",
+		"the scaling snapshot must include the warm workers control")
 
 	// HTML: the isolation select and capacity helper must exist.
 	assertContains(t, "index.html", `id="worker-isolation"`,

@@ -39,6 +39,20 @@ Either flag may be set on its own; `--max-sessions-per-replica 0` resets the
 cap to the runtime default. Both knobs are validated client-side (replicas
 `>= 1`, cap `0..1000`) and applied atomically by `PATCH /api/apps/<slug>`.
 
+Increasing replicas starts only the additional processes and preserves existing
+sessions. Decreasing replicas drains the highest-index replicas before stopping
+them; surviving replicas continue serving. Sessions on a removed replica have
+up to `server.drain_timeout` (default `60s`) to finish before being disconnected.
+The requested count is persisted immediately and the pool converges in the
+background. If an additional replica fails to start, existing replicas remain
+available and the app reports degraded capacity; reissuing the replica setting
+through the CLI or API retries convergence.
+
+Changing only `max_sessions_per_replica` applies live, without restarting any
+process. Existing sessions remain admitted even when the cap is lowered.
+Worker isolation, worker structure, placement, and resource-limit changes still
+require a restart.
+
 **Via API** (for tooling integrations):
 
 ```bash

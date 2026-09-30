@@ -1,4 +1,5 @@
 import { createPersonActions } from '/static/views/person-actions.js';
+import { scalingSettingsSnapshot, scalingSettingsPatch } from '/static/views/scaling-settings.js';
 import { applyPeopleOnboarding, createInvitationList } from '/static/views/people-onboarding.js';
 import { createNewPersonController } from '/static/views/new-person.js';
 import { createSupportSessionAction } from '/static/views/support-session-settings.js';
@@ -3163,6 +3164,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // re-snapshots to clean. A nav/unload guard warns before losing unsaved edits,
   // so all settings tabs behave identically.
   const settingsSections = {};
+  let originalScalingSettings = {};
   function registerSettingsSection(name, getEls, saveBtnId, dirtyId) {
     const els = getEls();
     const rec = {
@@ -3415,10 +3417,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const groupedSizeInput = document.getElementById('worker-grouped-size');
     const maxWorkersInput = document.getElementById('worker-max-workers');
     const warmSparesInput = document.getElementById('worker-warm-spares');
-    isolationSelect.value = app.worker_isolation || 'multiplex';
+    isolationSelect.value = app.worker_isolation || app.effective_worker_isolation || 'multiplex';
     isolationSelect.dataset.original = isolationSelect.value;
     isolationSelect.dataset.appStatus = String(app.status ?? '');
-    isolationSelect.dataset.lifetimeSecs = app.worker_max_session_lifetime_secs != null ? String(app.worker_max_session_lifetime_secs) : '';
     groupedSizeInput.value = String(app.worker_grouped_size ?? 1);
     maxWorkersInput.value = String(app.worker_max_workers ?? 0);
     warmSparesInput.value = String(app.worker_warm_spares ?? 0);
@@ -3519,6 +3520,7 @@ document.addEventListener('DOMContentLoaded', () => {
     snapshotSettingsSection('usage-privacy');
     snapshotSettingsSection('resources');
     snapshotSettingsSection('hibernate');
+    originalScalingSettings = scalingSettingsSnapshot(document);
     snapshotSettingsSection('scaling');
     snapshotSettingsSection('render');
   }
@@ -4081,15 +4083,14 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
-    // Replica-count changes restart the app (apps.go redeployApp), which
-    // drops every active session. Cap changes are hot. Confirm before the
-    // disruptive case.
+    // Growing preserves live slots. Shrinking drains only removed slots,
+    // whose remaining sessions can be disconnected when the deadline expires.
     const replicasInput = document.getElementById('scaling-replicas');
     const originalReplicas = parseInt(replicasInput.dataset.original ?? '', 10);
-    const wasRunning = replicasInput.dataset.appStatus === 'running';
-    if (wasRunning && Number.isFinite(originalReplicas) && replicas !== originalReplicas) {
+    const wasRunning = ['running', 'degraded'].includes(replicasInput.dataset.appStatus);
+    if (wasRunning && Number.isFinite(originalReplicas) && replicas < originalReplicas) {
       const ok = window.confirm(
-        `Changing replicas from ${originalReplicas} to ${replicas} will restart the app and drop all active sessions. Continue?`,
+        `Reducing replicas from ${originalReplicas} to ${replicas} will drain the removed replicas. Sessions still using them when the drain timeout expires will be disconnected. Continue?`,
       );
       if (!ok) return;
     }
@@ -4099,7 +4100,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const isolationSelect = document.getElementById('worker-isolation');
     const workerIsolation = isolationSelect.value;
     const originalIsolation = isolationSelect.dataset.original ?? 'multiplex';
-    const wasRunningIso = isolationSelect.dataset.appStatus === 'running';
+    const wasRunningIso = ['running', 'degraded'].includes(isolationSelect.dataset.appStatus);
     if (wasRunningIso && workerIsolation !== originalIsolation) {
       const ok = window.confirm(
         `Changing worker isolation mode from ${originalIsolation} to ${workerIsolation} will restart the app and drop all active sessions. Continue?`,
@@ -4107,10 +4108,8 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!ok) return;
     }
 
-    const groupedSizeRaw = document.getElementById('worker-grouped-size').value.trim();
     const maxWorkersRaw = document.getElementById('worker-max-workers').value.trim();
     const warmSparesRaw = document.getElementById('worker-warm-spares').value.trim();
-    const workerGroupedSize = parseInt(groupedSizeRaw, 10);
     const workerMaxWorkers = parseInt(maxWorkersRaw, 10);
     const workerWarmSpares = parseInt(warmSparesRaw, 10);
     if (!Number.isFinite(workerWarmSpares) || workerWarmSpares < 0 || workerWarmSpares > 1000) {
@@ -4121,19 +4120,14 @@ document.addEventListener('DOMContentLoaded', () => {
       setError(errEl, 'Warm workers cannot exceed max workers.');
       return;
     }
-    const lifetimeRaw = isolationSelect.dataset.lifetimeSecs;
-    const workerMaxSessionLifetimeSecs = lifetimeRaw ? parseInt(lifetimeRaw, 10) : null;
-
-    const payload = {
-      replicas,
-      max_sessions_per_replica: cap,
-      worker_isolation: workerIsolation,
-      worker_grouped_size: Number.isFinite(workerGroupedSize) ? workerGroupedSize : 1,
-      worker_max_workers: Number.isFinite(workerMaxWorkers) ? workerMaxWorkers : 0,
-      worker_warm_spares: workerWarmSpares,
-    };
-    if (workerMaxSessionLifetimeSecs !== null && Number.isFinite(workerMaxSessionLifetimeSecs)) {
-      payload.worker_max_session_lifetime_secs = workerMaxSessionLifetimeSecs;
+    const savedScaling = scalingSettingsSnapshot(document);
+    const payload = scalingSettingsPatch(savedScaling, originalScalingSettings);
+    if (Object.keys(payload).length === 0) return;
+    const workerStructureChanged = ['worker_isolation', 'worker_grouped_size', 'worker_max_workers']
+      .some(key => Object.hasOwn(payload, key));
+    if (wasRunningIso && workerStructureChanged && workerIsolation === originalIsolation) {
+      const ok = window.confirm('Changing worker capacity will restart the app and drop all active sessions. Continue?');
+      if (!ok) return;
     }
     const btn = document.getElementById('scaling-save-btn');
     btn.disabled = true;
@@ -4160,6 +4154,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     statusEl.textContent = 'Saved.';
     setHidden(statusEl, false);
+    originalScalingSettings = savedScaling;
+    replicasInput.dataset.original = String(replicas);
+    isolationSelect.dataset.original = workerIsolation;
     snapshotSettingsSection('scaling');
     // Isolation is one half of the keep-warm advisory shown in the Hibernation
     // fieldset, so a save that switches mode re-evaluates it against the

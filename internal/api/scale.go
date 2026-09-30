@@ -29,6 +29,11 @@ const defaultMaxReplicas = 32
 func (s *Server) ScaleUp(slug string) (bool, error) {
 	release := s.acquireDeployLock(slug)
 	defer release()
+	// A manual settings request may have committed a target before its queued
+	// reconciliation takes this lock. Do not scale from that intermediate size.
+	if s.isRedeployInFlight(slug) {
+		return false, nil
+	}
 
 	app, err := s.store.GetAppBySlug(slug)
 	if err != nil {
@@ -60,6 +65,14 @@ func (s *Server) ScaleUp(slug string) (bool, error) {
 	if app.AutoscaleEnabled && app.Replicas >= app.AutoscaleMaxReplicas {
 		return false, nil
 	}
+	return s.scaleUpLocked(app, true)
+}
+
+// scaleUpLocked adds one trailing slot with the app operation lock held.
+// Manual reconciliation supplies the actual pool size in app.Replicas and
+// leaves the already-persisted requested size untouched.
+func (s *Server) scaleUpLocked(app *db.App, persistSize bool) (bool, error) {
+	slug := app.Slug
 
 	deployments, err := s.store.ListRecentDeployments(app.ID, 1)
 	if err != nil || len(deployments) == 0 {
@@ -70,14 +83,15 @@ func (s *Server) ScaleUp(slug string) (bool, error) {
 		return false, fmt.Errorf("scale up %s: %w", slug, err)
 	}
 
-	// Defragment before adding: if warm rows exist (desired_state='warm', status
-	// 'stopped' or 'suspended'), restore them all first and return immediately -
-	// thawing the frozen ones and cold-booting the rest. This keeps the pool
-	// contiguous - no parked row sits below a running one - and avoids adding a new
-	// index N when capacity is already parked at lower indices.
+	// Restore parked rows before adding: thaw frozen slots and cold-boot stopped
+	// ones. Autoscaling returns after restoration; a manual resize also adds the
+	// requested trailing slot. This keeps the serving pool contiguous.
 	reps, err := s.store.ListReplicas(app.ID)
 	if err != nil {
 		return false, fmt.Errorf("scale up %s: list replicas: %w", slug, err)
+	}
+	if persistSize && replicaRowSize(reps) != app.Replicas {
+		return false, nil // a failed manual resize still needs reconciliation
 	}
 	var warmVictims []warmVictim
 	for _, r := range reps {
@@ -118,7 +132,11 @@ func (s *Server) ScaleUp(slug string) (bool, error) {
 				Detail:       db.AuditDetail(map[string]any{"defrag": true, "restored": restored}),
 			})
 		}
-		return restored > 0, bootErr
+		if persistSize || bootErr != nil {
+			return restored > 0, bootErr
+		}
+		// A manual resize must also reach the requested total, so after
+		// restoring parked slots continue to add the trailing slot below.
 	}
 
 	newIndex := app.Replicas
@@ -239,9 +257,11 @@ func (s *Server) ScaleUp(slug string) (bool, error) {
 			rollbackStarted(true)
 			return false, fmt.Errorf("scale up %s: persist placement: %w", slug, err)
 		}
-	} else if err := s.store.UpdateAppReplicas(app.ID, total); err != nil {
-		rollbackStarted(true)
-		return false, fmt.Errorf("scale up %s: update replica count: %w", slug, err)
+	} else if persistSize {
+		if err := s.store.UpdateAppReplicas(app.ID, total); err != nil {
+			rollbackStarted(true)
+			return false, fmt.Errorf("scale up %s: update replica count: %w", slug, err)
+		}
 	}
 	return true, nil
 }
@@ -258,6 +278,9 @@ func (s *Server) ScaleUp(slug string) (bool, error) {
 func (s *Server) ScaleDown(slug string, grace time.Duration) (bool, error) {
 	release := s.acquireDeployLock(slug)
 	defer release()
+	if s.isRedeployInFlight(slug) {
+		return false, nil
+	}
 
 	app, err := s.store.GetAppBySlug(slug)
 	if err != nil {
@@ -288,27 +311,35 @@ func (s *Server) ScaleDown(slug string, grace time.Duration) (bool, error) {
 	if app.Replicas <= floor {
 		return false, nil
 	}
+	rows, err := s.store.ListReplicas(app.ID)
+	if err != nil {
+		return false, err
+	}
+	if replicaRowSize(rows) != app.Replicas {
+		return false, nil
+	}
+	return s.scaleDownLocked(app, grace, true)
+}
+
+// scaleDownLocked drains only the trailing slot with the operation lock held.
+func (s *Server) scaleDownLocked(app *db.App, grace time.Duration, persistSize bool) (bool, error) {
+	slug := app.Slug
 	victim := app.Replicas - 1
 
 	if s.proxy != nil {
 		s.proxy.DrainReplica(slug, victim)
 	}
-	// In clustered mode, persist drain intent to the DB so other instances'
-	// pool syncers can observe it and stop routing new sessions to this slot.
-	// This happens after the local CAS (DrainReplica) and before the wait so
-	// a standby starting its own syncer loop sees the intent immediately.
-	if s.clustered {
-		if err := s.store.SetReplicaDesiredState(app.ID, victim, "draining"); err != nil {
-			// Log and proceed: the intent is advisory for remote instances; the
-			// local drain wait and stop still happen normally.
-			slog.Warn("scale down: set desired_state draining", "slug", slug, "index", victim, "err", err)
-		}
+	// Persist intent before waiting so the dashboard observes draining even on
+	// a single node, and other instances stop admitting new sessions to the slot.
+	if err := s.store.SetReplicaDesiredState(app.ID, victim, "draining"); err != nil {
+		// The local drain remains active if the advisory write fails.
+		slog.Warn("scale down: set desired_state draining", "slug", slug, "index", victim, "err", err)
 	}
 	if s.proxy != nil {
 		s.waitForDrain(slug, victim, grace, s.clusteredFleetWait(app.ID, victim))
 	}
 	if s.manager != nil {
-		if err := s.manager.StopReplica(slug, victim); err != nil {
+		if err := s.manager.StopReplicaConfirmed(slug, victim); err != nil {
 			switch {
 			case errors.Is(err, process.ErrReplicaNotFound):
 				// A missing entry is benign (the replica may already be gone);
@@ -325,10 +356,8 @@ func (s *Server) ScaleDown(slug string, grace time.Duration) (bool, error) {
 				if s.proxy != nil {
 					s.proxy.UndrainReplica(slug, victim)
 				}
-				if s.clustered {
-					if rerr := s.store.SetReplicaDesiredState(app.ID, victim, "running"); rerr != nil {
-						slog.Warn("scale down: revert desired_state running", "slug", slug, "index", victim, "err", rerr)
-					}
+				if rerr := s.store.SetReplicaDesiredState(app.ID, victim, "running"); rerr != nil {
+					slog.Warn("scale down: revert desired_state running", "slug", slug, "index", victim, "err", rerr)
 				}
 				return false, fmt.Errorf("scale down %s: stop replica %d: %w", slug, victim, err)
 			}
@@ -362,10 +391,108 @@ func (s *Server) ScaleDown(slug string, grace time.Duration) (bool, error) {
 		if err := s.store.SetAppPlacement(app.ID, string(b), victim); err != nil {
 			return false, fmt.Errorf("scale down %s: persist placement: %w", slug, err)
 		}
-	} else if err := s.store.UpdateAppReplicas(app.ID, victim); err != nil {
-		return false, fmt.Errorf("scale down %s: update replica count: %w", slug, err)
+	} else if persistSize {
+		if err := s.store.UpdateAppReplicas(app.ID, victim); err != nil {
+			return false, fmt.Errorf("scale down %s: update replica count: %w", slug, err)
+		}
 	}
 	return true, nil
+}
+
+// resizeApp reconciles a manual replica edit without cycling surviving slots.
+// The DB app count is the requested size; replica rows describe the current
+// size. Re-read both after taking the lock so queued edits converge on the
+// latest request, and stop/delete cannot be undone by a queued resize.
+func (s *Server) resizeApp(slug string) {
+	defer s.clearRedeployInFlight(slug)
+	release := s.acquireDeployLock(slug)
+	defer release()
+	if err := s.resizeAppLocked(slug); err != nil {
+		slog.Error("resize app", "slug", slug, "err", err)
+		if updateErr := s.store.UpdateAppStatus(db.UpdateAppStatusParams{
+			Slug: slug, Status: "degraded", LastError: err.Error(),
+		}); updateErr != nil {
+			slog.Error("resize app: persist failure", "slug", slug, "err", updateErr)
+		}
+	}
+}
+
+func (s *Server) resizeAppLocked(slug string) error {
+	app, err := s.store.GetAppBySlug(slug)
+	if err != nil {
+		return err
+	}
+	if app.Status != "running" && app.Status != "degraded" {
+		return nil
+	}
+	if err := s.guardActivationLifecycle(app.ID, "resize "+slug); err != nil {
+		return err
+	}
+	if err := s.guardCompatibilityQuarantine(app.ID, "resize "+slug); err != nil {
+		return err
+	}
+	// Replica count is inert in elastic modes, whose workers are demand-driven.
+	if deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation) != "multiplex" {
+		return nil
+	}
+	if len(app.PlacementMap()) > 0 {
+		return fmt.Errorf("resize %s: explicit placement requires a topology change", slug)
+	}
+	rows, err := s.store.ListReplicas(app.ID)
+	if err != nil {
+		return err
+	}
+	actual := replicaRowSize(rows)
+	target := app.Replicas
+	grace := s.cfg.Server.DrainTimeout
+	if grace <= 0 {
+		grace = 60 * time.Second
+	}
+	for actual != target {
+		app.Replicas = actual
+		var changed bool
+		if actual < target {
+			changed, err = s.scaleUpLocked(app, false)
+		} else {
+			changed, err = s.scaleDownLocked(app, grace, false)
+		}
+		if err != nil {
+			return err
+		}
+		if !changed {
+			return fmt.Errorf("resize %s: pool did not converge", slug)
+		}
+		if actual < target {
+			actual++
+		} else {
+			actual--
+		}
+	}
+	// Clear a previous resize failure only when all requested slots are healthy.
+	rows, err = s.store.ListReplicas(app.ID)
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if row.Status != db.ReplicaStatusRunning &&
+			!(row.DesiredState == db.ReplicaDesiredWarm && (row.Status == "stopped" || row.Status == "suspended")) {
+			return nil
+		}
+	}
+	if app.Status == "degraded" {
+		return s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "running"})
+	}
+	return nil
+}
+
+func replicaRowSize(rows []*db.Replica) int {
+	size := 0
+	for _, row := range rows {
+		if row.Index >= size {
+			size = row.Index + 1
+		}
+	}
+	return size
 }
 
 // lastPopulatedTier returns the last tier in tierOrder with a positive replica

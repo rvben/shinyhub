@@ -5265,6 +5265,9 @@ type PatchAppSettingsParams struct {
 
 	SetReplicas bool
 	Replicas    int
+	// PreserveReplicaRows leaves live trailing slots available for draining;
+	// the runtime removes their rows only after confirming the processes stop.
+	PreserveReplicaRows bool
 
 	SetMaxSessions bool
 	MaxSessions    int
@@ -5365,7 +5368,7 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 		}
 	}
 	if p.SetReplicas {
-		if p.Replicas < priorReplicas {
+		if p.Replicas < priorReplicas && !p.PreserveReplicaRows {
 			if _, err := tx.Exec(
 				`DELETE FROM replicas WHERE app_id = ? AND idx >= ?`,
 				appID, p.Replicas,

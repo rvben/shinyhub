@@ -1395,6 +1395,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		CPUQuotaPercent:              cpuQuotaPercent,
 		SetReplicas:                  setReplicas,
 		Replicas:                     newReplicas,
+		PreserveReplicaRows:          app.Status == "running" || app.Status == "degraded",
 		SetMaxSessions:               setMaxSessions,
 		MaxSessions:                  newMaxSessions,
 		SetRenderSeconds:             setRenderSeconds,
@@ -1523,8 +1524,8 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// A resource-limit change must reach the running replicas: the cgroup/
-	// container ceiling is set at spawn, so the pool is cycled (same as a
-	// replica-count change). The prior values come from inside PatchAppSettings'
+	// container ceiling is set at spawn, so the pool is cycled. The prior
+	// values come from inside PatchAppSettings'
 	// transaction (not the pre-write app snapshot), so detection is free of a
 	// time-of-check/time-of-use race with a concurrent PATCH. Per-field "changed"
 	// (not merely "present in the PATCH") gates both the redeploy and the audit
@@ -1595,12 +1596,16 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	workerChanged := workerIsolationChanged || workerGroupedSizeChanged || workerMaxWorkersChanged || workerMaxSessionLifetimeChanged
-	if (replicasChanged || placementChanged || resourceChanged || workerChanged) && priorStatus == "running" {
+	if (placementChanged || resourceChanged || workerChanged) && (priorStatus == "running" || priorStatus == "degraded") {
 		// Mark in-flight synchronously before launching the goroutine so the
 		// first GET after this PATCH returns observes the redeploy even though
 		// the app row still reads "running". The redeploy goroutine clears it.
 		s.markRedeployInFlight(slug)
 		go s.redeployApp(slug)
+	} else if (replicasChanged || (setReplicas && priorStatus == "degraded")) &&
+		(priorStatus == "running" || priorStatus == "degraded") {
+		s.markRedeployInFlight(slug)
+		go s.resizeApp(slug)
 	}
 
 	var fetchErr error

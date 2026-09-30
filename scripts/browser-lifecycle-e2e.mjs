@@ -12,6 +12,7 @@ import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
+import { checkBrowserScaling } from './browser-scaling-checks.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(new URL('../loadtest/render/driver/package.json', import.meta.url));
@@ -38,7 +39,7 @@ process.once('SIGTERM', stop);
 let server, browser, context;
 const children = new Set();
 const sockets = new WeakMap();
-const report = { checks: [], status: 'failed', shiny: '1.6.3', readiness: [], browserErrors: [] };
+const report = { checks: [], status: 'failed', shiny: '1.8.0', readiness: [], browserErrors: [] };
 // Operator overrides must never redirect this test to an existing database/server.
 const inherited = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('SHINYHUB_')));
 const env = { ...inherited, XDG_CONFIG_HOME: join(state, 'config'), GOWORK: 'off', UV_PYTHON_DOWNLOADS: 'never', UV_PYTHON_PREFERENCE: 'only-system' };
@@ -120,7 +121,7 @@ try {
   await new Promise(resolve => reservation.close(resolve));
   const host = `http://127.0.0.1:${port}`;
   await writeFile(passwordFile, password, { mode: 0o600 });
-  await writeFile(config, `server:\n  host: 127.0.0.1\n  port: ${port}\n  render_capacity_cores: 4\n  shutdown_apps: stop\n  session_recheck_interval: ${sweepSeconds}s\nauth:\n  secret: ${randomBytes(32).toString('hex')}\ndatabase:\n  dsn: ${JSON.stringify(join(state, 'hub.db'))}\nstorage:\n  apps_dir: ${JSON.stringify(join(state, 'apps'))}\n  app_data_dir: ${JSON.stringify(join(state, 'app-data'))}\nlifecycle:\n  hibernate_timeout: 30m\n`, { mode: 0o600 });
+  await writeFile(config, `server:\n  host: 127.0.0.1\n  port: ${port}\n  render_capacity_cores: 4\n  drain_timeout: 5s\n  shutdown_apps: stop\n  session_recheck_interval: ${sweepSeconds}s\nauth:\n  secret: ${randomBytes(32).toString('hex')}\ndatabase:\n  dsn: ${JSON.stringify(join(state, 'hub.db'))}\nstorage:\n  apps_dir: ${JSON.stringify(join(state, 'apps'))}\n  app_data_dir: ${JSON.stringify(join(state, 'app-data'))}\nlifecycle:\n  hibernate_timeout: 30m\n`, { mode: 0o600 });
   await command([binary, 'init', '--config', config, '--admin-user', username, '--admin-password-file', passwordFile], 'init', { cwd: state });
   const log = createWriteStream(join(work, 'server.log'), { mode: 0o600 });
   server = spawn(binary, ['serve', '--config', config, '--no-browser'], { cwd: state, env, detached: true });
@@ -207,12 +208,14 @@ try {
     await page.getByRole('button', { name: 'Recalculate' }).click();
     await output(page, 'v1', 2, 500, original);
   });
+  const originalCalculations = await checkBrowserScaling({ browser, context, page, host, username, password,
+    api, request, check, poll, output, original, sockets });
   let fresh, second;
   await check('rolling deployment preserves old sessions and serves v2 to new sessions', async () => {
     await writeFile(join(app, 'version.txt'), 'v2\n');
     await deploy();
     await page.getByRole('button', { name: 'Recalculate' }).click();
-    await output(page, 'v1', 3, 500, original);
+    await output(page, 'v1', originalCalculations + 1, 500, original);
     fresh = await context.newPage();
     await fresh.goto(appURL);
     second = await output(fresh, 'v2', 0);

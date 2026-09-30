@@ -211,7 +211,8 @@ func (s *Server) clearRedeployInFlight(slug string) {
 	s.redeployInFlight[slug]--
 }
 
-// isRedeployInFlight reports whether slug's pool is currently being cycled.
+// isRedeployInFlight reports whether an asynchronous pool reconfiguration
+// (resize or restart) is queued or executing.
 func (s *Server) isRedeployInFlight(slug string) bool {
 	s.redeployMu.Lock()
 	defer s.redeployMu.Unlock()

@@ -511,8 +511,8 @@ func (s *Server) acquireDataLock(slug string) (release func()) {
 }
 
 // redeployApp stops the current pool and restarts it at the replica count stored in the DB.
-// It is called asynchronously (go s.redeployApp(slug)) when the replica count changes while
-// the app is running. On failure the app status is set to "degraded".
+// It is called asynchronously for structural or resource changes while the app
+// is running. Replica-only edits use resizeApp. On failure status is "degraded".
 func (s *Server) redeployApp(slug string) {
 	// Drop the reference the PATCH handler added before launching this
 	// goroutine, on every return path. Each launched goroutine holds exactly
@@ -572,6 +572,22 @@ func (s *Server) redeployApp(slug string) {
 	}
 	if s.proxy != nil {
 		s.proxy.Deregister(slug)
+	}
+	// Live settings edits retain trailing rows until their processes are
+	// stopped. A combined structural/size change cycles the pool, so prune
+	// those now rather than leaving old slots available to pool syncers.
+	rows, err := s.store.ListReplicas(app.ID)
+	if err != nil {
+		slog.Error("redeploy: list replicas for pruning", "slug", slug, "err", err)
+		return
+	}
+	for _, row := range rows {
+		if row.Index >= app.Replicas {
+			if err := s.store.DeleteReplica(app.ID, row.Index); err != nil {
+				slog.Error("redeploy: prune stopped replica", "slug", slug, "index", row.Index, "err", err)
+				return
+			}
+		}
 	}
 
 	redeployDefaultMem, redeployDefaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)

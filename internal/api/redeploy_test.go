@@ -249,7 +249,7 @@ func TestPatchApp_WarmSparesDoesNotBootStoppedApp(t *testing.T) {
 // TestPatchApp_ReplicasUnchanged_NoRedeployNoAudit proves that PATCHing
 // replicas to the value the pool already runs at is a no-op: it neither
 // cycles the pool nor writes a phantom update_app audit event. A real change
-// to the same field still triggers both, naming the field in the detail.
+// adds replicas incrementally and names the field in the audit detail.
 func TestPatchApp_ReplicasUnchanged_NoRedeployNoAudit(t *testing.T) {
 	const slug = "replicas-noop"
 	store, app := newRedeployTestStore(t, slug, "running")
@@ -263,13 +263,20 @@ func TestPatchApp_ReplicasUnchanged_NoRedeployNoAudit(t *testing.T) {
 	if err := store.UpdateAppReplicas(app.ID, 2); err != nil {
 		t.Fatal(err)
 	}
+	for i := 0; i < 2; i++ {
+		if err := store.UpsertReplica(db.UpsertReplicaParams{
+			AppID: app.ID, Index: i, Status: "running", DesiredState: "running",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	s := New(&config.Config{Auth: config.AuthConfig{Secret: "test-secret"}}, store, nil, proxy.New())
 	entered := make(chan struct{}, 1)
-	s.SetDeployRunForTest(func(deploy.Params) (*deploy.PoolResult, error) {
+	s.deployReplica = func(_ deploy.Params, index int) (*deploy.Result, error) {
 		entered <- struct{}{}
-		return &deploy.PoolResult{}, nil
-	})
+		return &deploy.Result{Index: index, PID: 4242, Port: 9100 + index}, nil
+	}
 	token, _ := auth.IssueJWT(app.OwnerID, "bob", "admin", "test-secret")
 
 	patch := func(body map[string]any) {
@@ -315,8 +322,9 @@ func TestPatchApp_ReplicasUnchanged_NoRedeployNoAudit(t *testing.T) {
 
 	patch(map[string]any{"replicas": 3})
 	if !redeployed() {
-		t.Fatal("changed replicas did not trigger a pool redeploy")
+		t.Fatal("changed replicas did not start an additional replica")
 	}
+	waitResize(t, func() bool { return !s.isRedeployInFlight(slug) })
 	if n := countUpdateApp(); n != 1 {
 		t.Errorf("real replicas change logged %d update_app events, want 1", n)
 	}
