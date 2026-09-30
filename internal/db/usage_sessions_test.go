@@ -198,7 +198,7 @@ func TestUsageSessionInsertClampsCapturedAndCommittedPolicies(t *testing.T) {
 		if mode != "inherit" {
 			value = &mode
 		}
-		if _, _, _, _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
+		if _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
 			Slug: app.Slug, SetUsageIdentityMode: true, UsageIdentityMode: value,
 		}); err != nil {
 			t.Fatalf("set override %s: %v", mode, err)

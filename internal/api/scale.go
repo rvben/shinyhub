@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/db"
@@ -399,48 +400,69 @@ func (s *Server) scaleDownLocked(app *db.App, grace time.Duration, persistSize b
 	return true, nil
 }
 
-// resizeApp reconciles a manual replica edit without cycling surviving slots.
-// The DB app count is the requested size; replica rows describe the current
-// size. Re-read both after taking the lock so queued edits converge on the
-// latest request, and stop/delete cannot be undone by a queued resize.
-func (s *Server) resizeApp(slug string) {
-	defer s.clearRedeployInFlight(slug)
-	release := s.acquireDeployLock(slug)
-	defer release()
-	if err := s.resizeAppLocked(slug); err != nil {
+// cycleResize serves a replica-count-only settings redeploy under the caller's
+// deploy lock: it grows or shrinks the live pool to the stored count without
+// cycling surviving slots, and reports the outcome the way cycleRedeploy does.
+// A failure marks the app degraded with the error, so the next replica edit
+// retries the resize. A panic is recovered and reported as a failure.
+func (s *Server) cycleResize(slug string) (outcome, reason string) {
+	defer func() {
+		if p := recover(); p != nil {
+			slog.Error("resize app: panic", "slug", slug, "panic", p, "stack", string(debug.Stack()))
+			outcome, reason = db.RedeployFailed, fmt.Sprintf("internal error: %v", p)
+		}
+	}()
+	outcome, reason, err := s.resizeAppLocked(slug)
+	if err != nil {
 		slog.Error("resize app", "slug", slug, "err", err)
 		if updateErr := s.store.UpdateAppStatus(db.UpdateAppStatusParams{
 			Slug: slug, Status: "degraded", LastError: err.Error(),
 		}); updateErr != nil {
 			slog.Error("resize app: persist failure", "slug", slug, "err", updateErr)
 		}
+		return db.RedeployFailed, err.Error()
 	}
+	return outcome, reason
 }
 
-func (s *Server) resizeAppLocked(slug string) error {
+// resizeAppLocked reconciles a manual replica edit without cycling surviving
+// slots. The DB app count is the requested size; replica rows describe the
+// current size. Both are read under the deploy lock, so queued edits converge
+// on the latest request and a stop or delete is not undone by a queued resize.
+// A returned error is a failure; otherwise the outcome says whether the pool
+// reached the requested size with every slot healthy.
+func (s *Server) resizeAppLocked(slug string) (outcome, reason string, err error) {
 	app, err := s.store.GetAppBySlug(slug)
 	if err != nil {
-		return err
+		return "", "", fmt.Errorf("read app: %w", err)
 	}
 	if app.Status != "running" && app.Status != "degraded" {
-		return nil
+		return db.RedeploySkipped, "not_running", nil
 	}
+	// A guard that could not read its state is a failure, not a skip: only a
+	// condition the guard actually observed may report the benign outcome.
 	if err := s.guardActivationLifecycle(app.ID, "resize "+slug); err != nil {
-		return err
+		if errors.Is(err, errScheduleActivationInFlight) {
+			return db.RedeploySkipped, "activation_deferred", nil
+		}
+		return "", "", err
 	}
 	if err := s.guardCompatibilityQuarantine(app.ID, "resize "+slug); err != nil {
-		return err
+		if errors.Is(err, errCompatibilityQuarantined) {
+			return db.RedeploySkipped, "quarantined", nil
+		}
+		return "", "", err
 	}
 	// Replica count is inert in elastic modes, whose workers are demand-driven.
 	if deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation) != "multiplex" {
-		return nil
+		return db.RedeployCompleted, "", nil
 	}
 	if len(app.PlacementMap()) > 0 {
-		return fmt.Errorf("resize %s: explicit placement requires a topology change", slug)
+		return "", "", fmt.Errorf("resize %s: explicit placement requires a topology change", slug)
 	}
 	rows, err := s.store.ListReplicas(app.ID)
 	if err != nil {
-		return err
+		return "", "", err
 	}
 	actual := replicaRowSize(rows)
 	target := app.Replicas
@@ -457,10 +479,10 @@ func (s *Server) resizeAppLocked(slug string) error {
 			changed, err = s.scaleDownLocked(app, grace, false)
 		}
 		if err != nil {
-			return err
+			return "", "", err
 		}
 		if !changed {
-			return fmt.Errorf("resize %s: pool did not converge", slug)
+			return "", "", fmt.Errorf("resize %s: pool did not converge", slug)
 		}
 		if actual < target {
 			actual++
@@ -471,18 +493,24 @@ func (s *Server) resizeAppLocked(slug string) error {
 	// Clear a previous resize failure only when all requested slots are healthy.
 	rows, err = s.store.ListReplicas(app.ID)
 	if err != nil {
-		return err
+		return "", "", err
 	}
+	unhealthy := 0
 	for _, row := range rows {
 		if row.Status != db.ReplicaStatusRunning &&
 			!(row.DesiredState == db.ReplicaDesiredWarm && (row.Status == "stopped" || row.Status == "suspended")) {
-			return nil
+			unhealthy++
 		}
 	}
-	if app.Status == "degraded" {
-		return s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "running"})
+	if unhealthy > 0 {
+		return db.RedeployPartial, fmt.Sprintf("%d of %d replicas are not running", unhealthy, len(rows)), nil
 	}
-	return nil
+	if app.Status == "degraded" {
+		if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "running"}); err != nil {
+			return "", "", err
+		}
+	}
+	return db.RedeployCompleted, "", nil
 }
 
 func replicaRowSize(rows []*db.Replica) int {

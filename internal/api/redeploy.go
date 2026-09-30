@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"sync"
 	"time"
@@ -510,10 +511,21 @@ func (s *Server) acquireDataLock(slug string) (release func()) {
 	return m.Unlock
 }
 
-// redeployApp stops the current pool and restarts it at the replica count stored in the DB.
-// It is called asynchronously for structural or resource changes while the app
-// is running. Replica-only edits use resizeApp. On failure status is "degraded".
-func (s *Server) redeployApp(slug string) {
+// redeployApp serves settings redeploy seq for slug. A seq that changed only
+// the replica count resizes the live pool; any other pool-shape change stops
+// the current pool and restarts it with the settings stored in the DB. The
+// PATCH handler launches it asynchronously for every committed pool-shape
+// change (or replica repair) on a running or degraded app, and the lifecycle
+// owner relaunches any seq left owed by a process that died.
+//
+// Only one call ever serves a given seq, and only while the newest launched seq
+// is seq: the claim in ClaimRedeploy discards a duplicate, a seq superseded by
+// a newer launch (that redeploy reads the same current settings), and a call
+// from an instance that has lost the control-plane lease. The claimant records
+// how the cycle ended on the app row on every return path, so a client and a
+// clustered peer can tell a completed cycle from one that was skipped, failed
+// or left replicas down.
+func (s *Server) redeployApp(slug string, seq int64) {
 	// Drop the reference the PATCH handler added before launching this
 	// goroutine, on every return path. Each launched goroutine holds exactly
 	// one reference, so the marker stays set until the last redeploy for this
@@ -531,18 +543,84 @@ func (s *Server) redeployApp(slug string) {
 	release := s.acquireDeployLock(slug)
 	defer release()
 
+	ctx := context.Background()
+	lease := s.currentOwnerLease()
+	claimed, err := s.retryRedeployStore(func() (bool, error) {
+		return s.store.ClaimRedeploy(ctx, lease, slug, seq)
+	})
+	if err != nil {
+		slog.Warn("redeployApp: claim not taken", "slug", slug, "seq", seq, "err", err)
+		return
+	}
+	if !claimed {
+		slog.Info("redeployApp: seq already served or superseded", "slug", slug, "seq", seq)
+		return
+	}
+
+	// A replica-count-only change resizes the live pool, keeping surviving
+	// replicas and their sessions. Any seq since the last reported outcome that
+	// changed more than the count needs the whole pool cycled, including one
+	// this seq superseded or one whose own cycle failed or was skipped. If
+	// that cannot be read, cycling is the safe choice: it applies every
+	// stored setting.
+	full, err := s.store.RedeployNeedsFullCycle(ctx, slug)
+	if err != nil {
+		slog.Warn("redeployApp: read cycle kind, cycling the pool", "slug", slug, "seq", seq, "err", err)
+		full = true
+	}
+	var outcome, reason string
+	if full {
+		outcome, reason = s.cycleRedeploy(slug)
+	} else {
+		outcome, reason = s.cycleResize(slug)
+	}
+	recorded, err := s.retryRedeployStore(func() (bool, error) {
+		return s.store.RecordRedeployOutcome(ctx, lease, slug, seq, outcome, reason)
+	})
+	switch {
+	case err != nil:
+		slog.Error("redeployApp: record outcome", "slug", slug, "seq", seq, "outcome", outcome, "err", err)
+	case !recorded:
+		slog.Warn("redeployApp: outcome discarded, claim no longer held", "slug", slug, "seq", seq, "outcome", outcome)
+	default:
+		slog.Info("redeployApp: finished", "slug", slug, "seq", seq, "outcome", outcome, "reason", reason)
+	}
+}
+
+// cycleRedeploy performs one settings redeploy under the caller's deploy lock
+// and reports its outcome (db.RedeployCompleted, Partial, Skipped or Failed)
+// with a reason. A panic is recovered and reported as a failure, so the claimed
+// seq is never left without an outcome while its process lives on.
+func (s *Server) cycleRedeploy(slug string) (outcome, reason string) {
+	defer func() {
+		if p := recover(); p != nil {
+			slog.Error("redeployApp: panic", "slug", slug, "panic", p, "stack", string(debug.Stack()))
+			outcome, reason = db.RedeployFailed, fmt.Sprintf("internal error: %v", p)
+		}
+	}()
+
 	app, err := s.store.GetAppBySlug(slug)
 	if err != nil {
 		slog.Error("redeployApp: get app", "slug", slug, "err", err)
-		return
+		return db.RedeployFailed, "read app: " + err.Error()
 	}
+	// A guard that could not read its state is a failure, not a skip: only a
+	// condition the guard actually observed may report the benign outcome.
 	if err := s.guardActivationLifecycle(app.ID, "redeploy "+slug); err != nil {
-		slog.Info("redeployApp: deferred for scheduled data activation", "slug", slug, "err", err)
-		return
+		if errors.Is(err, errScheduleActivationInFlight) {
+			slog.Info("redeployApp: deferred for scheduled data activation", "slug", slug, "err", err)
+			return db.RedeploySkipped, "activation_deferred"
+		}
+		slog.Error("redeployApp: activation guard", "slug", slug, "err", err)
+		return db.RedeployFailed, err.Error()
 	}
 	if err := s.guardCompatibilityQuarantine(app.ID, "redeploy "+slug); err != nil {
-		slog.Warn("redeployApp: compatibility quarantine prevents consumer boot", "slug", slug, "err", err)
-		return
+		if errors.Is(err, errCompatibilityQuarantined) {
+			slog.Warn("redeployApp: compatibility quarantine prevents consumer boot", "slug", slug, "err", err)
+			return db.RedeploySkipped, "quarantined"
+		}
+		slog.Error("redeployApp: quarantine guard", "slug", slug, "err", err)
+		return db.RedeployFailed, err.Error()
 	}
 
 	// A concurrent stop, hibernate, or delete may have changed the app's intent
@@ -552,19 +630,23 @@ func (s *Server) redeployApp(slug string) {
 	// the operator just tore down.
 	if app.Status != "running" && app.Status != "degraded" {
 		slog.Info("redeployApp: app no longer running, skipping pool cycle", "slug", slug, "status", app.Status)
-		return
+		return db.RedeploySkipped, "not_running"
 	}
 
 	deployments, err := s.store.ListRecentDeployments(app.ID, 1)
-	if err != nil || len(deployments) == 0 {
+	if err != nil {
+		slog.Error("redeployApp: list deployments", "slug", slug, "err", err)
+		return db.RedeployFailed, "list deployments: " + err.Error()
+	}
+	if len(deployments) == 0 {
 		slog.Warn("redeployApp: no deployments", "slug", slug)
-		return
+		return db.RedeploySkipped, "no_deployment"
 	}
 	current := deployments[0]
 
 	if err := s.checkColocatedShared(app.ID, s.tiersForApp(app)); err != nil {
 		slog.Error("redeploy: cross-node shared mount rejected", "slug", slug, "err", err)
-		return
+		return db.RedeployFailed, err.Error()
 	}
 
 	if s.manager != nil {
@@ -579,13 +661,15 @@ func (s *Server) redeployApp(slug string) {
 	rows, err := s.store.ListReplicas(app.ID)
 	if err != nil {
 		slog.Error("redeploy: list replicas for pruning", "slug", slug, "err", err)
-		return
+		_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"})
+		return db.RedeployFailed, "list replicas for pruning: " + err.Error()
 	}
 	for _, row := range rows {
 		if row.Index >= app.Replicas {
 			if err := s.store.DeleteReplica(app.ID, row.Index); err != nil {
 				slog.Error("redeploy: prune stopped replica", "slug", slug, "index", row.Index, "err", err)
-				return
+				_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"})
+				return db.RedeployFailed, fmt.Sprintf("prune stopped replica %d: %v", row.Index, err)
 			}
 		}
 	}
@@ -595,7 +679,7 @@ func (s *Server) redeployApp(slug string) {
 	if gateErr != nil {
 		slog.Error("redeploy: acquire startup-data compatibility fence", "slug", slug, "err", gateErr)
 		_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"})
-		return
+		return db.RedeployFailed, "acquire startup-data compatibility fence: " + gateErr.Error()
 	}
 	defer releaseConsumerBoot()
 	redeployParams := s.withTierPlacement(deploy.Params{
@@ -630,7 +714,7 @@ func (s *Server) redeployApp(slug string) {
 		if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"}); err != nil {
 			slog.Error("redeployApp: update status", "slug", slug, "err", err)
 		}
-		return
+		return db.RedeployFailed, "deploy failed: " + err.Error()
 	}
 
 	var replicaPersistenceErr error
@@ -664,7 +748,7 @@ func (s *Server) redeployApp(slug string) {
 		}
 		_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"})
 		slog.Error("redeployApp: consumer provenance persistence failed; pool stopped", "slug", slug, "err", replicaPersistenceErr)
-		return
+		return db.RedeployFailed, "replica state could not be persisted; pool stopped"
 	}
 	for _, idx := range result.Failed {
 		if err := s.store.UpsertReplica(db.UpsertReplicaParams{
@@ -677,5 +761,101 @@ func (s *Server) redeployApp(slug string) {
 	}
 	if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "running"}); err != nil {
 		slog.Error("redeployApp: update status", "slug", slug, "err", err)
+	}
+	if len(result.Failed) > 0 {
+		return db.RedeployPartial, replicasFailedReason(result)
+	}
+	return db.RedeployCompleted, ""
+}
+
+// replicasFailedReason describes a pool start that left some replicas down.
+func replicasFailedReason(result *deploy.PoolResult) string {
+	return fmt.Sprintf("%d of %d replicas failed to start", len(result.Failed), len(result.Failed)+len(result.Replicas))
+}
+
+// currentOwnerLease returns the control-plane lease this instance holds now,
+// or nil when no elector is wired (tests), which runs lease-fenced writes
+// unfenced. A non-owner reports epoch 0, which every fenced write rejects.
+func (s *Server) currentOwnerLease() *db.OwnerLease {
+	if s.ownerLease == nil {
+		return nil
+	}
+	return s.ownerLease()
+}
+
+// outcomeWriteBackoff is the wait before each retry of a failed claim or
+// outcome write. A seq never claimed or never reported stays owed, which
+// clients report as not applied rather than as success, so a transient
+// database error must not be what leaves it there.
+var outcomeWriteBackoff = []time.Duration{250 * time.Millisecond, time.Second, 2 * time.Second, 4 * time.Second}
+
+// retryRedeployStore runs a redeploy bookkeeping store call until it succeeds,
+// the lease is found stale (a successor owns the app and retrying cannot help),
+// or the backoff runs out.
+func (s *Server) retryRedeployStore(call func() (bool, error)) (bool, error) {
+	sleep := s.outcomeRetrySleep
+	if sleep == nil {
+		sleep = time.Sleep
+	}
+	recorded, err := call()
+	for _, wait := range outcomeWriteBackoff {
+		if err == nil || errors.Is(err, db.ErrOwnerFenced) {
+			break
+		}
+		slog.Warn("settings redeploy bookkeeping failed; retrying", "err", err, "in", wait)
+		sleep(wait)
+		recorded, err = call()
+	}
+	return recorded, err
+}
+
+// recordBootOutcome records how a restart, deploy or rollback that booted the
+// pool on settings seq ended. It is bookkeeping after the pool change and
+// never fails the request.
+func (s *Server) recordBootOutcome(appID int64, slug string, seq int64, outcome, reason string) {
+	lease := s.currentOwnerLease()
+	if _, err := s.retryRedeployStore(func() (bool, error) {
+		return s.store.RecordBootOutcome(context.Background(), lease, appID, seq, outcome, reason)
+	}); err != nil {
+		slog.Error("record settings redeploy outcome after boot", "slug", slug, "seq", seq, "outcome", outcome, "err", err)
+	}
+}
+
+// recordPoolBoot records how a deploy or rollback that booted the pool on
+// settings seq ended: completed, partial when replicas failed to start, or
+// skipped as not running when a deploy kept a stopped app down, since the
+// stored settings then apply at its next start.
+func (s *Server) recordPoolBoot(appID int64, slug string, seq int64, verb string, result *deploy.PoolResult, keptStopped bool) {
+	switch {
+	case keptStopped:
+		s.recordBootOutcome(appID, slug, seq, db.RedeploySkipped, "not_running")
+	case result != nil && len(result.Failed) > 0:
+		s.recordBootOutcome(appID, slug, seq, db.RedeployPartial, verb+": "+replicasFailedReason(result))
+	default:
+		s.recordBootOutcome(appID, slug, seq, db.RedeployCompleted, verb)
+	}
+}
+
+// RelaunchOwedRedeploys launches every settings redeploy whose seq was
+// committed but never reported, typically because the process serving it
+// exited. The lifecycle owner calls it once recovery is complete; the claim
+// fence discards any of them another call already serves. It runs once per
+// ownership span and re-sending the same settings arms nothing, so the scan
+// is retried through a transient store failure rather than abandoned.
+func (s *Server) RelaunchOwedRedeploys() {
+	var owed []db.OwedRedeploy
+	_, err := s.retryRedeployStore(func() (bool, error) {
+		var err error
+		owed, err = s.store.ListOwedRedeploys()
+		return err == nil, err
+	})
+	if err != nil {
+		slog.Error("relaunch owed settings redeploys", "err", err)
+		return
+	}
+	for _, o := range owed {
+		slog.Info("relaunching owed settings redeploy", "slug", o.Slug, "seq", o.Seq)
+		s.markRedeployInFlight(o.Slug)
+		go s.redeployApp(o.Slug, o.Seq)
 	}
 }

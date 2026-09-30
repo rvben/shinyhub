@@ -62,6 +62,10 @@ type serverCapabilities struct {
 	// pyproject.toml declares is refused with 422, so a CLI can run the same
 	// check on the archive it is about to upload and report it at plan time.
 	StaleUVLockRefusal bool `json:"stale_uv_lock_refusal"`
+	// RedeployOutcome: GET /api/apps/{slug} reports redeploy_seq_launched and
+	// last_redeploy, so a client that changed the pool shape can wait for the
+	// settings redeploy it launched and learn whether it completed.
+	RedeployOutcome bool `json:"redeploy_outcome"`
 }
 
 // handleServerInfo advertises server capability flags so a fleet-aware CLI
@@ -91,6 +95,7 @@ func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 			ScheduleRefreshStale:      true,
 			DeployPreflight:           true,
 			StaleUVLockRefusal:        true,
+			RedeployOutcome:           true,
 		},
 		Runtimes: detectRuntimes(),
 	})

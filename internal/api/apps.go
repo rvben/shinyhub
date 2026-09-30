@@ -1381,7 +1381,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	// never leaves the row half-updated. The managed_by marker is a separate
 	// follow-up write (SetAppManagedBy) that runs after this transaction commits;
 	// the post-patch refetch exposes the final consistent state to the caller.
-	priorStatus, priorReplicas, priorMemoryLimitMB, priorCPUQuotaPercent, projectCreated, err := s.store.PatchAppSettings(db.PatchAppSettingsParams{
+	patched, err := s.store.PatchAppSettings(db.PatchAppSettingsParams{
 		Slug:                         slug,
 		SetHibernate:                 setHibernateTimeout,
 		HibernateMinutes:             hibernateTimeout,
@@ -1416,6 +1416,10 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		WorkerWarmSpares:             newWorkerWarmSpares,
 		SetWorkerMaxSessionLifetime:  setWorkerMaxSessionLifetime,
 		WorkerMaxSessionLifetimeSecs: newWorkerMaxSessionLifetime,
+		SetPlacement:                 setPlacement || clearPlacement,
+		Placement:                    placementJSON,
+		PlacementTotal:               placementTotal,
+		ArmRedeploy:                  true,
 	})
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
@@ -1425,6 +1429,18 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		reqLog(r).Error("patch app settings failed", "slug", slug, "err", err)
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
+	}
+	priorStatus, priorReplicas := patched.PriorStatus, patched.PriorReplicas
+	// The settings and the owed redeploy committed together, so the redeploy
+	// is launched on every return path from here, the late-write 500s below
+	// included: a committed pool change always gets its cycle. The in-flight
+	// marker is set synchronously so the first GET after this PATCH observes
+	// the redeploy even though the row still reads "running"; the goroutine
+	// clears it. Deferred after releaseSettings, so it runs first and the
+	// goroutine then waits for this handler to release the deploy lock.
+	if seq := patched.RedeploySeq; seq > 0 {
+		s.markRedeployInFlight(slug)
+		defer func() { go s.redeployApp(slug, seq) }()
 	}
 	if setUsageIdentityMode {
 		newOverride := ""
@@ -1486,24 +1502,6 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Placement is the authoritative writer for replica_placement + the derived
-	// replica count, so it runs after the core settings transaction. Clearing
-	// keeps the current replica count (all replicas on the default tier).
-	if setPlacement || clearPlacement {
-		total := placementTotal
-		if clearPlacement {
-			total, placementJSON = app.Replicas, ""
-		}
-		if err := s.store.SetAppPlacement(app.ID, placementJSON, total); err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				writeError(w, http.StatusNotFound, "not found")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "internal server error")
-			return
-		}
-	}
-
 	// Autoscale config is independent of the pool shape, so it never triggers a
 	// redeploy; the controller picks up the change on its next scan.
 	if setAutoscale {
@@ -1530,10 +1528,9 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	// time-of-check/time-of-use race with a concurrent PATCH. Per-field "changed"
 	// (not merely "present in the PATCH") gates both the redeploy and the audit
 	// entry, so a no-op PATCH neither restarts nor logs a phantom change.
-	oldMemoryLimitMB, oldCPUQuotaPercent := priorMemoryLimitMB, priorCPUQuotaPercent
+	oldMemoryLimitMB, oldCPUQuotaPercent := patched.PriorMem, patched.PriorCPU
 	memChanged := setMemoryLimitMB && !intPtrEqual(oldMemoryLimitMB, memoryLimitMB)
 	cpuChanged := setCPUQuotaPercent && !intPtrEqual(oldCPUQuotaPercent, cpuQuotaPercent)
-	resourceChanged := memChanged || cpuChanged
 
 	// Same "changed", not merely "present", rule as the resource limits above:
 	// requesting the pool's current shape or a worker dial's current value is a
@@ -1595,18 +1592,6 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			s.proxy.ReconcileElasticWarmSpares(slug)
 		}
 	}
-	workerChanged := workerIsolationChanged || workerGroupedSizeChanged || workerMaxWorkersChanged || workerMaxSessionLifetimeChanged
-	if (placementChanged || resourceChanged || workerChanged) && (priorStatus == "running" || priorStatus == "degraded") {
-		// Mark in-flight synchronously before launching the goroutine so the
-		// first GET after this PATCH returns observes the redeploy even though
-		// the app row still reads "running". The redeploy goroutine clears it.
-		s.markRedeployInFlight(slug)
-		go s.redeployApp(slug)
-	} else if (replicasChanged || (setReplicas && priorStatus == "degraded")) &&
-		(priorStatus == "running" || priorStatus == "degraded") {
-		s.markRedeployInFlight(slug)
-		go s.resizeApp(slug)
-	}
 
 	var fetchErr error
 	app, fetchErr = s.store.GetAppBySlug(slug)
@@ -1649,7 +1634,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			ResourceID: slug, Detail: detail, IPAddress: s.ClientIP(r), RunID: s.knownFleetRunID(r),
 		})
 	}
-	if projectCreated {
+	if patched.ProjectCreated {
 		s.audit(r, db.AuditProjectCreate, "project", newProjectSlug, `{"implicit":true}`)
 	}
 	effectiveRenderSeconds := app.RenderSeconds
@@ -1658,6 +1643,9 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	}
 	effectiveCap := deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica)
 	resp := map[string]any{"app": app}
+	if patched.RedeploySeq > 0 {
+		resp["redeploy_seq"] = patched.RedeploySeq
+	}
 	if block := s.buildRenderPacingBlock(effectiveRenderSeconds, effectiveCap); block != nil {
 		resp["render_pacing"] = block
 	}
@@ -2418,6 +2406,9 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	stoppedByOperator = app.Status == "stopped" && r.URL.Query().Get("start") != "true"
+	// The settings redeploy this deploy's boot supersedes, read under the lock
+	// so a redeploy launched after it stays owed and reports on its own.
+	bootedSeq := app.RedeploySeqLaunched
 
 	// Enforce per-app disk quota INSIDE the lock: the new extracted version
 	// has already been written, so DirSize now reflects the post-deploy
@@ -3008,7 +2999,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		// Revert manifest [app] settings so the restored old pool runs under
 		// the settings it was deployed with, not the failed bundle's.
 		if manifestApplied {
-			if _, _, _, _, _, rerr := s.store.PatchAppSettings(db.PatchAppSettingsParams{
+			if _, rerr := s.store.PatchAppSettings(db.PatchAppSettingsParams{
 				Slug:                         slug,
 				SetHibernate:                 true,
 				HibernateMinutes:             preManifestApp.HibernateTimeoutMinutes,
@@ -3321,6 +3312,12 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Once promoted, the pool is on its new bundle and the stored settings
+	// whatever the request does next, so the boot outcome is recorded here:
+	// ahead of manifest configuration that can still fail the request, and
+	// ahead of the read of the row the response carries, which would otherwise
+	// show the outcome this boot replaced.
+	s.recordPoolBoot(app.ID, slug, bootedSeq, "deploy", result, keepStopped)
 
 	// Record that this bundle's environment is built and its post-deploy hooks
 	// have run, so restoring it later is an activation rather than a rebuild.
@@ -3562,6 +3559,16 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 	// a superseded activation, or a candidate that failed and was confirmed
 	// stopped, no longer needs its result cache.
 	defer s.pruneAppCache(slug, app.ID)
+	// Re-read the row under the lock. A settings PATCH queued ahead of this
+	// rollback may have committed a new pool shape since the authorization
+	// read, and booting that earlier snapshot would bring the old settings
+	// back up. The settings redeploy seq read here names exactly the settings
+	// this rollback boots, so its outcome can serve that seq below.
+	app, ok = s.rereadAuthorizedApp(w, slug, app.ID)
+	if !ok {
+		return
+	}
+	bootedSeq := app.RedeploySeqLaunched
 	if err := s.guardActivationLifecycle(app.ID, "rollback "+slug); err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
@@ -3875,6 +3882,8 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		scheduleConvergence[i].Prestart = scheduleConvergence[i].Status == "satisfied"
 	}
 
+	// Recorded before the reload so the response carries this boot's outcome.
+	s.recordPoolBoot(app.ID, slug, bootedSeq, "rollback", result, false)
 	updatedApp, err := s.store.GetAppBySlug(slug)
 	if err != nil {
 		slog.Error("rollback: reload committed app failed", "slug", slug, "err", err)
@@ -3911,6 +3920,24 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 	}{App: updatedApp, ScheduleConvergence: scheduleConvergence, Warning: convergenceWarning})
 }
 
+// rereadAuthorizedApp re-reads slug's row once the deploy lock is held and
+// answers 404 unless it is still the app authorized as authorizedID. The
+// slug alone does not pin identity: the app may have been deleted and
+// another created under the same slug while the request queued, and the
+// caller was never authorized to act on that one.
+func (s *Server) rereadAuthorizedApp(w http.ResponseWriter, slug string, authorizedID int64) (*db.App, bool) {
+	app, err := s.store.GetAppBySlug(slug)
+	if err != nil && !errors.Is(err, db.ErrNotFound) {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return nil, false
+	}
+	if err != nil || app.ID != authorizedID {
+		writeError(w, http.StatusNotFound, "not found")
+		return nil, false
+	}
+	return app, true
+}
+
 func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
 
@@ -3944,6 +3971,17 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 	// boot the stale bundle while the DB records the new one as succeeded.
 	release := s.acquireDeployLock(slug)
 	defer release()
+	// Re-read the row under the lock. A settings PATCH queued ahead of this
+	// restart may have committed a new pool shape since the authorization read,
+	// and booting that earlier snapshot would bring the old settings back up.
+	// The settings redeploy seq read here names exactly the settings this
+	// restart boots, so its outcome can serve that seq below.
+	previousStatus := app.Status
+	app, ok = s.rereadAuthorizedApp(w, slug, app.ID)
+	if !ok {
+		return
+	}
+	bootedSeq := app.RedeploySeqLaunched
 	if err := s.guardActivationLifecycle(app.ID, "restart "+slug); err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
@@ -4020,6 +4058,7 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "stopped"}); err != nil {
 			slog.Error("restart_update_status_failed", "slug", slug, "err", err)
 		}
+		s.recordBootOutcome(app.ID, slug, bootedSeq, db.RedeployFailed, "restart failed: "+err.Error())
 		writeErrorWithKind(w, http.StatusInternalServerError, deployFailureMessage(err), deployfail.Classify(err))
 		return
 	}
@@ -4062,8 +4101,14 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 			s.proxy.Deregister(slug)
 		}
 		_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "stopped"})
+		s.recordBootOutcome(app.ID, slug, bootedSeq, db.RedeployFailed, "restart failed: replica state could not be persisted")
 		writeError(w, http.StatusInternalServerError, "restart consumer provenance could not be persisted")
 		return
+	}
+	if len(result.Failed) > 0 {
+		s.recordBootOutcome(app.ID, slug, bootedSeq, db.RedeployPartial, "restart: "+replicasFailedReason(result))
+	} else {
+		s.recordBootOutcome(app.ID, slug, bootedSeq, db.RedeployCompleted, "restart")
 	}
 	// Bookkeeping after the proxy switch: the restarted pool is already
 	// serving traffic, so a transient DB hiccup here must NOT surface as
@@ -4096,7 +4141,7 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 			// routine cycle of a healthy app from an operator reviving one that
 			// had crashed, which is the question an audit reader is asking.
 			Detail: auditDetailJSON(map[string]any{
-				"previous_status": app.Status,
+				"previous_status": previousStatus,
 				"replicas":        updatedApp.Replicas,
 			}),
 			IPAddress: s.ClientIP(r),

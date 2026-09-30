@@ -64,17 +64,9 @@ func (s *Store) beginElasticWrite(ctx context.Context, owner ElasticOwner) (writ
 }
 
 func (s *Store) checkElasticOwner(ctx context.Context, tx writeTx, owner ElasticOwner) error {
-	now := s.d.now()
-	if s.IsPostgres() {
-		now = "clock_timestamp()"
-	}
-	res, err := tx.ExecContext(ctx, `UPDATE cp_owner SET epoch = epoch WHERE role = ? AND instance_id = ? AND epoch = ? AND expires_at > `+now, ownerRole, owner.Instance, owner.Epoch)
-	if err == nil {
-		var n int64
-		n, err = res.RowsAffected()
-		if err == nil && n != 1 {
-			err = ErrElasticFenced
-		}
+	err := s.checkOwnerLease(ctx, tx, OwnerLease(owner))
+	if errors.Is(err, ErrOwnerFenced) {
+		return ErrElasticFenced
 	}
 	return err
 }

@@ -97,6 +97,11 @@ type Server struct {
 	// and any caller that never wires single-writer gating).
 	isOwner func() bool
 
+	// ownerLease reports the control-plane lease this instance holds, which
+	// fences settings redeploy claims and outcomes. Set via SetOwnerLease; nil
+	// runs those writes unfenced (tests).
+	ownerLease func() *db.OwnerLease
+
 	// nodeForTier resolves a tier name to the node identity backing it: a remote
 	// worker's node id, or "" for any tier the control plane itself backs (all
 	// such tiers share the "" identity, so they are mutually co-located). Nil
@@ -129,6 +134,9 @@ type Server struct {
 	// production startup persists the environment credential hash in api_keys.
 	deployToken *auth.DeployToken
 	deployRun   func(deploy.Params) (*deploy.PoolResult, error)
+	// outcomeRetrySleep waits between attempts to record a settings redeploy
+	// outcome; nil means time.Sleep. Tests replace it to act between attempts.
+	outcomeRetrySleep func(time.Duration)
 	// Generation cutover is split into independently testable durable and
 	// in-memory publication phases.
 	promoteDeployment       func(int64) error
@@ -640,6 +648,13 @@ func (s *Server) SetSleepOp(fn func(slug string) error) {
 // handling requests; it is not safe to call concurrently with live traffic.
 func (s *Server) SetOwnership(isOwner func() bool) {
 	s.isOwner = isOwner
+}
+
+// SetOwnerLease wires the source of this instance's control-plane lease
+// (instance ID and fencing epoch; epoch 0 when not the owner). Call it once
+// during startup, alongside SetOwnership.
+func (s *Server) SetOwnerLease(lease func() *db.OwnerLease) {
+	s.ownerLease = lease
 }
 
 // SetCluster marks this instance as part of a multi-instance cluster and

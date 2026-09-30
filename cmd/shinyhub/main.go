@@ -2576,6 +2576,11 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		releaseStartupFence()
 		startupFenceHeld = false
 		ownerReady.Store(true) // recovery complete and worker index is fresh
+		// A settings redeploy whose process exited before reporting is still
+		// owed; serve it now that this owner can boot pools. The scan retries
+		// through transient store failures, so it runs beside the owner's
+		// loops instead of delaying them.
+		go srv.RelaunchOwedRedeploys()
 
 		var loops sync.WaitGroup
 		if monitor != nil {
@@ -2665,6 +2670,9 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// deploy/placement, worker register/heartbeat) must wait for the fresh index.
 	ownerAndReady := ownerAndReadyPredicate(elector.IsOwner, &ownerReady)
 	srv.SetOwnership(ownerAndReady)
+	srv.SetOwnerLease(func() *db.OwnerLease {
+		return &db.OwnerLease{Instance: cfg.Server.InstanceID, Epoch: elector.Epoch()}
+	})
 	elasticSpawner.CanMutate = ownerAndReady
 	if workerAPI != nil {
 		workerAPI.SetOwnership(ownerAndReady)

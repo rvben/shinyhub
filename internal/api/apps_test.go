@@ -119,7 +119,7 @@ func TestListAppsResolvesEffectiveResourceDefaults(t *testing.T) {
 	}
 
 	zero := 0
-	if _, _, _, _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
+	if _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
 		Slug: "inherited", SetMemoryLimitMB: true, MemoryLimitMB: &zero,
 		SetCPUQuotaPercent: true, CPUQuotaPercent: &zero,
 	}); err != nil {

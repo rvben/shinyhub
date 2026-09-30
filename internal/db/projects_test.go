@@ -29,7 +29,7 @@ func mkApp(t *testing.T, s *db.Store, slug, project, access string, ownerID int6
 	if project != "" {
 		return
 	}
-	if _, _, _, _, _, err := s.PatchAppSettings(db.PatchAppSettingsParams{
+	if _, err := s.PatchAppSettings(db.PatchAppSettingsParams{
 		Slug: slug, SetProjectSlug: true, ProjectSlug: "",
 	}); err != nil {
 		t.Fatalf("clear project on %s: %v", slug, err)
@@ -364,13 +364,13 @@ func TestAppWritersCreateProjectLazily(t *testing.T) {
 		t.Errorf(`project_slug = %q, want "" (the 'default' sentinel is retired)`, app.ProjectSlug)
 	}
 
-	_, _, _, _, pcreated, err := s.PatchAppSettings(db.PatchAppSettingsParams{
+	pres, err := s.PatchAppSettings(db.PatchAppSettingsParams{
 		Slug: "c", SetProjectSlug: true, ProjectSlug: "via-patch",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !pcreated {
+	if !pres.ProjectCreated {
 		t.Error("PatchAppSettings moving an app into an unknown project must report projectCreated=true")
 	}
 

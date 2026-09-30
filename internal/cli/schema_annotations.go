@@ -276,6 +276,8 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "sessions_ceiling", Type: "integer", Desc: "Configured admission capacity; 0 when uncapped"},
 		{Name: "last_replica_error", Type: "string", Desc: "Active replica failure; empty after successful recovery"},
 		{Name: "last_replica_exit", Type: "object", Desc: "Timestamped historical exit verdict, retained after recovery"},
+		{Name: "redeploy_seq_launched", Type: "integer", Desc: "Newest settings change that requires a pool redeploy; owed while it exceeds last_redeploy.seq"},
+		{Name: "last_redeploy", Type: "object", Nullable: true, Desc: "{seq,outcome,reason,at} for the latest served settings redeploy; outcome is completed | partial | failed | skipped; null before the first one"},
 		{Name: "deploy_count", Type: "integer"},
 		{Name: "deploying", Type: "boolean", Desc: "true only while a deployment or rollback is actively executing"},
 	}, EnvelopeFields: []fieldSpec{
@@ -298,6 +300,8 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "sessions_ceiling", Type: "integer", Desc: "Configured admission capacity; 0 when uncapped"},
 		{Name: "last_replica_error", Type: "string", Desc: "Active replica failure; empty after successful recovery"},
 		{Name: "last_replica_exit", Type: "object", Desc: "Timestamped historical exit verdict, retained after recovery"},
+		{Name: "redeploy_seq_launched", Type: "integer", Desc: "Newest settings change that requires a pool redeploy; owed while it exceeds last_redeploy.seq"},
+		{Name: "last_redeploy", Type: "object", Nullable: true, Desc: "{seq,outcome,reason,at} for the latest served settings redeploy; outcome is completed | partial | failed | skipped; null before the first one"},
 		{Name: "max_sessions_per_replica", Type: "integer"},
 		{Name: "memory_limit_mb", Type: "integer", Desc: "Per-replica memory ceiling in MiB; null = inherit global default, 0 = unlimited"},
 		{Name: "cpu_quota_percent", Type: "integer", Desc: "Per-replica CPU ceiling in percent of one core (100 = 1 core); null = inherit, 0 = unlimited"},

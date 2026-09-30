@@ -100,7 +100,17 @@ func (s *Store) ListProjects(limit, offset int) ([]*ProjectListItem, error) {
 // RowsAffected, which ON CONFLICT DO NOTHING reports as 0 for a no-op on both
 // backends.
 func (s *Store) UpsertProject(p Project) (bool, error) {
-	res, err := s.db.Exec(
+	return upsertProject(s.db, p)
+}
+
+// sqlExecer is the Exec half shared by the store handle and a transaction, so
+// one statement can run either standalone or inside a caller's transaction.
+type sqlExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func upsertProject(x sqlExecer, p Project) (bool, error) {
+	res, err := x.Exec(
 		`INSERT INTO projects (slug, name, description, icon_emoji)
 		 VALUES (?, ?, ?, ?)
 		 ON CONFLICT (slug) DO NOTHING`,

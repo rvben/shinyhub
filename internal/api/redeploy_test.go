@@ -184,7 +184,7 @@ func TestPatchApp_ResourceLimitChangeTriggersRedeploy(t *testing.T) {
 func TestPatchApp_WarmSparesReconcileLiveWithoutRedeploy(t *testing.T) {
 	const slug = "warm-live"
 	store, app := newRedeployTestStore(t, slug, "running")
-	if _, _, _, _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
+	if _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
 		Slug: slug, SetWorkerIsolation: true, WorkerIsolation: "per_session",
 		SetWorkerMaxWorkers: true, WorkerMaxWorkers: 3,
 	}); err != nil {
@@ -218,7 +218,7 @@ func TestPatchApp_WarmSparesReconcileLiveWithoutRedeploy(t *testing.T) {
 func TestPatchApp_WarmSparesDoesNotBootStoppedApp(t *testing.T) {
 	const slug = "warm-stopped"
 	store, app := newRedeployTestStore(t, slug, "stopped")
-	if _, _, _, _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
+	if _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
 		Slug: slug, SetWorkerIsolation: true, WorkerIsolation: "per_session",
 		SetWorkerMaxWorkers: true, WorkerMaxWorkers: 3,
 	}); err != nil {
@@ -439,7 +439,7 @@ func TestPatchApp_WorkerIsolationUnchanged_NoRedeployNoAudit(t *testing.T) {
 	if err := store.PromoteDeployment(dep.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
+	if _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
 		Slug: slug, SetWorkerIsolation: true, WorkerIsolation: "per_session",
 		SetWorkerMaxWorkers: true, WorkerMaxWorkers: 3,
 	}); err != nil {
@@ -530,6 +530,33 @@ func newRedeployTestStore(t *testing.T, slug, status string) (*db.Store, *db.App
 	return store, app
 }
 
+// armRedeploySeq launches the next settings redeploy seq for slug the way a
+// committed pool-shape PATCH does, and returns it.
+// armRedeploySeq launches a seq that needs the whole pool cycled, as a
+// placement, resource or worker change does.
+func armRedeploySeq(t *testing.T, store *db.Store, slug string) int64 {
+	t.Helper()
+	return armSeq(t, store, slug, `UPDATE apps SET redeploy_seq_launched = redeploy_seq_launched + 1, redeploy_full_seq = redeploy_seq_launched + 1 WHERE slug = ?`)
+}
+
+// armResizeSeq launches a replica-count-only seq, served by a live resize.
+func armResizeSeq(t *testing.T, store *db.Store, slug string) int64 {
+	t.Helper()
+	return armSeq(t, store, slug, `UPDATE apps SET redeploy_seq_launched = redeploy_seq_launched + 1 WHERE slug = ?`)
+}
+
+func armSeq(t *testing.T, store *db.Store, slug, arm string) int64 {
+	t.Helper()
+	if _, err := store.DB().Exec(arm, slug); err != nil {
+		t.Fatal(err)
+	}
+	app, err := store.GetAppBySlug(slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return app.RedeploySeqLaunched
+}
+
 // TestRedeployApp_BlocksUntilLockFreeThenClears proves the async redeploy waits
 // for the per-slug deploy lock rather than skipping when an UNRELATED operation
 // (upload deploy, restart, rollback, stop, delete) holds it. Skipping would
@@ -544,6 +571,7 @@ func TestRedeployApp_BlocksUntilLockFreeThenClears(t *testing.T) {
 	// without needing a live process manager.
 	store, _ := newRedeployTestStore(t, slug, "stopped")
 	s := New(&config.Config{}, store, nil, nil)
+	seq := armRedeploySeq(t, store, slug)
 
 	// An unrelated operation holds the deploy lock for this slug.
 	release := s.acquireDeployLock(slug)
@@ -551,7 +579,7 @@ func TestRedeployApp_BlocksUntilLockFreeThenClears(t *testing.T) {
 	s.markRedeployInFlight(slug)
 	done := make(chan struct{})
 	go func() {
-		s.redeployApp(slug)
+		s.redeployApp(slug, seq)
 		close(done)
 	}()
 
@@ -603,8 +631,9 @@ func TestRedeployApp_DoesNotResurrectStoppedApp(t *testing.T) {
 	}
 	s := New(&config.Config{}, store, process.NewManager(t.TempDir(), process.NewNativeRuntime()), proxy.New())
 
+	seq := armRedeploySeq(t, store, slug)
 	s.markRedeployInFlight(slug)
-	s.redeployApp(slug)
+	s.redeployApp(slug, seq)
 
 	got, err := store.GetAppBySlug(slug)
 	if err != nil {
@@ -612,6 +641,9 @@ func TestRedeployApp_DoesNotResurrectStoppedApp(t *testing.T) {
 	}
 	if got.Status != "stopped" {
 		t.Fatalf("redeployApp altered a stopped app to %q; a concurrent stop must win over a queued replica redeploy", got.Status)
+	}
+	if got.LastRedeploy == nil || got.LastRedeploy.Seq != seq || got.LastRedeploy.Outcome != db.RedeploySkipped || got.LastRedeploy.Reason != "not_running" {
+		t.Fatalf("last_redeploy = %+v, want seq %d skipped/not_running", got.LastRedeploy, seq)
 	}
 	if s.isRedeployInFlight(slug) {
 		t.Fatal("redeployApp must clear the marker even when it skips a torn-down app")

@@ -206,6 +206,8 @@ func TestPatchReplicaFailedGrowthKeepsCapacityAndRetries(t *testing.T) {
 	if stored.Replicas != 3 || stored.Status != "degraded" || stored.LastError == "" {
 		t.Fatalf("failure not reported with requested size intact: %+v", stored)
 	}
+	wantOutcome(t, stored.LastRedeploy, stored.RedeploySeqLaunched, db.RedeployFailed, stored.LastError)
+	failedSeq := stored.RedeploySeqLaunched
 	rows, _ := s.store.ListReplicas(app.ID)
 	if len(rows) != 2 || len(s.proxy.ReplicaSessionCounts(slug)) != 2 {
 		t.Fatal("partial growth did not retain existing capacity")
@@ -220,6 +222,11 @@ func TestPatchReplicaFailedGrowthKeepsCapacityAndRetries(t *testing.T) {
 	if stored.Status != "running" || stored.LastError != "" || len(s.proxy.ReplicaSessionCounts(slug)) != 3 {
 		t.Fatalf("retry failed to converge: %+v", stored)
 	}
+	// Re-sending the unchanged count to a degraded app arms its own seq.
+	if stored.RedeploySeqLaunched != failedSeq+1 {
+		t.Fatalf("repair armed seq %d, want %d", stored.RedeploySeqLaunched, failedSeq+1)
+	}
+	wantOutcome(t, stored.LastRedeploy, stored.RedeploySeqLaunched, db.RedeployCompleted, "")
 	check()
 }
 
@@ -232,11 +239,17 @@ func TestResizeQueuedAfterStopDoesNotBoot(t *testing.T) {
 		t.Error("queued resize resurrected a stopped app")
 		return nil, fmt.Errorf("unexpected boot")
 	}
+	seq := armResizeSeq(t, s.store, "stopped-resize")
 	s.markRedeployInFlight("stopped-resize")
-	s.resizeApp("stopped-resize")
+	s.redeployApp("stopped-resize", seq)
 	if s.isRedeployInFlight("stopped-resize") {
 		t.Fatal("queued resize left in-flight marker set")
 	}
+	stored, err := s.store.GetAppBySlug("stopped-resize")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantOutcome(t, stored.LastRedeploy, seq, db.RedeploySkipped, "not_running")
 }
 
 func TestAutoscaleDefersUnconvergedManualResize(t *testing.T) {
@@ -271,8 +284,9 @@ func TestResizeRestoresWarmSlotsBeforeAdding(t *testing.T) {
 	if err := s.store.UpdateAppReplicas(app.ID, 4); err != nil {
 		t.Fatal(err)
 	}
+	seq := armResizeSeq(t, s.store, app.Slug)
 	s.markRedeployInFlight(app.Slug)
-	s.resizeApp(app.Slug)
+	s.redeployApp(app.Slug, seq)
 	if booted := rt.boosted(); len(booted) != 3 {
 		t.Fatalf("expected warm slots 1, 2 and new slot 3 to start, got %v", booted)
 	}
@@ -285,6 +299,11 @@ func TestResizeRestoresWarmSlotsBeforeAdding(t *testing.T) {
 			t.Fatalf("slot not restored: %+v", row)
 		}
 	}
+	stored, err := s.store.GetAppBySlug(app.Slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantOutcome(t, stored.LastRedeploy, seq, db.RedeployCompleted, "")
 }
 
 func TestPatchCombinedReplicaAndResourceChangePrunesStoppedSlots(t *testing.T) {
@@ -303,5 +322,145 @@ func TestPatchCombinedReplicaAndResourceChangePrunesStoppedSlots(t *testing.T) {
 	rows, err := s.store.ListReplicas(app.ID)
 	if err != nil || len(rows) != 1 || rows[0].PID == nil || *rows[0].PID != 4242 {
 		t.Fatalf("combined edit did not apply the structural restart: rows=%v err=%v", rows, err)
+	}
+}
+
+// A replica-only seq resizes the live pool and never cycles it.
+func TestRedeployResizeSeqDoesNotCyclePool(t *testing.T) {
+	s, app := newScaleTestServer(t, "resize-only", 2, &config.Config{})
+	s.proxy.SetPoolSize(app.Slug, 1)
+	s.deployRun = func(deploy.Params) (*deploy.PoolResult, error) {
+		t.Error("a replica-only seq cycled the whole pool")
+		return nil, fmt.Errorf("unexpected cycle")
+	}
+	s.deployReplica = func(_ deploy.Params, index int) (*deploy.Result, error) {
+		return &deploy.Result{Index: index, PID: 4242 + index, Port: 19700 + index, Provider: "native", Tier: "default"}, nil
+	}
+	if err := s.store.DeleteReplica(app.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	seq := armResizeSeq(t, s.store, app.Slug)
+	s.markRedeployInFlight(app.Slug)
+	s.redeployApp(app.Slug, seq)
+	rows, err := s.store.ListReplicas(app.ID)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("resize did not grow the pool: rows=%v err=%v", rows, err)
+	}
+	stored, err := s.store.GetAppBySlug(app.Slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantOutcome(t, stored.LastRedeploy, seq, db.RedeployCompleted, "")
+}
+
+// A structural seq superseded by a newer replica-only seq before either was
+// served still gets its full cycle: the newer seq's claimant serves both.
+func TestRedeploySupersededFullSeqStillCycles(t *testing.T) {
+	s, app := newScaleTestServer(t, "full-then-resize", 1, &config.Config{})
+	cycles := 0
+	s.deployRun = func(p deploy.Params) (*deploy.PoolResult, error) {
+		cycles++
+		return &deploy.PoolResult{Replicas: []deploy.Result{{Index: 0, PID: 4242, Port: 19600}}}, nil
+	}
+	full := armRedeploySeq(t, s.store, app.Slug)
+	resize := armResizeSeq(t, s.store, app.Slug)
+	s.markRedeployInFlight(app.Slug)
+	s.redeployApp(app.Slug, full)
+	if cycles != 0 {
+		t.Fatal("the superseded seq was served")
+	}
+	s.markRedeployInFlight(app.Slug)
+	s.redeployApp(app.Slug, resize)
+	if cycles != 1 {
+		t.Fatalf("pool cycles = %d, want 1: the superseded structural change was dropped", cycles)
+	}
+	stored, err := s.store.GetAppBySlug(app.Slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantOutcome(t, stored.LastRedeploy, resize, db.RedeployCompleted, "")
+
+	// With the structural seq served, the next replica-only seq resizes.
+	next := armResizeSeq(t, s.store, app.Slug)
+	s.markRedeployInFlight(app.Slug)
+	s.redeployApp(app.Slug, next)
+	if cycles != 1 {
+		t.Fatalf("pool cycles = %d after a replica-only seq, want 1", cycles)
+	}
+}
+
+// A structural seq whose pool cycle failed left the pool on the old settings,
+// so the next replica-only seq cycles the pool instead of resizing it and
+// reporting success.
+func TestRedeployFailedFullSeqCyclesOnNextSeq(t *testing.T) {
+	s, app := newScaleTestServer(t, "failed-full", 1, &config.Config{})
+	cycles := 0
+	fail := true
+	s.deployRun = func(p deploy.Params) (*deploy.PoolResult, error) {
+		cycles++
+		if fail {
+			return nil, fmt.Errorf("image pull failed")
+		}
+		return &deploy.PoolResult{Replicas: []deploy.Result{{Index: 0, PID: 4242, Port: 19600}}}, nil
+	}
+	s.deployReplica = func(_ deploy.Params, index int) (*deploy.Result, error) {
+		return &deploy.Result{Index: index, PID: 4300 + index, Port: 19650 + index, Provider: "native", Tier: "default"}, nil
+	}
+	full := armRedeploySeq(t, s.store, app.Slug)
+	s.markRedeployInFlight(app.Slug)
+	s.redeployApp(app.Slug, full)
+	stored, err := s.store.GetAppBySlug(app.Slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.LastRedeploy == nil || stored.LastRedeploy.Outcome != db.RedeployFailed {
+		t.Fatalf("structural seq outcome = %+v, want failed", stored.LastRedeploy)
+	}
+
+	fail = false
+	if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: app.Slug, Status: "running"}); err != nil {
+		t.Fatal(err)
+	}
+	resize := armResizeSeq(t, s.store, app.Slug)
+	s.markRedeployInFlight(app.Slug)
+	s.redeployApp(app.Slug, resize)
+	if cycles != 2 {
+		t.Fatalf("pool cycles = %d, want 2: the replica-only seq resized a pool still on the old settings", cycles)
+	}
+	stored, err = s.store.GetAppBySlug(app.Slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantOutcome(t, stored.LastRedeploy, resize, db.RedeployCompleted, "")
+}
+
+// A replica-only seq left owed by a process that died is relaunched and served
+// as a resize.
+func TestRelaunchServesOwedResizeSeq(t *testing.T) {
+	s, app := newScaleTestServer(t, "owed-resize", 2, &config.Config{})
+	s.proxy.SetPoolSize(app.Slug, 1)
+	s.deployRun = func(deploy.Params) (*deploy.PoolResult, error) {
+		t.Error("an owed replica-only seq cycled the whole pool")
+		return nil, fmt.Errorf("unexpected cycle")
+	}
+	s.deployReplica = func(_ deploy.Params, index int) (*deploy.Result, error) {
+		return &deploy.Result{Index: index, PID: 4242 + index, Port: 19700 + index, Provider: "native", Tier: "default"}, nil
+	}
+	if err := s.store.DeleteReplica(app.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	seq := armResizeSeq(t, s.store, app.Slug)
+	s.RelaunchOwedRedeploys()
+	waitResize(t, func() bool {
+		stored, err := s.store.GetAppBySlug(app.Slug)
+		return err == nil && stored.LastRedeploy != nil
+	})
+	stored, err := s.store.GetAppBySlug(app.Slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantOutcome(t, stored.LastRedeploy, seq, db.RedeployCompleted, "")
+	if rows, err := s.store.ListReplicas(app.ID); err != nil || len(rows) != 2 {
+		t.Fatalf("owed resize did not grow the pool: rows=%v err=%v", rows, err)
 	}
 }

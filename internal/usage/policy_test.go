@@ -137,7 +137,7 @@ func TestLoadPolicyRepairsEveryStricterAppOverride(t *testing.T) {
 	}
 	for i := range apps {
 		override := apps[i].override
-		if _, _, _, _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
+		if _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
 			Slug: apps[i].app.Slug, SetUsageIdentityMode: true, UsageIdentityMode: &override,
 		}); err != nil {
 			t.Fatal(err)
@@ -180,7 +180,7 @@ func TestPolicySnapshotIsCoherentAcrossInstancesAndSlugReuse(t *testing.T) {
 	}
 
 	disabled := "disabled"
-	if _, _, _, _, _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
+	if _, err := store.PatchAppSettings(db.PatchAppSettingsParams{
 		Slug: app.Slug, SetUsageIdentityMode: true, UsageIdentityMode: &disabled,
 	}); err != nil {
 		t.Fatal(err)

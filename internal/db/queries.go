@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -1169,6 +1170,33 @@ type App struct {
 	// admission pacer. 0 disables pacing. Mirrors autoscale_target's float64
 	// round-tripping (REAL on SQLite, DOUBLE PRECISION on Postgres).
 	RenderSeconds float64 `json:"render_seconds"`
+	// RedeploySeqLaunched counts the settings redeploys owed to this app: a
+	// PATCH that changes the pool shape of a running app advances it in the
+	// same transaction as the settings. A redeploy is owed while
+	// LastRedeploy.Seq is below it.
+	RedeploySeqLaunched int64 `json:"redeploy_seq_launched"`
+	// LastRedeploy is the outcome reported for the latest served settings
+	// redeploy, nil when none has been reported.
+	LastRedeploy *RedeployOutcome `json:"last_redeploy"`
+}
+
+// Settings-redeploy outcomes recorded in apps.last_redeploy_outcome.
+const (
+	RedeployCompleted = "completed"
+	RedeployPartial   = "partial"
+	RedeploySkipped   = "skipped"
+	RedeployFailed    = "failed"
+)
+
+// RedeployOutcome is how the settings redeploy for Seq ended. Reason is a
+// stable token for a skip (activation_deferred, quarantined, no_deployment,
+// not_running), the verb ("restart", "deploy", "rollback") when a fresh boot
+// served the seq, or the failure text.
+type RedeployOutcome struct {
+	Seq     int64     `json:"seq"`
+	Outcome string    `json:"outcome"`
+	Reason  string    `json:"reason,omitempty"`
+	At      time.Time `json:"at"`
 }
 
 // PlacementMap parses ReplicaPlacement into a {tier: count} map. It returns nil
@@ -1288,7 +1316,9 @@ const appColumns = `id, slug, name, project_slug, owner_id, access, status,
 		       last_autoscale_at, identity_headers, usage_identity_mode, min_warm_replicas,
 		       last_error, crashed_at, description, icon_mime, icon_emoji,
 		       worker_isolation, worker_grouped_size, worker_max_workers, worker_warm_spares,
-		       worker_max_session_lifetime_secs, ephemeral_data_ack, render_seconds,`
+		       worker_max_session_lifetime_secs, ephemeral_data_ack, render_seconds,
+		       redeploy_seq_launched, last_redeploy_seq, last_redeploy_outcome,
+		       last_redeploy_reason, last_redeploy_at,`
 
 type CreateAppParams struct {
 	Slug        string
@@ -5294,14 +5324,56 @@ type PatchAppSettingsParams struct {
 	WorkerWarmSpares             int
 	SetWorkerMaxSessionLifetime  bool
 	WorkerMaxSessionLifetimeSecs int
+
+	// SetPlacement writes replica_placement and the replica count derived from
+	// it. Placement "" clears placement and keeps the stored replica count (all
+	// replicas on the default tier); otherwise PlacementTotal is the count.
+	SetPlacement   bool
+	Placement      string
+	PlacementTotal int
+
+	// ArmRedeploy asks for a settings redeploy to be owed when this write
+	// changes the pool shape (replicas, placement, resource limits, or a
+	// structural worker dial) of an app whose prior status is running or
+	// degraded, or sets the replica count of a degraded app (a repair). The
+	// seq advances in this transaction, so the settings and the owed redeploy
+	// commit or roll back together. A change other than the replica count also
+	// advances redeploy_full_seq, so the redeploy cycles the whole pool; a
+	// replica-only seq resizes the live pool. Writers that restore settings for
+	// a pool they manage themselves (the failed-deploy revert) leave it false.
+	ArmRedeploy bool
+}
+
+// PatchAppSettingsResult carries the pre-write state read inside the
+// PatchAppSettings transaction and what the write armed.
+type PatchAppSettingsResult struct {
+	PriorStatus    string
+	PriorReplicas  int
+	PriorMem       *int
+	PriorCPU       *int
+	ProjectCreated bool
+	// PoolShapeChanged reports that the write changed replicas, placement,
+	// a resource limit, or a structural worker dial.
+	PoolShapeChanged bool
+	// RedeploySeq is the settings-redeploy seq this write armed, 0 when it
+	// armed none. The caller must launch that redeploy once it returns.
+	RedeploySeq int64
 }
 
 // PatchAppSettings applies any subset of the user-editable app settings in a
-// single SQLite transaction, so a failure partway through cannot leave the
-// row half-updated. It returns the app's prior status and replica count
-// (read inside the same transaction) so the caller can decide whether a
-// running pool needs a redeploy. Returns ErrNotFound if no app has the slug.
-func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, priorReplicas int, priorMem, priorCPU *int, projectCreated bool, err error) {
+// single transaction, so a failure partway through (the project row a new
+// project_slug names included) commits nothing. The prior values are read
+// inside the same transaction, so change detection cannot race a concurrent
+// writer. Returns ErrNotFound if no app has the slug.
+func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (PatchAppSettingsResult, error) {
+	res, err := s.patchAppSettings(p)
+	if err != nil {
+		return PatchAppSettingsResult{}, err
+	}
+	return res, nil
+}
+
+func (s *Store) patchAppSettings(p PatchAppSettingsParams) (res PatchAppSettingsResult, err error) {
 	// This transaction reads the current row before writing it. A deferred
 	// SQLite transaction can deadlock during that read-to-write upgrade when
 	// fleet apply PATCHes several apps concurrently: one writer advances the
@@ -5311,20 +5383,24 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 	// Postgres it remains a normal transaction.
 	tx, err := s.d.beginWrite(context.Background(), s.rawDB(), 0)
 	if err != nil {
-		return "", 0, nil, nil, false, fmt.Errorf("begin: %w", err)
+		return res, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
 	var appID int64
 	var curMem, curCPU sql.NullInt64
+	var prior App
 	if err := tx.QueryRow(
-		`SELECT id, status, replicas, memory_limit_mb, cpu_quota_percent FROM apps WHERE slug = ?`,
+		`SELECT id, status, replicas, memory_limit_mb, cpu_quota_percent, replica_placement,
+		        worker_isolation, worker_grouped_size, worker_max_workers, worker_max_session_lifetime_secs
+		   FROM apps WHERE slug = ?`,
 		p.Slug,
-	).Scan(&appID, &priorStatus, &priorReplicas, &curMem, &curCPU); err != nil {
+	).Scan(&appID, &res.PriorStatus, &res.PriorReplicas, &curMem, &curCPU, &prior.ReplicaPlacement,
+		&prior.WorkerIsolation, &prior.WorkerGroupedSize, &prior.WorkerMaxWorkers, &prior.WorkerMaxSessionLifetimeSecs); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", 0, nil, nil, false, ErrNotFound
+			return res, ErrNotFound
 		}
-		return "", 0, nil, nil, false, fmt.Errorf("load app: %w", err)
+		return res, fmt.Errorf("load app: %w", err)
 	}
 
 	if p.SetHibernate {
@@ -5332,7 +5408,7 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			`UPDATE apps SET hibernate_timeout_minutes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.HibernateMinutes, appID,
 		); err != nil {
-			return "", 0, nil, nil, false, fmt.Errorf("update hibernate: %w", err)
+			return res, fmt.Errorf("update hibernate: %w", err)
 		}
 	}
 	if p.SetName {
@@ -5340,7 +5416,7 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			`UPDATE apps SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.Name, appID,
 		); err != nil {
-			return "", 0, nil, nil, false, fmt.Errorf("update name: %w", err)
+			return res, fmt.Errorf("update name: %w", err)
 		}
 	}
 	if p.SetProjectSlug {
@@ -5348,7 +5424,7 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			`UPDATE apps SET project_slug = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.ProjectSlug, appID,
 		); err != nil {
-			return "", 0, nil, nil, false, fmt.Errorf("update project_slug: %w", err)
+			return res, fmt.Errorf("update project_slug: %w", err)
 		}
 	}
 	if p.SetMemoryLimitMB || p.SetCPUQuotaPercent {
@@ -5364,23 +5440,23 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			`UPDATE apps SET memory_limit_mb = ?, cpu_quota_percent = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			newMem, newCPU, appID,
 		); err != nil {
-			return "", 0, nil, nil, false, fmt.Errorf("update resource limits: %w", err)
+			return res, fmt.Errorf("update resource limits: %w", err)
 		}
 	}
 	if p.SetReplicas {
-		if p.Replicas < priorReplicas && !p.PreserveReplicaRows {
+		if p.Replicas < res.PriorReplicas && !p.PreserveReplicaRows {
 			if _, err := tx.Exec(
 				`DELETE FROM replicas WHERE app_id = ? AND idx >= ?`,
 				appID, p.Replicas,
 			); err != nil {
-				return "", 0, nil, nil, false, fmt.Errorf("prune replicas: %w", err)
+				return res, fmt.Errorf("prune replicas: %w", err)
 			}
 		}
 		if _, err := tx.Exec(
 			`UPDATE apps SET replicas = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.Replicas, appID,
 		); err != nil {
-			return "", 0, nil, nil, false, fmt.Errorf("update replicas: %w", err)
+			return res, fmt.Errorf("update replicas: %w", err)
 		}
 	}
 	if p.SetMaxSessions {
@@ -5388,7 +5464,7 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			`UPDATE apps SET max_sessions_per_replica = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.MaxSessions, appID,
 		); err != nil {
-			return "", 0, nil, nil, false, fmt.Errorf("update max_sessions_per_replica: %w", err)
+			return res, fmt.Errorf("update max_sessions_per_replica: %w", err)
 		}
 	}
 
@@ -5397,7 +5473,7 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			`UPDATE apps SET render_seconds = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.RenderSeconds, appID,
 		); err != nil {
-			return "", 0, nil, nil, false, fmt.Errorf("update render_seconds: %w", err)
+			return res, fmt.Errorf("update render_seconds: %w", err)
 		}
 	}
 	if p.SetIdentityHeaders {
@@ -5405,7 +5481,7 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			`UPDATE apps SET identity_headers = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.IdentityHeaders, appID,
 		); err != nil {
-			return "", 0, nil, nil, false, fmt.Errorf("update identity_headers: %w", err)
+			return res, fmt.Errorf("update identity_headers: %w", err)
 		}
 	}
 	if p.SetUsageIdentityMode {
@@ -5413,11 +5489,11 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			`UPDATE apps SET usage_identity_mode = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.UsageIdentityMode, appID,
 		); err != nil {
-			return "", 0, nil, nil, false, fmt.Errorf("update usage_identity_mode: %w", err)
+			return res, fmt.Errorf("update usage_identity_mode: %w", err)
 		}
 		if _, err := tx.Exec(`UPDATE usage_policy SET generation = generation + 1,
 			updated_at = CURRENT_TIMESTAMP WHERE singleton_id = 1`); err != nil {
-			return "", 0, nil, nil, false, fmt.Errorf("advance usage policy generation: %w", err)
+			return res, fmt.Errorf("advance usage policy generation: %w", err)
 		}
 	}
 
@@ -5426,7 +5502,7 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			`UPDATE apps SET min_warm_replicas = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.MinWarmReplicas, appID,
 		); err != nil {
-			return "", 0, nil, nil, false, fmt.Errorf("update min_warm_replicas: %w", err)
+			return res, fmt.Errorf("update min_warm_replicas: %w", err)
 		}
 	}
 	if p.SetWorkerIsolation {
@@ -5434,7 +5510,7 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			`UPDATE apps SET worker_isolation = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.WorkerIsolation, appID,
 		); err != nil {
-			return "", 0, nil, nil, false, fmt.Errorf("update worker_isolation: %w", err)
+			return res, fmt.Errorf("update worker_isolation: %w", err)
 		}
 	}
 	if p.SetWorkerGroupedSize {
@@ -5442,7 +5518,7 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			`UPDATE apps SET worker_grouped_size = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.WorkerGroupedSize, appID,
 		); err != nil {
-			return "", 0, nil, nil, false, fmt.Errorf("update worker_grouped_size: %w", err)
+			return res, fmt.Errorf("update worker_grouped_size: %w", err)
 		}
 	}
 	if p.SetWorkerMaxWorkers {
@@ -5450,7 +5526,7 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			`UPDATE apps SET worker_max_workers = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.WorkerMaxWorkers, appID,
 		); err != nil {
-			return "", 0, nil, nil, false, fmt.Errorf("update worker_max_workers: %w", err)
+			return res, fmt.Errorf("update worker_max_workers: %w", err)
 		}
 	}
 	if p.SetWorkerWarmSpares {
@@ -5458,7 +5534,7 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			`UPDATE apps SET worker_warm_spares = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.WorkerWarmSpares, appID,
 		); err != nil {
-			return "", 0, nil, nil, false, fmt.Errorf("update worker_warm_spares: %w", err)
+			return res, fmt.Errorf("update worker_warm_spares: %w", err)
 		}
 	}
 	if p.SetWorkerMaxSessionLifetime {
@@ -5466,22 +5542,70 @@ func (s *Store) PatchAppSettings(p PatchAppSettingsParams) (priorStatus string, 
 			`UPDATE apps SET worker_max_session_lifetime_secs = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			p.WorkerMaxSessionLifetimeSecs, appID,
 		); err != nil {
-			return "", 0, nil, nil, false, fmt.Errorf("update worker_max_session_lifetime_secs: %w", err)
+			return res, fmt.Errorf("update worker_max_session_lifetime_secs: %w", err)
+		}
+	}
+
+	if p.SetPlacement {
+		total := p.PlacementTotal
+		if p.Placement == "" {
+			total = res.PriorReplicas
+		}
+		if _, err := tx.Exec(
+			`UPDATE apps SET replica_placement = ?, replicas = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			p.Placement, total, appID,
+		); err != nil {
+			return res, fmt.Errorf("update placement: %w", err)
+		}
+	}
+	if p.SetProjectSlug && p.ProjectSlug != "" {
+		if res.ProjectCreated, err = upsertProject(tx, Project{Slug: p.ProjectSlug}); err != nil {
+			return res, err
+		}
+	}
+
+	replicasChanged := p.SetReplicas && p.Replicas != res.PriorReplicas
+	needsFullCycle := (p.SetPlacement && !maps.Equal(prior.PlacementMap(), App{ReplicaPlacement: p.Placement}.PlacementMap())) ||
+		(p.SetMemoryLimitMB && !int64PtrMatches(curMem, p.MemoryLimitMB)) ||
+		(p.SetCPUQuotaPercent && !int64PtrMatches(curCPU, p.CPUQuotaPercent)) ||
+		(p.SetWorkerIsolation && p.WorkerIsolation != prior.WorkerIsolation) ||
+		(p.SetWorkerGroupedSize && p.WorkerGroupedSize != prior.WorkerGroupedSize) ||
+		(p.SetWorkerMaxWorkers && p.WorkerMaxWorkers != prior.WorkerMaxWorkers) ||
+		(p.SetWorkerMaxSessionLifetime && p.WorkerMaxSessionLifetimeSecs != prior.WorkerMaxSessionLifetimeSecs)
+	res.PoolShapeChanged = replicasChanged || needsFullCycle
+	// Setting the replica count of a degraded app, even to its current value,
+	// asks for the missing slots to be brought back.
+	repair := p.SetReplicas && res.PriorStatus == "degraded"
+	live := res.PriorStatus == "running" || res.PriorStatus == "degraded"
+	if p.ArmRedeploy && live && (res.PoolShapeChanged || repair) {
+		// Both assignments read the pre-update redeploy_seq_launched, so
+		// redeploy_full_seq names the seq this statement launches.
+		arm := `UPDATE apps SET redeploy_seq_launched = redeploy_seq_launched + 1 WHERE id = ? RETURNING redeploy_seq_launched`
+		if needsFullCycle {
+			arm = `UPDATE apps SET redeploy_seq_launched = redeploy_seq_launched + 1, redeploy_full_seq = redeploy_seq_launched + 1 WHERE id = ? RETURNING redeploy_seq_launched`
+		}
+		if err := tx.QueryRow(arm, appID).Scan(&res.RedeploySeq); err != nil {
+			return res, fmt.Errorf("arm redeploy: %w", err)
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return "", 0, nil, nil, false, fmt.Errorf("commit: %w", err)
+		return res, fmt.Errorf("commit: %w", err)
 	}
-	if p.SetProjectSlug {
-		if projectCreated, err = s.EnsureProject(p.ProjectSlug); err != nil {
-			return "", 0, nil, nil, false, fmt.Errorf("patch app settings: %w", err)
-		}
-	}
-	// priorMem/priorCPU are the resource columns read inside this transaction, so
-	// callers detect a real change (and audit the true old value) without a
+	// PriorMem/PriorCPU are the resource columns read inside this transaction,
+	// so callers detect a real change (and audit the true old value) without a
 	// time-of-check/time-of-use race against a concurrent PATCH.
-	return priorStatus, priorReplicas, intPtrFromNull(curMem), intPtrFromNull(curCPU), projectCreated, nil
+	res.PriorMem, res.PriorCPU = intPtrFromNull(curMem), intPtrFromNull(curCPU)
+	return res, nil
+}
+
+// int64PtrMatches reports whether a nullable column holds the value p names
+// (nil meaning NULL).
+func int64PtrMatches(col sql.NullInt64, p *int) bool {
+	if p == nil {
+		return !col.Valid
+	}
+	return col.Valid && col.Int64 == int64(*p)
 }
 
 // intPtrFromNull maps a sql.NullInt64 to a *int (invalid ⇒ nil).
@@ -5523,6 +5647,8 @@ func scanApp(s scanner) (*App, error) {
 	var lastDeployedAtRaw, releasedAtRaw sql.NullString
 	var autoscaleEnabledInt int
 	var ephemeralDataAckInt int
+	var lastRedeploy RedeployOutcome
+	var lastRedeployAt int64
 	err := s.Scan(
 		&a.ID, &a.Slug, &a.Name, &projectSlug, &a.OwnerID, &a.Access,
 		&a.Status, &a.Replicas, &a.MaxSessionsPerReplica, &a.DeployCount,
@@ -5534,6 +5660,8 @@ func scanApp(s scanner) (*App, error) {
 		&a.LastError, &a.CrashedAt, &a.Description, &a.IconMime, &a.IconEmoji,
 		&a.WorkerIsolation, &a.WorkerGroupedSize, &a.WorkerMaxWorkers,
 		&a.WorkerWarmSpares, &a.WorkerMaxSessionLifetimeSecs, &ephemeralDataAckInt, &a.RenderSeconds,
+		&a.RedeploySeqLaunched, &lastRedeploy.Seq, &lastRedeploy.Outcome,
+		&lastRedeploy.Reason, &lastRedeployAt,
 		&lastDeployedAtRaw, &a.ReleaseNumber, &releasedAtRaw,
 		&currentVersion, &contentDigest, &lastDeploymentStatus,
 	)
@@ -5545,6 +5673,10 @@ func scanApp(s scanner) (*App, error) {
 	}
 	a.AutoscaleEnabled = autoscaleEnabledInt != 0
 	a.EphemeralDataAck = ephemeralDataAckInt != 0
+	if lastRedeploy.Seq > 0 {
+		lastRedeploy.At = time.Unix(lastRedeployAt, 0).UTC()
+		a.LastRedeploy = &lastRedeploy
+	}
 	if projectSlug.Valid {
 		a.ProjectSlug = projectSlug.String
 	}
