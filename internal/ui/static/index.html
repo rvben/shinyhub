@@ -28,6 +28,40 @@
       } catch (e) { document.documentElement.dataset.theme = 'dark'; }
     })();
   </script>
+  <!-- Start the boot API requests now instead of after every module has loaded.
+       Placed before the stylesheets, which would otherwise hold this script
+       until they arrive. The session goes first; once it is known, the requests
+       the dashboard makes for that user follow. app.js takes these responses
+       through views/boot-prefetch.js, which documents the contract.
+       Every follow-up path is registered synchronously in the first reaction
+       to the session response, which runs before app.js's own reaction to it,
+       so app.js always finds them. The admin-only ones wait on the role and
+       reject for anyone else, which makes app.js fetch them itself. -->
+  <script>
+    (function () {
+      if (!window.fetch || !window.Promise) return;
+      var B = window.__shinyhubBoot = { t: Date.now(), r: {} };
+      function get(path) {
+        return fetch(path, { credentials: 'same-origin' });
+      }
+      function park(path, p) {
+        p['catch'](function () {});
+        if (B.r) B.r[path] = p;
+      }
+      park('/api/auth/providers', get('/api/auth/providers'));
+      var me = get('/api/auth/me');
+      park('/api/auth/me', me);
+      me.then(function (resp) {
+        if (!resp.ok) return;
+        park('/api/apps', get('/api/apps'));
+        park('/api/server-info', get('/api/server-info'));
+        var admin = resp.clone().json().then(function (body) {
+          if (!body || !body.user || body.user.role !== 'admin') throw new Error('not admin');
+        });
+        park('/api/fleet/health', admin.then(function () { return get('/api/fleet/health'); }));
+      })['catch'](function () {});
+    })();
+  </script>
   <!-- Self-hosted webfonts: no third-party origin to resolve, connect to and
        wait on before first render. The latin Manrope face is preloaded because
        it sets nearly all dashboard text and is otherwise discovered only once

@@ -444,6 +444,82 @@ func TestAppDetailCacheInvalidationWired(t *testing.T) {
 		"a stale envelope must be refetched BEFORE the panel renders, not repainted behind it")
 }
 
+// TestBootPrefetchWired guards the cold-load prefetch: the shell starts the
+// boot API requests while it parses, and app.js answers its own first GETs
+// from them (views/boot-prefetch.js). Each link fails silently when broken -
+// the dashboard still works, just a round trip or two slower, or (worse) keeps
+// serving a boot-time answer after the user changed something - so each one
+// is pinned here.
+func TestBootPrefetchWired(t *testing.T) {
+	shellBytes, err := fs.ReadFile(ui.Static(), "index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shell := string(shellBytes)
+	bootAt := strings.Index(shell, "window.__shinyhubBoot = ")
+	cssAt := strings.Index(shell, `<link rel="stylesheet"`)
+	headAt := strings.Index(shell, "<head>")
+	if bootAt < 0 || cssAt < 0 || headAt < 0 || bootAt < headAt || bootAt > cssAt {
+		t.Fatalf("the boot prefetch script must sit in <head> before the first stylesheet, which would otherwise delay it until the CSS arrives (boot=%d head=%d css=%d)", bootAt, headAt, cssAt)
+	}
+
+	// Every parked path must be one the dashboard actually requests, spelled
+	// identically; a renamed endpoint would otherwise leave the shell
+	// prefetching a URL nothing takes.
+	var dashboard strings.Builder
+	for _, name := range []string{"app.js", "views/about.js", "views/support-session-recovery.js"} {
+		b, err := fs.ReadFile(ui.Static(), name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dashboard.Write(b)
+	}
+	parked := regexp.MustCompile(`park\('([^']+)'`).FindAllStringSubmatch(shell, -1)
+	if len(parked) < 5 {
+		t.Fatalf("expected the shell to park the boot requests, found %d", len(parked))
+	}
+	// A parked response is consumed some time after it arrived, so a body
+	// carrying a relative time (a countdown's remaining_seconds) would be
+	// anchored late and run long. Those endpoints must not be prefetched.
+	for _, m := range parked {
+		if m[1] == "/api/support-sessions/current" {
+			t.Errorf("the shell prefetches %s, whose remaining_seconds would be anchored after the prefetch delay", m[1])
+		}
+	}
+	if !strings.Contains(shell, "if (B.r) B.r[path] = p;") {
+		t.Error("the shell must park through window.__shinyhubBoot.r and only while it is set, so discard() releases every parked response, late ones included")
+	}
+	for _, m := range parked {
+		if !strings.Contains(dashboard.String(), "'"+m[1]+"'") {
+			t.Errorf("the shell prefetches %s, which the dashboard never requests under that exact path", m[1])
+		}
+	}
+
+	appBytes, err := fs.ReadFile(ui.Static(), "app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := string(appBytes)
+	assertContains(t, "app.js", "const bootPrefetch = createBootPrefetch(window.__shinyhubBoot);",
+		"app.js must adopt the requests the shell parked")
+	assertContains(t, "app.js", "createGETCoalescer((path, init) => bootPrefetch.fetch(path, init,",
+		"api()'s GETs must be answered from the boot prefetch when one is live")
+	assertContains(t, "app.js", "createServerInfoLoader((url) => bootPrefetch.fetch(url,",
+		"the server-info loader bypasses api(), so it must take the boot prefetch itself")
+	apiBody := funcBody(t, app, "async function api(")
+	mutAt := strings.Index(apiBody, "if (mutating) {")
+	discardAt := strings.Index(apiBody, "bootPrefetch.discard();")
+	fetchAt := strings.Index(apiBody, "const resp = ")
+	if mutAt < 0 || discardAt < mutAt || fetchAt < discardAt {
+		t.Error("api() must discard the boot prefetch in its mutating branch, before the request, so nothing read afterwards predates the change")
+	}
+	initBody := funcBody(t, app, "async function initialize(")
+	finallyAt := strings.Index(initBody, "} finally {")
+	if finallyAt < 0 || !strings.Contains(initBody[finallyAt:], "bootPrefetch.discard();") {
+		t.Error("initialize() must discard the boot prefetch in a finally, so no later navigation is ever answered from the boot")
+	}
+}
+
 // TestRouterErrorBoundaryWired guards the global error boundary. A throw inside
 // a view mount function once blanked the whole dashboard (v0.8.7). The router
 // now catches mount throws and calls an onError callback; app.js must pass one

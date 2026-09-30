@@ -15,6 +15,7 @@ import { mountUsers } from '/static/views/users.js';
 import { tokenListModels, renderTokenList } from '/static/views/tokens.js';
 import { mountWorkers, workerDisplay } from '/static/views/workers.js';
 import { createGETCoalescer } from '/static/views/request-coalesce.js';
+import { createBootPrefetch } from '/static/views/boot-prefetch.js';
 import {
   activationAttentionTooltip,
   degradedTooltip,
@@ -276,7 +277,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const aboutModal   = document.getElementById('about-modal');
   const aboutButton  = document.getElementById('about-button');
   const aboutClose   = document.getElementById('about-close');
-  const loadServerInfo = createServerInfoLoader((url) => fetch(url));
+  const loadServerInfo = createServerInfoLoader((url) => bootPrefetch.fetch(url, undefined, (u) => fetch(u)));
   const appGrid = document.getElementById('app-grid');
   const projectDetailGrid = document.getElementById('project-detail-grid');
   const emptyState = document.getElementById('empty-state');
@@ -515,7 +516,12 @@ document.addEventListener('DOMContentLoaded', () => {
   // plain GET with no body and no caller-supplied headers - anything else
   // (every mutating request, and a GET a caller has customized) always gets
   // its own fetch, unchanged.
-  const coalescedGET = createGETCoalescer((path, init) => fetch(path, init));
+  //
+  // Underneath, the first GETs of a cold load are answered by the requests the
+  // shell already started while it parsed (index.html, views/boot-prefetch.js),
+  // until the boot finishes or anything mutates server state.
+  const bootPrefetch = createBootPrefetch(window.__shinyhubBoot);
+  const coalescedGET = createGETCoalescer((path, init) => bootPrefetch.fetch(path, init, (p, i) => fetch(p, i)));
 
   async function api(path, options = {}) {
     const init = {
@@ -530,6 +536,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const method = (init.method || 'GET').toUpperCase();
     const mutating = method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS';
     if (mutating) {
+      bootPrefetch.discard();
       const token = readCookie('csrf_token');
       if (token) init.headers['X-CSRF-Token'] = token;
     }
@@ -6604,6 +6611,15 @@ document.addEventListener('DOMContentLoaded', () => {
   router.register('/apps/:slug/:tab', appDetailRoute, { key: appDetailKey });
 
   async function initialize() {
+    try {
+      await bootstrap();
+    } finally {
+      // Whatever the outcome, every request after the boot is a fresh one.
+      bootPrefetch.discard();
+    }
+  }
+
+  async function bootstrap() {
     // Persist any /#deploy=<slug> hash before the auth check so the slug
     // survives the login redirect in case the user is not authenticated.
     persistDeployHash();
