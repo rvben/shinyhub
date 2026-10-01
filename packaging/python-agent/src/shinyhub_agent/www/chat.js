@@ -5,6 +5,8 @@
   var chatSession = null;
   var activeRequest = null;
   var activeAnswer = null;
+  var answerSource = "";
+  var answerFrame = null;
   var approval = null;
   var lastApprovalCard = null;
   var installed = false;
@@ -27,6 +29,319 @@
     if (className) element.className = className;
     if (text !== undefined) element.textContent = text;
     return element;
+  }
+
+  // A deliberately bounded Markdown dialect. All tags and attributes originate
+  // here; untrusted content is only ever placed in text nodes. No HTML parsing,
+  // URL handling, or syntax highlighting occurs, even inside code or tables.
+  function literalEnd(source, start) {
+    if (source[start] === "<" && /^<(?:\/?[A-Za-z][A-Za-z0-9-]*(?:\s|\/?>|$)|[!?]|[A-Za-z][A-Za-z0-9+.-]*:|[^<>\s]*@)/.test(source.slice(start))) {
+      var end = source.indexOf(">", start + 1);
+      return end < 0 ? source.length : end + 1;
+    }
+    if (source[start] !== "[" && source[start] !== "!") return start;
+    var rest = source.slice(start);
+    var link = /^!?\[[^\]\n]*\](?:\([^\n]*?\)|\[[^\]\n]*\])/.exec(rest);
+    return link ? start + link[0].length : start;
+  }
+
+  function inlineMarkdown(parent, source, depth) {
+    depth = depth || 0;
+    var text = "";
+    function flush() {
+      if (text) text.split("\n").forEach(function (line, index) {
+        if (index) parent.append(make("br"));
+        if (line) parent.append(document.createTextNode(line));
+      });
+      text = "";
+    }
+    for (var i = 0; i < source.length;) {
+      var char = source[i];
+      if (char === "\\" && /[!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]/.test(source[i + 1] || "")) {
+        text += source[i + 1]; i += 2; continue;
+      }
+      var literal = literalEnd(source, i);
+      if (literal > i) {
+        text += source.slice(i, literal); i = literal; continue;
+      }
+      if (char === "\n") { flush(); parent.append(make("br")); i++; continue; }
+      if (char === "`") {
+        var ticks = /^`+/.exec(source.slice(i))[0];
+        var close = i + ticks.length;
+        while ((close = source.indexOf(ticks, close)) >= 0) {
+          if (source[close - 1] !== "`" && source[close + ticks.length] !== "`") break;
+          close += ticks.length;
+        }
+        if (close >= 0) {
+          flush();
+          parent.append(make("code", "", source.slice(i + ticks.length, close)));
+          i = close + ticks.length; continue;
+        }
+        text += ticks; i += ticks.length; continue;
+      }
+      if (char === "*" && depth < 4) {
+        var marker = /^\*+/.exec(source.slice(i))[0];
+        var count = marker.length;
+        var finish = -1;
+        if (count <= 3 && /\S/.test(source[i + count] || "")) {
+          var nestedMarkers = [];
+          for (var j = i + count; j < source.length;) {
+            if (source[j] === "\\") { j += 2; continue; }
+            var opaque = literalEnd(source, j);
+            if (opaque > j) { j = opaque; continue; }
+            if (source[j] === "`") {
+              var run = /^`+/.exec(source.slice(j))[0];
+              var endCode = source.indexOf(run, j + run.length);
+              j = endCode < 0 ? j + run.length : endCode + run.length; continue;
+            }
+            if (source[j] === "*") {
+              var stars = /^\*+/.exec(source.slice(j))[0];
+              var remaining = stars.length, consumed = 0;
+              if (/\S/.test(source[j - 1])) {
+                while (nestedMarkers.length && remaining >= nestedMarkers[nestedMarkers.length - 1]) {
+                  var matched = nestedMarkers.pop(); remaining -= matched; consumed += matched;
+                }
+                if (!nestedMarkers.length && remaining === count) { finish = j + consumed; break; }
+              }
+              if (remaining <= 3 && remaining && /\S/.test(source[j + stars.length] || "")) nestedMarkers.push(remaining);
+              j += stars.length;
+            } else j++;
+          }
+        }
+        if (finish >= 0) {
+          flush();
+          var emphasis = make(count === 1 ? "em" : "strong");
+          var content = count === 3 ? make("em") : emphasis;
+          inlineMarkdown(content, source.slice(i + count, finish), depth + 1);
+          if (count === 3) emphasis.append(content);
+          parent.append(emphasis);
+          i = finish + count; continue;
+        }
+        text += marker; i += count; continue;
+      }
+      text += char; i++;
+    }
+    flush();
+  }
+
+  function tableCells(line) {
+    var cells = [], cell = "", pipes = 0;
+    for (var i = 0; i < line.length; i++) {
+      if (line[i] === "\\" && i + 1 < line.length) {
+        // Pipe escaping belongs to table structure, including inside code spans.
+        cell += line[i + 1] === "|" ? line[++i] : line[i] + line[++i];
+      }
+      else if (line[i] === "|") { cells.push(cell.trim()); cell = ""; pipes++; }
+      else cell += line[i];
+    }
+    if (!pipes) return null;
+    cells.push(cell.trim());
+    if (/^\s*\|/.test(line)) cells.shift();
+    if (/\|\s*$/.test(line) && cells[cells.length - 1] === "") cells.pop();
+    return cells;
+  }
+
+  function listItem(line) {
+    var match = /^( *)([-+*]|\d{1,9}\.)[ \t]+(.*)$/.exec(line);
+    if (!match || /^\[[ xX]\](?:\s|$)/.test(match[3])) return null;
+    return { indent: match[1].length, ordered: /\d/.test(match[2]),
+      number: parseInt(match[2], 10), text: match[3] };
+  }
+
+  function markdownTree(source, final) {
+    var root = document.createDocumentFragment();
+    var lines = source.replace(/\r\n?/g, "\n").split("\n");
+    function complete(index) { return final || index < lines.length - 1; }
+    function paragraph(text, className) {
+      var node = make("p", className || "");
+      inlineMarkdown(node, text); return node;
+    }
+    function fence(index) {
+      return complete(index) && /^ {0,3}(`{3,}|~{3,})([^`]*)$/.exec(lines[index]);
+    }
+    function heading(index) { return complete(index) && /^ {0,3}#{1,6}[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$/.exec(lines[index]); }
+    function table(index) {
+      if (index + 1 >= lines.length || !complete(index + 1)) return null;
+      var headers = tableCells(lines[index]), separators = tableCells(lines[index + 1]);
+      if (!headers || !separators || !headers.length || headers.length !== separators.length ||
+          !separators.every(function (cell) { return /^:?-{3,}:?$/.test(cell); })) return null;
+      return { headers: headers, alignment: separators.map(function (cell) {
+        return cell[0] === ":" ? (cell.endsWith(":") ? "center" : "left") : (cell.endsWith(":") ? "right" : "left");
+      }) };
+    }
+    function parseList(start, indent, depth) {
+      var first = listItem(lines[start]);
+      var list = make(first.ordered ? "ol" : "ul");
+      if (first.ordered && first.number !== 1) list.setAttribute("start", first.number);
+      var i = start, item = null;
+      while (i < lines.length) {
+        if (!lines[i].trim()) {
+          var next = i;
+          while (next < lines.length && !lines[next].trim()) next++;
+          var continuation = next < lines.length && listItem(lines[next]);
+          if (!continuation || !(continuation.indent === indent && continuation.ordered === first.ordered ||
+              continuation.indent > indent && item)) break;
+          i = next;
+        }
+        var marker = listItem(lines[i]);
+        if (marker && marker.indent === indent && marker.ordered === first.ordered) {
+          item = make("li");
+          inlineMarkdown(item, marker.text); list.append(item); i++;
+        } else if (marker && marker.indent > indent && depth < 2 && item) {
+          var nested = parseList(i, marker.indent, depth + 1);
+          item.append(nested.node); i = nested.end;
+        } else if (marker && marker.indent > indent && depth === 2 && item) {
+          item.append(make("br"), document.createTextNode(lines[i++]));
+        } else if (!marker && item && /^ +\S/.test(lines[i]) &&
+                   lines[i].search(/\S/) > indent && !/^\s*[-+*] /.test(lines[i])) {
+          item.append(make("br")); inlineMarkdown(item, lines[i].trimStart()); i++;
+        } else break;
+      }
+      return { node: list, end: i };
+    }
+    for (var i = 0; i < lines.length;) {
+      if (!lines[i].trim()) { i++; continue; }
+      var opening = fence(i);
+      if (opening) {
+        var code = [], marker = opening[1], closed = false;
+        i++;
+        while (i < lines.length) {
+          var closing = /^ {0,3}(`+|~+)[ \t]*$/.exec(lines[i]);
+          if (closing && complete(i) && closing[1][0] === marker[0] && closing[1].length >= marker.length) {
+            closed = true; i++; break;
+          }
+          code.push(lines[i++]);
+        }
+        var pre = make("pre", "sh-agent-code-block");
+        pre.tabIndex = 0;
+        pre.setAttribute("aria-label", "Code block");
+        pre.append(make("code", "", code.join("\n") + (closed && code.length ? "\n" : "")));
+        root.append(pre); continue;
+      }
+      var title = heading(i);
+      if (title) { root.append(paragraph(title[1], "sh-agent-markdown-heading")); i++; continue; }
+      var spec = table(i);
+      if (spec) {
+        var wrapper = make("div", "sh-agent-table-scroll");
+        wrapper.tabIndex = 0;
+        wrapper.setAttribute("role", "region");
+        wrapper.setAttribute("aria-label", "Answer table");
+        var grid = make("table"), head = make("thead"), body = make("tbody");
+        function row(cells, header) {
+          var tr = make("tr");
+          cells.forEach(function (value, column) {
+            var td = make(header ? "th" : "td", "sh-agent-align-" + spec.alignment[column]);
+            if (header) td.setAttribute("scope", "col");
+            inlineMarkdown(td, value); tr.append(td);
+          });
+          return tr;
+        }
+        head.append(row(spec.headers, true)); i += 2;
+        while (i < lines.length && complete(i)) {
+          var followingList = listItem(lines[i]);
+          if (fence(i) || heading(i) || followingList && followingList.indent <= 3 ||
+              /^ {0,3}(?:>|[-+*][ \t]+\[[ xX]\](?:\s|$))/.test(lines[i])) break;
+          var cells = tableCells(lines[i]);
+          // Never silently drop a model-produced value or invent an empty cell.
+          if (!cells || cells.length !== spec.headers.length) break;
+          body.append(row(cells, false)); i++;
+        }
+        grid.append(head, body); wrapper.append(grid); root.append(wrapper); continue;
+      }
+      var bullet = listItem(lines[i]);
+      if (bullet && bullet.indent <= 3) {
+        var parsed = parseList(i, bullet.indent, 1);
+        root.append(parsed.node); i = parsed.end; continue;
+      }
+      var content = [lines[i++]];
+      while (i < lines.length && lines[i].trim() && !fence(i) && !heading(i) && !table(i) &&
+             !(listItem(lines[i]) && listItem(lines[i]).indent <= 3)) content.push(lines[i++]);
+      root.append(paragraph(content.join("\n")));
+    }
+    return root;
+  }
+
+  // Reconcile fixed structural nodes rather than replacing the answer on every
+  // frame. In particular table scroll containers, focus and completed rows stay.
+  function reconcile(parent, desired) {
+    var children = Array.from(desired.childNodes);
+    children.forEach(function (next, index) {
+      var current = parent.childNodes[index];
+      if (!current || current.nodeName !== next.nodeName) {
+        if (current) parent.replaceChild(next, current);
+        else parent.append(next);
+      } else if (next.nodeType === 3) {
+        if (current.nodeValue !== next.nodeValue) current.nodeValue = next.nodeValue;
+      } else {
+        Array.from(current.attributes).forEach(function (attr) {
+          if (!next.hasAttribute(attr.name)) current.removeAttribute(attr.name);
+        });
+        Array.from(next.attributes).forEach(function (attr) {
+          if (current.getAttribute(attr.name) !== attr.value) current.setAttribute(attr.name, attr.value);
+        });
+        reconcile(current, next);
+      }
+    });
+    while (parent.childNodes.length > children.length) parent.lastChild.remove();
+  }
+
+  function selectedAnswer(body) {
+    var selection = window.getSelection();
+    if (!selection || !selection.rangeCount || selection.isCollapsed ||
+        !body.contains(selection.anchorNode) || !body.contains(selection.focusNode)) return null;
+    var range = selection.getRangeAt(0), before = range.cloneRange();
+    before.selectNodeContents(body); before.setEnd(range.startContainer, range.startOffset);
+    return { text: selection.toString(), start: before.toString().length,
+      backward: selection.anchorNode === range.endContainer && selection.anchorOffset === range.endOffset };
+  }
+
+  function restoreSelection(body, saved) {
+    if (!saved) return;
+    var text = body.textContent, start = saved.start;
+    if (text.slice(start, start + saved.text.length) !== saved.text) start = text.indexOf(saved.text);
+    if (start < 0) return;
+    var walker = document.createTreeWalker(body, 4), node, offset = 0, anchor, focus;
+    while ((node = walker.nextNode())) {
+      var end = offset + node.nodeValue.length;
+      if (!anchor && start <= end) anchor = { node: node, offset: start - offset };
+      if (start + saved.text.length <= end) {
+        focus = { node: node, offset: start + saved.text.length - offset }; break;
+      }
+      offset = end;
+    }
+    if (anchor && focus) {
+      var selection = window.getSelection(), first = saved.backward ? focus : anchor, last = saved.backward ? anchor : focus;
+      selection.setBaseAndExtent(first.node, first.offset, last.node, last.offset);
+    }
+  }
+
+  function renderAnswer(final) {
+    if (!activeAnswer) return;
+    var follow = nearBottom(), selected = selectedAnswer(activeAnswer);
+    reconcile(activeAnswer, markdownTree(answerSource, final));
+    restoreSelection(activeAnswer, selected);
+    scrollAfterChange(follow);
+  }
+
+  function cancelAnswerFrame() {
+    if (answerFrame !== null) window.cancelAnimationFrame(answerFrame);
+    answerFrame = null;
+  }
+
+  function scheduleAnswer() {
+    if (answerFrame !== null) return;
+    answerFrame = window.requestAnimationFrame(function () {
+      answerFrame = null; renderAnswer(false);
+    });
+  }
+
+  function spokenAnswer(node) {
+    if (node.nodeType === 3) return node.nodeValue;
+    if (node.nodeName === "BR") return "\n";
+    var text = Array.from(node.childNodes).map(spokenAnswer).join("");
+    if (/^(TH|TD)$/.test(node.nodeName)) return text + "; ";
+    if (/^(P|LI|TR|PRE)$/.test(node.nodeName)) return text + "\n";
+    return text;
   }
 
   function icon(paths) {
@@ -56,7 +371,8 @@
   launcher.append(icon(sparkle), make("span", "", "Ask this app"));
   launcher.setAttribute("aria-controls", "shinyhub-agent-chat-panel");
   launcher.setAttribute("aria-expanded", "false");
-  var panel = make("aside", "sh-agent-panel");
+  // A section supports the mobile dialog role and keeps its header local.
+  var panel = make("section", "sh-agent-panel");
   panel.id = "shinyhub-agent-chat-panel";
   panel.hidden = true;
   panel.setAttribute("aria-labelledby", "shinyhub-agent-chat-heading");
@@ -216,31 +532,36 @@
   }
 
   function finish(message) {
+    var follow = nearBottom();
+    cancelAnswerFrame();
+    renderAnswer(true);
     clearApproval();
     if (message && lastApprovalCard && lastApprovalCard.dataset.result === "applying") {
       lastApprovalCard.dataset.result = "unknown";
       lastApprovalCard.querySelector(".sh-agent-approval-label").textContent = "Check the current view";
     }
-    announcer.textContent = activeAnswer && !message && activeAnswer.textContent.trim()
-      ? "Answer: " + activeAnswer.textContent.trim() : "";
-    if (activeAnswer && activeAnswer.textContent.trim() && !message && navigator.clipboard) {
-      var answer = activeAnswer;
+    announcer.textContent = activeAnswer && !message && answerSource.trim()
+      ? "Answer: " + spokenAnswer(activeAnswer).trim() : "";
+    if (activeAnswer && answerSource.trim() && !message && navigator.clipboard) {
+      var source = answerSource;
       var copy = make("button", "sh-agent-copy", "Copy answer");
       copy.type = "button";
       copy.addEventListener("click", function () {
-        navigator.clipboard.writeText(answer.textContent).then(function () {
+        navigator.clipboard.writeText(source).then(function () {
           copy.textContent = "Copied";
           setTimeout(function () { copy.textContent = "Copy answer"; }, 1800);
-        });
+        }).catch(function () { copy.textContent = "Copy failed · Retry"; });
       });
       activeAnswer.parentNode.append(copy);
     }
     if (message && activeAnswer) activeAnswer.parentNode.append(make("p", "sh-agent-error", message));
     activeRequest = null;
     activeAnswer = null;
+    answerSource = "";
     pendingTools = [];
     setBusy(false);
     setStatus(message ? "Answer interrupted" : "", message ? "error" : "working");
+    scrollAfterChange(follow);
   }
 
   function toolLabel(name) {
@@ -417,6 +738,7 @@
     announcer.textContent = "";
     appendMessage("user", question);
     activeAnswer = appendMessage("assistant", "");
+    answerSource = "";
     activeRequest = crypto.randomUUID();
     setBusy(true);
     setStatus("Connecting to assistant");
@@ -455,10 +777,17 @@
       if (!event || event.version !== VERSION || event.session !== chatSession) return;
       if (event.type === "approval_required") { if (activeRequest) showApproval(event); return; }
       if (event.type === "reset") {
+        cancelAnswerFrame();
+        activeAnswer = null;
+        activeRequest = null;
+        answerSource = "";
+        pendingTools = [];
+        clearApproval();
         log.replaceChildren(empty);
         announcer.textContent = "";
         lastApprovalCard = null;
         undoRequests.clear();
+        setBusy(false);
         setStatus("New chat started");
         return;
       }
@@ -486,10 +815,10 @@
       else if (event.type === "tool_started") showTool(event);
       else if (event.type === "tool_finished") finishTool(event);
       else if (event.type === "delta") {
-        var follow = nearBottom();
-        activeAnswer.textContent += event.text;
+        if (!activeAnswer || typeof event.text !== "string") return;
+        answerSource += event.text;
+        scheduleAnswer();
         setStatus("Writing answer");
-        scrollAfterChange(follow);
       } else if (event.type === "action_applied") {
         showReceipt(event);
         setStatus("Writing answer");

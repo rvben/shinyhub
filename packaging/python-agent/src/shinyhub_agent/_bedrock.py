@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ._core import ToolError, ToolRegistry
+from ._formatting import panel_instructions
 
 Approve = Callable[[str, dict[str, Any]], Awaitable[Any]]
 logger = logging.getLogger(__name__)
@@ -85,7 +86,7 @@ class BedrockChat:
         for _ in range(4):
             request = {
                 "modelId": self.model_id,
-                "system": [{"text": self.instructions}],
+                "system": [{"text": panel_instructions(self.instructions)}],
                 "messages": messages,
                 "inferenceConfig": {"maxTokens": self.max_output_tokens},
                 "toolConfig": {"tools": tool_specs},

@@ -146,6 +146,30 @@ server executes an approved handler and returns the applied result to the
 agent. Conversation history stays in the Shiny session and is bounded; it is
 not stored durably by this helper.
 
+Assistant answers support basic Markdown in the native toolbar overlay and
+fallback panel: paragraphs, line breaks, `**bold**`, `*italic*`, inline code,
+bullet and numbered lists with one nested level, fenced code blocks, and simple
+pipe tables. ATX headings appear as bold paragraphs. Questions remain plain
+text, and **Copy answer** copies the original Markdown source.
+
+For tables, provide a header and separator with the same number of cells, using
+at least three hyphens per separator cell. Use `---:` for numeric columns and
+`:---:` for centered columns; escape a pipe within a cell as `\|`. Each body row
+must match the header width. Malformed rows remain visible as text so values are
+never silently dropped. Wide tables and code blocks scroll within the message.
+
+Links, images, autolinks and raw HTML stay visible without creating active
+browser content. Blockquotes, task lists, footnotes, underscore emphasis and
+strikethrough are unsupported; their markers stay visible. The panel preserves
+source line breaks and supports backslash escapes for literal punctuation.
+It implements a limited dialect rather than full CommonMark or GFM.
+
+`OpenAIChat` and `BedrockChat` append a shared formatting-capability description
+to your `instructions` on every request. Keep app-specific behavior and tool
+guidance in `instructions`; explicit formatting preferences take precedence.
+For `AGUIChat`, configure this formatting contract on your external agent.
+The renderer remains safe regardless of whether the model follows the guidance.
+
 ## Browser agents
 
 Where `document.modelContext.registerTool` exists, the helper registers each

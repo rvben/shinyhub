@@ -235,6 +235,14 @@ test-browser-app-nav-e2e:
 	@if [ ! -d loadtest/render/driver/node_modules/playwright ]; then cd loadtest/render/driver && npm install --no-audit --no-fund --silent; fi
 	SHINYHUB_E2E_BROWSER_CHANNEL="$${SHINYHUB_E2E_BROWSER_CHANNEL:-chrome}" node scripts/app-nav-browser-e2e.mjs
 
+# Actual agent assets in both the native toolbar slot and fallback panel.
+# Checks streamed table layout, scroll state, keyboard access, copying and XSS.
+test-browser-agent-chat-e2e:
+	@command -v node >/dev/null 2>&1 || { echo "node not found (Node 20+ required)"; exit 1; }
+	@if [ ! -d node_modules/axe-core ]; then npm install --no-audit --no-fund --silent; fi
+	@if [ ! -d loadtest/render/driver/node_modules/playwright ]; then cd loadtest/render/driver && npm install --no-audit --no-fund --silent; fi
+	SHINYHUB_E2E_BROWSER_CHANNEL="$${SHINYHUB_E2E_BROWSER_CHANNEL:-chrome}" node scripts/agent-chat-browser-e2e.mjs
+
 # Real Python Shiny lifecycle contract in a disposable, extension-free Chromium.
 # Requires uv and system Python; uses the render driver's locked Playwright.
 test-browser-lifecycle-e2e:

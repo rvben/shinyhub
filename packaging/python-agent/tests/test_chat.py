@@ -6,6 +6,7 @@ import httpx
 
 from shinyhub_agent import AgentTool, OpenAIChat, ToolError, ToolRegistry
 from shinyhub_agent._chat import ChatSession
+from shinyhub_agent._formatting import ANSWER_FORMAT
 
 
 async def read(_):
@@ -60,6 +61,8 @@ def test_openai_reads_registered_tool_and_keeps_response_ephemeral():
     assert {"type": "tool_finished", "name": "get_view", "ok": True} in events
     assert requests[0]["store"] is False
     assert requests[0]["stream"] is True
+    assert all(request["instructions"] == "Read the view\n\n" + ANSWER_FORMAT
+               for request in requests)
     assert json.loads(requests[1]["input"][-1]["output"]) == {"period": "week"}
 
 

@@ -212,7 +212,7 @@ body.sh-agent-native-chat .sh-agent-reset { display: none; }
 }
 .sh-agent-suggestion:hover { border-color: #0284c7; background: #f3f9fd; }
 
-.sh-agent-message { display: flex; flex-direction: column; gap: 6px; max-width: 96%; }
+.sh-agent-message { display: flex; flex-direction: column; gap: 6px; min-width: 0; max-width: 96%; }
 .sh-agent-speaker {
   color: #5b6784;
   font-size: 11px;
@@ -225,6 +225,74 @@ body.sh-agent-native-chat .sh-agent-reset { display: none; }
 .sh-agent-user { align-self: flex-end; max-width: 88%; padding: 11px 14px; border-radius: 13px 13px 4px 13px; background: #e8edf6; }
 .sh-agent-user .sh-agent-speaker { color: #45526e; }
 .sh-agent-assistant { align-self: flex-start; padding: 0 2px; }
+.sh-agent-assistant .sh-agent-message-body { min-width: 0; max-width: 100%; white-space: normal; }
+.sh-agent-assistant .sh-agent-message-body > :first-child { margin-top: 0; }
+.sh-agent-assistant .sh-agent-message-body > :last-child { margin-bottom: 0; }
+.sh-agent-assistant .sh-agent-message-body p { margin: 0 0 12px; }
+.sh-agent-assistant .sh-agent-message-body strong { font-weight: 750; }
+.sh-agent-assistant .sh-agent-message-body em { font-style: italic; }
+.sh-agent-assistant .sh-agent-message-body .sh-agent-markdown-heading { margin-top: 18px; margin-bottom: 6px; font-weight: 750; }
+.sh-agent-assistant .sh-agent-message-body ul,
+.sh-agent-assistant .sh-agent-message-body ol { margin: 0 0 12px; padding-left: 24px; list-style-position: outside; }
+.sh-agent-assistant .sh-agent-message-body ul { list-style-type: disc; }
+.sh-agent-assistant .sh-agent-message-body ol { list-style-type: decimal; }
+.sh-agent-assistant .sh-agent-message-body li { display: list-item; margin: 3px 0; padding-left: 2px; }
+.sh-agent-assistant .sh-agent-message-body li > ul,
+.sh-agent-assistant .sh-agent-message-body li > ol { margin: 4px 0; }
+.sh-agent-assistant .sh-agent-message-body code {
+  padding: 2px 4px;
+  border-radius: 4px;
+  background: #e8edf6;
+  color: #16203a;
+  font-family: "Space Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: .86em;
+  white-space: pre-wrap;
+}
+.sh-agent-assistant .sh-agent-message-body .sh-agent-code-block {
+  max-width: 100%;
+  margin: 0 0 12px;
+  padding: 12px;
+  overflow-x: auto;
+  border: 1px solid #c6d0e0;
+  border-radius: 8px;
+  background: #e8edf6;
+  color: #16203a;
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre;
+  overflow-wrap: normal;
+  overscroll-behavior-x: contain;
+}
+.sh-agent-assistant .sh-agent-code-block code { display: block; padding: 0; background: transparent; white-space: pre; }
+.sh-agent-table-scroll {
+  max-width: 100%;
+  margin: 0 0 12px;
+  overflow-x: auto;
+  border: 1px solid #c6d0e0;
+  border-radius: 8px;
+  background: #fff;
+  overscroll-behavior-x: contain;
+}
+.sh-agent-code-block,
+.sh-agent-table-scroll { scrollbar-color: #c6d0e0 transparent; scrollbar-width: thin; }
+.sh-agent-table-scroll table { width: 100%; margin: 0; border: 0; border-collapse: collapse; font-size: 13px; line-height: 1.5; }
+.sh-agent-table-scroll th,
+.sh-agent-table-scroll td {
+  padding: 8px 10px;
+  border: 0;
+  border-bottom: 1px solid #dbe2ee;
+  color: #16203a;
+  text-align: left;
+  vertical-align: top;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  font-variant-numeric: tabular-nums;
+}
+.sh-agent-table-scroll th { background: #e8edf6; font-weight: 750; }
+.sh-agent-table-scroll td { background: #fff; }
+.sh-agent-table-scroll tbody tr:last-child td { border-bottom: 0; }
+.sh-agent-table-scroll .sh-agent-align-right { text-align: right; }
+.sh-agent-table-scroll .sh-agent-align-center { text-align: center; }
 .sh-agent-copy,
 .sh-agent-reset {
   align-self: flex-start;

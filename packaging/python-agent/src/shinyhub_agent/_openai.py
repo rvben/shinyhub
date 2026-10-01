@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 
 from ._core import ToolError, ToolRegistry
+from ._formatting import panel_instructions
 
 Approve = Callable[[str, dict[str, Any]], Awaitable[Any]]
 logger = logging.getLogger(__name__)
@@ -70,7 +71,7 @@ class OpenAIChat:
                     headers=headers,
                     json={
                         "model": self.model,
-                        "instructions": self.instructions,
+                        "instructions": panel_instructions(self.instructions),
                         "input": inputs,
                         "tools": model_tools,
                         "parallel_tool_calls": False,

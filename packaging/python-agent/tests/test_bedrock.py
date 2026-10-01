@@ -5,6 +5,7 @@ import pytest
 
 from shinyhub_agent import AgentTool, BedrockChat, ToolRegistry
 from shinyhub_agent._core import ToolError
+from shinyhub_agent._formatting import ANSWER_FORMAT
 
 
 def stream_tool(name, arguments):
@@ -61,7 +62,8 @@ def test_bedrock_streams_tool_result_with_app_scoped_history():
     assert {"type": "tool_finished", "name": "get_view", "ok": True} in events
     first, second = client.requests
     assert first["modelId"] == "model-id"
-    assert first["system"] == [{"text": "Use app tools"}]
+    assert first["system"] == [{"text": "Use app tools\n\n" + ANSWER_FORMAT}]
+    assert second["system"] == first["system"]
     assert first["messages"][0] == {"role": "user", "content": [{"text": "Previous question"}]}
     assert first["toolConfig"]["tools"][0]["toolSpec"]["name"] == "get_view"
     assert second["messages"][-2]["content"][0]["toolUse"]["input"] == {}

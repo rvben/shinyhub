@@ -62,6 +62,32 @@ conversation body and agent backend. Its own launcher and frame remain available
 outside ShinyHub or when the toolbar is hidden. Apps without chat do not show
 **Ask**.
 
+Assistant answers render basic Markdown in both panel layouts: paragraphs,
+line breaks, `**bold**`, `*italic*`, inline code, bullet and numbered lists
+with one nested level, fenced code blocks, and simple pipe tables. ATX headings
+(`# Heading`) appear as bold paragraphs. **Copy answer** copies the original
+Markdown, including its tables. Questions remain plain text.
+
+Tables require a header and separator with matching column counts; each
+separator cell contains at least three hyphens. Outer pipes are optional.
+Escape a pipe within a cell as `\|`, including inside inline code. Use `---:`
+to right-align a column or `:---:` to center it. Body rows must match the header
+width; malformed rows remain visible as text rather than losing values. Wide
+tables and code blocks scroll horizontally inside the answer.
+
+Links, autolinks, images and HTML never create active browser content. Their
+syntax stays visible, as do unsupported markers such as blockquotes, task lists,
+footnotes, underscore emphasis and strikethrough. Inline emphasis uses asterisks;
+backslash escapes preserve literal punctuation. Every source line break is
+displayed. This is a limited dialect, not full CommonMark or GFM support.
+
+`OpenAIChat` and `BedrockChat` append a shared description of these formatting
+capabilities to the app's `instructions` on every model request, including tool
+follow-ups. Explicit app formatting preferences still take precedence. With
+`AGUIChat`, configure the same formatting guidance on the hoster-owned endpoint;
+the helper does not modify that agent's system prompt. Formatting guidance is
+advisory; safe rendering does not depend on the model following it.
+
 ```python
 import os
 from shinyhub_agent import AGUIChat, BedrockChat, OpenAIChat, chat_dependency
