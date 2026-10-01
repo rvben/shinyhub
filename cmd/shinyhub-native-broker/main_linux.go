@@ -6,6 +6,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"os/signal"
@@ -26,8 +28,28 @@ func main() {
 			defer cancel()
 			err = server.Serve(ctx)
 		}
+	} else if len(os.Args) > 1 && os.Args[1] == "provision" {
+		flags := flag.NewFlagSet("provision", flag.ContinueOnError)
+		policy := flags.String("policy", "/etc/shinyhub/native-broker.json", "Root-owned desired broker policy")
+		apply := flags.Bool("apply", false, "Apply the plan while controller, apps and broker are stopped")
+		err = flags.Parse(os.Args[2:])
+		if err == flag.ErrHelp {
+			return
+		}
+		if err == nil && flags.NArg() != 0 {
+			err = fmt.Errorf("provision accepts flags only")
+		}
+		if err == nil {
+			var plan nativebroker.ProvisionPlan
+			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+			defer cancel()
+			plan, err = nativebroker.Provision(ctx, *policy, *apply)
+			if err == nil {
+				err = json.NewEncoder(os.Stdout).Encode(plan)
+			}
+		}
 	} else {
-		err = fmt.Errorf("usage: shinyhub-native-broker serve /etc/shinyhub/native-broker.json")
+		err = fmt.Errorf("usage: shinyhub-native-broker serve /etc/shinyhub/native-broker.json | provision --policy /etc/shinyhub/native-broker.json [--apply]")
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

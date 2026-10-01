@@ -11,7 +11,8 @@ controller over a Unix socket and launches hardened transient systemd units from
 a root-owned app registry. Unknown apps and unavailable protections fail closed;
 there is no fallback to the controller UID.
 
-This is opt-in and requires manual provisioning. Leaving `broker_socket` empty
+This is opt-in and requires an administrator-provisioned policy and accounts.
+Leaving `broker_socket` empty
 keeps the existing native runtime and its [Landlock dial](isolation.md).
 The broker enforces its systemd protections even when the legacy dial is `off`.
 
@@ -73,7 +74,54 @@ special files, foreign-owned files and controller-owned hardlinks from other
 groups are refused. Apps that deliberately make their files inaccessible can
 still disrupt their own backup or service.
 
-## Provision one app
+## Offline provisioning helper
+
+For new app identities, the broker binary can prepare accounts and storage from
+an administrator-owned desired policy. First create the app records (without
+running bundles), obtain their database IDs, and fill in the policy's explicit
+UIDs/GIDs and storage paths. Keep the controller database, configuration and
+secrets in a private directory; preserve the existing auth key. Install the
+root-owned policy and broker binary as shown below.
+
+Review the plan (no changes):
+
+```bash
+sudo /usr/local/libexec/shinyhub-native-broker provision --policy /etc/shinyhub/native-broker.json
+```
+
+Stop the controller, all its native app/build/job processes, and the broker.
+Then apply the same desired policy:
+
+```bash
+sudo /usr/local/libexec/shinyhub-native-broker provision --policy /etc/shinyhub/native-broker.json --apply
+```
+
+The JSON plan lists exact account/group commands and directory ownership/modes.
+Apply creates locked, non-login app accounts named `shapp-<controller UID>-<app ID>`,
+private primary groups, controller group memberships and missing storage
+ancestors. Re-running a completed plan makes no changes. If a system command
+fails, inspect a new plan before resuming; existing accounts and data are retained.
+It never deletes accounts or reuses an identity for a different app.
+
+The helper refuses unrelated existing UIDs/GIDs or account names, supplementary
+app groups, shared primary groups, overlapping app parents, symlinks and directory
+ACLs. It never widens an existing common parent: move control files into private
+storage and arrange traversable common parents first. An existing app-specific
+directory must belong to the controller. It does not recursively migrate files;
+the broker/controller prepares existing contents at startup. Previously hand-made
+accounts use the manual setup below rather than being silently adopted.
+
+Provisioning remains an offline administrator operation. The running broker and
+controller cannot create accounts or edit the registry. The helper does not
+allocate numeric IDs, change server configuration or secrets, install/start
+services, or remove retired identities. Keep retired accounts reserved. Restart
+the broker to load the policy and the controller to load new group memberships,
+then explicitly configure `runtime.native.broker_socket`.
+
+## Manual provisioning
+
+Choose either the helper or these manual account/directory commands. Both use
+the same policy, service installation and controller configuration below.
 
 Stop the controller and **all legacy native app/job/build processes** before
 migration. Old workers still have the controller UID and could authenticate to
@@ -95,7 +143,7 @@ sudo usermod --append --groups shinyhub-example shinyhub
 sudo install -d -o shinyhub -g shinyhub -m 0711 \
   /var/lib/shinyhub /var/lib/shinyhub/apps \
   /var/lib/shinyhub/app-data /var/lib/shinyhub/app-cache
-sudo install -d -o shinyhub -g shinyhub-example -m 0750 \
+sudo install -d -o shinyhub -g shinyhub-example -m 0711 \
   /var/lib/shinyhub/apps/example
 sudo install -d -o shinyhub -g shinyhub-example -m 0770 \
   /var/lib/shinyhub/apps/example/versions \
@@ -130,7 +178,8 @@ existing, non-overlapping roots. The policy's `bundle_root` must be
 `<storage.app_data_dir>/<slug>` and `<storage.app_cache_dir>/<slug>`. Root paths
 cannot contain symlinks, whitespace or systemd specifiers. Restart the broker
 after policy changes and the controller after changing group membership.
-The broker does not create users, allocate IDs or automatically register apps.
+The running broker does not create users, allocate IDs or automatically register apps.
+The offline helper above prepares new identities from the same explicit policy.
 
 Configure the controller:
 

@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
-- **runtime**: opt-in Linux native execution under dedicated per-app users through a separate, root-owned systemd broker. Dependency builds, hooks, replicas and jobs use the registered app identity; startup guards, lifetime locks and unit-based recovery are preserved. Requires manual provisioning; see [setup and limitations](docs/native-user-isolation.md).
+- **runtime**: opt-in Linux native execution under dedicated per-app users through a separate, root-owned systemd broker. Dependency builds, hooks, replicas and jobs use the registered app identity; startup guards, lifetime locks and unit-based recovery are preserved. Includes an offline plan/apply helper for new app accounts and private storage; an administrator-owned policy is still required. See [setup and limitations](docs/native-user-isolation.md).
 - **runtime**: startup diagnostics identify isolated native execution and warn when apps share the controller UID. Backend selection remains explicit for this release; unavailable configured isolation prevents startup.
 
 ### Security
