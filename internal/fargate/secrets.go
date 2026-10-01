@@ -57,7 +57,12 @@ func newSecretsManagerStore(api secretsManagerAPI, kmsKeyID string) *secretsMana
 // client. kmsKeyID is optional (empty uses the default aws/secretsmanager key).
 // Wire the result with WithSecretsStore.
 func NewSecretsManagerStore(client *secretsmanager.Client, kmsKeyID string) SecretsStore {
-	return newSecretsManagerStore(client, kmsKeyID)
+	return newSecretsManagerStore(secretsManagerClient{
+		createSecret:   client.CreateSecret,
+		putSecretValue: client.PutSecretValue,
+		deleteSecret:   client.DeleteSecret,
+		listSecrets:    client.ListSecrets,
+	}, kmsKeyID)
 }
 
 // Put upserts the secret: it creates it, or (when it already exists) writes a

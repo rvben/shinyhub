@@ -87,7 +87,8 @@ func IsECSManagedWorkerID(id string) bool {
 const startedBy = "shinyhub"
 
 // ECSClient is the subset of the AWS ECS API the runtime needs. The SDK's
-// *ecs.Client satisfies it directly; tests supply a fake.
+// *ecs.Client satisfies it directly; production uses NewECSClient so unused SDK
+// operations can be removed from the binary, and tests supply a fake.
 type ECSClient interface {
 	RunTask(ctx context.Context, in *ecs.RunTaskInput, optFns ...func(*ecs.Options)) (*ecs.RunTaskOutput, error)
 	StopTask(ctx context.Context, in *ecs.StopTaskInput, optFns ...func(*ecs.Options)) (*ecs.StopTaskOutput, error)
@@ -192,7 +193,8 @@ type Config struct {
 }
 
 // EC2Client is the subset of the AWS EC2 API needed to resolve a task ENI's
-// public IP when RouteViaPublicIP is set. The SDK's *ec2.Client satisfies it.
+// public IP when RouteViaPublicIP is set. Production uses NewEC2Client to avoid
+// retaining unused SDK operations; tests supply a fake.
 type EC2Client interface {
 	DescribeNetworkInterfaces(ctx context.Context, in *ec2.DescribeNetworkInterfacesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeNetworkInterfacesOutput, error)
 }

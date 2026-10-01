@@ -57,7 +57,9 @@ jobs:
         run: make vuln
 
       - name: Build
-        run: go build -o /tmp/shinyhub ./cmd/shinyhub
+        run: |
+          go build -ldflags="-w" -o /tmp/shinyhub ./cmd/shinyhub
+          python3 scripts/check-sdk-linking.py /tmp/shinyhub
 
   # The Worker decides what reaches the demo container, and a request that
   # reaches a sleeping container wakes it. deploy/cloudflare-demo only deploys

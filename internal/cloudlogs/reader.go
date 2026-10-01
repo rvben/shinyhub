@@ -34,6 +34,19 @@ func New(c client, region string) *Reader {
 	return &Reader{client: c, region: region}
 }
 
+type getLogEventsFunc func(context.Context, *cloudwatchlogs.GetLogEventsInput, ...func(*cloudwatchlogs.Options)) (*cloudwatchlogs.GetLogEventsOutput, error)
+
+func (call getLogEventsFunc) GetLogEvents(ctx context.Context, in *cloudwatchlogs.GetLogEventsInput, opts ...func(*cloudwatchlogs.Options)) (*cloudwatchlogs.GetLogEventsOutput, error) {
+	return call(ctx, in, opts...)
+}
+
+// NewSDKReader binds only GetLogEvents, allowing the linker to remove unused
+// CloudWatch operations even when CLI templates use reflection. A wrapper with
+// a *cloudwatchlogs.Client field would still retain all exported SDK methods.
+func NewSDKReader(c *cloudwatchlogs.Client, region string) *Reader {
+	return New(getLogEventsFunc(c.GetLogEvents), region)
+}
+
 func (r *Reader) Read(ctx context.Context, details process.ExternalLogs, cursor string, limit int32) (process.ExternalLogPage, error) {
 	if r == nil || r.client == nil {
 		return process.ExternalLogPage{}, fmt.Errorf("cloudwatch logs reader is not configured")

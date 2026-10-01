@@ -877,7 +877,7 @@ func buildFargateRuntime(ctx context.Context, cfg *config.Config, tier config.Ti
 	var opts []fargate.Option
 	if fc.RouteViaPublicIP {
 		// Out-of-VPC control plane: resolve task public IPs via EC2.
-		opts = append(opts, fargate.WithEC2Client(ec2.NewFromConfig(awsCfg)))
+		opts = append(opts, fargate.WithEC2Client(fargate.NewEC2Client(ec2.NewFromConfig(awsCfg))))
 	}
 	if fc.SecretsNamePrefix != "" {
 		// Route apps' secret env vars through AWS Secrets Manager (referenced by
@@ -891,10 +891,10 @@ func buildFargateRuntime(ctx context.Context, cfg *config.Config, tier config.Ti
 		// pre-creates each app's directory in the linked bucket (a non-existent
 		// per-app rootDirectory fails to mount). Needs GetFileSystem + PutObject.
 		opts = append(opts,
-			fargate.WithS3FilesDescriber(s3files.NewFromConfig(awsCfg)),
-			fargate.WithObjectPutter(s3.NewFromConfig(awsCfg)))
+			fargate.WithS3FilesDescriber(fargate.NewS3FilesDescriber(s3files.NewFromConfig(awsCfg))),
+			fargate.WithObjectPutter(fargate.NewObjectPutter(s3.NewFromConfig(awsCfg))))
 	}
-	return fargate.New(ecs.NewFromConfig(awsCfg), fargate.Config{
+	return fargate.New(fargate.NewECSClient(ecs.NewFromConfig(awsCfg)), fargate.Config{
 		Cluster:          fc.Cluster,
 		TaskDefinition:   fc.TaskDefinition,
 		ContainerName:    fc.ContainerName,
@@ -1580,7 +1580,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		if awsCfg, err := awsconfig.LoadDefaultConfig(ctx, opts...); err != nil {
 			slog.Warn("CloudWatch application logs unavailable; using AWS console handoff", "err", err)
 		} else {
-			srv.SetExternalLogReader(cloudlogs.New(cloudwatchlogs.NewFromConfig(awsCfg), awsCfg.Region))
+			srv.SetExternalLogReader(cloudlogs.NewSDKReader(cloudwatchlogs.NewFromConfig(awsCfg), awsCfg.Region))
 		}
 	}
 	if isClustered(cfg) {
