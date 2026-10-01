@@ -2706,8 +2706,30 @@ auth:
 	if got, want := cfg.Auth.ForwardAuth.SecretHeader, "X-ShinyHub-Forward-Auth-Secret"; got != want {
 		t.Fatalf("SecretHeader: got %q want %q", got, want)
 	}
-	if got, want := cfg.Auth.ForwardAuth.DefaultRole, "developer"; got != want {
+	if got, want := cfg.Auth.ForwardAuth.DefaultRole, "viewer"; got != want {
 		t.Fatalf("DefaultRole: got %q want %q", got, want)
+	}
+}
+
+func TestForwardAuth_ExplicitDefaultRole(t *testing.T) {
+	for _, role := range []string{"viewer", "developer", "operator", "admin"} {
+		t.Run(role, func(t *testing.T) {
+			path := writeYAML(t, `
+auth:
+  secret: `+strings.Repeat("a", 32)+`
+  forward_auth:
+    enabled: true
+    shared_secret: `+strings.Repeat("p", 32)+`
+    default_role: `+role+`
+`)
+			cfg, err := config.Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Auth.ForwardAuth.DefaultRole != role {
+				t.Fatalf("explicit role = %q, want %q", cfg.Auth.ForwardAuth.DefaultRole, role)
+			}
+		})
 	}
 }
 
@@ -2731,6 +2753,7 @@ func TestForwardAuth_EnvOverride(t *testing.T) {
 	t.Setenv("SHINYHUB_FORWARD_AUTH_USER_HEADER", "X-User")
 	t.Setenv("SHINYHUB_FORWARD_AUTH_SHARED_SECRET", strings.Repeat("p", 32))
 	t.Setenv("SHINYHUB_FORWARD_AUTH_ADMIN_GROUPS", "admins,sre")
+	t.Setenv("SHINYHUB_FORWARD_AUTH_DEFAULT_ROLE", "developer")
 	yaml := `
 auth:
   secret: ` + strings.Repeat("a", 32) + `
@@ -2748,6 +2771,9 @@ auth:
 	}
 	if got, want := strings.Join(cfg.Auth.ForwardAuth.AdminGroups, ","), "admins,sre"; got != want {
 		t.Fatalf("AdminGroups: got %q want %q", got, want)
+	}
+	if got, want := cfg.Auth.ForwardAuth.DefaultRole, "developer"; got != want {
+		t.Fatalf("DefaultRole from env: got %q want %q", got, want)
 	}
 }
 

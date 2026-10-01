@@ -928,7 +928,8 @@ type ForwardAuthConfig struct {
 	NameHeader   string   `yaml:"name_header"`
 	GroupsHeader string   `yaml:"groups_header"`
 	AdminGroups  []string `yaml:"admin_groups"`
-	DefaultRole  string   `yaml:"default_role"`
+	// DefaultRole defaults to viewer; deployment rights must be granted explicitly.
+	DefaultRole string `yaml:"default_role"`
 	// RequireGroupsHeader, when true and groups_header is configured, causes a
 	// forward-auth request that is missing the groups header to be refused (403)
 	// instead of being treated as no groups. Default false keeps the revoke
@@ -1933,7 +1934,7 @@ func loadRaw(path string) (*Config, error) {
 			}
 		}
 		if cfg.Auth.ForwardAuth.DefaultRole == "" {
-			cfg.Auth.ForwardAuth.DefaultRole = "developer"
+			cfg.Auth.ForwardAuth.DefaultRole = "viewer"
 		}
 		switch cfg.Auth.ForwardAuth.DefaultRole {
 		case "viewer", "developer", "operator", "admin":

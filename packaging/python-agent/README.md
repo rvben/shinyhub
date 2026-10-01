@@ -32,7 +32,8 @@ def server(input, output, session):
         ui.update_select("period", selected=args["period"], session=session)
         return {"period": selected_period.get()}
 
-    register(session=session, input=input, tools=[
+    # Explicitly allow browser agents to change this session's display filter.
+    register(session=session, input=input, allow_browser_writes=True, tools=[
         AgentTool("get_view", "Read the selected period", {
             "type": "object", "properties": {}, "additionalProperties": False,
         }, current_view),
@@ -149,11 +150,38 @@ An AG-UI agent hosted in Amazon Bedrock AgentCore needs an authenticated
 `InvokeAgentRuntime` client or a hoster-managed HTTPS relay. `AGUIChat` does
 not sign AgentCore requests itself.
 
-When WebMCP is available, `bridge.js` registers the declared tools. In other
+When WebMCP is available, `bridge.js` registers the exposed tools. In other
 browsers it makes them available through `window.shinyhubAgentTools.invoke()`
-for an app-supplied assistant. Browser tool writes show visitor confirmation
-before dispatch. This confirmation is a browser interaction, **not a security
-authorization boundary**; the app handler still decides what the viewer may do.
+for an app-supplied assistant. By default, browser capabilities contain only
+read-only tools, and the server rejects direct calls to write tools even with
+a valid session nonce. Chat retains the full registry and server-side approval
+for writes. To expose writes to browser agents, explicitly pass
+`allow_browser_writes=True` to `register()` (as in the display-filter example).
+Opted-in browser writes show visitor confirmation before dispatch, but that
+confirmation can be bypassed by a client. It is **not a security authorization
+boundary**; the app handler must still decide what the viewer may do. Keep
+consequential actions on the chat path when server-side approval is required.
+
+Upgrading from a release that exposed browser writes automatically requires
+this explicit opt-in to retain that behavior. Chat-only integrations need no
+change.
+
+## Data sent to agents
+
+Tool results are model input. Return the same authorized and anonymised data
+as the page, reduced to the fields needed for the question. Resolve identities
+such as "me" from verified session identity in the handler, and apply access
+filters before aggregation. Do not accept a caller-supplied user or project as
+the authority for scope. Avoid returning identity tokens, credentials, or
+unnecessary names and identifiers, even if the UI can display them.
+
+Build tools and schemas inside the top-level server function for each viewer.
+Enums can be computed from that viewer's authorized values; schemas and
+descriptions are also visible to agents. An enum is a schema constraint, not
+an authorization check: the handler must re-check access on every call,
+including after permissions change. Test ordinary, manager, admin, and
+anonymised views against the page's access rules, including requests for
+another viewer's data. A result-size limit does not redact sensitive fields.
 
 The chat history exists only in the viewer's Shiny session and is limited to
 the last six exchanges. A new chat clears it. The app currently has no durable

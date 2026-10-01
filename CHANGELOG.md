@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Security
+
+- **auth**: default forward-auth users to `viewer`, requiring deployment rights to be granted explicitly. Explicit `default_role` settings are unchanged; deployments relying on the previous `developer` default should configure it explicitly if intended. Group-role reconciliation also uses the new default.
+- **agent**: expose and execute only read-only tools on the browser bridge by default. Apps must opt in with `register(..., allow_browser_writes=True)` to retain browser writes; chat writes keep their server-side approval flow.
+- **docs**: filter Caddy runtime headers, document private systemd secret configuration, and clarify agent data minimisation and per-viewer schemas.
+
 ## [0.19.0](https://github.com/rvben/shinyhub/compare/v0.18.8...v0.19.0) - 2026-10-01
 
 ### Added

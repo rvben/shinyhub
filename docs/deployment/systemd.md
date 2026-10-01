@@ -24,6 +24,41 @@ Create the service user, configuration, and data directories referenced by the
 unit before starting it. Store `auth.secret` outside the repository with owner-
 only permissions.
 
+## Private service configuration
+
+The unit is normally `0644`; keep secret values out of `Environment=` lines
+and drop-ins. Use `auth.secret_file: /etc/shinyhub/auth.secret` in
+`shinyhub.yaml` for the existing root secret. The secret file must be readable
+by the service user and have mode `0600`; ShinyHub rejects group- or
+world-readable files. Moving the existing value is not a rotation. Follow
+[secret rotation](../secret-rotation.md) before replacing it, because it also
+encrypts persistent app secrets.
+
+Keep `shinyhub.yaml` owned by `shinyhub:shinyhub` with mode `0600` when it
+contains proxy, OAuth, deploy, or database credentials. For settings supplied
+through environment variables, create a root-owned `/etc/shinyhub/shinyhub.env`
+with mode `0600` and add the following inside `[Service]` in the unit or a
+drop-in:
+
+```ini
+EnvironmentFile=/etc/shinyhub/shinyhub.env
+```
+
+Use `KEY=value` lines without `export`. Systemd's system service manager reads
+the file before dropping privileges; the path can appear in the public unit,
+but the values should not. Keep the root secret in its secret file rather
+than this environment file. Do not print secret values in diagnostics or
+commit private files. Reload systemd after changing the unit, and restart
+the service to apply changed environment-file values.
+
+These permissions protect against other local users, not native replicas
+running as the same UID. Native apps can read other replicas' environments
+and server-readable files. Use a separate runtime boundary for app code you
+do not trust; see [native isolation](../isolation.md). The shipped hardening
+and cgroup delegation are not per-app user isolation. Do not enable
+`ProtectControlGroups` or `ProtectSystem=strict` blindly: the native runtime
+needs delegated cgroups and writable app data.
+
 ## Reverse proxy
 
 Keep the ShinyHub listener on loopback and terminate HTTPS with Caddy, nginx, or

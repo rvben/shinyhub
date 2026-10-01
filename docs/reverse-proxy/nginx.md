@@ -109,7 +109,7 @@ server:
     - ::1/128
 
 auth:
-  secret: "..."     # your existing secret
+  secret_file: /etc/shinyhub/auth.secret  # existing root secret; owner-readable 0600
   forward_auth:
     enabled: true
     shared_secret: "replace-with-a-random-32+-character-secret"
@@ -117,7 +117,7 @@ auth:
     email_header: X-Forwarded-Email
     groups_header: X-Forwarded-Groups  # when set, always emit - empty value for users with no groups
     admin_groups: ["shinyhub-admins"] # users in this group get admin role
-    default_role: developer           # role for newly provisioned accounts
+    default_role: viewer              # deployment rights require an explicit grant
     require_groups_header: false      # set true to REFUSE (403) any request missing the groups header
 ```
 
@@ -139,9 +139,21 @@ SHINYHUB_FORWARD_AUTH_USER_HEADER=X-Forwarded-User
 SHINYHUB_FORWARD_AUTH_EMAIL_HEADER=X-Forwarded-Email
 SHINYHUB_FORWARD_AUTH_GROUPS_HEADER=X-Forwarded-Groups
 SHINYHUB_FORWARD_AUTH_ADMIN_GROUPS=shinyhub-admins
-SHINYHUB_FORWARD_AUTH_DEFAULT_ROLE=developer
+SHINYHUB_FORWARD_AUTH_DEFAULT_ROLE=viewer
 SHINYHUB_FORWARD_AUTH_REQUIRE_GROUPS_HEADER=false
 ```
+
+The default role is now `viewer`; older releases defaulted to `developer`.
+Explicitly configured roles still apply. Set `default_role: developer` only
+if all authenticated users should be able to deploy. Group reconciliation
+also uses this default when an elevated mapping no longer applies.
+
+Keep the proxy secret out of debug logs, and protect the nginx secrets include
+and `shinyhub.yaml` with owner-only permissions. Use a private environment file
+for systemd rather than inline unit secrets; see
+[private service configuration](../deployment/systemd.md#private-service-configuration).
+Move the existing root secret to `secret_file`; generating a replacement
+requires the [rotation procedure](../secret-rotation.md).
 
 Generate the shared value once and provide it independently to both processes:
 

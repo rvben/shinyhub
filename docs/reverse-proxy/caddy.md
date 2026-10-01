@@ -35,6 +35,24 @@ Browser --> Caddy (TLS, auth) --> ShinyHub :8080
 ## Caddyfile
 
 ```caddy
+{
+    # Runtime logging, including reverse_proxy diagnostics.
+    log default {
+        level INFO
+        format filter {
+            wrap json
+            fields {
+                request>headers delete
+                headers delete
+                # Expanded configuration can contain header_up credentials.
+                http delete
+                tls delete
+                config delete
+            }
+        }
+    }
+}
+
 shiny.example.com, apps.example.com {
     route {
         # Never accept identity or the proxy credential from the browser.
@@ -68,6 +86,37 @@ authenticate, then proxy. If you configure additional or differently named
 identity headers, update both the removal and copying lists. See Caddy's
 [forward_auth](https://caddyserver.com/docs/caddyfile/directives/forward_auth)
 and [route](https://caddyserver.com/docs/caddyfile/directives/route) references.
+
+### Protect proxy credentials in logs
+
+Keep global `debug`, server `trace`, and `log_credentials` disabled in
+production. Reverse-proxy debug messages can include the upstream request,
+including the custom forward-auth shared-secret header. The global `log default`
+filter above removes request and response header maps and structured
+configuration fields from runtime logs, including the HTTP/TLS configuration
+logged at debug startup. Changing only a site's access-log format does not
+filter runtime diagnostics.
+If you have other named runtime or access loggers, apply the same filter to
+each destination that records requests. See Caddy's
+[global logging options](https://caddyserver.com/docs/caddyfile/options#log)
+and [filter encoder](https://caddyserver.com/docs/caddyfile/directives/log#filter).
+
+For file logging, explicitly restrict permissions in each logger's output:
+
+```caddy
+output file /var/log/caddy/shinyhub.log {
+    mode 0600
+}
+```
+
+Caddy's file writer defaults to `0600`; verify existing files, rotated copies,
+journals, and log collectors too. Changing the writer mode requires a restart
+or a new output filename, and does not secure existing copies. In a test
+environment, send a synthetic marker as the proxy credential and check every
+log destination before using real credentials. Filters do not redact secrets
+in arbitrary message text, URLs, or saved configurations. If a real credential
+was logged, restrict the copies and rotate it; redaction only protects future
+entries.
 
 ## WebSockets (Shiny reactivity)
 
@@ -148,7 +197,7 @@ server:
     - ::1/128
 
 auth:
-  secret: "..."     # your existing secret
+  secret_file: /etc/shinyhub/auth.secret  # existing root secret; owner-readable 0600
   forward_auth:
     enabled: true
     shared_secret: "replace-with-a-random-32+-character-secret"
@@ -156,7 +205,7 @@ auth:
     email_header: X-Forwarded-Email
     groups_header: X-Forwarded-Groups  # when set, always emit - empty value for users with no groups
     admin_groups: ["shinyhub-admins"] # users in this group get admin role
-    default_role: developer           # role for newly provisioned accounts
+    default_role: viewer              # deployment rights require an explicit grant
     require_groups_header: false      # set true to REFUSE (403) any request missing the groups header
 ```
 
@@ -178,7 +227,7 @@ SHINYHUB_FORWARD_AUTH_USER_HEADER=X-Forwarded-User
 SHINYHUB_FORWARD_AUTH_EMAIL_HEADER=X-Forwarded-Email
 SHINYHUB_FORWARD_AUTH_GROUPS_HEADER=X-Forwarded-Groups
 SHINYHUB_FORWARD_AUTH_ADMIN_GROUPS=shinyhub-admins
-SHINYHUB_FORWARD_AUTH_DEFAULT_ROLE=developer
+SHINYHUB_FORWARD_AUTH_DEFAULT_ROLE=viewer
 SHINYHUB_FORWARD_AUTH_REQUIRE_GROUPS_HEADER=false
 ```
 
@@ -187,6 +236,19 @@ Generate the shared value once and provide it independently to both processes:
 ```sh
 export SHINYHUB_FORWARD_AUTH_SHARED_SECRET=$(openssl rand -hex 32)
 ```
+
+For systemd deployments, load environment values from a private file rather
+than inline `Environment=` entries in the unit. Protect `shinyhub.yaml` too:
+the example contains the proxy shared secret. See
+[private service configuration](../deployment/systemd.md#private-service-configuration).
+Use the existing root secret when moving it to `secret_file`; replacing it
+requires the [rotation procedure](../secret-rotation.md).
+
+The default role is now `viewer`. Older releases defaulted to `developer`;
+explicitly configured roles still apply. If deployment rights for all SSO
+users are intentional, set `default_role: developer` explicitly. Group-based
+role reconciliation also uses this default when an elevated mapping no longer
+applies, so check existing users during an upgrade.
 
 After restarting both services, sign in through Caddy in a browser and open the
 following URL, not the direct ShinyHub listener, so the check covers

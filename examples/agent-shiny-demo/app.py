@@ -1,6 +1,7 @@
 """Real Shiny session state exposed through explicit agent capabilities."""
 
 import os
+from inspect import signature
 from pathlib import Path
 
 from shiny import App, reactive, render, ui
@@ -90,6 +91,12 @@ def server(input, output, session):
         ui.update_select("period", selected=previous_period, session=session)
         return await get_dashboard_state({})
 
+    # This demo permits browser changes to this viewer's display filter only.
+    # Older pinned helpers exposed writes automatically and lack this option.
+    browser_options = (
+        {"allow_browser_writes": True}
+        if "allow_browser_writes" in signature(register).parameters else {}
+    )
     register(session=session, input=input, tools=[
         AgentTool(
             "get_dashboard_state",
@@ -108,7 +115,7 @@ def server(input, output, session):
             receipt=lambda _args, result: f"View set to {result['period']}",
             undo=undo_dashboard_period,
         ),
-    ], chat=CHAT)
+    ], chat=CHAT, **browser_options)
 
     @output
     @render.ui

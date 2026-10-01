@@ -12,6 +12,13 @@ ShinyHub and the app handler enforce access to app data and actions.
 
 ## Tool discovery
 
+Browser discovery exposes only read-only tools by default. The server also
+rejects direct browser requests for write tools with `write_not_allowed`.
+An app can explicitly enable browser writes with
+`register(..., allow_browser_writes=True)`; the write examples below assume
+that opt-in. Chat retains its full tool registry and server-side write
+approval independently of the browser setting.
+
 The browser sends `.shinyhub_agent_discover` with `{version: 1, nonce: <time>}`
 after its bridge loads. The app also publishes capabilities after its first
 Shiny flush. The app replies with `shinyhub-agent-capabilities`:

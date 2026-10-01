@@ -55,7 +55,8 @@ def server(input, output, session):
         ui.update_select("period", selected=args["period"], session=session)
         return {"period": period.get()}
 
-    register(session=session, input=input, tools=[
+    # Allow browser agents to change only this viewer's display filter.
+    register(session=session, input=input, allow_browser_writes=True, tools=[
         AgentTool("get_view", "Read the selected period", {
             "type": "object", "properties": {}, "additionalProperties": False,
         }, get_view),
@@ -178,10 +179,33 @@ The renderer remains safe regardless of whether the model follows the guidance.
 
 ## Browser agents
 
-Where `document.modelContext.registerTool` exists, the helper registers each
-declared tool as a WebMCP browser tool. This path uses the visitor's current
+Where `document.modelContext.registerTool` exists, the helper registers the
+exposed tools as WebMCP browser tools. This path uses the visitor's current
 Shiny session. Other browsers continue to run the app normally; they can use
 the built-in chat if configured.
+
+Browser tools are read-only by default. The server rejects write calls even
+when a client bypasses discovery and supplies a valid session nonce. The
+example explicitly enables browser writes with `allow_browser_writes=True`
+for a per-viewer display filter. This opt-in permits direct browser writes;
+the browser confirmation is not server-side approval. Keep actions requiring
+server-side approval on the chat path, which retains write tools and its
+approval flow regardless of this setting. Earlier releases exposed browser
+writes automatically; retaining that behavior now requires the explicit opt-in.
+
+## Data access and minimisation
+
+Tool results go to the model provider or the hoster-owned agent endpoint.
+Reuse the page's access filters and anonymisation before returning results;
+return only the fields needed to answer the question. Resolve "me" from the
+verified session identity, never from caller-supplied identity arguments.
+
+Construct each viewer's tools in their server session. Schema enums and tool
+descriptions must contain only values that viewer may see. Enums are not
+authorization checks: handlers must re-check current permissions on each
+call. Add role-based regression checks for unauthorized slices and for views
+where the page hides user identifiers. See the helper's
+[security notes](https://github.com/rvben/shinyhub/tree/main/packaging/python-agent#data-sent-to-agents).
 
 This integration covers Python Shiny apps. It does not yet provide a platform
 administration screen, central model budget, durable conversation store,

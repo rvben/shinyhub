@@ -44,8 +44,11 @@ def chat_dependency():
 
 
 def register(*, session: Any, input: Any, tools: Sequence[AgentTool],
-             chat: ChatAgent | None = None) -> ToolRegistry:
-    """Register tools for this viewer's Shiny session, once in the top-level server."""
+             chat: ChatAgent | None = None, allow_browser_writes: bool = False) -> ToolRegistry:
+    """Register session tools; browser writes require an explicit opt-in.
+
+    Chat writes retain server-side approval regardless of this setting.
+    """
     from shiny import reactive
 
     if getattr(session, REGISTRATION_MARKER, None) is not None:
@@ -55,7 +58,7 @@ def register(*, session: Any, input: Any, tools: Sequence[AgentTool],
         raise ValueError("Register agent tools from the top-level server session")
     registry = ToolRegistry(tools)
     setattr(session, REGISTRATION_MARKER, registry)
-    dispatcher = SessionTools(registry)
+    dispatcher = SessionTools(registry, allow_browser_writes=allow_browser_writes)
     chat_session = ChatSession(
         chat, registry, lambda event: session.send_custom_message(CHAT_EVENT_MESSAGE, event)
     ) if chat is not None else None

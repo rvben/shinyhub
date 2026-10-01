@@ -18,14 +18,20 @@ logger = logging.getLogger(__name__)
 class SessionTools:
     """Dispatch validated tool calls for exactly one connected viewer."""
 
-    def __init__(self, registry: ToolRegistry):
+    def __init__(self, registry: ToolRegistry, *, allow_browser_writes: bool = False):
+        if not isinstance(allow_browser_writes, bool):
+            raise TypeError("allow_browser_writes must be a bool")
         self.registry = registry
+        self.allow_browser_writes = allow_browser_writes
         self.nonce = secrets.token_urlsafe(18)
         self.lock = asyncio.Lock()
         self.calls: deque[float] = deque()
 
     def capabilities(self) -> dict[str, Any]:
-        return {**self.registry.public_spec(), "session": self.nonce}
+        spec = self.registry.public_spec()
+        if not self.allow_browser_writes:
+            spec["tools"] = [tool for tool in spec["tools"] if tool["readOnly"]]
+        return {**spec, "session": self.nonce}
 
     async def handle(self, raw: Any) -> dict[str, Any] | None:
         if not isinstance(raw, dict):
@@ -46,6 +52,9 @@ class SessionTools:
                 raise ToolError("busy", "Another app action is still running.")
             self.calls.append(now)
             async with self.lock:
+                tool = self.registry.get(raw.get("name"))
+                if tool is not None and not tool.read_only and not self.allow_browser_writes:
+                    raise ToolError("write_not_allowed", "This action is unavailable through browser tools.")
                 response["result"] = await self.registry.execute(raw.get("name"), raw.get("arguments"))
                 response["ok"] = True
                 logger.info("Agent tool completed: %s", raw.get("name"))

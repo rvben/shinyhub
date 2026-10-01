@@ -13,6 +13,12 @@ Type=notify
 NotifyAccess=all
 User=shinyhub
 Group=shinyhub
+# Never put secret values in Environment= lines: this unit is world-readable.
+# Optional root-owned 0600 environment file, read by the system service manager:
+# EnvironmentFile=/etc/shinyhub/shinyhub.env
+# Prefer auth.secret_file for the root secret. Protect shinyhub.yaml with 0600
+# when it contains other secrets. Native apps still share this service's UID;
+# private files and environment files do not isolate them from the server.
 RuntimeDirectory=shinyhub
 # shinyhub.yaml must set: server.pid_file: /run/shinyhub/shinyhub.pid
 ExecStart=/usr/local/bin/shinyhub serve --config /etc/shinyhub/shinyhub.yaml

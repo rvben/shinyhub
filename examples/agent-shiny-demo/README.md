@@ -6,6 +6,13 @@ returns the applied period and metrics. The same registry serves browser
 WebMCP and the built-in chat. Without an API key, the browser-tool example
 still works and the chat panel stays hidden.
 
+The demo explicitly opts in to browser writes where supported by the helper,
+because its only write changes the current viewer's display filter. Browser
+confirmation can be bypassed by a client; chat writes use server-side approval.
+Other apps should keep the new read-only browser default for consequential
+actions. The compatibility check allows the example to run with its older
+pinned helper, which exposed browser writes automatically.
+
 To run from this repository:
 
 ```bash
