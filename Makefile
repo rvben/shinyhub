@@ -118,7 +118,7 @@ test-py-agent:
 	cd packaging/python-agent && PYTHONPATH=src uv run --with pytest --with jsonschema --with shiny --with httpx --no-project python -m pytest tests/ -q
 	node packaging/python-agent/tests/bridge.test.cjs
 	@if [ ! -d node_modules/jsdom ]; then npm install --no-audit --no-fund --silent; fi
-	node --test packaging/python-agent/tests/chat.test.cjs
+	node --test packaging/python-agent/tests/chat.test.cjs packaging/python-agent/tests/bridge-approval.test.cjs
 
 # test-r-identity runs the shinyhubidentity R helper's testthat suite. Needs R
 # with jose, sodium and testthat (see bootstrap-r-identity). Skips when Rscript
@@ -242,6 +242,15 @@ test-browser-agent-chat-e2e:
 	@if [ ! -d node_modules/axe-core ]; then npm install --no-audit --no-fund --silent; fi
 	@if [ ! -d loadtest/render/driver/node_modules/playwright ]; then cd loadtest/render/driver && npm install --no-audit --no-fund --silent; fi
 	SHINYHUB_E2E_BROWSER_CHANNEL="$${SHINYHUB_E2E_BROWSER_CHANNEL:-chrome}" node scripts/agent-chat-browser-e2e.mjs
+
+.PHONY: test-browser-agent-chat-e2e test-browser-agent-shiny-e2e
+
+# Real Python Shiny session: reads, approvals, updates, undo and cancellation.
+# SHINYHUB_AGENT_TEST_PYTHON can select an environment with shinyhub-agent deps.
+test-browser-agent-shiny-e2e:
+	@command -v uv >/dev/null 2>&1 || { echo "uv is required"; exit 1; }
+	@if [ ! -d loadtest/render/driver/node_modules/playwright ]; then cd loadtest/render/driver && npm install --no-audit --no-fund --silent; fi
+	uv run --with 'shiny>=1.8,<2' --with jsonschema --with httpx --no-project node scripts/agent-shiny-browser-e2e.mjs
 
 # Real Python Shiny lifecycle contract in a disposable, extension-free Chromium.
 # Requires uv and system Python; uses the render driver's locked Playwright.

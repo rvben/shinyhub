@@ -19,14 +19,13 @@ const assets = new Map(await Promise.all([
   ['/nav.js', '../internal/appnav/assets/nav.js'],
 ].map(async ([route, path]) => [route, await readFile(new URL(path, import.meta.url))])));
 
-function fixture(native) {
+function fixture(native, captureShadow = true) {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1"><title>Agent chat</title>
   <style>body{margin:0} main{padding:24px} table{width:1800px;margin:50px;font-size:30px} th,td{color:red;text-align:center;padding:40px} pre{white-space:normal}</style>
   <link rel="stylesheet" href="/chat.css"></head><body><main><h1>Dashboard</h1><button>App action</button></main>
   <script>
-    const attach = Element.prototype.attachShadow;
-    Element.prototype.attachShadow = function(options) { const root=attach.call(this,options); window.navRoot=root; return root; };
+    ${captureShadow ? 'const attach = Element.prototype.attachShadow; Element.prototype.attachShadow = function(options) { const root=attach.call(this,options); window.navRoot=root; return root; };' : ''}
     window.handlers = new Map(); window.request = null;
     window.Shiny = { addCustomMessageHandler(name,fn){ handlers.set(name,fn); },
       setInputValue(name,value){ if(value.message) window.request=value; } };
@@ -46,7 +45,7 @@ const server = createServer((req, res) => {
     res.setHeader('Content-Type', 'application/json');
     res.end(JSON.stringify({ apps: [{ slug: 'demo', name: 'Demo', url: '/app/demo/' }] }));
   } else {
-    res.setHeader('Content-Type', 'text/html'); res.end(fixture(req.url.startsWith('/native')));
+    res.setHeader('Content-Type', 'text/html'); res.end(fixture(req.url.startsWith('/native'), !req.url.includes('unpatched')));
   }
 });
 server.listen(0, '127.0.0.1'); await once(server, 'listening');
@@ -90,6 +89,37 @@ try {
   browser = await chromium.launch({ channel: process.env.SHINYHUB_E2E_BROWSER_CHANNEL || 'chrome', headless: true });
   const context = await browser.newContext({ permissions: ['clipboard-read', 'clipboard-write'] });
   context.setDefaultTimeout(5000);
+  // The public hook must work against the actual closed shadow root, with no
+  // attachShadow wrapper. The later layout tests capture it only to inspect chrome.
+  for (const width of [1280, 375]) {
+    const tab = await context.newPage();
+    await tab.setViewportSize({ width, height: 900 });
+    await tab.goto(`${origin}/native?unpatched`);
+    await tab.waitForFunction(() => window.shinyhubAgentChat?.open());
+    assert.equal(await tab.evaluate(() => window.shinyhubAgentChat.open()), true);
+    assert.equal(await tab.locator('.sh-agent-panel').isVisible(), true);
+    assert.equal(await tab.locator('.sh-agent-panel').evaluate((p) => p.parentElement.shadowRoot), null);
+    await start(tab);
+    await tab.evaluate(() => chatEvent({ type: 'approval_required', approvalId: 'nested', name: 'set_filters',
+      message: 'Change the dashboard filters?', expiresIn: 30,
+      arguments: { filters: { model: ['alpha', 'beta', '<b>literal</b>'],
+        cost_center: Array.from({ length: 20 }, (_, i) => 'CC' + i) }, personal_usage: true } }));
+    assert.match(await tab.locator('.sh-agent-approval').textContent(), /Filters · Model/);
+    assert.match(await tab.locator('.sh-agent-approval').textContent(), /and 12 more/);
+    assert.equal(await tab.locator('.sh-agent-approval b').count(), 0);
+    await tab.locator('.sh-agent-approval-details summary').click();
+    assert.match(await tab.locator('.sh-agent-approval-details pre').textContent(), /CC19/);
+    assert.ok(await tab.locator('.sh-agent-panel').evaluate((p) => p.scrollWidth <= p.clientWidth + 1));
+    assert.ok(await tab.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+    const issues = await tab.evaluate(axe.source + '\naxe.run(document.querySelector(".sh-agent-panel"), { rules: { "color-contrast": { enabled: false } } }).then(r => r.violations.map(v => v.id))');
+    assert.deepEqual(issues, [], 'approval content must remain accessible');
+    if (screenshots) await tab.screenshot({ path: resolve(screenshots, `approval-${width}.png`) });
+    await tab.locator('.sh-agent-secondary').filter({ hasText: 'Keep current view' }).click();
+    await tab.evaluate(() => chatEvent({ type: 'done' }));
+    await tab.evaluate(() => { window.shinyhubAgentChat.close(); window.shinyhubAgentChat.close(); });
+    assert.equal(await tab.locator('.sh-agent-panel').isVisible(), false);
+    await tab.close();
+  }
   for (const native of [false, true]) {
     for (const width of [1280, 800, 375]) {
       console.log(`Checking ${native ? 'native toolbar' : 'fallback'} at ${width}px`);
@@ -100,7 +130,7 @@ try {
       await tab.setViewportSize({ width, height: 900 });
       await tab.goto(`${origin}/${native ? 'native' : 'fallback'}`);
       if (native) {
-        await tab.evaluate(() => navRoot.querySelector('.chat-trigger').click());
+        await tab.evaluate(() => window.shinyhubAgentChat.open());
         assert.equal(await tab.locator('body').evaluate((body) => body.classList.contains('sh-agent-native-chat')), true);
         assert.equal(await tab.locator('.sh-agent-panel').evaluate((panel) => panel.slot), 'shinyhub-chat-content');
       } else await tab.locator('.sh-agent-launcher').click();
