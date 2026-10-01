@@ -50,7 +50,12 @@ func matchInventoryItem(items []process.InventoryItem, slug string, index int, d
 func recoverRemoteReplica(
 	store *db.Store, mgr *process.Manager, prx *proxy.Proxy,
 	app *db.App, r *db.Replica, items []process.InventoryItem, logRunID string,
-) bool {
+) (adopted bool) {
+	defer func() {
+		if !adopted {
+			discardRecoveredRoute(prx, app, r)
+		}
+	}()
 	if r.DesiredState == db.ReplicaDesiredWarm {
 		// Warm-parked by the idle shrink: deliberately stopped; expansion boots it, not recovery.
 		return false
@@ -122,7 +127,8 @@ func recoverRemoteReplica(
 		WorkerID:    r.WorkerID,
 		LogRunID:    logRunID,
 	}, process.RunHandle{ContainerID: r.WorkerID + "/" + item.ContainerID})
-	if err := prx.RegisterReplica(app.Slug, r.Index, item.URL, mgr.TransportForWorker(r.Tier, r.WorkerID), derefInt64(r.DeploymentID), app.ID); err != nil {
+	base := mgr.TransportForWorker(r.Tier, r.WorkerID)
+	if err := prx.RegisterReplica(app.Slug, r.Index, item.URL, recoveredRouteTransport(prx, store, r, base, item.URL), derefInt64(r.DeploymentID), app.ID); err != nil {
 		slog.Error("recovery: register remote proxy", "slug", app.Slug, "idx", r.Index, "err", err)
 		return false
 	}

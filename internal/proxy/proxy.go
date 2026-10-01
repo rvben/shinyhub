@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -400,6 +401,10 @@ type AccessLogEntry struct {
 	// pool-degraded, unknown-slug). Empty for routed requests and for
 	// readiness-probe rejections (which bypass this access-log path).
 	Reject RejectReason
+	// Fallback identifies a platform response rather than the app's content.
+	// Status remains the actual downstream status, including a browser wait page.
+	Fallback       bool
+	FallbackReason string
 }
 
 // UsageSessionStart is emitted exactly once for a successful upgraded app
@@ -1363,25 +1368,52 @@ func writeWaitPage(w http.ResponseWriter, status int, body string) {
 	w.Write([]byte(body)) //nolint:errcheck
 }
 
+// A partially restored pool is starting capacity, not a degraded serving pool.
+func (p *Proxy) deferStartingCapacity(w http.ResponseWriter, r *http.Request, slug string) bool {
+	if fn := p.getAppStatusLookup(); fn != nil {
+		status, _ := fn(slug)
+		if status == "waking" || status == "starting" {
+			p.serveMissPage(w, r, slug, nil)
+			return true
+		}
+	}
+	return false
+}
+
 // serveMissPage responds to a request for a slug with no live backend. A
 // crashed or stopped app gets a clear, static status page so the user sees why
 // it is unavailable; an app with a deployment in flight gets the deploying
 // wait page (auto-refresh, no give-up, no wake); anything else fires the wake
 // trigger and gets the auto-retrying loading page (the normal cold-start path).
 func (p *Proxy) serveMissPage(w http.ResponseWriter, r *http.Request, slug string, trigger func(context.Context, string)) {
+	if sr, ok := w.(*statusRecorder); ok {
+		sr.fallbackReason = "replica-starting"
+		if sr.proxyErr != nil {
+			sr.fallbackReason = "upstream-error"
+		}
+	}
 	if fn := p.getAppStatusLookup(); fn != nil {
 		switch status, reason := fn(slug); status {
 		case "crashed":
+			if sr, ok := w.(*statusRecorder); ok {
+				sr.fallbackReason = "app-crashed"
+			}
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusServiceUnavailable)
 			w.Write([]byte(p.decorateAppPage(renderAppDownPage("crashed", slug, reason), slug, r))) //nolint:errcheck
 			return
 		case "stopped":
+			if sr, ok := w.(*statusRecorder); ok {
+				sr.fallbackReason = "app-stopped"
+			}
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusServiceUnavailable)
 			w.Write([]byte(p.decorateAppPage(renderAppDownPage("stopped", slug, ""), slug, r))) //nolint:errcheck
 			return
 		case "deploying":
+			if sr, ok := w.(*statusRecorder); ok {
+				sr.fallbackReason = "deploying"
+			}
 			// A deployment is in flight for this slug (the deploy tears the
 			// pool down before the new pool boots). Serve the deploy-aware
 			// wait page: no give-up countdown (the pending deployment row
@@ -1396,6 +1428,20 @@ func (p *Proxy) serveMissPage(w http.ResponseWriter, r *http.Request, slug strin
 	}
 	if trigger != nil {
 		go trigger(wakeContext(r.Context()), slug)
+	}
+	p.mu.RLock()
+	registered := p.pools[slug] != nil
+	p.mu.RUnlock()
+	if sr, ok := w.(*statusRecorder); !ok || sr.proxyErr == nil {
+		p.recordReject(w, slug, ReasonReplicaStarting, registered)
+	}
+	w.Header().Set("Retry-After", "1")
+	// Do not hand an HTML shell to an upgrade, mutation, or subresource. Keep
+	// legacy GET clients with no negotiation headers on the browser wait path.
+	if r.Method != http.MethodGet && r.Method != http.MethodHead || isWSUpgrade(r) ||
+		(r.Header.Get("Sec-Fetch-Dest") != "" || r.Header.Get("Accept") != "") && !isPageLoad(r) {
+		http.Error(w, "App is temporarily unavailable; retry shortly.", http.StatusServiceUnavailable)
+		return
 	}
 	writeWaitPage(w, http.StatusOK, p.decorateAppPage(loadingPage, slug, r))
 }
@@ -1818,6 +1864,11 @@ func (p *Proxy) newReplicaBackend(pool *backendPool, slug string, index int, tar
 	// (the wake trigger is wired on every instance), since the dead-replica race
 	// happens in both.
 	rp.ErrorHandler = func(w http.ResponseWriter, req *http.Request, err error) {
+		if errors.Is(err, ErrReplicaStarting) {
+			slog.Info("proxy_deferred", "slug", slugCopy, "reason", "replica-starting")
+			p.serveMissPage(w, req, slugCopy, nil)
+			return
+		}
 		slog.Warn("proxy_upstream_error", "slug", slugCopy, "error", err.Error())
 		if sr, ok := w.(*statusRecorder); ok {
 			sr.proxyErr = err
@@ -3055,17 +3106,19 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			resolver = *rp
 		}
 		(*logPtr)(AccessLogEntry{
-			Slug:         slug,
-			Method:       r.Method,
-			Path:         r.URL.Path,
-			Status:       rec.status,
-			Bytes:        rec.bytes,
-			Duration:     time.Since(start),
-			ClientIP:     resolveClientIP(resolver, r),
-			Peer:         r.RemoteAddr,
-			ReplicaIndex: replicaIndex,
-			Sticky:       sticky,
-			Reject:       rec.rejectReason,
+			Slug:           slug,
+			Method:         r.Method,
+			Path:           r.URL.Path,
+			Status:         rec.status,
+			Bytes:          rec.bytes,
+			Duration:       time.Since(start),
+			ClientIP:       resolveClientIP(resolver, r),
+			Peer:           r.RemoteAddr,
+			ReplicaIndex:   replicaIndex,
+			Sticky:         sticky,
+			Reject:         rec.rejectReason,
+			Fallback:       rec.fallbackReason != "",
+			FallbackReason: rec.fallbackReason,
 		})
 	}()
 
@@ -3386,6 +3439,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// new sessions right now) and shed with Retry-After so a polite
 		// client retries once the drain completes and a fresh slot lands.
 		p.mu.RUnlock()
+		if p.deferStartingCapacity(rec, r, slug) {
+			return
+		}
 		p.recordReject(rec, slug, ReasonPoolDegraded, true)
 		// Fire the wake trigger so a warm-shrunk pool is expanded immediately
 		// rather than waiting for the next watcher tick. Duplicate triggers are
@@ -3415,6 +3471,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			reason = ReasonPoolDegraded
 		}
 		p.mu.RUnlock()
+		if reason == ReasonPoolDegraded && p.deferStartingCapacity(rec, r, slug) {
+			return
+		}
 		p.recordReject(rec, slug, reason, true)
 		// When degraded (fewer live replicas than configured), fire the wake
 		// trigger to expand a warm-shrunk pool immediately. A full healthy pool

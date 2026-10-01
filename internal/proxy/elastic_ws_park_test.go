@@ -75,11 +75,11 @@ func TestElasticRouting_WSUpgradeParkedUntilWorkerReady(t *testing.T) {
 	}
 }
 
-// TestElasticRouting_WSUpgradeParkTimeoutFallsBackToSplash pins the bound:
+// TestElasticRouting_WSUpgradeParkTimeoutIsRetryable pins the bound:
 // when the worker never becomes ready within the park TTL, the upgrade falls
-// back to today's behavior (the loading page), so a wedged boot cannot hold
+// back to a retryable response, so a wedged boot cannot hold
 // connections forever.
-func TestElasticRouting_WSUpgradeParkTimeoutFallsBackToSplash(t *testing.T) {
+func TestElasticRouting_WSUpgradeParkTimeoutIsRetryable(t *testing.T) {
 	oldTTL, oldInt := wsBootParkTTL, wsBootParkInterval
 	wsBootParkTTL, wsBootParkInterval = 150*time.Millisecond, 20*time.Millisecond
 	t.Cleanup(func() { wsBootParkTTL, wsBootParkInterval = oldTTL, oldInt })
@@ -97,10 +97,10 @@ func TestElasticRouting_WSUpgradeParkTimeoutFallsBackToSplash(t *testing.T) {
 	rec2 := httptest.NewRecorder()
 	p.ServeHTTP(rec2, wsUpgradeRequest(slug, cookies))
 
-	if rec2.Code != http.StatusOK {
-		t.Fatalf("timed-out upgrade: want 200 loading page, got %d", rec2.Code)
+	if rec2.Code != http.StatusServiceUnavailable || rec2.Header().Get("Retry-After") == "" {
+		t.Fatalf("timed-out upgrade: want retryable 503, got %d", rec2.Code)
 	}
-	if !strings.Contains(rec2.Body.String(), LoadingPageSentinel) {
-		t.Errorf("timed-out upgrade must fall back to the loading page, got %q", rec2.Body.String())
+	if strings.Contains(rec2.Body.String(), LoadingPageSentinel) {
+		t.Errorf("timed-out upgrade must not return an HTML splash, got %q", rec2.Body.String())
 	}
 }

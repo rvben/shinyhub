@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"testing"
@@ -32,7 +33,7 @@ func TestPoolSync_AppliesRenderPacing(t *testing.T) {
 		AppRenderSeconds: 1.3,
 		Replica:          &db.Replica{AppID: 1, Index: 0, Status: "running"},
 	}}
-	syncer.reconcileSlug("demo", rows)
+	syncer.reconcileSlug(context.Background(), "demo", rows)
 
 	if prx.appLimiter("demo") == nil {
 		t.Fatal("reconcileSlug with render_seconds > 0 should install a limiter")

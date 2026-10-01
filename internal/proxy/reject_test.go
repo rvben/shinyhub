@@ -192,9 +192,9 @@ func TestServeHTTP_ReadyProbe_FailOpenCollapsesToSentinel(t *testing.T) {
 	if got := p.RejectsByReason("ghost", 10*time.Minute); got != nil {
 		t.Errorf("raw slug recorded: %v, want nil (collapsed to sentinel)", got)
 	}
-	// The event is recorded under the sentinel instead.
-	if got := p.RejectsByReason("__unknown__", 10*time.Minute); got[proxy.ReasonAppNotReady] != 1 {
-		t.Errorf("sentinel app-not-ready = %d, want 1", got[proxy.ReasonAppNotReady])
+	// Readiness observations are excluded from admission history too.
+	if got := p.RejectsByReason("__unknown__", 10*time.Minute); got[proxy.ReasonAppNotReady] != 0 {
+		t.Errorf("sentinel app-not-ready = %d, want 0", got[proxy.ReasonAppNotReady])
 	}
 }
 

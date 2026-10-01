@@ -141,6 +141,7 @@ type appStore interface {
 	ListDeployments(appID int64) ([]*db.Deployment, error)
 	ListRecentDeployments(appID int64, n int) ([]*db.Deployment, error)
 	UpsertReplica(p db.UpsertReplicaParams) error
+	SetReplicaDesiredState(appID int64, idx int, state string) error
 	RecordReplicaCrash(p db.UpsertReplicaParams) error
 	// RecordReplicaCrashFromLost is the lost-overwriting variant used only for
 	// the failure of a restart launched from a lost row; RecordReplicaCrash
@@ -303,9 +304,9 @@ const wakeDrainTimeout = 15 * time.Second
 // New constructs a Watcher. deployFn encapsulates deploy.RunReplica with the
 // shared Manager and Proxy so wake/restart paths can persist the resulting PID
 // and port on a per-replica basis. Its ctx carries the lifecycle span
-// (lifecycle.wake or lifecycle.restart) the boot runs under, for trace
-// parentage only: it is never cancelled, and callers without a span pass
-// context.Background().
+// (lifecycle.wake or lifecycle.restart) the boot runs under. Startup restores
+// also carry owner cancellation; ordinary request wakes use an independent
+// context so a visitor disconnect cannot interrupt the shared boot.
 func New(cfg Config, mgr *process.Manager, prx *proxy.Proxy, st *db.Store,
 	deployFn func(ctx context.Context, slug, bundleDir string, index int) (*deploy.Result, error)) *Watcher {
 	return &Watcher{
@@ -648,6 +649,10 @@ func (w *Watcher) RestoreWarm(ctx context.Context) {
 			return // a standby never drives app processes
 		}
 		if app.Replicas < 1 {
+			continue
+		}
+		if app.MinWarmReplicas > 0 {
+			// Serving floors are restored separately; never freeze one here.
 			continue
 		}
 
@@ -2219,9 +2224,10 @@ func spanParent(ctx context.Context) context.Context {
 // the DB BeginWake CAS guards across processes.
 //
 // parent positions the lifecycle.wake span in a trace (it must carry no
-// cancellation); trigger names what started the wake ("request" or
-// "reconcile") and is recorded as shinyhub.wake.trigger.
-func (w *Watcher) driveWakingApp(parent context.Context, slug, trigger string) {
+// cancellation for request wakes); startup uses the owner's cancellation.
+// trigger names what started the wake ("request", "reconcile", or "startup")
+// and is recorded as shinyhub.wake.trigger.
+func (w *Watcher) driveWakingApp(parent context.Context, slug, trigger string) <-chan struct{} {
 	w.mu.Lock()
 	if w.stopping {
 		w.mu.Unlock()
@@ -2229,20 +2235,22 @@ func (w *Watcher) driveWakingApp(parent context.Context, slug, trigger string) {
 		if aerr := w.store.AbortWake(slug); aerr != nil {
 			slog.Warn("watcher: abort wake on shutdown failed", "slug", slug, "err", aerr)
 		}
-		return
+		return nil
 	}
 	if w.driving[slug] {
 		// Another goroutine within this process is already driving this wake.
 		// The DB CAS prevents a second process from racing us, so this is safe
 		// to skip entirely.
 		w.mu.Unlock()
-		return
+		return nil
 	}
 	w.driving[slug] = true
 	w.wakeWG.Add(1)
 	w.mu.Unlock()
 
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		defer func() {
 			w.mu.Lock()
 			delete(w.driving, slug)
@@ -2334,23 +2342,66 @@ func (w *Watcher) driveWakingApp(parent context.Context, slug, trigger string) {
 			// (and any resume failure) cold-boot. Reading the rows once here keeps the
 			// per-replica goroutines lock-free.
 			suspendedByIdx := make(map[int]bool)
+			existingByIdx := make(map[int]bool)
 			if reps, lerr := w.store.ListReplicas(app.ID); lerr == nil {
 				for _, r := range reps {
+					existingByIdx[r.Index] = true
 					if r.Status == db.ReplicaStatusSuspended {
 						suspendedByIdx[r.Index] = true
 					}
 				}
 			} else {
 				slog.Warn("watcher: list replicas for wake failed", "slug", slug, "err", lerr)
+				if trigger == "startup" {
+					opErr = lerr
+					return
+				}
+			}
+			bootCount := app.Replicas
+			var bootSlots chan struct{}
+			if trigger == "startup" {
+				bootCount = min(app.Replicas, app.MinWarmReplicas)
+				if app.AutoscaleEnabled {
+					bootCount = min(app.Replicas, max(bootCount, app.AutoscaleMinReplicas))
+				}
+				if bootCount < 1 {
+					return
+				}
+				// Preserve runtime identity for suspended surplus slots, while making
+				// the ordinary burst-expansion path own this parked capacity.
+				for i := bootCount; i < app.Replicas; i++ {
+					var err error
+					if existingByIdx[i] {
+						err = w.store.SetReplicaDesiredState(app.ID, i, db.ReplicaDesiredWarm)
+					} else {
+						err = w.store.UpsertReplica(db.UpsertReplicaParams{AppID: app.ID, Index: i, Status: "stopped", DesiredState: db.ReplicaDesiredWarm})
+					}
+					if err != nil {
+						opErr = err
+						return
+					}
+				}
+				bootSlots = make(chan struct{}, 4)
 			}
 			var wg sync.WaitGroup
 			var started atomic.Int32
 			var persistenceFailed atomic.Bool
 			var firstFailure atomic.Pointer[wakeReplicaFailure]
-			for i := 0; i < app.Replicas; i++ {
+			for i := 0; i < bootCount; i++ {
 				wg.Add(1)
 				go func(idx int) {
 					defer wg.Done()
+					if bootSlots != nil {
+						select {
+						case bootSlots <- struct{}{}:
+						case <-ctx.Done():
+							return
+						}
+						defer func() { <-bootSlots }()
+						if ctx.Err() != nil {
+							return
+						}
+					}
 					res, consumerBooted, err := w.wakeReplica(ctx, slug, deployments[0].BundleDir, idx, suspendedByIdx[idx])
 					if err != nil {
 						slog.Warn("wake replica failed", "slug", slug, "idx", idx, "err", err)
@@ -2391,6 +2442,10 @@ func (w *Watcher) driveWakingApp(parent context.Context, slug, trigger string) {
 				return
 			}
 			if started.Load() == 0 {
+				if ctx.Err() != nil {
+					opErr = ctx.Err()
+					return
+				}
 				// No replica came up. Reverting silently to hibernated (the deferred
 				// guard's default) would make the wake retry forever against a bundle
 				// that can never boot, with no signal anywhere an operator would look.
@@ -2464,4 +2519,5 @@ func (w *Watcher) driveWakingApp(parent context.Context, slug, trigger string) {
 			tearDownStarted(cur.Status)
 		}
 	}()
+	return done
 }

@@ -753,7 +753,12 @@ func workerDeclaredGone(store *db.Store, workerID string) bool {
 // recoverNativeReplica re-adopts a single PID-backed replica. It returns true
 // when the replica was adopted, and marks crashed (so the watcher restarts it)
 // when the PID is missing, dead, or fails the stale-process identity check.
-func recoverNativeReplica(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, app *db.App, r *db.Replica, bundleDir, logRunID string) bool {
+func recoverNativeReplica(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, app *db.App, r *db.Replica, bundleDir, logRunID string) (adopted bool) {
+	defer func() {
+		if !adopted {
+			discardRecoveredRoute(prx, app, r)
+		}
+	}()
 	if r.DesiredState == db.ReplicaDesiredWarm {
 		// Warm-parked by the idle shrink: expansion boots it, not recovery. A
 		// 'suspended' warm row is a frozen (SIGSTOP'd) process that survived this
@@ -837,7 +842,7 @@ func recoverNativeReplica(store *db.Store, mgr *process.Manager, prx *proxy.Prox
 	if targetURL == "" {
 		targetURL = fmt.Sprintf("http://127.0.0.1:%d", *r.Port)
 	}
-	if err := prx.RegisterReplica(app.Slug, r.Index, targetURL, nil, derefInt64(r.DeploymentID), app.ID); err != nil {
+	if err := prx.RegisterReplica(app.Slug, r.Index, targetURL, recoveredRouteTransport(prx, store, r, nil, targetURL), derefInt64(r.DeploymentID), app.ID); err != nil {
 		slog.Error("process recovery: register proxy", "slug", app.Slug, "idx", r.Index, "err", err)
 		return false
 	}
@@ -996,7 +1001,12 @@ func derefInt64(p *int64) int64 {
 // It returns true when the replica was adopted; a missing container, an
 // out-of-pool index, or a missing port row leaves the replica unadopted so the
 // watcher relaunches it.
-func recoverContainerReplica(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, app *db.App, r *db.Replica, lister ContainerLister, containers []process.ContainerInfo, logRunID string) bool {
+func recoverContainerReplica(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, app *db.App, r *db.Replica, lister ContainerLister, containers []process.ContainerInfo, logRunID string) (adopted bool) {
+	defer func() {
+		if !adopted {
+			discardRecoveredRoute(prx, app, r)
+		}
+	}()
 	if r.DesiredState == db.ReplicaDesiredWarm {
 		// Warm-parked by the idle shrink: expansion boots it, not recovery. A
 		// 'suspended' warm row is a paused container that survived the restart and
@@ -1104,7 +1114,7 @@ func recoverContainerReplica(store *db.Store, mgr *process.Manager, prx *proxy.P
 		DeploymentID: derefInt64(r.DeploymentID),
 		LogRunID:     logRunID,
 	}, process.RunHandle{ContainerID: cID})
-	if err := prx.RegisterReplica(app.Slug, r.Index, targetURL, nil, derefInt64(r.DeploymentID), app.ID); err != nil {
+	if err := prx.RegisterReplica(app.Slug, r.Index, targetURL, recoveredRouteTransport(prx, store, r, nil, targetURL), derefInt64(r.DeploymentID), app.ID); err != nil {
 		slog.Error("recovery: register docker proxy", "slug", app.Slug, "idx", r.Index, "err", err)
 		return false
 	}

@@ -52,7 +52,8 @@ type statusRecorder struct {
 	// rejectReason, when set by recordReject, is the platform rejection reason
 	// for this request. The ServeHTTP access-log defer copies it into
 	// AccessLogEntry.Reject. Empty for non-rejected requests.
-	rejectReason RejectReason
+	rejectReason   RejectReason
+	fallbackReason string
 }
 
 func newStatusRecorder(w http.ResponseWriter) *statusRecorder {

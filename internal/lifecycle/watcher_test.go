@@ -386,6 +386,17 @@ func (f *fakeStore) ListRecentDeployments(appID int64, n int) ([]*db.Deployment,
 	}
 	return all, nil
 }
+func (f *fakeStore) SetReplicaDesiredState(appID int64, idx int, state string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, r := range f.replicas[appID] {
+		if r.Index == idx {
+			r.DesiredState = state
+		}
+	}
+	return nil
+}
+
 func (f *fakeStore) UpsertReplica(p db.UpsertReplicaParams) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

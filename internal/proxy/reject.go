@@ -48,6 +48,9 @@ const (
 	// inflated by design (one paced visit re-polls every ~1.75 s), so folding it
 	// into render-paced would make "sessions refused" unreadable.
 	ReasonRenderDeferred RejectReason = "render-deferred"
+	// ReasonReplicaStarting is an expected lifecycle wait, not an admission
+	// failure. It is stamped on retry responses but excluded from the rollup.
+	ReasonReplicaStarting RejectReason = "replica-starting"
 )
 
 // rejectSentinel is the metrics key substituted for any slug that is not a
@@ -106,7 +109,12 @@ func (p *Proxy) recordReject(w http.ResponseWriter, slug string, reason RejectRe
 	if registered {
 		key = slug
 	}
-	p.rejects.record(key, reason)
+	// Readiness polls and expected startup waits are observations, not refused
+	// user admissions. Preserve their labelled metrics without making routine
+	// restarts raise the dashboard's ten-minute admission warning.
+	if reason != ReasonAppNotReady && reason != ReasonReplicaStarting {
+		p.rejects.record(key, reason)
+	}
 	if rp := p.rejectRecorder.Load(); rp != nil {
 		(*rp).RecordReject(key, string(reason))
 	}

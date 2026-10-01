@@ -2893,7 +2893,7 @@ func TestPatchAppIfContentDigestMismatch409(t *testing.T) {
 	}
 }
 
-func TestHandleGetApp_IncludesRejectsByReason(t *testing.T) {
+func TestHandleGetApp_ReadinessProbesDoNotReportAdmissionIssues(t *testing.T) {
 	// Build a server that shares one proxy handle so the test can drive a reject
 	// through the proxy and read it back via the app-detail GET. (newTestServer
 	// passes a nil proxy and returns no handle, so we wire it inline here,
@@ -2913,9 +2913,8 @@ func TestHandleGetApp_IncludesRejectsByReason(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Register a pool for "demo" but never complete a WS handshake. A readiness
-	// poll then records exactly one app-not-ready reject under slug "demo"
-	// (registered == true), synchronously and with no goroutines.
+	// Readiness polling a registered app before its first WS handshake must
+	// not create an admission warning.
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer backend.Close()
 	if err := prx.Register("demo", backend.URL); err != nil {
@@ -2935,16 +2934,8 @@ func TestHandleGetApp_IncludesRejectsByReason(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	block, ok := body["rejects_by_reason"].(map[string]any)
-	if !ok {
-		t.Fatalf("rejects_by_reason missing or wrong type: %v", body["rejects_by_reason"])
-	}
-	if block["window_seconds"].(float64) != 600 {
-		t.Errorf("window_seconds = %v, want 600", block["window_seconds"])
-	}
-	counts := block["counts"].(map[string]any)
-	if counts["app-not-ready"].(float64) != 1 {
-		t.Errorf("counts[app-not-ready] = %v, want 1", counts["app-not-ready"])
+	if block, ok := body["rejects_by_reason"]; ok {
+		t.Fatalf("readiness polling must not report admission issues: %v", block)
 	}
 }
 
@@ -2974,14 +2965,15 @@ func TestDeleteApp_ForgetsRejects(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Register a pool and drive one readiness-probe reject to populate reject
-	// history for the slug.
+	// Drain the only registered slot to populate real admission history.
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer backend.Close()
 	if err := prx.Register("demo", backend.URL); err != nil {
 		t.Fatal(err)
 	}
-	prx.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/app/demo/.shinyhub/ready", nil))
+	prx.SetPoolSize("demo", 2)
+	prx.DrainReplica("demo", 0)
+	prx.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/app/demo/", nil))
 
 	// Precondition: reject history is non-nil.
 	if got := prx.RejectsByReason("demo", 10*time.Minute); got == nil {
@@ -3086,8 +3078,8 @@ func TestHandleGetApp_RejectsByReason_MultipleReasons(t *testing.T) {
 		t.Errorf("window_seconds = %v, want 600", block["window_seconds"])
 	}
 	counts := block["counts"].(map[string]any)
-	if counts["app-not-ready"].(float64) != 1 {
-		t.Errorf("counts[app-not-ready] = %v, want 1", counts["app-not-ready"])
+	if _, ok := counts["app-not-ready"]; ok {
+		t.Errorf("readiness probes must be excluded: %v", counts)
 	}
 	if counts["pool-saturated"].(float64) != 1 {
 		t.Errorf("counts[pool-saturated] = %v, want 1", counts["pool-saturated"])

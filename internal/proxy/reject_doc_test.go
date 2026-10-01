@@ -34,6 +34,7 @@ func TestMetricsDocCoversEveryRejectReason(t *testing.T) {
 		proxy.ReasonRenderPaced,
 		proxy.ReasonCPUSaturation,
 		proxy.ReasonRenderDeferred,
+		proxy.ReasonReplicaStarting,
 	} {
 		if !strings.Contains(doc, "`"+string(reason)+"`") {
 			t.Errorf("docs/metrics.md does not document reject reason %q; an operator "+

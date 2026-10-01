@@ -326,6 +326,16 @@ process is already listening.
   idle). If the stored replica count is below the keep-warm floor, the platform
   self-clamps the floor to the replica count; the Configuration tab shows a
   warning when this condition is detected.
+- **Server restart.** After process recovery, previously running multiplex apps
+  whose processes did not survive restore their warm floor in the background,
+  without waiting for a visitor. With autoscale enabled, the serving floor is
+  the larger of its minimum and `min_warm_replicas`, clamped to `replicas`.
+  Background restoration boots at most four replicas at once. Stopped, failed,
+  and operator-slept apps retain their state; elastic pools remain demand driven.
+  This works independently of frozen warm-wake snapshots. Traffic uses only
+  endpoints that have passed readiness; a recovering route holds requests up
+  to `lifecycle.wake_hold` (default 5 seconds), then serves a browser starting
+  page or a retryable 503 for upgrades and other non-document requests.
 
 ### Observability
 

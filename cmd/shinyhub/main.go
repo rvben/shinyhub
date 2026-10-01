@@ -1554,6 +1554,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	if isClustered(cfg) {
 		transportBuilder := worker.NewReplicaTransportBuilder(dialer, store)
 		syncer := proxy.NewPoolSyncer(prx, store, transportBuilder, slog.Default(), cfg.Auth.IdentityHeadersEnabled())
+		syncer.SetReplicaValidator(lifecycle.ReplicaRouteValidator(store, mgr))
 		syncerCtx, cancelSyncer := context.WithCancel(context.Background())
 		syncerCancel = cancelSyncer
 		syncerWG.Add(1)
@@ -1829,6 +1830,9 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		}
 		if e.Reject != "" {
 			attrs = append(attrs, "reject", string(e.Reject))
+		}
+		if e.Fallback {
+			attrs = append(attrs, "fallback", true, "fallback_reason", e.FallbackReason)
 		}
 		slog.Info("proxy_access", attrs...)
 	})
@@ -2546,6 +2550,14 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		// Re-adopt any processes that survived a server restart. Must run after
 		// ReconcileInflightDeployments so recovery adopts the last-good deployment,
 		// not a half-applied one.
+		var previouslyRunning []*db.App
+		if !retryOwnerStep("list apps for startup warm floors", func() error {
+			var err error
+			previouslyRunning, err = store.ListRunningApps()
+			return err
+		}) {
+			return
+		}
 		lifecycle.RecoverProcesses(store, mgr, prx, cfg.Runtime.DefaultMaxSessionsPerReplica, cfg.Auth.IdentityHeadersEnabled(), cfg.Runtime.DefaultWorkerIsolation)
 		// Stop any native processes in the Manager that belong to elastic-mode
 		// apps. Elastic workers are ephemeral and must not be re-adopted; the
@@ -2645,15 +2657,16 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		}()
 		loops.Add(1)
 		go func() { defer loops.Done(); srv.RunDevelopmentAppReaper(octx, time.Minute) }()
-		// Warm-restore: re-boot and re-freeze the apps that were hibernated before
-		// this restart, so their next access is a warm resume instead of a cold
-		// boot (a frozen process does not survive a service restart, so the warm
-		// state is re-created from scratch). Background - the boots take time - and
-		// owner-gated by this span; only when warm-wake is enabled.
-		if cfg.Runtime.Snapshot.Enabled && cfg.Runtime.Snapshot.RestoreOnStartup {
-			loops.Add(1)
-			go func() { defer loops.Done(); watcher.RestoreWarm(octx) }()
-		}
+		// Restore serving floors independently of optional frozen warm-wake.
+		// Sequence the two passes so frozen restoration cannot claim a serving app.
+		loops.Add(1)
+		go func() {
+			defer loops.Done()
+			watcher.RestoreWarmFloors(octx, previouslyRunning)
+			if cfg.Runtime.Snapshot.Enabled && cfg.Runtime.Snapshot.RestoreOnStartup {
+				watcher.RestoreWarm(octx)
+			}
+		}()
 		if controller != nil {
 			loops.Add(1)
 			go func() { defer loops.Done(); controller.Run(octx) }()
@@ -3010,7 +3023,10 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		startupSyncer := proxy.NewPoolSyncer(prx, store,
 			worker.NewReplicaTransportBuilder(dialer, store),
 			slog.Default(), cfg.Auth.IdentityHeadersEnabled())
-		startupSyncer.RunOnce(context.Background())
+		startupSyncer.SetReplicaValidator(lifecycle.ReplicaRouteValidator(store, mgr))
+		adoptionCtx, cancelAdoption := context.WithTimeout(ctx, 3*time.Second)
+		startupSyncer.RunOnce(adoptionCtx)
+		cancelAdoption()
 		slog.Info("startup pool adoption complete (single-node)")
 	}
 

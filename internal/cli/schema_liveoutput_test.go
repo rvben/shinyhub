@@ -225,11 +225,6 @@ func bootContractServer(t *testing.T) (host, token string) {
 	mgr := process.NewManager(appsDir, process.NewNativeRuntime())
 	prx := proxy.New()
 	srv := api.New(cfg, store, mgr, prx)
-	// The fixture app runs grouped isolation so the worker_pool envelope field
-	// the schema declares is present in live output (an elastic pool with zero
-	// workers reports an empty, not absent, view).
-	prx.SetPoolMode("demo", config.IsolationGrouped, 6, 5)
-
 	rawToken := "contract_admin_token_0123456789abcdef0123456789abcd"
 	sysUser, err := store.UpsertSystemUser(db.SystemUsernameDeploy, "admin")
 	if err != nil {
@@ -244,14 +239,21 @@ func bootContractServer(t *testing.T) (host, token string) {
 	seedContractFixtures(t, store, cfg, dataDir, sysUser.ID)
 
 	// Drive one real rejection through the proxy so the rejects_by_reason rollup
-	// the schema declares is present in live output. The readiness probe for a
-	// registered-but-workerless pool is the cheapest production path that records
-	// under the app's own slug: an unregistered slug collapses to the sentinel key
-	// and would never reach `apps show demo`.
-	prx.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/app/demo/.shinyhub/ready", nil))
-	if len(prx.RejectsByReason("demo", time.Minute)) == 0 {
-		t.Fatal("readiness probe recorded no rejection; the rejects_by_reason fixture is not producing the field it exists to cover")
+	// the schema declares is present in live output. A draining pool records under
+	// the app's own slug; an unregistered slug collapses to the sentinel key and
+	// would never reach `apps show demo`. Readiness polling is not an admission issue.
+	prx.SetPoolSize("demo", 2)
+	if err := prx.RegisterReplica("demo", 0, "http://127.0.0.1:29999", nil, 0); err != nil {
+		t.Fatal(err)
 	}
+	prx.DrainReplica("demo", 0)
+	prx.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/app/demo/", nil))
+	if len(prx.RejectsByReason("demo", time.Minute)) == 0 {
+		t.Fatal("drained pool recorded no rejection; the rejects_by_reason fixture is not producing the field it exists to cover")
+	}
+	// Switch to grouped isolation after seeding admission history so the
+	// worker_pool envelope field is also present (zero workers is an empty view).
+	prx.SetPoolMode("demo", config.IsolationGrouped, 6, 5)
 
 	ts := httptest.NewServer(srv.Router())
 	t.Cleanup(ts.Close)

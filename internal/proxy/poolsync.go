@@ -43,6 +43,15 @@ type PoolSyncer struct {
 	// flag. Each instance resolves NULL app columns against its LOCAL config,
 	// so operators must keep the flag consistent across control-plane instances.
 	identityGlobal bool
+	// validate checks a newly adopted endpoint before it becomes routable. Live
+	// unchanged routes retain their readiness; deployment registers new routes
+	// only after its own health check.
+	validate func(context.Context, db.RoutableReplica, http.RoundTripper) error
+}
+
+// SetReplicaValidator installs the adoption readiness check before serving.
+func (s *PoolSyncer) SetReplicaValidator(fn func(context.Context, db.RoutableReplica, http.RoundTripper) error) {
+	s.validate = fn
 }
 
 // NewPoolSyncer constructs a syncer. interval is the reconcile tick period;
@@ -93,7 +102,9 @@ func (s *PoolSyncer) RunOnce(ctx context.Context) {
 // a second query variant. The miss path is low-frequency (first request after
 // a cold-start or scale-up), so the extra scan cost is negligible.
 // A per-slug query is a future optimisation at large fleet scale.
-func (s *PoolSyncer) SyncSlug(_ context.Context, slug string) {
+func (s *PoolSyncer) SyncSlug(ctx context.Context, slug string) {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
 	rows, err := s.store.ListRoutableReplicas()
 	if err != nil {
 		s.log.Warn("pool_sync_slug_error", "slug", slug, "err", err)
@@ -106,11 +117,13 @@ func (s *PoolSyncer) SyncSlug(_ context.Context, slug string) {
 			filtered = append(filtered, rr)
 		}
 	}
-	s.reconcileSlugs(map[string][]db.RoutableReplica{slug: filtered})
+	s.reconcileSlugs(ctx, map[string][]db.RoutableReplica{slug: filtered})
 }
 
 // sync fetches all routable replicas and reconciles every slug.
 func (s *PoolSyncer) sync(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
 	rows, err := s.store.ListRoutableReplicas()
 	if err != nil {
 		return err
@@ -120,7 +133,7 @@ func (s *PoolSyncer) sync(ctx context.Context) error {
 	for _, rr := range rows {
 		bySlug[rr.Slug] = append(bySlug[rr.Slug], rr)
 	}
-	s.reconcileSlugs(bySlug)
+	s.reconcileSlugs(ctx, bySlug)
 
 	// Deregister any slug currently in the pool that has no routable replicas
 	// in the DB. This handles replicas that went lost/stopped since the last tick.
@@ -138,16 +151,16 @@ func (s *PoolSyncer) sync(ctx context.Context) error {
 // pool table. Slugs absent from bySlug are not touched here (the caller
 // controls scope; a full sync passes all slugs, a slug-scoped sync passes
 // only one).
-func (s *PoolSyncer) reconcileSlugs(bySlug map[string][]db.RoutableReplica) {
+func (s *PoolSyncer) reconcileSlugs(ctx context.Context, bySlug map[string][]db.RoutableReplica) {
 	for slug, rows := range bySlug {
-		s.reconcileSlug(slug, rows)
+		s.reconcileSlug(ctx, slug, rows)
 	}
 }
 
 // reconcileSlug reconciles the pool for a single slug against the given rows.
 // When rows is empty, the pool is fully deregistered (replica has no routable
 // replicas).
-func (s *PoolSyncer) reconcileSlug(slug string, rows []db.RoutableReplica) {
+func (s *PoolSyncer) reconcileSlug(ctx context.Context, slug string, rows []db.RoutableReplica) {
 	if len(rows) == 0 {
 		s.prx.Deregister(slug)
 		return
@@ -246,6 +259,12 @@ func (s *PoolSyncer) reconcileSlug(slug string, rows []db.RoutableReplica) {
 			s.log.Warn("pool_sync_transport_error",
 				"slug", slug, "index", idx, "err", err)
 			continue
+		}
+		if s.validate != nil {
+			if err := s.validate(ctx, d.rr, tr); err != nil {
+				s.log.Info("pool_adoption_deferred", "slug", slug, "index", idx, "reason", "replica-not-ready", "err", err)
+				continue
+			}
 		}
 
 		// RegisterReplica clears wsReady for this slug; the app must re-prove

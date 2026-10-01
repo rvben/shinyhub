@@ -227,6 +227,20 @@ which is why they are not collapsed into one:
 | `render-paced` | A new session was deferred because the app's render-admission bucket was empty, then shed after the park window. | Raise the app's [`render_seconds`](scaling.md#render-pacing) accuracy or add cores. More replicas do not help: they do not add CPU. |
 | `cpu-saturation` | The host CPU watermark is breached, so a new session was shed to protect connected ones. | Add cores or move apps off this host. |
 | `render-deferred` | A page load was shown the "Waiting for capacity" page because the app had no render capacity at that instant. | Same as `render-paced`. See the caveat below before alerting on it. |
+| `replica-starting` | A request could not be forwarded because replica readiness has not completed. Non-document clients receive 503 with `Retry-After`. | Allow startup to finish; inspect startup logs if it persists. |
+
+Readiness observations (`app-not-ready`) and expected startup waits
+(`replica-starting`) retain their labelled counters but are excluded from the
+dashboard's ten-minute admission-issues rollup. A probe poll is not a refused
+user session. Failed boots still appear as crashed or degraded apps, and an
+upstream failure after readiness remains a `proxy_upstream_error` warning.
+
+`proxy_access` records the actual downstream status. When ShinyHub serves a
+starting, deploying, stopped, or crashed page instead of app content, it also
+records `fallback: true` and `fallback_reason`. Browser starting pages can
+return 200; an unreachable previously ready upstream is identified by
+`fallback_reason: "upstream-error"` rather than appearing as an unqualified
+success.
 
 `render-deferred` counts **page loads deferred**, not sessions refused, and it is
 inflated by design: one waiting browser re-polls roughly every 1.75 s until
