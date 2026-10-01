@@ -39,7 +39,11 @@ class SessionTools:
         request_id = raw.get("requestId")
         if not isinstance(request_id, str) or not REQUEST_ID.fullmatch(request_id):
             return None
-        response: dict[str, Any] = {"version": VERSION, "session": self.nonce, "requestId": request_id}
+        response: dict[str, Any] = {
+            "version": VERSION,
+            "session": self.nonce,
+            "requestId": request_id,
+        }
         try:
             if raw.get("version") != VERSION or raw.get("session") != self.nonce:
                 raise ToolError("stale_session", "The app session changed. Try again.")
@@ -47,21 +51,59 @@ class SessionTools:
             while self.calls and now - self.calls[0] > 60:
                 self.calls.popleft()
             if len(self.calls) >= 20:
-                raise ToolError("rate_limited", "Too many actions. Try again in a minute.")
+                raise ToolError(
+                    "rate_limited", "Too many actions. Try again in a minute."
+                )
             if self.lock.locked():
                 raise ToolError("busy", "Another app action is still running.")
             self.calls.append(now)
             async with self.lock:
                 tool = self.registry.get(raw.get("name"))
-                if tool is not None and not tool.read_only and not self.allow_browser_writes:
-                    raise ToolError("write_not_allowed", "This action is unavailable through browser tools.")
-                response["result"] = await self.registry.execute(raw.get("name"), raw.get("arguments"))
+                if (
+                    tool is not None
+                    and not tool.read_only
+                    and not self.allow_browser_writes
+                ):
+                    raise ToolError(
+                        "write_not_allowed",
+                        "This action is unavailable through browser tools.",
+                    )
+                action = raw.get("action", "execute")
+                if action == "prepare":
+                    arguments = await self.registry.validate(
+                        raw.get("name"), raw.get("arguments")
+                    )
+                    tool = self.registry.get(raw.get("name"))
+                    if tool is None or tool.read_only:
+                        raise ToolError(
+                            "invalid_action",
+                            "Only state-changing actions need approval.",
+                        )
+                    response["result"] = {
+                        "arguments": arguments,
+                        "confirmation": tool.confirmation,
+                        "description": await self.registry.describe(
+                            tool.name, arguments
+                        ),
+                    }
+                elif action == "execute":
+                    response["result"] = await self.registry.execute(
+                        raw.get("name"), raw.get("arguments")
+                    )
+                else:
+                    raise ToolError(
+                        "invalid_action", "The requested action is unavailable."
+                    )
                 response["ok"] = True
                 logger.info("Agent tool completed: %s", raw.get("name"))
         except ToolError as error:
             response.update(ok=False, code=error.code, message=str(error))
             logger.info("Agent tool rejected: %s (%s)", raw.get("name"), error.code)
         except Exception:
-            response.update(ok=False, code="tool_failed", message="The app could not finish this action.")
+            response.update(
+                ok=False,
+                code="tool_failed",
+                message="The app could not finish this action.",
+            )
             logger.exception("Agent tool dispatch failed")
         return response

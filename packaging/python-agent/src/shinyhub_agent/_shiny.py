@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Sequence
 from typing import Any
 
-from ._core import AgentTool, ToolRegistry
 from ._chat import ChatAgent, ChatSession
+from ._core import AgentTool, ToolRegistry
 from ._session import SessionTools
 
 REQUEST_INPUT = ".shinyhub_agent_request"
@@ -24,7 +25,8 @@ def agent_dependency():
     from htmltools import HTMLDependency
 
     return HTMLDependency(
-        "shinyhub-agent", "0.2.0b4",
+        "shinyhub-agent",
+        "0.2.0b4",
         source={"package": "shinyhub_agent", "subdir": "www"},
         script={"src": "bridge.js", "defer": "defer"},
         stylesheet={"href": "bridge.css"},
@@ -36,32 +38,83 @@ def chat_dependency():
     from htmltools import HTMLDependency
 
     return HTMLDependency(
-        "shinyhub-agent-chat", "0.2.0b4",
+        "shinyhub-agent-chat",
+        "0.2.0b4",
         source={"package": "shinyhub_agent", "subdir": "www"},
         script={"src": "chat.js", "defer": "defer"},
         stylesheet={"href": "chat.css"},
     )
 
 
-def register(*, session: Any, input: Any, tools: Sequence[AgentTool],
-             chat: ChatAgent | None = None, allow_browser_writes: bool = False) -> ToolRegistry:
+def register(
+    *,
+    session: Any,
+    input: Any,
+    tools: Sequence[AgentTool],
+    chat: ChatAgent | None = None,
+    approval_timeout: float = 30,
+    history_exchanges: int = 6,
+    max_answer_chars: int = 8_000,
+    usage_metadata: dict[str, str | None] | None = None,
+    allow_browser_writes: bool = False,
+) -> ToolRegistry:
     """Register session tools; browser writes require an explicit opt-in.
 
     Chat writes retain server-side approval regardless of this setting.
     """
     from shiny import reactive
+    from shiny.session import session_context
 
     if getattr(session, REGISTRATION_MARKER, None) is not None:
         raise RuntimeError("Register agent tools only once per session")
     namespace_probe = "__shinyhub_namespace_probe"
     if str(session.ns(namespace_probe)) != namespace_probe:
         raise ValueError("Register agent tools from the top-level server session")
-    registry = ToolRegistry(tools)
-    setattr(session, REGISTRATION_MARKER, registry)
+
+    async def execute(operation):
+        # Only app callbacks hold the graph lock; model I/O and approval do not.
+        async with reactive.lock():
+            with session_context(session), reactive.isolate():
+                try:
+                    return await operation()
+                finally:
+                    await reactive.flush()
+
+    registry = ToolRegistry(tools, executor=execute)
     dispatcher = SessionTools(registry, allow_browser_writes=allow_browser_writes)
-    chat_session = ChatSession(
-        chat, registry, lambda event: session.send_custom_message(CHAT_EVENT_MESSAGE, event)
-    ) if chat is not None else None
+    chat_session = (
+        ChatSession(
+            chat,
+            registry,
+            lambda event: session.send_custom_message(CHAT_EVENT_MESSAGE, event),
+            approval_timeout=approval_timeout,
+            history_exchanges=history_exchanges,
+            max_answer_chars=max_answer_chars,
+            usage_metadata={
+                "app": os.environ.get("SHINYHUB_APP_SLUG"),
+                **(usage_metadata or {}),
+            },
+        )
+        if chat is not None
+        else None
+    )
+    setattr(session, REGISTRATION_MARKER, registry)
+    tasks: set[asyncio.Task[Any]] = set()
+
+    def launch(operation):
+        async def run():
+            with session_context(session), reactive.isolate():
+                await operation()
+
+        task = asyncio.create_task(run())
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+
+    def cancel_tasks():
+        for task in tuple(tasks):
+            task.cancel()
+
+    session.on_ended(cancel_tasks)
 
     async def publish() -> None:
         await session.send_custom_message(
@@ -69,7 +122,9 @@ def register(*, session: Any, input: Any, tools: Sequence[AgentTool],
             dispatcher.capabilities(),
         )
         if chat_session is not None:
-            await session.send_custom_message(CHAT_CAPABILITIES_MESSAGE, chat_session.capabilities())
+            await session.send_custom_message(
+                CHAT_CAPABILITIES_MESSAGE, chat_session.capabilities()
+            )
 
     session.on_flushed(publish, once=True)
 
@@ -80,16 +135,23 @@ def register(*, session: Any, input: Any, tools: Sequence[AgentTool],
 
     @reactive.effect
     @reactive.event(input[REQUEST_INPUT], ignore_none=True)
-    async def _request() -> None:
-        response = await dispatcher.handle(input[REQUEST_INPUT]())
-        if response is not None:
-            await session.send_custom_message(RESULT_MESSAGE, response)
+    def _request() -> None:
+        raw = input[REQUEST_INPUT]()
+
+        async def respond():
+            response = await dispatcher.handle(raw)
+            if response is not None:
+                await session.send_custom_message(RESULT_MESSAGE, response)
+
+        launch(respond)
 
     if chat_session is not None:
+
         @reactive.effect
         @reactive.event(input[CHAT_INPUT], ignore_none=True)
         def _chat_request() -> None:
-            asyncio.create_task(chat_session.handle(input[CHAT_INPUT]()))
+            raw = input[CHAT_INPUT]()
+            launch(lambda: chat_session.handle(raw))
 
         @reactive.effect
         @reactive.event(input[CHAT_DECISION_INPUT], ignore_none=True)
