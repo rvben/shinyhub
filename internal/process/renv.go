@@ -227,7 +227,7 @@ func SyncR(ctx context.Context, bundleDir string) error {
 		return err
 	}
 
-	out, err := renvRestoreCmd(ctx, bundleDir, lib).CombinedOutput()
+	out, err := HostCombinedOutput(ctx, renvRestoreCmd(ctx, bundleDir, lib))
 	if err != nil {
 		switch ctx.Err() {
 		case context.DeadlineExceeded:

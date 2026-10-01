@@ -1,0 +1,31 @@
+[Unit]
+Description=ShinyHub isolated native worker broker
+After=local-fs.target
+Before=shinyhub.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/local/libexec/shinyhub-native-broker serve /etc/shinyhub/native-broker.json
+Restart=on-failure
+RestartSec=2s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_SYS_PTRACE
+# The broker writes memory.reclaim for its own transient units. Do not make
+# /sys/fs/cgroup read-only here. App units receive ProtectControlGroups=yes.
+# Do not use KillMode=control-group on the ShinyHub controller as a way to
+# stop these workers: they belong to separate, durably recorded system units.
+
+[Install]
+WantedBy=multi-user.target

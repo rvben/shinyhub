@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +10,31 @@ import (
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/process"
 )
+
+func TestBuildRuntimeNativeWithoutBrokerPreservesExistingBackend(t *testing.T) {
+	cfg := &config.Config{}
+	rt, err := buildRuntime(context.Background(), config.TierConfig{Name: "local", Runtime: "native"}, cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := rt.(*process.NativeRuntime); !ok {
+		t.Fatalf("unconfigured isolation changed the existing backend to %T", rt)
+	}
+}
+
+func TestBuildRuntimeConfiguredNativeBrokerNeverFallsBack(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Runtime.Native.BrokerSocket = filepath.Join(t.TempDir(), "unavailable.sock")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	rt, err := buildRuntime(ctx, config.TierConfig{Name: "local", Runtime: "native"}, cfg, nil)
+	if err == nil || rt != nil {
+		t.Fatalf("unavailable configured isolation returned a usable runtime: %T %v", rt, err)
+	}
+	if !strings.Contains(err.Error(), "native user isolation") {
+		t.Fatalf("startup error did not identify isolation: %v", err)
+	}
+}
 
 // TestBuildRuntime_NativeIsSnapshotter asserts the native tier's runtime is
 // wired as a Snapshotter so warm-wake (SIGSTOP + per-app cgroup reclaim) is

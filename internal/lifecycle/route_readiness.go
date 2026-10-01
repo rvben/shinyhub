@@ -31,6 +31,15 @@ func ReplicaRouteValidator(store *db.Store, mgr *process.Manager) func(context.C
 				return err
 			}
 		}
+		if isolated, ok := mgr.RuntimeForTier(r.Tier).(*process.SystemdRuntime); ok {
+			if r.WorkerID == "" {
+				return fmt.Errorf("missing isolated native unit identity")
+			}
+			pid, err := isolated.InspectPID(r.WorkerID)
+			if err != nil || pid <= 0 || (r.PID != nil && *r.PID != pid) {
+				return fmt.Errorf("isolated native worker identity is not live")
+			}
+		}
 		probeCtx, cancel := context.WithTimeout(ctx, time.Second)
 		defer cancel()
 		return deploy.ProbeReadiness(probeCtx, r.EndpointURL, bundleDir, transport)

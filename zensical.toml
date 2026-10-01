@@ -62,6 +62,7 @@ nav = [
     { "Scaling" = "scaling.md" },
     { "Application performance" = "app-performance.md" },
     { "Isolation" = "isolation.md" },
+    { "Native app users" = "native-user-isolation.md" },
     { "Identity forwarding" = "identity.md" },
     { "App entitlements" = "entitlements.md" },
     { "People and invitations" = "people.md" },

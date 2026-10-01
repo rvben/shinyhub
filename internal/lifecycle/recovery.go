@@ -464,7 +464,7 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 			markRecoveryDown(store, app.Slug)
 		}
 		if anyAlive {
-			cleanupObsoleteDeploymentGenerations(store, app)
+			cleanupObsoleteDeploymentGenerations(store, mgr, app)
 		}
 	}
 
@@ -558,7 +558,7 @@ func reconcileDeploymentGenerationProjection(store *db.Store, app *db.App) bool 
 // legacy projection has been adopted and routed. Each deployment ledger is
 // deleted as a unit only when every recorded native identity is confirmed gone;
 // failures remain durable and block another handoff until a later recovery.
-func cleanupObsoleteDeploymentGenerations(store *db.Store, app *db.App) {
+func cleanupObsoleteDeploymentGenerations(store *db.Store, mgr *process.Manager, app *db.App) {
 	rows, err := store.ListDeploymentReplicas(app.ID)
 	if err != nil {
 		slog.Error("generation recovery: list cleanup identities", "slug", app.Slug, "err", err)
@@ -581,6 +581,12 @@ func cleanupObsoleteDeploymentGenerations(store *db.Store, app *db.App) {
 		allStopped := true
 		for _, replica := range replicas {
 			id := deploymentID
+			if isolated, ok := mgr.RuntimeForTier(replica.Tier).(*process.SystemdRuntime); ok {
+				if replica.WorkerID == "" || replica.Provider != "native" || isolated.RemoveContainer(replica.WorkerID) != nil {
+					allStopped = false
+				}
+				continue
+			}
 			if !stopRecordedNativeReplica(store, app, replica.PID, replica.Provider, &id) {
 				allStopped = false
 			}
@@ -1099,6 +1105,10 @@ func recoverContainerReplica(store *db.Store, mgr *process.Manager, prx *proxy.P
 	if targetURL == "" {
 		targetURL = fmt.Sprintf("http://127.0.0.1:%d", port)
 	}
+	handle := process.RunHandle{ContainerID: cID}
+	if _, isolated := mgr.RuntimeForTier(r.Tier).(*process.SystemdRuntime); isolated {
+		handle.PID = pid
+	}
 	mgr.Adopt(app.Slug, process.ProcessInfo{
 		Slug:         app.Slug,
 		AppID:        app.ID,
@@ -1113,7 +1123,7 @@ func recoverContainerReplica(store *db.Store, mgr *process.Manager, prx *proxy.P
 		AppVersion:   r.AppVersion,
 		DeploymentID: derefInt64(r.DeploymentID),
 		LogRunID:     logRunID,
-	}, process.RunHandle{ContainerID: cID})
+	}, handle)
 	if err := prx.RegisterReplica(app.Slug, r.Index, targetURL, recoveredRouteTransport(prx, store, r, nil, targetURL), derefInt64(r.DeploymentID), app.ID); err != nil {
 		slog.Error("recovery: register docker proxy", "slug", app.Slug, "idx", r.Index, "err", err)
 		return false
@@ -1428,6 +1438,13 @@ func cleanupElasticDeploymentGenerations(store *db.Store, mgr *process.Manager, 
 			stopped[row.DeploymentID] = true
 		}
 		id := row.DeploymentID
+		if isolated, ok := mgr.RuntimeForTier(row.Tier).(*process.SystemdRuntime); ok {
+			if row.Provider != "native" || row.WorkerID == "" || isolated.RemoveContainer(row.WorkerID) != nil {
+				slog.Error("elastic recovery: isolated native worker stop is unconfirmed", "slug", app.Slug, "worker_id", row.WorkerID)
+				stopped[id] = false
+			}
+			continue
+		}
 		_, nativeTier := mgr.RuntimeForTier(row.Tier).(*process.NativeRuntime)
 		localWorkerID := row.WorkerID == "" || (row.PID != nil && row.WorkerID == strconv.Itoa(*row.PID))
 		if !nativeTier || !localWorkerID || (row.Provider != "" && row.Provider != "native") {

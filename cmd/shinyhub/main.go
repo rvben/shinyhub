@@ -805,6 +805,33 @@ func buildRuntime(ctx context.Context, tier config.TierConfig, cfg *config.Confi
 		dockerRT.SetSnapshot(cfg.Runtime.Snapshot.Enabled, cfg.Runtime.Snapshot.ReclaimMinFraction)
 		return dockerRT, nil
 	case "native":
+		if cfg.Runtime.Native.BrokerSocket != "" {
+			rt, err := process.NewSystemdRuntime(ctx, cfg.Runtime.Native.BrokerSocket)
+			if err != nil {
+				return nil, fmt.Errorf("native user isolation: %w", err)
+			}
+			rt.SetSnapshot(cfg.Runtime.Snapshot.Enabled, cfg.Runtime.Snapshot.ReclaimMinFraction)
+			if err := rt.ValidateStorage(cfg.Storage.AppsDir, cfg.Storage.AppDataDir, cfg.Storage.AppCacheDir); err != nil {
+				return nil, fmt.Errorf("native user isolation: %w", err)
+			}
+			if !db.IsPostgresDSN(cfg.Database.DSN) {
+				if err := rt.ValidateControlDatabase(cfg.Database.DSN); err != nil {
+					return nil, fmt.Errorf("native user isolation: %w", err)
+				}
+			}
+			for _, path := range []string{serverConfigPath(), cfg.Auth.SecretFile} {
+				if err := rt.ValidateControlPath(path); err != nil {
+					return nil, fmt.Errorf("native user isolation: %w", err)
+				}
+			}
+			if err := rt.PrepareStorage(ctx); err != nil {
+				return nil, fmt.Errorf("native user isolation: prepare storage: %w", err)
+			}
+			process.SetHostCommandRunner(rt.RunBuild)
+			slog.Info("native backend selected", "tier", tier.Name, "backend", "isolated_systemd", "boundary", "per_app_uid")
+			return rt, nil
+		}
+		slog.Warn("native apps run as the controller user; deploy only trusted app code, or configure runtime.native.broker_socket for separate app users", "tier", tier.Name, "backend", "trusted_shared_uid")
 		nativeRT := process.NewNativeRuntime()
 		// Enable warm-wake (SIGSTOP freeze + per-app cgroup reclaim) when
 		// configured. If the delegated cgroup subtree cannot be prepared at
@@ -1117,12 +1144,12 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 			slog.Warn("store close", "err", err)
 		}
 	}()
-	// On the native runtime a deployed app runs as the same OS user as this
+	// On the shared-user native runtime a deployed app runs as the same OS user as this
 	// process, and a process environment is readable by any process of that
 	// user. auth.secret signs every session token and derives the key
 	// encrypting every app's secret env vars, so holding it in the environment
 	// puts it within reach of the code it is meant to be secret from.
-	if cfg.Auth.SecretSource == "env" && cfg.Runtime.Mode != "docker" {
+	if cfg.Auth.SecretSource == "env" && cfg.Runtime.Mode != "docker" && cfg.Runtime.Native.BrokerSocket == "" {
 		logger.Warn("auth.secret comes from SHINYHUB_AUTH_SECRET, which any process running as this user can read (/proc/<pid>/environ, ps eww); native-runtime apps run as this user",
 			"remedy", "write the secret to a mode-0600 file and set auth.secret_file (SHINYHUB_AUTH_SECRET_FILE), then unset SHINYHUB_AUTH_SECRET")
 	}
@@ -1753,7 +1780,9 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 			return fmt.Errorf("workload metrics setup: %w", setupErr)
 		}
 		for _, tier := range cfg.Runtime.Tiers {
-			if native, ok := mgr.RuntimeForTier(tier.Name).(*process.NativeRuntime); ok {
+			if native, ok := mgr.RuntimeForTier(tier.Name).(interface {
+				SetWorkloadObserver(process.WorkloadObserver)
+			}); ok {
 				native.SetWorkloadObserver(collector.Observe)
 			}
 		}

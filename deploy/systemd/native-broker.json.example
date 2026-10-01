@@ -1,0 +1,18 @@
+{
+  "control_uid": 22000,
+  "control_gid": 22000,
+  "socket": "/run/shinyhub-native-broker/control.sock",
+  "runtime_dir": "/run/shinyhub-native-broker",
+  "state_dir": "/var/lib/shinyhub-native-broker",
+  "apps": [
+    {
+      "id": 1,
+      "slug": "example",
+      "uid": 22001,
+      "gid": 22001,
+      "bundle_root": "/var/lib/shinyhub/apps/example/versions",
+      "data_root": "/var/lib/shinyhub/app-data/example",
+      "cache_root": "/var/lib/shinyhub/app-cache/example"
+    }
+  ]
+}

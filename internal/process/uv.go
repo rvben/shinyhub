@@ -101,7 +101,7 @@ func Sync(ctx context.Context, dir string) error {
 	if err != nil {
 		return err
 	}
-	out, err := uvSyncCmd(ctx, dir, build.Env, append(LockSyncFlags(dir), build.Flags...)).CombinedOutput()
+	out, err := HostCombinedOutput(ctx, uvSyncCmd(ctx, dir, build.Env, append(LockSyncFlags(dir), build.Flags...)))
 	if err != nil {
 		switch ctx.Err() {
 		case context.DeadlineExceeded:
@@ -198,10 +198,10 @@ func EnsureProject(ctx context.Context, dir string, appEnv []string) error {
 	if err != nil {
 		return err
 	}
-	if out, err := uvInitCmd(ctx, dir, build.Env).CombinedOutput(); err != nil {
+	if out, err := HostCombinedOutput(ctx, uvInitCmd(ctx, dir, build.Env)); err != nil {
 		return fmt.Errorf("uv init: %w\n%s", err, build.Output(out))
 	}
-	if out, err := uvAddRequirementsCmd(ctx, dir, build.Env, build.Flags).CombinedOutput(); err != nil {
+	if out, err := HostCombinedOutput(ctx, uvAddRequirementsCmd(ctx, dir, build.Env, build.Flags)); err != nil {
 		_ = os.Remove(filepath.Join(dir, "pyproject.toml"))
 		_ = os.Remove(filepath.Join(dir, "uv.lock"))
 		_ = fsx.RemoveAll(filepath.Join(dir, ".venv"))
@@ -211,7 +211,7 @@ func EnsureProject(ctx context.Context, dir string, appEnv []string) error {
 	// declaring it optional (shinychat 0.5.0). Add pydantic for shiny apps so they
 	// do not crash on `import shiny.ui`. See requirementsImplyPydantic.
 	if reqs, rerr := os.ReadFile(filepath.Join(dir, "requirements.txt")); rerr == nil && requirementsImplyPydantic(string(reqs)) {
-		if out, err := uvAddCmd(ctx, dir, build.Env, build.Flags, "pydantic").CombinedOutput(); err != nil {
+		if out, err := HostCombinedOutput(ctx, uvAddCmd(ctx, dir, build.Env, build.Flags, "pydantic")); err != nil {
 			_ = os.Remove(filepath.Join(dir, "pyproject.toml"))
 			_ = os.Remove(filepath.Join(dir, "uv.lock"))
 			_ = fsx.RemoveAll(filepath.Join(dir, ".venv"))

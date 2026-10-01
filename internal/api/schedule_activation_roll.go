@@ -711,6 +711,11 @@ func (s *Server) confirmActivationReplicaStopped(app *db.App, index int) error {
 		}
 	}
 	stopErr := s.manager.StopReplicaConfirmed(app.Slug, index)
+	if errors.Is(stopErr, process.ErrReplicaNotFound) && durable != nil && durable.Status == "stopped" && durable.WorkerID == "" && (durable.PID == nil || *durable.PID <= 0) {
+		// A previously confirmed stop has already cleared both identities. Do
+		// not require a container/unit ID from this durable tombstone.
+		stopErr = nil
+	}
 	if errors.Is(stopErr, process.ErrReplicaNotFound) && durable != nil {
 		if lister, ok := s.manager.RuntimeForTier(durable.Tier).(interface {
 			ListByLabel(string) ([]process.ContainerInfo, error)

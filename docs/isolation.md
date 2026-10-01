@@ -4,6 +4,10 @@ description: "Restrict what a native app process can reach on disk, instead of l
 
 # Native process isolation
 
+For the opt-in Linux backend with dedicated per-app UIDs, see
+[native workers with separate app users](native-user-isolation.md). The same-UID
+limitations below describe the default backend with no `broker_socket`.
+
 The native runtime launches each app as a plain OS process. By default that
 process runs with the full filesystem reach of the ShinyHub service user. The
 **isolation dial** narrows that reach without requiring the Docker runtime, using

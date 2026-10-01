@@ -142,6 +142,12 @@ lifecycle:
 
 runtime:
   mode: native                        # "native" (default) or "docker"
+  native:
+    isolation: standard               # existing Landlock write confinement
+    # Empty broker_socket retains trusted native execution as the controller UID.
+    # Opt-in per-app Linux identities. Requires a root-owned broker policy and
+    # manual account/storage provisioning; see docs/native-user-isolation.md.
+    # broker_socket: /run/shinyhub-native-broker/control.sock
   # Per-app memory_limit_mb and cpu_quota_percent (and the default_* below) are
   # enforced in BOTH native and docker mode: native mode applies them as a cgroup
   # v2 memory.max / cpu.max on a per-app cgroup. Native enforcement requires the

@@ -632,6 +632,13 @@ func restore(cfg *config.Config, archivePath string, force bool) (movedAside []s
 			return movedAside, mErr
 		}
 		if aside != "" {
+			if cfg.Runtime.Native.BrokerSocket != "" {
+				// Preserved storage is a controller-only rollback copy, outside
+				// the broker's registered roots. Keep it private after restore.
+				if err := os.Chmod(aside, 0700); err != nil {
+					return movedAside, fmt.Errorf("protect preserved storage %s: %w", aside, err)
+				}
+			}
 			movedAside = append(movedAside, aside)
 		}
 	}

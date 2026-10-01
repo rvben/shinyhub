@@ -223,7 +223,11 @@ func (s *ElasticSpawner) Spawn(slug string, slotID int) {
 	}
 
 	// Local native workers cannot execute app code until their identity is durable.
-	_, guarded := s.Manager.RuntimeForTier(tier).(*process.NativeRuntime)
+	guardedRuntime, guarded := s.Manager.RuntimeForTier(tier).(interface {
+		process.GuardedStartCapable
+		process.LifetimeFileInheritor
+	})
+	guarded = guarded && guardedRuntime.SupportsGuardedStart() && guardedRuntime.InheritsLifetimeFiles()
 	if !guarded {
 		// A worker the server cannot record before it executes may outlive the
 		// server's knowledge of it, and it holds none of the lifetime locks a
@@ -856,7 +860,7 @@ func (s *ElasticSpawner) stopWorker(slug string, slotID int) error {
 	if !ok {
 		return process.ErrReplicaNotFound
 	}
-	if _, native := s.Manager.RuntimeForTier(info.Tier).(*process.NativeRuntime); !native {
+	if _, native := s.Manager.RuntimeForTier(info.Tier).(process.LifetimeFileInheritor); !native {
 		return s.Manager.StopReplica(slug, slotID)
 	}
 	if err := s.Manager.StopReplicaConfirmed(slug, slotID); err != nil {

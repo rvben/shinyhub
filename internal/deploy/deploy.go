@@ -99,6 +99,9 @@ const sandboxBuildLevel = sandbox.LevelStandard
 // platform (this repo's darwin dev machines, and any future non-Linux CI
 // leg) rather than failing outright.
 func sandboxedCommand(dir string, argv []string) (wrapped, extraEnv, writePaths []string, err error) {
+	if process.HostUserIsolationEnabled() {
+		return argv, nil, nil, nil
+	}
 	if !sandbox.Supported() {
 		return argv, nil, nil, nil
 	}
@@ -237,7 +240,7 @@ func runSandboxedBuildStep(ctx context.Context, dir string, argv []string, appEn
 	// all of them so it is authoritative over an app-set UV_PYTHON_* (its keys
 	// are disjoint from the sandbox redirects).
 	cmd.Env = process.WithBuildInterpreterPolicy(append(append(process.SanitizedEnv(), appEnv...), extraEnv...))
-	out, err := cmd.CombinedOutput()
+	out, err := process.HostCombinedOutput(ctx, cmd)
 	if len(writePaths) > 0 {
 		err = sandboxDenialHint(out, err, writePaths)
 	}

@@ -846,6 +846,9 @@ func TestConfirmActivationReplicaStopped_DockerAbsenceIsProvenWithoutSyntheticPI
 			t.Fatalf("Docker absence did not leave a stop tombstone: %+v", row)
 		}
 	}
+	if err := srv.confirmActivationReplicaStopped(app, 1); err != nil {
+		t.Fatalf("rechecking an already stopped durable row: %v", err)
+	}
 }
 
 func TestScheduleActivationRoll_PostSurgeCheckpointFailuresStayInRepair(t *testing.T) {

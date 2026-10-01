@@ -1010,6 +1010,9 @@ type NativeRuntimeConfig struct {
 	// (default) or "standard" (Landlock filesystem confinement + NO_NEW_PRIVS,
 	// Linux-only, best-effort). Validated at load against sandbox.ParseLevel.
 	Isolation string
+	// BrokerSocket enables fail-closed Linux native execution under separate
+	// app identities. Empty retains the existing trusted native runtime.
+	BrokerSocket string
 }
 
 // FargateRuntimeConfig holds the AWS ECS/Fargate runtime settings shared by every
@@ -1440,7 +1443,8 @@ type rawRuntimeConfig struct {
 }
 
 type rawNativeRuntimeConfig struct {
-	Isolation string `yaml:"isolation"`
+	Isolation    string `yaml:"isolation"`
+	BrokerSocket string `yaml:"broker_socket"`
 }
 
 type rawFargateRuntimeConfig struct {
@@ -1704,6 +1708,9 @@ func loadRaw(path string) (*Config, error) {
 	}
 	if err := applyEnv(cfg); err != nil {
 		return nil, err
+	}
+	if socket := cfg.Runtime.Native.BrokerSocket; socket != "" && (!filepath.IsAbs(socket) || filepath.Clean(socket) != socket) {
+		return nil, fmt.Errorf("runtime.native.broker_socket must be an absolute, canonical path")
 	}
 	if cfg.PrincipalShareDivisor() < 1 {
 		return nil, fmt.Errorf("server.principal_share_divisor must be at least 1")
@@ -2676,6 +2683,7 @@ func parseRuntime(r rawRuntimeConfig) (RuntimeConfig, error) {
 		return RuntimeConfig{}, fmt.Errorf("runtime.native.isolation: %w", err)
 	}
 	rc.Native.Isolation = string(isolation)
+	rc.Native.BrokerSocket = r.Native.BrokerSocket
 	rc.Snapshot.Enabled = r.Snapshot.Enabled
 	if r.Snapshot.MaxSuspended > 0 {
 		rc.Snapshot.MaxSuspended = r.Snapshot.MaxSuspended
@@ -3281,6 +3289,9 @@ func applyEnv(cfg *Config) error {
 			return fmt.Errorf("SHINYHUB_RUNTIME_SNAPSHOT_RECLAIM_MIN_FRACTION: %q is not a number: %w", v, err)
 		}
 		cfg.Runtime.Snapshot.ReclaimMinFraction = f
+	}
+	if v := os.Getenv("SHINYHUB_RUNTIME_NATIVE_BROKER_SOCKET"); v != "" {
+		cfg.Runtime.Native.BrokerSocket = v
 	}
 	if v := os.Getenv("SHINYHUB_RUNTIME_DOCKER_IMAGE_PYTHON"); v != "" {
 		cfg.Runtime.Docker.Images.Python = v

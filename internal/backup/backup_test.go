@@ -121,6 +121,7 @@ func TestRestorePreservesExistingState(t *testing.T) {
 
 	dst := mkCfg(t)
 	seed(t, dst) // dst already has its own data
+	dst.Runtime.Native.BrokerSocket = "/run/shinyhub-broker/control.sock"
 	canary := filepath.Join(dst.Storage.AppsDir, "demo", "canary.txt")
 	if err := os.WriteFile(canary, []byte("keep me"), 0o640); err != nil {
 		t.Fatal(err)
@@ -136,6 +137,9 @@ func TestRestorePreservesExistingState(t *testing.T) {
 	found := false
 	for _, p := range moved {
 		if strings.Contains(p, ".pre-restore-") {
+			if info, err := os.Stat(p); err == nil && info.IsDir() && info.Mode().Perm() != 0700 {
+				t.Fatalf("preserved isolated storage is not controller-private: %s %o", p, info.Mode().Perm())
+			}
 			if _, statErr := os.Stat(p); statErr == nil {
 				found = true
 			}

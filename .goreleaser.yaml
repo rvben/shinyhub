@@ -15,6 +15,14 @@ builds:
     ldflags:
       - -s -w -X main.version={{.Version}}
 
+  - id: shinyhub-native-broker
+    main: ./cmd/shinyhub-native-broker
+    binary: shinyhub-native-broker
+    env: [CGO_ENABLED=0]
+    goos: [linux]
+    goarch: [amd64, arm64]
+    ldflags: [-s -w]
+
 archives:
   - id: shinyhub
     ids: [shinyhub]
@@ -22,6 +30,15 @@ archives:
     formats: [tar.gz]
     files:
       - README.md
+
+  - id: shinyhub-native-broker
+    ids: [shinyhub-native-broker]
+    name_template: "shinyhub-native-broker_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    files:
+      - deploy/systemd/shinyhub-native-broker.service
+      - deploy/systemd/native-broker.json.example
+      - docs/native-user-isolation.md
 
 checksum:
   name_template: checksums.txt

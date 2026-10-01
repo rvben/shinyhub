@@ -695,7 +695,7 @@ func runHookExec(ctx context.Context, bundleDir string, argv []string, extraEnv 
 	cmd.Env = process.WithBuildInterpreterPolicy(append(append(process.SanitizedEnv(), extraEnv...), sandboxEnv...))
 	cmd.Stdout = logOut
 	cmd.Stderr = logOut
-	return cmd.Run()
+	return process.RunHostCommand(ctx, cmd, logOut)
 }
 
 // InstrumentPythonCommand shares the fleet/manifest decision and package overlay

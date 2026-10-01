@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **runtime**: opt-in Linux native execution under dedicated per-app users through a separate, root-owned systemd broker. Dependency builds, hooks, replicas and jobs use the registered app identity; startup guards, lifetime locks and unit-based recovery are preserved. Requires manual provisioning; see [setup and limitations](docs/native-user-isolation.md).
+- **runtime**: startup diagnostics identify isolated native execution and warn when apps share the controller UID. Backend selection remains explicit for this release; unavailable configured isolation prevents startup.
+
 ### Security
 
 - **auth**: default forward-auth users to `viewer`, requiring deployment rights to be granted explicitly. Explicit `default_role` settings are unchanged; deployments relying on the previous `developer` default should configure it explicitly if intended. Group-role reconciliation also uses the new default.

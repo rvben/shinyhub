@@ -18,6 +18,10 @@ bootstrap:
 	GOBIN=$(CURDIR)/tmp/tools go install github.com/air-verse/air@$(AIR_VERSION)
 	@echo "Ready. Start the server with: make dev"
 
+.PHONY: build-native-broker
+build-native-broker:
+	GOOS=linux CGO_ENABLED=0 go build -o bin/shinyhub-native-broker ./cmd/shinyhub-native-broker
+
 build:
 	go build -o bin/shinyhub ./cmd/shinyhub
 

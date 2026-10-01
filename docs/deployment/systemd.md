@@ -51,6 +51,10 @@ than this environment file. Do not print secret values in diagnostics or
 commit private files. Reload systemd after changing the unit, and restart
 the service to apply changed environment-file values.
 
+The opt-in [per-app user backend](../native-user-isolation.md) adds a separate
+root broker and dedicated app accounts. The following limitation applies when
+`runtime.native.broker_socket` is empty.
+
 These permissions protect against other local users, not native replicas
 running as the same UID. Native apps can read other replicas' environments
 and server-readable files. Use a separate runtime boundary for app code you

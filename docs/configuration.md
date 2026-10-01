@@ -459,11 +459,20 @@ Equivalently, `auth.secret_file` in the config file. The server reads it once at
 startup, trims surrounding whitespace, and refuses a file that is group- or
 world-readable. Setting both the file and `SHINYHUB_AUTH_SECRET` to different
 values is an error, since one of them would silently win. While the secret still
-comes from the environment on the native runtime, startup logs a warning.
+comes from the environment on the shared-user native runtime, startup logs a warning.
 
 This narrows one exposure; it is not a tenant boundary. See
 [isolation.md](isolation.md) for why the native runtime should not host
 mutually-untrusting tenants.
+
+The opt-in Linux [native app-user backend](native-user-isolation.md) separates
+app identities from the controller. Its setting is
+`runtime.native.broker_socket` (`SHINYHUB_RUNTIME_NATIVE_BROKER_SOCKET`); the
+same-UID limitations above apply when that setting is empty.
+It remains opt-in for this release, including on new Linux installations.
+Upgrades keep the existing backend until explicitly configured. A configured
+broker that cannot be used stops startup; it never selects the shared-UID backend
+as a fallback. See the [default and migration policy](native-user-isolation.md#default-and-migration-policy).
 
 ## Application logs and how long they are kept
 
