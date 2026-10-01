@@ -52,7 +52,7 @@ def server(input, output, session):
 
     async def set_period(args):
         period.set(args["period"])
-        ui.update_select("period", selected=args["period"], session=session)
+        ui.update_select("period", selected=args["period"])
         return {"period": period.get()}
 
     # Allow browser agents to change only this viewer's display filter.
@@ -65,7 +65,8 @@ def server(input, output, session):
             "properties": {"period": {"type": "string", "enum": ["week", "year"]}},
             "required": ["period"], "additionalProperties": False,
         }, set_period, read_only=False,
-            confirmation="Change this dashboard's reporting period?"),
+            confirmation="Change this dashboard's reporting period?",
+            describe=lambda args: f"Reporting period = {args['period']}"),
     ])
 
 app = App(app_ui, server)
@@ -76,6 +77,19 @@ again before calling a handler, binds requests to the current Shiny session,
 limits request volume and payload size, and returns safe errors. A write is
 reported as applied only after its handler returns. For sensitive tools, check
 the viewer's authorization in the handler as well.
+
+Registered callbacks run with the viewer's session context, isolated reactive
+reads and the reactive graph lock; pending work is flushed afterwards. The
+example needs no explicit `session=`, `reactive.isolate()` or manual flush.
+Keep handlers short. Input updates are client messages, so return normalized
+server-owned state as above rather than reading `input.period()` immediately
+after updating it. Use the same normalization for manual changes and tools.
+
+For dynamic constraints, add `validate(args)` to a tool. It must return `None`
+or raise a visitor-safe `ToolError(code, message)` and may be synchronous or
+async. It runs before approval and again before execution, without changing
+arguments. Optional synchronous `describe(args)` supplies up to 300 characters
+of plain text for approval. Complete nested arguments remain inspectable.
 
 ## Add chat
 
@@ -146,6 +160,34 @@ The visitor sees the proposed action and chooses whether to apply it. The
 server executes an approved handler and returns the applied result to the
 agent. Conversation history stays in the Shiny session and is bounded; it is
 not stored durably by this helper.
+
+All backends default to two calls and one write per step, eight calls per turn
+and four tool rounds. Excess calls receive correlated deferred results; later
+calls in that step are also deferred so reads cannot pass a pending write.
+When the budget runs out, one additional tools-disabled call answers from
+completed results, with a deterministic fallback if that call fails.
+Configure `max_tool_calls_per_step` (1–8), `max_tool_calls_per_turn` (1–64) and
+`max_tool_rounds` (1–8) on the backend. OpenAI and Bedrock accept
+`max_output_tokens` (100–8192; default 500).
+
+In `register()`, configure `approval_timeout` (1–300 seconds; default 30),
+`history_exchanges` (1–32; default 6) and `max_answer_chars` (1000–32768;
+default 8000). Cards show deadlines and expiration. Arguments and schemas
+are capped at 8192 UTF-8 bytes, results at 32768 bytes, and tool execution at
+8 seconds. The helper README lists all fixed limits.
+
+Set `on_usage(record)` on the backend for a record per provider request:
+timestamp, model, turn/call IDs, round, tokens, duration, requested tools and
+outcome. Records also appear in structured INFO logs and model-call span
+attributes when tracing is available. Use `usage_metadata={"username": ...}`
+in `register()` for optional attribution from verified identity; it is not
+sent in prompts or HTTP headers. AG-UI reports endpoint duration with unknown
+token counts; model accounting belongs on its external endpoint.
+
+Browser tests can open either panel with
+`await page.waitForFunction(() => window.shinyhubAgentChat?.open())` and use
+`.sh-agent-input` and `.sh-agent-send`. This public hook is idempotent and
+works without opening or patching the toolbar's shadow root.
 
 Assistant answers support basic Markdown in the native toolbar overlay and
 fallback panel: paragraphs, line breaks, `**bold**`, `*italic*`, inline code,

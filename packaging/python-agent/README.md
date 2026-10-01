@@ -29,7 +29,7 @@ def server(input, output, session):
 
     async def set_period(args):
         selected_period.set(args["period"])
-        ui.update_select("period", selected=args["period"], session=session)
+        ui.update_select("period", selected=args["period"])
         return {"period": selected_period.get()}
 
     # Explicitly allow browser agents to change this session's display filter.
@@ -183,10 +183,182 @@ including after permissions change. Test ordinary, manager, admin, and
 anonymised views against the page's access rules, including requests for
 another viewer's data. A result-size limit does not redact sensitive fields.
 
-The chat history exists only in the viewer's Shiny session and is limited to
-the last six exchanges. A new chat clears it. The app currently has no durable
+The chat history exists only in the viewer's Shiny session and defaults to
+the last six exchanges (`history_exchanges` in `register()`). A new chat clears it. The app currently has no durable
 conversation store. The helper does not provide a remote MCP server or a
 platform-wide agent registry, administration UI, or billing controls.
+
+## Approval and validation
+
+JSON Schema validation runs before a chat approval card or an opted-in browser
+confirmation. For constraints that depend on current app state, add a
+side-effect-free `validate(args)` callback. It may be synchronous or async,
+must return `None` on success, and can raise `ToolError(code, message)` with a
+visitor-safe explanation. Validation runs again immediately before execution:
+available data may change while a visitor considers an action. Read tools can
+also have validators. Unexpected callback errors are sanitised.
+
+An optional synchronous `describe(args)` gives a write an app-specific summary:
+
+```python
+# Inside server(), alongside selected_period and set_period above:
+from shinyhub_agent import ToolError
+
+available_periods = reactive.value(["week", "year"])
+
+def validate_period(args):
+    if args["period"] not in available_periods.get():
+        raise ToolError("no_data", "That reporting period has no data yet.")
+
+set_period_tool = AgentTool(
+    "set_period", "Change the dashboard period",
+    {"type": "object", "properties": {"period": {"type": "string"}},
+     "required": ["period"], "additionalProperties": False},
+    set_period, read_only=False, confirmation="Change the dashboard period?",
+    validate=validate_period,
+    describe=lambda args: f"Reporting period = {args['period']}",
+)
+```
+
+Descriptions contain 1–300 characters; invalid descriptions fall back to the
+argument display. Callbacks receive snapshots and cannot silently rewrite the
+approved arguments. The chat shows nested keys and array values as plain text;
+long summaries and custom descriptions retain expandable complete JSON details.
+HTML is always literal. Approval has a visible deadline; expired cards remove
+their buttons. Ask again to propose a fresh action.
+
+## Shiny state and write results
+
+Registered handlers, validators, descriptions and undo callbacks run in the
+viewer session, with reactive reads isolated and the reactive graph locked.
+Pending reactive work is flushed before callbacks complete. They can read
+`input.x()` or a reactive calculation, call `ui.update_*()` without `session=`,
+and set reactive values without a manual `reactive.flush()`. Model requests and
+approval waits do not hold the lock. Session end cancels outstanding tasks.
+Keep callbacks short: the graph lock is shared across sessions in the process.
+Do not wait inside a callback for browser input updates or unrelated slow I/O.
+
+`ui.update_*()` sends a client update; it does not synchronously change
+`input.x()`. Return normalized, server-owned view state, as `selected_period`
+does above. Route manual input changes through the same normalization function,
+including clamping dates and clearing incompatible filters. Use that state for
+subsequent reads and outputs. A browser acknowledgment cannot guarantee that
+later app effects or asynchronous work have completed. This package provides
+no app-wide `settle()` guarantee.
+
+These guarantees apply to tools returned by `register()`. A standalone
+`ToolRegistry` has validation and payload bounds but no Shiny execution context.
+Writes are not transactional: a handler that raises after a mutation must
+handle its own recovery. Undo must still check that the applied state is current.
+
+## Budgets and limits
+
+All backends execute calls in order. When a per-step budget or the
+one-write-per-step rule defers a call, all later calls in that step are deferred
+too. Each receives a correlated result with the `tool_deferred` error code;
+the model can request that work in another step. Malformed or incomplete
+streams never trigger app tools.
+
+When the tool-round or per-turn call budget is exhausted, one final call with
+app tools disabled answers from completed results. If it fails or still
+requests tools, a deterministic response lists completed reads, applied actions
+and recent safe tool errors. The final call is additional to `max_tool_rounds`
+and is included in usage records.
+
+| Setting | Where | Default | Allowed range |
+| --- | --- | ---: | --- |
+| `max_tool_calls_per_step` | Any backend | 2 | 1–8 |
+| `max_tool_calls_per_turn` | Any backend | 8 | 1–64 |
+| `max_tool_rounds` | Any backend | 4 | 1–8, plus one final call |
+| `max_output_tokens` | OpenAI/Bedrock | 500 | 100–8192; provider limits also apply |
+| `approval_timeout` | `register()` | 30 s | 1–300 s |
+| `history_exchanges` | `register()` | 6 | 1–32 complete exchanges |
+| `max_answer_chars` | `register()` | 8000 | 1000–32768 characters |
+
+History drops the oldest complete exchanges when full. Backends retain the
+registered history without a second six-exchange or 2000-character truncation.
+Increase `max_answer_chars` when raising model output limits. Larger histories
+and budgets increase token use.
+
+Fixed bounds: 32 tools; 8192 UTF-8 bytes per schema or argument object; 32768
+UTF-8 bytes per tool or undo result; 500 characters per tool description;
+300 per confirmation; 140 per receipt. Tool execution, preflight and undo have
+an 8-second timeout including waiting for the reactive lock. Streams allow
+64 KiB per event and 1 MiB per response. Chat questions are capped at 2000
+characters, 10 per minute and 40 per session; reset does not reset those budgets.
+Browser dispatch allows 20 requests per minute, with write preflight and
+execution each consuming one request. Browser confirmation expires after 30
+seconds; each dispatch waits up to 10 seconds. Only the last chat write is
+undoable, for five minutes.
+
+## Usage attribution
+
+All backends accept `on_usage(record)`, a synchronous or async callback receiving
+a frozen `UsageRecord` per provider request, including final calls, failures
+and cancellations. Records include UTC timestamp, provider, app, optional
+username, model, turn/call IDs, one-based round, final-call flag, tokens, cache
+tokens when available, duration in milliseconds, requested tool names and
+outcome. Unknown counts are `None`, not zero. AG-UI records describe endpoint
+requests (`model="external"`); its protocol does not supply model token usage.
+Account for its internal model calls on the endpoint.
+
+```python
+from dataclasses import asdict
+import logging
+
+usage_log = logging.getLogger("app.assistant_usage")
+
+def record_usage(record):
+    usage_log.info("assistant_usage", extra={"usage": asdict(record)})
+
+chat = BedrockChat(
+    model_id=os.environ["SHINYHUB_AGENT_BEDROCK_MODEL_ID"],
+    region=os.environ["AWS_REGION"], instructions="Use app tools for facts.",
+    on_usage=record_usage,
+)
+
+# Inside server(), after resolving viewer from verified session identity:
+register(session=session, input=input, tools=tools, chat=chat,
+         usage_metadata={"username": viewer.username if viewer else None})
+```
+
+App slug defaults from `SHINYHUB_APP_SLUG`. `usage_metadata` may set `app` and
+`username` (up to 256 characters each). Metadata stays in local logs, callbacks
+and tracing; it is not added to prompts or HTTP headers. Viewer identity is
+never automatically sent to the model. Resolve "me" in session-scoped tools.
+Shared adapters keep usage context separate for each viewer and turn.
+
+`shinyhub_agent._usage` also emits single-line JSON at INFO level with structured
+`agent_usage` logging metadata. Where OpenTelemetry is installed, model-call
+spans receive `shinyhub.agent.*` attributes. Traces may be sampled; use logs or
+callbacks for complete accounting. Async callbacks have a two-second timeout;
+keep callbacks short and enqueue durable accounting separately. Callback and
+tracing failures do not fail answers. Records are observations, not exactly-once
+billing events; use call IDs for deduplication.
+
+## Opening chat in tests
+
+The public `window.shinyhubAgentChat.open()` and `.close()` methods are
+idempotent. They return `true` when a chat session is available, or `false`
+before connection. They work with the native closed shadow root and fallback:
+
+```javascript
+await page.waitForFunction(() => window.shinyhubAgentChat?.open());
+await page.locator(".sh-agent-input").fill("What is the current reporting period?");
+await page.locator(".sh-agent-send").click();
+```
+
+The existing `shinyhub:chat:toggle` event with `{version: 1}` also works, but
+toggles instead of ensuring the panel is open. Neither hook submits questions
+or approves changes. The toolbar's own controls require separate toolbar tests.
+
+From the repository root, `make test-py-agent` runs the Python and browser unit
+tests. `make test-browser-agent-chat-e2e` checks native and fallback panels at
+desktop and mobile sizes, including keyboard access, accessibility and plain
+text argument rendering. `make test-browser-agent-shiny-e2e` exercises a real
+Shiny session with a local stub agent: approval, updates, output recomputation,
+undo and cancellation. These browser checks require Chrome and make no model
+provider requests.
 
 ## Operational requirements
 
