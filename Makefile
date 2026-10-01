@@ -117,6 +117,8 @@ test-py-agent:
 	@command -v uv >/dev/null 2>&1 || { echo "uv not found (needed for the Python agent helper tests)"; exit 1; }
 	cd packaging/python-agent && PYTHONPATH=src uv run --with pytest --with jsonschema --with shiny --with httpx --no-project python -m pytest tests/ -q
 	node packaging/python-agent/tests/bridge.test.cjs
+	@if [ ! -d node_modules/jsdom ]; then npm install --no-audit --no-fund --silent; fi
+	node --test packaging/python-agent/tests/chat.test.cjs
 
 # test-r-identity runs the shinyhubidentity R helper's testthat suite. Needs R
 # with jose, sodium and testthat (see bootstrap-r-identity). Skips when Rscript

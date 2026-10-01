@@ -310,6 +310,9 @@ body.sh-agent-native-chat .sh-agent-reset { display: none; }
 .sh-agent-receipt[data-result="unavailable"] { border-color: #dbe2ee; background: #fff; }
 .sh-agent-receipt[data-result="undone"] .sh-agent-receipt-mark,
 .sh-agent-receipt[data-result="unavailable"] .sh-agent-receipt-mark { background: #e8edf6; color: #45526e; }
+.sh-agent-approval[data-result="expired"] .sh-agent-approval-label { color: #5b6784; }
+.sh-agent-approval[data-result="failed"] .sh-agent-approval-label { color: #991b1b; }
+.sh-agent-sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
 
 .sh-agent-status {
   display: flex;

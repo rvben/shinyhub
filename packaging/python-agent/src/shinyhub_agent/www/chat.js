@@ -106,6 +106,11 @@
   status.setAttribute("aria-live", "polite");
   status.hidden = true;
   status.append(make("span", "sh-agent-status-dot"), make("span", "sh-agent-status-text"));
+  // The log stays silent while an answer streams, so screen readers do not
+  // announce every fragment; the finished answer is announced once from here.
+  var announcer = make("div", "sh-agent-sr-only");
+  announcer.setAttribute("aria-live", "polite");
+  announcer.setAttribute("aria-atomic", "true");
   var composer = make("form", "sh-agent-composer");
   var input = make("textarea", "sh-agent-input");
   input.rows = 2;
@@ -125,7 +130,7 @@
   var hint = make("span", "sh-agent-hint", "Enter to send · Shift+Enter for a new line");
   controls.append(reset, hint, stop, send);
   composer.append(input, controls);
-  panel.append(header, logWrap, status, composer);
+  panel.append(header, logWrap, status, announcer, composer);
   document.body.append(launcher, panel);
 
   function emit(payload) {
@@ -216,6 +221,8 @@
       lastApprovalCard.dataset.result = "unknown";
       lastApprovalCard.querySelector(".sh-agent-approval-label").textContent = "Check the current view";
     }
+    announcer.textContent = activeAnswer && !message && activeAnswer.textContent.trim()
+      ? "Answer: " + activeAnswer.textContent.trim() : "";
     if (activeAnswer && activeAnswer.textContent.trim() && !message && navigator.clipboard) {
       var answer = activeAnswer;
       var copy = make("button", "sh-agent-copy", "Copy answer");
@@ -263,6 +270,20 @@
     var entry = pendingTools.splice(index, 1)[0];
     entry.item.dataset.result = event.ok ? "done" : "error";
     entry.state.textContent = event.ok ? "Done" : "Unavailable";
+    if (event.ok) return;
+    // A write tool that fails ends its approval without ending the answer, so
+    // the card has to be settled here rather than by finish().
+    if (approval && approval.dataset.tool === event.name) {
+      approval.querySelector(".sh-agent-approval-actions").remove();
+      approval.dataset.result = "expired";
+      approval.querySelector(".sh-agent-approval-label").textContent = "Not approved in time";
+      lastApprovalCard = approval;
+      approval = null;
+    } else if (lastApprovalCard && lastApprovalCard.dataset.result === "applying" &&
+        lastApprovalCard.dataset.tool === event.name) {
+      lastApprovalCard.dataset.result = "failed";
+      lastApprovalCard.querySelector(".sh-agent-approval-label").textContent = "Change failed";
+    }
   }
 
   function showApproval(event) {
@@ -270,6 +291,7 @@
     lastApprovalCard = null;
     var follow = nearBottom();
     approval = make("section", "sh-agent-approval");
+    approval.dataset.tool = event.name || "";
     approval.append(make("span", "sh-agent-approval-label", "Approval needed"));
     approval.append(make("h3", "", event.message || "Apply this change to the app?"));
     var values = Object.entries(event.arguments || {});
@@ -392,6 +414,7 @@
     if (!chatSession || activeRequest || !input.value.trim()) return;
     var question = input.value.trim();
     input.value = "";
+    announcer.textContent = "";
     appendMessage("user", question);
     activeAnswer = appendMessage("assistant", "");
     activeRequest = crypto.randomUUID();
@@ -433,6 +456,7 @@
       if (event.type === "approval_required") { if (activeRequest) showApproval(event); return; }
       if (event.type === "reset") {
         log.replaceChildren(empty);
+        announcer.textContent = "";
         lastApprovalCard = null;
         undoRequests.clear();
         setStatus("New chat started");
