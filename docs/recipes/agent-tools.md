@@ -18,7 +18,7 @@ Install the [published `shinyhub-agent` package](https://pypi.org/project/shinyh
 in a Python Shiny app:
 
 ```text
-shinyhub-agent==0.2.0b3
+shinyhub-agent==0.2.0b4
 ```
 
 The repository contains a [runnable example](https://github.com/rvben/shinyhub/tree/main/examples/agent-shiny-demo)
@@ -107,7 +107,7 @@ chat = OpenAIChat(
 register(session=session, input=input, tools=tools, chat=chat)
 ```
 
-For Bedrock, install `shinyhub-agent[bedrock]==0.2.0b3` instead of the base
+For Bedrock, install `shinyhub-agent[bedrock]==0.2.0b4` instead of the base
 requirement. This installs `boto3` for the same package and version. Then supply
 an AWS region and a model ID that supports streaming tool use:
 

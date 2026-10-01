@@ -7,5 +7,5 @@ from ._bedrock import BedrockChat
 from ._chat import ChatAgent
 from ._shiny import agent_dependency, chat_dependency, register
 
-__version__ = "0.2.0b3"
+__version__ = "0.2.0b4"
 __all__ = ["AGUIChat", "AgentTool", "BedrockChat", "ChatAgent", "OpenAIChat", "ToolError", "ToolRegistry", "agent_dependency", "chat_dependency", "register"]
