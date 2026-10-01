@@ -49,7 +49,7 @@ runtime:
     # internal/process/docker.go and is required for correct proxy routing.
     network_mode: host          # SHINYHUB_RUNTIME_DOCKER_NETWORK_MODE
     images:
-      python: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+      python: ghcr.io/astral-sh/uv:python3.14-bookworm-slim
       r: rocker/r-base
     default_memory_mb: 512      # per-replica container memory limit (MiB); 0 = no limit
     default_cpu_percent: 100    # 100 = one full core; 0 = no limit

@@ -42,6 +42,7 @@ Build and ship an application:
 | `dev` | Develop an app locally or on an explicit remote host |
 | `run` | Run a Shiny app bundle locally in the foreground |
 | `doctor` | Check whether an app and remote are ready to deploy |
+| `diagnose` | Inspect local Python stacks or save a private Tachyon flame graph with `diagnose python <pid>` (Python 3.15+) |
 | `manifest` | Work with the bundle manifest (`shinyhub.toml`) |
 | `plan` | Preview one app deployment (read-only, no changes) |
 | `apply` | Apply an exact saved plan |

@@ -1,0 +1,5 @@
+[project]
+name = "shinyhub-python-runtime-benchmark"
+version = "0.0.0"
+requires-python = ">=3.12,<3.16"
+dependencies = ["shiny==1.8.0", "pydantic"]

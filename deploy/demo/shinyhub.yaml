@@ -33,7 +33,7 @@ runtime:
     socket: /var/run/docker.sock
     network_mode: host
     images:
-      python: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+      python: ghcr.io/astral-sh/uv:python3.14-bookworm-slim
       r: rocker/shiny:4.5.1
     default_memory_mb: 512
     default_cpu_percent: 100

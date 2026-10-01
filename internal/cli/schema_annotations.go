@@ -53,6 +53,17 @@ var mut = boolp(true) // mutating
 // schemaAnnotations is keyed by command path: space-joined command names
 // below the root, e.g. "apps list", "schedule add", "serve".
 var schemaAnnotations = map[string]cmdAnnotation{
+	"diagnose": {Mutating: ro},
+	"diagnose python": {Mutating: mut, Stability: "experimental",
+		ArgTypes: map[string]string{"pid": "integer", "--python": "path", "--save": "path"},
+		Notes:    "Host-local Python diagnostics. Does not contact a server or change the target. Requires a target-compatible Python 3.15+ interpreter and process-inspection permissions. --save writes a new private HTML profile; existing files are refused.",
+		OutputFields: []fieldSpec{
+			{Name: "status", Type: "string"},
+			{Name: "pid", Type: "integer"},
+			{Name: "python_version", Type: "string"},
+			{Name: "path", Type: "string", Desc: "Present when a profile was saved"},
+			{Name: "stacks", Type: "string", Desc: "Present for a stack dump"},
+		}},
 	"drafts":         {Mutating: ro},
 	"drafts list":    {Mutating: ro, Notes: "Lists at most 100 retained drafts; expires_at and created_at are Unix seconds."},
 	"drafts preview": {Mutating: boolp(true), Notes: "Creates a private expiring preview or returns the existing preview. Does not replace production."},

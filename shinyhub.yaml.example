@@ -171,7 +171,7 @@ runtime:
     socket: /var/run/docker.sock
     network_mode: bridge              # "bridge" (default; isolated namespace + 127.0.0.1 port mapping) or "host"  # SHINYHUB_RUNTIME_DOCKER_NETWORK_MODE
     images:
-      python: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+      python: ghcr.io/astral-sh/uv:python3.14-bookworm-slim
       r: rocker/r-base
     default_memory_mb: 512            # per-replica; pool total = replicas × memory_limit_mb; 0 = no limit
     default_cpu_percent: 100          # 100 = one full core; 0 = no limit

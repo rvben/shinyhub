@@ -22,7 +22,7 @@ jobs:
 
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -60,6 +60,37 @@ jobs:
         run: |
           go build -ldflags="-w" -o /tmp/shinyhub ./cmd/shinyhub
           python3 scripts/check-sdk-linking.py /tmp/shinyhub
+
+  # Keep the stable baseline, older compatibility and newest preview under the
+  # same SDK and native-launch checks; no free-threaded interpreter is selected.
+  test-python-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.14", "3.15"]
+    env:
+      PYTHON_VERSION: ${{ matrix.python }}+gil
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-go
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+          allow-prereleases: true
+      - uses: astral-sh/setup-uv@v7
+      - name: Python SDKs
+        run: make test-py-identity test-py-bookmarks test-py-agent
+      - name: Python tracing, launcher and native app
+        run: make test-py-runtime
+      - name: Real agent session
+        run: make test-browser-agent-shiny-e2e
+      - name: Real native deployment and browser lifecycle
+        run: make test-browser-lifecycle-e2e
 
   # The Worker decides what reaches the demo container, and a request that
   # reaches a sleeping container wakes it. deploy/cloudflare-demo only deploys
@@ -195,7 +226,7 @@ jobs:
 
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
       - name: Install uv
         run: |

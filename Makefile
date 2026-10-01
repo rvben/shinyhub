@@ -5,6 +5,7 @@ AIR_BIN := $(CURDIR)/tmp/tools/air
 CLISPEC ?= clispec
 CLISPEC_MIN_VERSION := 0.3.1
 RACE_TIMEOUT ?= 20m
+PYTHON_VERSION ?= 3.14+gil
 
 # bootstrap installs the exact project dependencies and a repo-local, pinned
 # live-reload binary. Nothing is written to a developer's global Go bin.
@@ -105,20 +106,36 @@ test-identity: test-py-identity test-identity-conformance test-r-identity
 # test-py-identity runs the shinyhub-identity Python helper's unit tests via uv.
 test-py-identity:
 	@command -v uv >/dev/null 2>&1 || { echo "uv not found (needed for the Python identity helper tests)"; exit 1; }
-	cd packaging/python-identity && PYTHONPATH=src uv run --with pytest --with pyjwt --no-project python -m pytest tests/ -q
+	cd packaging/python-identity && PYTHONPATH=src uv run --python '$(PYTHON_VERSION)' --with pytest --with pyjwt --no-project python -m pytest tests/ -q
 
 # test-py-bookmarks validates the independently versioned Python Shiny adapter.
 test-py-bookmarks:
 	@command -v uv >/dev/null 2>&1 || { echo "uv not found (needed for the Python bookmark helper tests)"; exit 1; }
-	cd packaging/python-bookmarks && PYTHONPATH=src uv run --with pytest --with pytest-asyncio --with 'shiny>=1.6.4,<2' --no-project python -m pytest tests/ -q
+	cd packaging/python-bookmarks && PYTHONPATH=src uv run --python '$(PYTHON_VERSION)' --with pytest --with pytest-asyncio --with 'shiny>=1.8,<2' --no-project python -m pytest tests/ -q
 
 # test-py-agent validates the session-bound adapter and browser protocol.
 test-py-agent:
 	@command -v uv >/dev/null 2>&1 || { echo "uv not found (needed for the Python agent helper tests)"; exit 1; }
-	cd packaging/python-agent && PYTHONPATH=src uv run --with pytest --with jsonschema --with shiny --with httpx --no-project python -m pytest tests/ -q
+	cd packaging/python-agent && PYTHONPATH=src uv run --python '$(PYTHON_VERSION)' --with pytest --with jsonschema --with 'shiny>=1.8,<2' --with httpx --no-project python -m pytest tests/ -q
 	node packaging/python-agent/tests/bridge.test.cjs
 	@if [ ! -d node_modules/jsdom ]; then npm install --no-audit --no-fund --silent; fi
 	node --test packaging/python-agent/tests/chat.test.cjs packaging/python-agent/tests/bridge-approval.test.cjs
+
+.PHONY: test-py-runtime benchmark-python-runtime
+
+# Exercises the shared tracing bootstrap, the wheel launcher and a real native
+# app through the production launch/proxy path using the requested interpreter.
+test-py-runtime:
+	mkdir -p tmp/python-compat
+	go build -o tmp/python-compat/shinyhub ./cmd/shinyhub
+	uv run --python '$(PYTHON_VERSION)' --no-project --with 'shiny>=1.8,<2' --with pydantic --with opentelemetry-sdk --with opentelemetry-instrumentation-asgi python scripts/test-python-runtime.py --binary tmp/python-compat/shinyhub
+
+# Downloads/builds happen before timing. Results stay in ignored local material.
+benchmark-python-runtime:
+	mkdir -p tmp/python-compat
+	go build -o tmp/python-compat/shinyhub ./cmd/shinyhub
+	@if [ ! -d loadtest/render/driver/node_modules/playwright ]; then cd loadtest/render/driver && npm ci --no-audit --no-fund; fi
+	node loadtest/python-runtime/benchmark.mjs --binary tmp/python-compat/shinyhub
 
 # test-r-identity runs the shinyhubidentity R helper's testthat suite. Needs R
 # with jose, sodium and testthat (see bootstrap-r-identity). Skips when Rscript
@@ -250,7 +267,7 @@ test-browser-agent-chat-e2e:
 test-browser-agent-shiny-e2e:
 	@command -v uv >/dev/null 2>&1 || { echo "uv is required"; exit 1; }
 	@if [ ! -d loadtest/render/driver/node_modules/playwright ]; then cd loadtest/render/driver && npm install --no-audit --no-fund --silent; fi
-	uv run --with 'shiny>=1.8,<2' --with jsonschema --with httpx --no-project node scripts/agent-shiny-browser-e2e.mjs
+	uv run --python '$(PYTHON_VERSION)' --with 'shiny>=1.8,<2' --with jsonschema --with httpx --no-project node scripts/agent-shiny-browser-e2e.mjs
 
 # Real Python Shiny lifecycle contract in a disposable, extension-free Chromium.
 # Requires uv and system Python; uses the render driver's locked Playwright.
@@ -258,7 +275,7 @@ test-browser-lifecycle-e2e:
 	@command -v uv >/dev/null 2>&1 || { echo "uv is required"; exit 1; }
 	cd loadtest/render/driver && npm ci --no-audit --no-fund --silent
 	cd loadtest/render/driver && npx --no-install playwright install chromium
-	node scripts/browser-lifecycle-e2e.mjs
+	PYTHON_VERSION='$(PYTHON_VERSION)' node scripts/browser-lifecycle-e2e.mjs
 
 # test-cli-compatibility-e2e downloads the checksum-pinned previous release and
 # proves both supported upgrade directions with real servers: current CLI ->

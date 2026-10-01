@@ -40,20 +40,24 @@ process.once('SIGTERM', stop);
 let server, browser, context;
 const children = new Set();
 const sockets = new WeakMap();
-const report = { checks: [], status: 'failed', shiny: '1.8.0', readiness: [], browserErrors: [] };
+const pythonRequest = process.env.SHINYHUB_E2E_PYTHON || process.env.PYTHON_VERSION || '3.14+gil';
+const report = { checks: [], status: 'failed', shiny: '1.8.0', python_request: pythonRequest, readiness: [], browserErrors: [] };
 // Operator overrides must never redirect this test to an existing database/server.
 const inherited = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('SHINYHUB_')));
-const env = { ...inherited, XDG_CONFIG_HOME: join(state, 'config'), GOWORK: 'off', UV_PYTHON_DOWNLOADS: 'never', UV_PYTHON_PREFERENCE: 'only-system' };
+const env = { ...inherited, XDG_CONFIG_HOME: join(state, 'config'), GOWORK: 'off', UV_PYTHON: pythonRequest, UV_PYTHON_DOWNLOADS: 'never', UV_PYTHON_PREFERENCE: 'only-system' };
 
 async function command(args, name, extra = {}) {
   const log = createWriteStream(join(work, `${name}.log`), { mode: 0o600 });
   const child = spawn(args[0], args.slice(1), { cwd: root, env, signal: abort.signal, ...extra });
   children.add(child);
+  let stdout = '';
+  child.stdout.on('data', chunk => { stdout += chunk; });
   child.stdout.pipe(log, { end: false });
   child.stderr.pipe(log, { end: false });
   try {
     const [code] = await once(child, 'exit');
     assert.equal(code, 0, `${name} failed; inspect ${name}.log`);
+    return stdout;
   } finally { children.delete(child); log.end(); }
 }
 
@@ -112,6 +116,11 @@ async function assertDisconnected(page) {
 }
 
 try {
+  // Resolve to an absolute executable before enforcing only-system in the
+  // isolated server. This also avoids broken ambient Python/mise shims.
+  const python = (await command(['uv', 'python', 'find', '--python-preference', 'managed', pythonRequest], 'python-interpreter')).trim();
+  assert.ok(python, 'selected Python interpreter was resolved');
+  env.UV_PYTHON = python;
   if (!process.env.SHINYHUB_E2E_BINARY) await command(['go', 'build', '-o', binary, './cmd/shinyhub'], 'build');
   report.binary_sha256 = createHash('sha256').update(await readFile(binary)).digest('hex');
   // Reserve an ephemeral loopback port; process readiness below detects a bind race.
@@ -152,6 +161,12 @@ try {
   const api = (path, data) => request(data === undefined ? 'GET' : 'POST', '/api/apps/browser' + path, data);
   const app = join(state, 'input');
   await cp(join(root, 'loadtest/browser/app'), app, { recursive: true, filter: source => !source.includes('__pycache__') });
+  // Confirm the deployed interpreter, not merely the Python used by this test.
+  const expectedPython = (await command([python, '-c', 'import sys; print(repr(sys.version_info[:2]))'], 'python-version')).trim();
+  assert.match(expectedPython, /^\(3, \d+\)$/);
+  const appSource = await readFile(join(app, 'app.py'), 'utf8');
+  await writeFile(join(app, 'app.py'), `import sys\nassert sys.version_info[:2] == ${expectedPython}, sys.version\n` + appSource);
+  report.python_version = expectedPython;
   // Exercise the helper built from this exact tree, including packaging. The
   // release gate runs before PyPI publication, so never resolve the helper there.
   const wheels = join(state, 'wheels');

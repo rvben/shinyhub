@@ -309,6 +309,65 @@ must resolve with source builds disabled first, run the application's complete
 test suite, and load-test real sessions. Standard CPython remains the supported
 default.
 
+### Python runtime baseline
+
+The default Docker image and reference Fargate runner use standard Python 3.14
+(`ghcr.io/astral-sh/uv:python3.14-bookworm-slim`). Local Python test targets also
+default to 3.14. Existing explicit image overrides stay authoritative. Native
+apps still select their interpreter through `build.python` or `requires-python`;
+the server does not replace an app's interpreter constraint with a fleet-wide
+version. Set `build.python: "3.14+gil"` to choose the stable baseline for native
+apps, explicitly selecting the standard build even when a free-threaded
+interpreter is also installed.
+
+### Evaluating Python 3.15
+
+Python 3.15 can be selected explicitly for native apps through `build.python`,
+or through the app's interpreter constraint when the server leaves that field
+empty. Use a current uv release: downloadable interpreter versions are bundled
+with uv, so an old uv may not know about 3.15. An explicit interpreter path also
+works. Docker and Fargate require their own tested image; the shipped Python
+image default is 3.14.
+
+The compatibility matrix runs the Python SDKs, shared tracing bootstrap,
+Python CLI entrypoint, real native launch, agent session and deployed browser
+lifecycle on 3.12, 3.14 and 3.15. Metadata allowing a Python version does not
+establish compatibility with every app's binary dependencies.
+
+Before moving production apps, resolve their locked dependencies with source
+builds disabled, then run their complete tests and representative session load.
+Compare readiness, first render, steady session latency and memory. The local
+runtime benchmark (`loadtest/python-runtime/README.md`) uses one dependency
+lock across both runtimes and measures real sessions through the native proxy.
+Release candidates, missing wheels or a material regression keep the production
+default unchanged. Lazy imports, JIT and free-threaded builds remain explicit
+experiments; none is enabled by ShinyHub's 3.15 compatibility checks.
+
+### Local Python diagnostics
+
+Run on the machine hosting the Python process, using the interpreter PID rather
+than a uv launcher PID. Select a Python 3.15+ interpreter compatible with the
+target's version and build:
+
+```bash
+shinyhub diagnose python 12345 --python /path/to/python3.15 --output table
+shinyhub diagnose python 12345 --python /path/to/python3.15 --async-aware --output table
+shinyhub diagnose python 12345 --python /path/to/python3.15 --save profile.html --duration 30s
+```
+
+The default command dumps every thread once. `--async-aware` includes suspended
+asyncio tasks. `--save` collects a bounded profile, writes an HTML flame graph
+with permissions `0600`, and refuses an existing destination. Profiling is
+optional and does not install instrumentation into the app or restart it.
+
+Tachyon needs permission to read the target process's memory. Linux ptrace policy,
+container PID namespaces and capabilities, app user isolation, and macOS
+debugging permissions can prevent attachment. The command reports the failure
+without changing these settings. For containers or remote workers, run within
+the target's PID namespace on its host; a PID from another machine must never
+be passed to this local command. Profiles and dumps can expose paths, source
+lines and application details, so keep them private.
+
 ## Caveat: rotating `SHINYHUB_AUTH_SECRET`
 
 The encryption key is derived from `SHINYHUB_AUTH_SECRET`. Rotating that secret

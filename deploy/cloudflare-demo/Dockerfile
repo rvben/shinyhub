@@ -16,7 +16,7 @@ RUN VERSION="$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' 
 
 FROM caddy:2.10.2-alpine AS caddy
 
-FROM python:3.12-slim-bookworm
+FROM python:3.14-slim-bookworm
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \

@@ -2478,7 +2478,7 @@ func parseLifecycle(r rawLifecycleConfig) (LifecycleConfig, error) {
 // socket, and network mode without duplicating the literals.
 const (
 	DefaultDockerSocket = "/var/run/docker.sock"
-	DefaultPythonImage  = "ghcr.io/astral-sh/uv:python3.12-bookworm-slim"
+	DefaultPythonImage  = "ghcr.io/astral-sh/uv:python3.14-bookworm-slim"
 	DefaultRImage       = "rocker/r-base"
 	DefaultNetworkMode  = "bridge"
 )

@@ -3,7 +3,7 @@
 # (runtime.docker.images.python), keeping the dep-prep semantics in sync.
 # See entrypoint.sh for the fetch-verify-prep-exec sequence.
 # R runner is a fast-follow (out of scope for this initial image).
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     unzip \

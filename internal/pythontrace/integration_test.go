@@ -26,6 +26,10 @@ func TestBootstrapExportsConnectedAWSAndASGISpans(t *testing.T) {
 	if err != nil {
 		t.Skip("uv unavailable")
 	}
+	python := os.Getenv("PYTHON_VERSION")
+	if python == "" {
+		python = "3.14+gil"
+	}
 	overlay := []string{"opentelemetry-distro", "opentelemetry-exporter-otlp", "opentelemetry-instrumentation-starlette", "opentelemetry-instrumentation-httpx", "opentelemetry-instrumentation-botocore", "boto3", "httpx", "starlette"}
 	for _, events := range []string{"false", "true"} {
 		t.Run("asgi_events_"+events, func(t *testing.T) {
@@ -54,7 +58,7 @@ with TestClient(Starlette(routes=[Route("/", hello)])) as client:
 					t.Fatal(err)
 				}
 			}
-			prefix := []string{uv, "run", "--no-project"}
+			prefix := []string{uv, "run", "--python", python, "--no-project"}
 			for _, pkg := range overlay {
 				prefix = append(prefix, "--with", pkg)
 			}
@@ -135,6 +139,10 @@ func TestBootstrapPreservesExitCodeSamplingAndSingleExecution(t *testing.T) {
 	if err != nil {
 		t.Skip("uv unavailable")
 	}
+	python := os.Getenv("PYTHON_VERSION")
+	if python == "" {
+		python = "3.14+gil"
+	}
 	overlay := []string{"opentelemetry-distro", "opentelemetry-exporter-otlp"}
 	for _, sampled := range []string{"00", "01"} {
 		t.Run("parent_sampled_"+sampled, func(t *testing.T) {
@@ -147,7 +155,7 @@ path = pathlib.Path("executions")
 path.write_text(path.read_text() + "run\n" if path.exists() else "run\n")
 raise SystemExit(7)
 `
-			prefix := []string{uv, "run", "--no-project"}
+			prefix := []string{uv, "run", "--python", python, "--no-project"}
 			for _, pkg := range overlay {
 				prefix = append(prefix, "--with", pkg)
 			}

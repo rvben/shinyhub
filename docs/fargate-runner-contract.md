@@ -104,7 +104,7 @@ if [ -f pyproject.toml ]; then
 fi
 ```
 
-The reference image uses `ghcr.io/astral-sh/uv:python3.12-bookworm-slim` as
+The reference image uses `ghcr.io/astral-sh/uv:python3.14-bookworm-slim` as
 its base so `uv` is available on PATH.
 
 ### R apps

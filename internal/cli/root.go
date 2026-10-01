@@ -77,6 +77,7 @@ func AddCommandsTo(root *cobra.Command) {
 		newCompletionCmd(root),
 		newConnectCmd(),
 		newDoctorCmd(),
+		newDiagnoseCmd(),
 		newLoginCmd(),
 		newLogoutCmd(),
 		newWhoamiCmd(),
