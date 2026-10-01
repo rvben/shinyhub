@@ -43,7 +43,7 @@ running one; the previous deployment continues to serve traffic.
 
 ## When each section is applied
 
-Deploy proceeds in this order:
+For a stop-first deployment, deploy proceeds in this order:
 
 1. The bundle is uploaded, validated, and unzipped into a fresh version
    directory.
@@ -70,6 +70,17 @@ Deploy proceeds in this order:
    access table as `source = manifest`, preserving any manually-managed
    rules. Unlike schedules, this is declarative: a group removed from the
    manifest loses its manifest rule on the next deploy.
+
+Multiplex and grouped apps can instead hand off with an unchanged parsed
+manifest, no hooks, and reconciled app settings that already match the live app.
+Comments and formatting are ignored by the comparison. Schedule and access
+declarations are still reconciled; equality with the previous bundle does not
+prove that their live rows have not drifted. A required deploy-time producer or
+compatibility repair independently requires stop-first. A satisfied
+`first_deploy` bootstrap can allow a code-only handoff; `bundle_change` requires
+a producer run when the bundle digest changes. See [redeploy without
+interrupting the current version](cli.md#redeploy-without-interrupting-the-current-version)
+for capacity and downtime fallback behavior.
 
 Phase A or Phase B failure aborts the deploy before the new bundle starts.
 Phase B is transactional: the old declaration set remains intact rather than

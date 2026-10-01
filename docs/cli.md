@@ -118,12 +118,20 @@ version until they finish or the configured drain deadline expires. Tabs still
 using the old version get a version-update indicator in the app switcher and
 can move deliberately with **Switch now**.
 
-The first implementation is deliberately conservative. A handoff is deferred
-when memory for both pools cannot be proven, prior cleanup is pending, the app
-uses a non-native provider or clustered control plane, worker isolation is not
-`multiplex`, shared producer state changes, or the uploaded bundle contains a
-`shinyhub.toml` manifest. The working version remains available and the CLI
-returns a conflict with the reason.
+Multiplex handoffs require memory for the entire replacement pool alongside the
+current one, plus the configured host memory floor. For 16 replicas, budget for
+16 additional replicas; the one-replica surge used by scheduled data rolls is a
+separate operation. Grouped apps use the
+[grouped worker handoff](deployment-plan.md#grouped-worker-handoff).
+
+A handoff is deferred when memory cannot be proven, an older generation is still
+draining or awaiting cleanup, the app uses a non-native provider or clustered
+control plane, worker isolation does not match `multiplex` or `grouped` across
+both versions, or shared producer state requires a deploy-time write. A bundle
+with `shinyhub.toml` can hand off when its parsed manifest matches the previous
+bundle, it declares no hooks, and its reconciled app settings already match the
+live app. Changed manifest declarations require stop-first. The working version
+remains available on refusal and the CLI returns a conflict with the reason.
 
 If interruption is acceptable, opt in explicitly:
 
@@ -133,8 +141,13 @@ shinyhub apply release.plan --allow-downtime
 shinyhub fleet apply fleet.yaml --allow-downtime
 ```
 
-This stop-first fallback disconnects active sessions. It is never selected
-silently. After an interrupted cleanup, ShinyHub retains the old process
+`--allow-downtime` permits the stop-first fallback when handoff is unavailable;
+it still uses handoff when safe. The fallback disconnects active sessions. Omit
+the flag in CI when preserving availability is required: insufficient capacity
+or another handoff refusal then fails the deploy with the working version still
+serving. `fleet apply` defaults to this behavior too.
+
+After an interrupted cleanup, ShinyHub retains the old process
 identity for startup recovery and defers another handoff until cleanup is
 confirmed.
 

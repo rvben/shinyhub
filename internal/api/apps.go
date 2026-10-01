@@ -2746,10 +2746,11 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			unsupportedReason = "this deployment changes shared producer state and requires an explicit stop-first deploy"
 		case !groupedHandoff && (currentIsolation != "multiplex" || targetIsolation != "multiplex"):
 			unsupportedReason = fmt.Sprintf("worker isolation is %q (target: %q); deploying without downtime currently supports matching multiplex or grouped isolation for both versions, so this update requires stopping the old version before starting its replacement", deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation), targetIsolation)
-		case manifest != nil && !(groupedHandoff && s.groupedManifestHandoffSafe(app, prevActive, manifest)):
+		case manifest != nil && !s.manifestHandoffSafe(app, prevActive, manifest):
 			// Manifest reconciliation has deliberate omitted-key reset semantics
-			// (identity/privacy/access included). Grouped handoff accepts an
-			// unchanged declaration only when its live policy also matches.
+			// (identity/privacy/access included). Multiplex and grouped handoffs
+			// accept an unchanged declaration when its live app settings match;
+			// producer state is checked independently above.
 			unsupportedReason = "this bundle contains a manifest whose configuration must be reconciled by an explicit stop-first deploy"
 		}
 		if unsupportedReason == "" {
@@ -2866,8 +2867,9 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	manifestApplied := false
 
 	// Phase A: apply [app] manifest settings atomically before starting the new
-	// pool. manager.Stop has already run so no process holds a replica index
-	// that may be pruned. Validation already passed above; any error here is a
+	// pool. Handoff admission proved these settings already match; otherwise
+	// manager.Stop ran so no process holds a replica index that may be pruned.
+	// Validation already passed above; any error here is a
 	// storage failure that leaves the app in an inconsistent state — mark it
 	// degraded so the operator notices.
 	var manifestSummary ManifestApplied

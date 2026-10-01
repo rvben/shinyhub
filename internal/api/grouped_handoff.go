@@ -131,11 +131,13 @@ func (s *Server) selectDeployManagerGeneration(slug string, deploymentID int64, 
 	return s.manager.SelectGeneration(slug, deploymentID)
 }
 
-// A code-only grouped update can carry the same manifest. Check both the
-// declaration and live settings: comparing files alone would miss overrides
-// changed since the last deploy. Hooks may mutate shared state and must never
-// run beside an old generation, even when their declaration is unchanged.
-func (s *Server) groupedManifestHandoffSafe(app *db.App, previous *db.Deployment, manifest *deploy.Manifest) bool {
+// A code-only multiplex or grouped update can carry the same manifest. Check
+// both the declaration and live settings: comparing files alone would miss
+// overrides changed since the last deploy. Hooks may mutate shared state and
+// must never run beside an old generation, even when unchanged.
+// Schedule producer state is checked separately by handoff admission; manifest
+// equality only establishes that the uploaded declarations are unchanged.
+func (s *Server) manifestHandoffSafe(app *db.App, previous *db.Deployment, manifest *deploy.Manifest) bool {
 	if previous == nil || len(manifest.Hooks) != 0 {
 		return false
 	}

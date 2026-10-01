@@ -186,8 +186,9 @@ func (s *Server) validateManifestActivationTopology(app *db.App, manifest *deplo
 // Caller contract:
 //   - requireManageApp has already authorized r.
 //   - validateManifestForServer has already returned nil.
-//   - manager.Stop(app.Slug) has already run, so no process holds a
-//     replica index that may be deleted.
+//   - manager.Stop(app.Slug) has already run, or manifestHandoffSafe has
+//     confirmed that reconciliation leaves the live app settings unchanged.
+//     No live process may hold a replica index that reconciliation deletes.
 //
 // identity_headers is reconciled UNCONDITIONALLY (even when m.IsZero()): nil
 // reverts the column to NULL so removing the key from the manifest restores
