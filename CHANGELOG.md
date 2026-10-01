@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.19.0](https://github.com/rvben/shinyhub/compare/v0.18.8...v0.19.0) - 2026-10-01
+
+### Added
+
+- **metrics**: export native replica and scheduled-run RSS, cumulative CPU and replica counts over OTLP with workload identity. Opt in with `metrics.process_interval: 30s` (disabled by default); see [accounting and sampling limits](https://github.com/rvben/shinyhub/blob/v0.19.0/docs/metrics.md#native-workload-metrics-over-otlp) ([4104707](https://github.com/rvben/shinyhub/commit/410470716788c68b184735ad192490f8004b1c38))
+- **auth**: renew hosted sessions and enforce connection deadlines ([3556e06](https://github.com/rvben/shinyhub/commit/3556e069241b1e10ed9f6e69ad62a86473f90f61))
+- **auth**: renew browser sessions with configurable lifetimes ([b5443a5](https://github.com/rvben/shinyhub/commit/b5443a5b9b3b03df9917281dbfb3d9208b75031b))
+
+### Fixed
+
+- **agent**: settle failed approvals and reset answer announcements ([20065d6](https://github.com/rvben/shinyhub/commit/20065d68bd33aa212801e317588564ed15d7daa6))
+- **auth**: offer dashboard recovery for gateway sessions ([5d83d94](https://github.com/rvben/shinyhub/commit/5d83d9448f7927302bca0212dbc32e8ce930f7e4))
+
+### Performance
+
+- **aws**: trim unused SDK operations from server builds ([40838db](https://github.com/rvben/shinyhub/commit/40838dba42641c262edd6c05576f3f8fa996e7d7))
+
 ## [0.18.8](https://github.com/rvben/shinyhub/compare/v0.18.7...v0.18.8) - 2026-09-30
 
 ### Added
