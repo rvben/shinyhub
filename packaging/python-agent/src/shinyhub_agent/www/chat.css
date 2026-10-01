@@ -369,8 +369,15 @@ body.sh-agent-native-chat .sh-agent-expand { display: none; }
 .sh-agent-approval-label { color: #7c2d12; font-size: 11px; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; }
 .sh-agent-approval h3 { margin: 8px 0 0; color: #16203a; font-size: 15px; font-weight: 700; line-height: 1.45; }
 .sh-agent-approval-values { display: grid; grid-template-columns: minmax(75px, 1fr) 2fr; gap: 6px 12px; margin: 15px 0 0; padding: 11px 12px; border-radius: 8px; background: #f4f7fc; font-size: 12px; }
-.sh-agent-approval-values dt { margin: 0; color: #5b6784; }
+.sh-agent-approval-values dt { min-width: 0; margin: 0; color: #5b6784; overflow-wrap: anywhere; }
 .sh-agent-approval-values dd { min-width: 0; margin: 0; color: #16203a; font-weight: 700; overflow-wrap: anywhere; }
+.sh-agent-approval-description { margin: 12px 0 0; color: #16203a; font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap; }
+.sh-agent-approval-details { min-width: 0; margin-top: 12px; color: #45526e; font-size: 12px; }
+.sh-agent-approval-details summary { min-height: 36px; display: list-item; align-content: center; cursor: pointer; color: #0369a1; font-weight: 700; }
+.sh-agent-approval-details summary:focus-visible { outline: 2px solid #0284c7; outline-offset: 3px; border-radius: 4px; }
+.sh-agent-approval-details pre { max-height: 240px; overflow: auto; margin: 4px 0 0; padding: 12px; background: #f4f7fc; color: #16203a; font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.sh-agent-approval-details pre:focus-visible { outline: 2px solid #0284c7; outline-offset: 2px; }
+.sh-agent-approval-deadline { margin: 12px 0 0; color: #5b6784; font-size: 12px; line-height: 1.5; font-variant-numeric: tabular-nums; }
 .sh-agent-approval-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .sh-agent-secondary,
 .sh-agent-apply { min-height: 44px; padding: 8px 12px; border-radius: 8px; font-size: 12px; font-weight: 700; cursor: pointer; }

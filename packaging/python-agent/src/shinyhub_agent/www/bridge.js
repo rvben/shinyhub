@@ -7,8 +7,10 @@
   var registered = new Set();
   var installed = false;
   var confirmationOpen = false;
+  var writePending = false;
+  var cancelConfirmation = null;
 
-  function confirmAction(message) {
+  function confirmAction(message, argumentsValue) {
     if (confirmationOpen) return Promise.reject(new Error("Another action is awaiting confirmation."));
     confirmationOpen = true;
     return new Promise(function (resolve) {
@@ -25,6 +27,11 @@
       title.textContent = "Confirm app action";
       var detail = document.createElement("p");
       detail.textContent = message;
+      var values = document.createElement("pre");
+      values.textContent = JSON.stringify(argumentsValue, null, 2);
+      values.className = "sh-agent-confirm-values";
+      values.tabIndex = 0;
+      values.setAttribute("aria-label", "Complete action arguments");
       var actions = document.createElement("div");
       actions.className = "sh-agent-confirm-actions";
       var cancel = document.createElement("button");
@@ -35,24 +42,29 @@
       apply.textContent = "Apply change";
       apply.className = "sh-agent-confirm-apply";
       actions.append(cancel, apply);
-      dialog.append(title, detail, actions);
+      dialog.append(title, detail, values, actions);
       backdrop.append(dialog);
       document.body.append(backdrop);
       var timeout = setTimeout(function () { finish(false); }, 30000);
+      var finished = false;
       function finish(allowed) {
+        if (finished) return;
+        finished = true;
+        cancelConfirmation = null;
         clearTimeout(timeout);
         backdrop.remove();
         confirmationOpen = false;
         if (previousFocus && previousFocus.isConnected) previousFocus.focus({ preventScroll: true });
         resolve(allowed);
       }
+      cancelConfirmation = function () { finish(false); };
       cancel.addEventListener("click", function () { finish(false); });
       apply.addEventListener("click", function () { finish(true); });
       backdrop.addEventListener("keydown", function (event) {
         if (event.key === "Escape") { event.preventDefault(); finish(false); }
         if (event.key === "Tab") {
-          if (event.shiftKey && document.activeElement === cancel) { event.preventDefault(); apply.focus(); }
-          else if (!event.shiftKey && document.activeElement === apply) { event.preventDefault(); cancel.focus(); }
+          if (event.shiftKey && document.activeElement === values) { event.preventDefault(); apply.focus(); }
+          else if (!event.shiftKey && document.activeElement === apply) { event.preventDefault(); values.focus(); }
         }
       });
       apply.focus({ preventScroll: true });
@@ -60,6 +72,7 @@
   }
 
   function rejectPending(message) {
+    if (cancelConfirmation) cancelConfirmation();
     pending.forEach(function (entry) {
       clearTimeout(entry.timer);
       entry.reject(new Error(message));
@@ -87,9 +100,27 @@
     var tool = findTool(name);
     if (!tool) return Promise.reject(new Error("This tool is unavailable in the current app session."));
     if (pending.size >= 4) return Promise.reject(new Error("Too many actions are waiting for the app."));
-    if (!tool.readOnly && !(await confirmAction(tool.confirmation))) {
-      throw new Error("Action cancelled.");
+    // Snapshot the caller's JSON before either preflight or visitor approval.
+    var snapshot = JSON.parse(JSON.stringify(argumentsValue || {}));
+    var expectedSession = capabilities.session;
+    if (!tool.readOnly) {
+      if (writePending) throw new Error("Another action is awaiting confirmation.");
+      writePending = true;
+      try {
+        var prepared = await request(name, snapshot, "prepare");
+        if (!capabilities || capabilities.session !== expectedSession) throw new Error("The app session changed. Try again.");
+        if (!(await confirmAction(prepared.description || prepared.confirmation, prepared.arguments))) {
+          throw new Error("Action cancelled.");
+        }
+        if (!capabilities || capabilities.session !== expectedSession) throw new Error("The app session changed. Try again.");
+        return await request(name, prepared.arguments, "execute");
+      } finally { writePending = false; }
     }
+    return request(name, snapshot, "execute");
+  }
+
+  function request(name, argumentsValue, action) {
+    if (pending.size >= 4) return Promise.reject(new Error("Too many actions are waiting for the app."));
     var requestId = crypto.randomUUID();
     return new Promise(function (resolve, reject) {
       var timer = setTimeout(function () {
@@ -103,7 +134,8 @@
           session: capabilities.session,
           requestId: requestId,
           name: name,
-          arguments: argumentsValue || {}
+          arguments: argumentsValue,
+          action: action
         }, { priority: "event" });
       } catch (error) {
         clearTimeout(timer);

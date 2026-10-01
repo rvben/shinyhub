@@ -74,6 +74,14 @@ handler exception is never serialized. A successful result means the handler
 completed; app authors should return authoritative applied state, not a
 requested value that may still be pending in the UI.
 
+Opted-in browser writes first send `action: "prepare"` with the same request
+fields. The server validates the schema and dynamic app constraints without
+running the handler, then returns `{arguments, confirmation, description}`.
+The bridge displays that snapshot before sending `action: "execute"` (also
+the default when absent). Execution revalidates current constraints. This
+preflight improves confirmation; it does not create an authorization token
+or make browser approval a server-side security boundary.
+
 ## Chat
 
 When a chat backend is configured, the app publishes
@@ -84,12 +92,17 @@ history; it ignores any history supplied by the browser. It streams
 `shinyhub-agent-chat-event` messages with matching `version`, `session`, and
 `requestId` for `status`, `delta`, `action_applied`, `done`, and `error`.
 
-For a write, the server emits `approval_required` with an `approvalId`, tool
-name, arguments, and display message. The browser sends
+For a write, the server validates the schema and app constraints, then emits
+`approval_required` with an `approvalId`, tool name, arguments, display
+`message`, optional plain-text `description` and `expiresIn` in seconds.
+Validation errors go to the model as structured tool results without a card.
+The browser sends
 `.shinyhub_agent_chat_decision` with the chat nonce, approval ID, and boolean
 `approved`. The server accepts only the currently pending ID, executes the
 registered handler after approval, and emits `action_applied` with its result.
-Denial or timeout does not run the handler. The chat panel's **Stop** and
+Execution revalidates the approved snapshot. Denial or timeout does not run
+the handler. Timeout emits `approval_expired` with the matching `approvalId`;
+late decisions cannot revive that approval. The chat panel's **Stop** and
 **New chat** controls send `action: "cancel"` and `action: "reset"` requests.
 
 The browser helper also announces `shinyhub:chat:capabilities` with
@@ -101,6 +114,10 @@ fallback header. The host sends `shinyhub:chat:toggle` and
 `shinyhub:chat:busy` so the host can manage its overlay and disable **New**
 while a request is active. Older hosts ignore the added fields and retain the
 helper's own chat frame.
+
+`window.shinyhubAgentChat.open()` and `.close()` are idempotent public hooks.
+They return whether chat is available, work with native and fallback panels,
+and never submit questions or approve actions.
 
 ## Compatibility rules
 

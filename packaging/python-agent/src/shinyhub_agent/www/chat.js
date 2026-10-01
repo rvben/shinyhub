@@ -8,6 +8,7 @@
   var answerSource = "";
   var answerFrame = null;
   var approval = null;
+  var approvalTimer = null;
   var lastApprovalCard = null;
   var installed = false;
   var previousFocus = null;
@@ -544,6 +545,8 @@
   }
 
   function clearApproval() {
+    clearInterval(approvalTimer);
+    approvalTimer = null;
     if (approval) approval.remove();
     approval = null;
   }
@@ -612,16 +615,53 @@
     // A write tool that fails ends its approval without ending the answer, so
     // the card has to be settled here rather than by finish().
     if (approval && approval.dataset.tool === event.name) {
-      approval.querySelector(".sh-agent-approval-actions").remove();
-      approval.dataset.result = "expired";
-      approval.querySelector(".sh-agent-approval-label").textContent = "Not approved in time";
-      lastApprovalCard = approval;
-      approval = null;
+      expireApproval();
     } else if (lastApprovalCard && lastApprovalCard.dataset.result === "applying" &&
         lastApprovalCard.dataset.tool === event.name) {
       lastApprovalCard.dataset.result = "failed";
       lastApprovalCard.querySelector(".sh-agent-approval-label").textContent = "Change failed";
     }
+  }
+
+  function expireApproval() {
+    clearInterval(approvalTimer);
+    approvalTimer = null;
+    if (!approval) return;
+    var actions = approval.querySelector(".sh-agent-approval-actions");
+    if (actions) actions.remove();
+    approval.dataset.result = "expired";
+    approval.querySelector(".sh-agent-approval-label").textContent = "Not approved in time";
+    var deadline = approval.querySelector(".sh-agent-approval-deadline");
+    if (deadline) deadline.textContent = "Approval expired. Ask again to propose a new change.";
+    lastApprovalCard = approval;
+    approval = null;
+  }
+
+  function approvalValues(argumentsValue) {
+    var rows = [], shortened = false;
+    function visit(value, path, depth) {
+      if (rows.length >= 24) { shortened = true; return; }
+      if (value && !Array.isArray(value) && typeof value === "object" &&
+          Object.keys(value).length && depth < 4) {
+        Object.entries(value).forEach(function (entry) {
+          visit(entry[1], path.concat(entry[0]), depth + 1);
+        });
+        return;
+      }
+      var text;
+      if (Array.isArray(value) && value.every(function (item) { return item === null || typeof item !== "object"; })) {
+        text = value.length ? value.slice(0, 8).map(function (item) {
+          return typeof item === "string" && !item ? "(empty string)" : String(item);
+        }).join(", ") : "(empty list)";
+        if (value.length > 8) { text += " and " + (value.length - 8) + " more"; shortened = true; }
+      } else if (value && typeof value === "object") {
+        text = JSON.stringify(value); shortened = true;
+      } else text = value === "" ? "(empty string)" : String(value);
+      if (text.length > 220) { text = text.slice(0, 220) + "…"; shortened = true; }
+      rows.push({ label: path.map(toolLabel).join(" · "), text: text });
+    }
+    Object.entries(argumentsValue || {}).forEach(function (entry) { visit(entry[1], [entry[0]], 0); });
+    return { rows: rows, shortened: shortened };
   }
 
   function showApproval(event) {
@@ -630,21 +670,47 @@
     var follow = nearBottom();
     approval = make("section", "sh-agent-approval");
     approval.dataset.tool = event.name || "";
+    approval.dataset.approvalId = event.approvalId;
     approval.append(make("span", "sh-agent-approval-label", "Approval needed"));
     approval.append(make("h3", "", event.message || "Apply this change to the app?"));
-    var values = Object.entries(event.arguments || {});
-    if (values.length) {
+    if (event.description) approval.append(make("p", "sh-agent-approval-description", event.description));
+    var values = approvalValues(event.arguments);
+    if (values.rows.length && !event.description) {
       var details = make("dl", "sh-agent-approval-values");
-      values.forEach(function (entry) {
-        details.append(make("dt", "", toolLabel(entry[0])), make("dd", "", String(entry[1])));
+      values.rows.forEach(function (entry) {
+        details.append(make("dt", "", entry.label), make("dd", "", entry.text));
       });
       approval.append(details);
     }
+    if (values.rows.length && (values.shortened || event.description)) {
+      var full = make("details", "sh-agent-approval-details");
+      full.append(make("summary", "", "Review all action details"));
+      var complete = make("pre", "", JSON.stringify(event.arguments, null, 2));
+      complete.tabIndex = 0;
+      complete.setAttribute("aria-label", "Complete action arguments");
+      full.append(complete);
+      approval.append(full);
+    }
+    var seconds = typeof event.expiresIn === "number" && event.expiresIn >= 1 && event.expiresIn <= 300 ? event.expiresIn : 30;
+    var expiresAt = Date.now() + seconds * 1000;
+    var deadline = make("p", "sh-agent-approval-deadline");
+    approval.append(deadline);
+    function tick() {
+      var remaining = Math.ceil((expiresAt - Date.now()) / 1000);
+      if (remaining <= 0) expireApproval();
+      else deadline.textContent = "Approve within " + remaining + " seconds";
+    }
+    tick();
+    approvalTimer = setInterval(tick, 1000);
     var actions = make("div", "sh-agent-approval-actions");
     var decline = make("button", "sh-agent-secondary", "Keep current view");
     var approve = make("button", "sh-agent-apply", "Apply change");
     [decline, approve].forEach(function (button) { button.type = "button"; });
     function decide(approved) {
+      if (!approval || Date.now() >= expiresAt) { expireApproval(); return; }
+      clearInterval(approvalTimer);
+      approvalTimer = null;
+      deadline.remove();
       window.Shiny.setInputValue(".shinyhub_agent_chat_decision", {
         version: VERSION, session: chatSession, approvalId: event.approvalId,
         approved: approved
@@ -830,6 +896,10 @@
     }
   });
   launcher.addEventListener("click", openPanel);
+  window.shinyhubAgentChat = Object.freeze({
+    open: function () { if (!chatSession) return false; if (panel.hidden) openPanel(); return true; },
+    close: function () { if (!chatSession) return false; if (!panel.hidden) closePanel(); return true; }
+  });
   close.addEventListener("click", closePanel);
   window.addEventListener("shinyhub:chat:discover", function (event) {
     if (event.detail && event.detail.version === VERSION && chatSession) {
@@ -918,6 +988,10 @@
     window.Shiny.addCustomMessageHandler("shinyhub-agent-chat-event", function (event) {
       if (!event || event.version !== VERSION || event.session !== chatSession) return;
       if (event.type === "approval_required") { if (activeRequest) showApproval(event); return; }
+      if (event.type === "approval_expired") {
+        if (approval && approval.dataset.approvalId === event.approvalId) expireApproval();
+        return;
+      }
       if (event.type === "reset") {
         cancelAnswerFrame();
         activeAnswer = null;

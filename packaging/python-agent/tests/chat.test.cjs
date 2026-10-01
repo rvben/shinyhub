@@ -117,6 +117,71 @@ function requestApproval(send) {
     arguments: { year: 2024 }, message: "Show only 2024?" });
 }
 
+test("nested approval values show keys and values as literal text", (t) => {
+  const { doc, send } = ask(t);
+  send({ type: "approval_required", approvalId: "nested", name: "set_filters", message: "Change filters?",
+    arguments: { filters: { model: ["alpha", "beta"], cost_center: ["CC123", "<b>literal</b>"] }, empty: [], missing: null } });
+  assert.deepEqual(Array.from(doc.querySelectorAll(".sh-agent-approval dt")).map((x) => x.textContent),
+    ["Filters · Model", "Filters · Cost Center", "Empty", "Missing"]);
+  assert.deepEqual(Array.from(doc.querySelectorAll(".sh-agent-approval dd")).map((x) => x.textContent),
+    ["alpha, beta", "CC123, <b>literal</b>", "(empty list)", "null"]);
+  assert.equal(doc.querySelector(".sh-agent-approval b"), null);
+});
+
+test("shortened lists and descriptions retain inspectable complete action details", (t) => {
+  const { doc, send } = ask(t);
+  const args = { filters: { model: Array.from({ length: 30 }, (_, i) => "model-" + i) } };
+  send({ type: "approval_required", approvalId: "long", name: "set_filters", message: "Change filters?", arguments: args });
+  assert.match(doc.querySelector(".sh-agent-approval dd").textContent, /and 22 more/);
+  assert.equal(doc.querySelector(".sh-agent-approval-details pre").textContent, JSON.stringify(args, null, 2));
+  send({ type: "approval_required", approvalId: "description", name: "set_filters", message: "Change filters?",
+    arguments: args, description: "<img src=x> Filter models for this view" });
+  assert.equal(doc.querySelector(".sh-agent-approval-description").textContent, "<img src=x> Filter models for this view");
+  assert.equal(doc.querySelector(".sh-agent-approval img"), null);
+  assert.equal(doc.querySelector(".sh-agent-approval dl"), null);
+  assert.match(doc.querySelector(".sh-agent-approval-details pre").textContent, /model-29/);
+});
+
+test("approval expiry matches its ID and removes the dead decision", (t) => {
+  const { doc, send, inputs } = ask(t);
+  requestApproval(send);
+  assert.match(doc.querySelector(".sh-agent-approval-deadline").textContent, /30 seconds/);
+  send({ type: "approval_expired", approvalId: "previous" });
+  assert.equal(doc.querySelectorAll(".sh-agent-approval button").length, 2);
+  send({ type: "approval_expired", approvalId: "a1" });
+  assert.equal(card(doc).result, "expired");
+  assert.equal(card(doc).buttons, 0);
+  assert.match(doc.querySelector(".sh-agent-approval-deadline").textContent, /Ask again/);
+  assert.equal(inputs.filter((x) => x.name === ".shinyhub_agent_chat_decision").length, 0);
+});
+
+test("a decision after its visible deadline cannot be sent", (t) => {
+  const { doc, send, inputs, window } = ask(t);
+  const originalNow = window.Date.now;
+  window.Date.now = () => 1000;
+  send({ type: "approval_required", approvalId: "a1", name: "set_year", message: "Change?", arguments: {}, expiresIn: 1 });
+  window.Date.now = () => 2000;
+  doc.querySelector(".sh-agent-apply").click();
+  window.Date.now = originalNow;
+  assert.equal(card(doc).result, "expired");
+  assert.equal(inputs.filter((x) => x.name === ".shinyhub_agent_chat_decision").length, 0);
+});
+
+test("public chat opening is idempotent with the toolbar present", (t) => {
+  const { window, doc } = ask(t);
+  window.dispatchEvent(new window.CustomEvent("shinyhub:chat:host", {
+    detail: { version: 1, available: true, native: true }
+  }));
+  window.shinyhubAgentChat.close();
+  assert.equal(doc.querySelector(".sh-agent-panel").hidden, true);
+  assert.equal(window.shinyhubAgentChat.open(), true);
+  assert.equal(window.shinyhubAgentChat.open(), true);
+  assert.equal(doc.querySelector(".sh-agent-panel").hidden, false);
+  window.shinyhubAgentChat.close();
+  window.shinyhubAgentChat.close();
+  assert.equal(doc.querySelector(".sh-agent-panel").hidden, true);
+});
+
 test("an approved change whose tool fails is reported as failed, not left applying", (t) => {
   const { doc, send } = ask(t);
   requestApproval(send);
