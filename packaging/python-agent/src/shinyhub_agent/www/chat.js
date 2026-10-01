@@ -232,7 +232,14 @@
           cells.forEach(function (value, column) {
             var td = make(header ? "th" : "td", "sh-agent-align-" + spec.alignment[column]);
             if (header) td.setAttribute("scope", "col");
-            inlineMarkdown(td, value); tr.append(td);
+            inlineMarkdown(td, value);
+            // Wrap prose, but keep a formatted measurement together.
+            if (!header && /^\(?[+−-]?(?:[$€£¥]\s*)?\d[\d,.]*(?:\s?(?:%|[KMBT]|USD|EUR|GBP))?\)?$/i.test(td.textContent.trim())) {
+              td.classList.add("sh-agent-cell-value");
+            } else if (!header && td.textContent.length > 32) {
+              td.classList.add("sh-agent-cell-description");
+            }
+            tr.append(td);
           });
           return tr;
         }
@@ -389,7 +396,13 @@
   close.type = "button";
   close.setAttribute("aria-label", "Close assistant");
   close.append(icon(["M5 5l14 14", "M19 5 5 19"]));
-  header.append(brand, close);
+  var expand = make("button", "sh-agent-icon-button sh-agent-expand");
+  expand.type = "button";
+  expand.append(icon(["M8 3H3v5", "m3 3 6 6", "M16 21h5v-5", "m21 21-6-6"]));
+  var headerActions = make("div", "sh-agent-header-actions");
+  headerActions.append(expand, close);
+  header.append(brand, headerActions);
+  var resizeGrip = make("div", "sh-agent-resize");
   var logWrap = make("div", "sh-agent-log-wrap");
   var log = make("div", "sh-agent-log");
   log.setAttribute("role", "log");
@@ -446,7 +459,7 @@
   var hint = make("span", "sh-agent-hint", "Enter to send · Shift+Enter for a new line");
   controls.append(reset, hint, stop, send);
   composer.append(input, controls);
-  panel.append(header, logWrap, status, announcer, composer);
+  panel.append(header, resizeGrip, logWrap, status, announcer, composer);
   document.body.append(launcher, panel);
 
   function emit(payload) {
@@ -501,6 +514,11 @@
     panel.hidden = false;
     launcher.setAttribute("aria-expanded", "true");
     announceChat("state", { open: true });
+    setPanelRole();
+    input.focus({ preventScroll: true });
+  }
+
+  function setPanelRole() {
     if (nativeChat) {
       panel.setAttribute("role", "region");
       panel.setAttribute("aria-label", "Conversation");
@@ -513,7 +531,6 @@
       panel.setAttribute("role", "complementary");
       panel.removeAttribute("aria-modal");
     }
-    input.focus({ preventScroll: true });
   }
 
   function closePanel() {
@@ -688,6 +705,130 @@
     scrollAfterChange(follow);
   }
 
+  // Both standalone bundles implement this small sizing contract so either
+  // panel works with older hosts/helpers. Browser tests exercise their parity.
+  function installChatSizing(surface, expandButton, grip, mobileWidth, margin, changing, unavailable) {
+    var key = "shinyhub:chat:size";
+    var width = 440, expanded = false, drag = null;
+    function load() {
+      try {
+        var saved = JSON.parse(window.sessionStorage.getItem(key));
+        if (saved && typeof saved.width === "number" && isFinite(saved.width) &&
+            saved.width >= 360 && saved.width <= 960) {
+          width = saved.width; expanded = saved.expanded === true;
+        }
+      } catch (e) { /* Storage is optional in embedded apps and privacy modes. */ }
+    }
+    load();
+
+    grip.tabIndex = 0;
+    grip.setAttribute("role", "separator");
+    grip.setAttribute("aria-orientation", "vertical");
+    grip.setAttribute("aria-label", "Resize assistant");
+    grip.setAttribute("aria-controls", surface.id);
+    grip.title = "Drag to resize. Left/Right arrows adjust width; Home/End choose the smallest/largest width.";
+
+    function maximum() { return Math.min(960, window.innerWidth - 2 * margin()); }
+    function clamp(value) { return Math.round(Math.max(360, Math.min(maximum(), value))); }
+    function save() {
+      try { window.sessionStorage.setItem(key, JSON.stringify({ width: width, expanded: expanded })); }
+      catch (e) { /* Resizing still works without storage. */ }
+    }
+    function update() {
+      var mobile = window.innerWidth <= mobileWidth || unavailable && unavailable();
+      changing(true);
+      var actual = mobile ? window.innerWidth : clamp(expanded ? maximum() : width);
+      surface.style.setProperty("--sh-chat-width", actual + "px");
+      var focused = surface.getRootNode().activeElement;
+      var moveFocus = mobile && (focused === grip || focused === expandButton);
+      grip.hidden = expandButton.hidden = mobile;
+      grip.setAttribute("aria-valuemin", "360");
+      grip.setAttribute("aria-valuemax", String(Math.max(360, maximum())));
+      grip.setAttribute("aria-valuenow", String(actual));
+      grip.setAttribute("aria-valuetext", actual + " pixels wide");
+      var label = expanded ? "Restore assistant width" : "Expand assistant";
+      expandButton.setAttribute("aria-label", label);
+      expandButton.setAttribute("aria-pressed", String(expanded));
+      expandButton.title = label;
+      var paths = expandButton.querySelectorAll("path");
+      var drawing = expanded ? ["M3 8h5V3", "m3 3 5 5", "M21 16h-5v5", "m21 21-5-5"] :
+        ["M8 3H3v5", "m3 3 6 6", "M16 21h5v-5", "m21 21-6-6"];
+      for (var i = 0; i < paths.length; i++) paths[i].setAttribute("d", drawing[i]);
+      changing(false, moveFocus);
+    }
+    function finish(cancel) {
+      if (!drag) return;
+      var previous = drag; drag = null;
+      if (cancel) { width = previous.width; expanded = previous.expanded; }
+      surface.classList.remove("chat-resizing");
+      if (typeof grip.hasPointerCapture === "function" && grip.hasPointerCapture(previous.id)) {
+        grip.releasePointerCapture(previous.id);
+      }
+      update();
+      if (!cancel) save();
+    }
+    expandButton.addEventListener("click", function () {
+      expanded = !expanded; update(); save();
+    });
+    grip.addEventListener("pointerdown", function (event) {
+      if (event.button !== 0 || grip.hidden || drag) return;
+      event.preventDefault();
+      grip.focus({ preventScroll: true });
+      drag = { id: event.pointerId, x: event.clientX,
+        actual: clamp(expanded ? maximum() : width), width: width, expanded: expanded };
+      surface.classList.add("chat-resizing");
+      if (typeof grip.setPointerCapture === "function") grip.setPointerCapture(event.pointerId);
+    });
+    grip.addEventListener("pointermove", function (event) {
+      if (!drag || drag.id !== event.pointerId) return;
+      width = clamp(drag.actual + drag.x - event.clientX);
+      expanded = false; update();
+    });
+    grip.addEventListener("pointerup", function (event) {
+      if (drag && drag.id === event.pointerId) finish(false);
+    });
+    grip.addEventListener("pointercancel", function (event) {
+      if (drag && drag.id === event.pointerId) finish(true);
+    });
+    grip.addEventListener("lostpointercapture", function () { finish(false); });
+    grip.addEventListener("keydown", function (event) {
+      if (event.key === "Escape" && drag) {
+        event.preventDefault(); event.stopPropagation(); finish(true); return;
+      }
+      if (grip.hidden ||
+          ["ArrowLeft", "ArrowRight", "Home", "End"].indexOf(event.key) < 0) return;
+      event.preventDefault(); event.stopPropagation();
+      var step = event.shiftKey ? 64 : 16;
+      width = event.key === "Home" ? 360 : event.key === "End" ? maximum() :
+        clamp(expanded ? maximum() : width) + (event.key === "ArrowLeft" ? step : -step);
+      width = clamp(width); expanded = false; update(); save();
+    });
+    window.addEventListener("blur", function () { finish(true); });
+    window.addEventListener("resize", function () { finish(true); update(); });
+    update();
+    return function () { load(); update(); };
+  }
+
+  var sizingFollow = false;
+  var updateSizing = installChatSizing(panel, expand, resizeGrip, 680, function () {
+    return toolbarAvailable ? 12 : 24;
+  }, function (before, moveFocus) {
+    if (nativeChat) return;
+    if (before) sizingFollow = nearBottom();
+    else {
+      if (!panel.hidden) setPanelRole();
+      scrollAfterChange(sizingFollow);
+      if (moveFocus && !panel.hidden) input.focus({ preventScroll: true });
+    }
+  }, function () { return nativeChat; });
+  window.addEventListener("shinyhub:chat:layout", function (event) {
+    if (!nativeChat || !event.detail || event.detail.version !== VERSION) return;
+    if (event.detail.before) sizingFollow = nearBottom();
+    else {
+      scrollAfterChange(sizingFollow);
+      if (event.detail.focusInput && !panel.hidden) input.focus({ preventScroll: true });
+    }
+  });
   launcher.addEventListener("click", openPanel);
   close.addEventListener("click", closePanel);
   window.addEventListener("shinyhub:chat:discover", function (event) {
@@ -702,6 +843,7 @@
     nativeChat = !!event.detail.native;
     document.body.classList.toggle("sh-agent-toolbar-host", toolbarAvailable);
     document.body.classList.toggle("sh-agent-native-chat", nativeChat);
+    updateSizing();
     launcher.hidden = !chatSession || toolbarAvailable || toolbarSuspended;
   });
   window.addEventListener("shinyhub:chat:toggle", function (event) {
@@ -718,7 +860,7 @@
   panel.addEventListener("keydown", function (event) {
     if (event.key === "Escape") { closePanel(); return; }
     if (event.key !== "Tab" || nativeChat || !matchMedia("(max-width: 680px)").matches) return;
-    var focusable = Array.from(panel.querySelectorAll("button,textarea,summary")).filter(function (item) {
+    var focusable = Array.from(panel.querySelectorAll("button,textarea,summary,[tabindex='0']")).filter(function (item) {
       return !item.disabled && !item.hidden && item.getClientRects().length;
     });
     var first = focusable[0], last = focusable[focusable.length - 1];

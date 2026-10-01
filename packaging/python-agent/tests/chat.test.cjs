@@ -6,10 +6,53 @@ const { JSDOM } = require("jsdom");
 
 const source = fs.readFileSync(path.join(__dirname, "../src/shinyhub_agent/www/chat.js"), "utf8");
 
+test("table measurements stay together while descriptive values can wrap", (t) => {
+  const { doc, send } = ask(t);
+  send({ type: "delta", text: "| Description | Value |\n| --- | ---: |\n| **North** business line | **$442.91K** |\n| Cost rose 2.1% this week | -2.1% |\n| Euro cost | €1,230.50 |\n| Refund | (42.00) |\n| Status | No changes |" });
+  send({ type: "done" });
+  const rows = doc.querySelectorAll("tbody tr");
+  assert.equal(rows[0].cells[0].classList.contains("sh-agent-cell-value"), false);
+  for (const row of Array.from(rows).slice(0, 4)) {
+    assert.equal(row.cells[1].classList.contains("sh-agent-cell-value"), true);
+  }
+  assert.equal(rows[4].cells[1].classList.contains("sh-agent-cell-value"), false);
+});
+
+test("fallback restores a valid size and remembers compact width after expansion", (t) => {
+  const { window, doc } = ask(t, { savedSize: '{"width":620,"expanded":true}' });
+  const panel = doc.querySelector(".sh-agent-panel"), button = doc.querySelector(".sh-agent-expand");
+  assert.equal(panel.style.getPropertyValue("--sh-chat-width"), "960px");
+  assert.equal(button.getAttribute("aria-label"), "Restore assistant width");
+  button.click();
+  assert.equal(panel.style.getPropertyValue("--sh-chat-width"), "620px");
+  const grip = doc.querySelector(".sh-agent-resize");
+  grip.dispatchEvent(new window.KeyboardEvent("keydown", { key: "ArrowLeft", shiftKey: true, bubbles: true }));
+  assert.equal(panel.style.getPropertyValue("--sh-chat-width"), "684px");
+  assert.deepEqual(JSON.parse(window.sessionStorage.getItem("shinyhub:chat:size")), { width: 684, expanded: false });
+});
+
+test("bad or denied storage cannot break sizing, and native hosting hides fallback controls", (t) => {
+  for (const options of [{ savedSize: "{" }, { savedSize: '{"width":1e99,"expanded":true}' }, { blockStorage: true }]) {
+    const { window, doc } = ask(t, options);
+    const panel = doc.querySelector(".sh-agent-panel"), button = doc.querySelector(".sh-agent-expand");
+    assert.equal(panel.style.getPropertyValue("--sh-chat-width"), "440px");
+    button.click();
+    assert.equal(panel.style.getPropertyValue("--sh-chat-width"), "960px");
+    window.dispatchEvent(new window.CustomEvent("shinyhub:chat:host", {
+      detail: { version: 1, available: true, native: true }
+    }));
+    window.dispatchEvent(new window.Event("resize"));
+    assert.equal(button.hidden, true);
+    assert.equal(doc.querySelector(".sh-agent-resize").hidden, true);
+  }
+});
+
 // Loads the widget into a fresh page, opens a session and asks one question, so
 // each test starts with an answer in flight and drives the events that follow.
-function ask(t) {
-  const dom = new JSDOM("<!doctype html><body></body>", { runScripts: "outside-only" });
+function ask(t, { savedSize = null, blockStorage = false } = {}) {
+  const dom = new JSDOM("<!doctype html><body></body>", {
+    runScripts: "outside-only", url: "https://apps.example.test/"
+  });
   const window = dom.window;
   t.after(() => window.close());
   const handlers = new Map();
@@ -30,6 +73,10 @@ function ask(t) {
   };
   Object.defineProperty(window, "crypto", { value: { randomUUID: () => "request_" + (++ids) } });
   window.matchMedia = () => ({ matches: false });
+  if (savedSize !== null) window.sessionStorage.setItem("shinyhub:chat:size", savedSize);
+  if (blockStorage) Object.defineProperty(window, "sessionStorage", {
+    get() { throw new Error("Storage denied"); }
+  });
   Object.defineProperty(window.navigator, "clipboard", { value: { writeText: (text) => {
     clipboard.push(text); return Promise.resolve();
   } } });

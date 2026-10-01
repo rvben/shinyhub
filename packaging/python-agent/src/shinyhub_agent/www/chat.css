@@ -42,7 +42,7 @@
   bottom: 84px;
   display: flex;
   flex-direction: column;
-  width: min(440px, calc(100vw - 32px));
+  width: min(var(--sh-chat-width, 440px), calc(100vw - 48px));
   height: min(710px, calc(100dvh - 108px));
   overflow: hidden;
   border: 1px solid #c6d0e0;
@@ -56,6 +56,7 @@ body.sh-agent-toolbar-host .sh-agent-panel {
   top: 60px;
   right: 12px;
   bottom: auto;
+  width: min(var(--sh-chat-width, 440px), calc(100vw - 24px));
   height: min(710px, calc(100dvh - 72px));
 }
 
@@ -129,6 +130,34 @@ body.sh-agent-native-chat .sh-agent-reset { display: none; }
   cursor: pointer;
 }
 .sh-agent-icon-button:hover { background: #1b2444; color: #fff; }
+.sh-agent-header-actions { display: flex; flex: none; gap: 2px; }
+.sh-agent-resize {
+  position: absolute;
+  z-index: 2;
+  top: 86px;
+  bottom: 0;
+  left: 0;
+  width: 12px;
+  cursor: ew-resize;
+  touch-action: none;
+}
+.sh-agent-resize::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: calc(50% - 20px);
+  width: 3px;
+  height: 40px;
+  border-radius: 3px;
+  background: #5b6784;
+}
+.sh-agent-resize:hover::after,
+.sh-agent-resize:focus-visible::after,
+.sh-agent-panel.chat-resizing .sh-agent-resize::after { background: #0369a1; }
+.sh-agent-resize:focus-visible { outline-offset: -3px; }
+.sh-agent-panel.chat-resizing { user-select: none; cursor: ew-resize; }
+body.sh-agent-native-chat .sh-agent-resize,
+body.sh-agent-native-chat .sh-agent-expand { display: none; }
 
 .sh-agent-log-wrap { position: relative; display: flex; flex: 1; min-height: 0; }
 .sh-agent-log {
@@ -284,12 +313,14 @@ body.sh-agent-native-chat .sh-agent-reset { display: none; }
   color: #16203a;
   text-align: left;
   vertical-align: top;
-  white-space: nowrap;
+  white-space: normal;
   overflow-wrap: normal;
   font-variant-numeric: tabular-nums;
 }
 .sh-agent-table-scroll th { background: #e8edf6; font-weight: 750; }
 .sh-agent-table-scroll td { background: #fff; }
+.sh-agent-table-scroll .sh-agent-cell-value { white-space: nowrap; }
+.sh-agent-table-scroll .sh-agent-cell-description { min-width: 20ch; }
 .sh-agent-table-scroll tbody tr:last-child td { border-bottom: 0; }
 .sh-agent-table-scroll .sh-agent-align-right { text-align: right; }
 .sh-agent-table-scroll .sh-agent-align-center { text-align: center; }

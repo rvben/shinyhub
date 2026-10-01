@@ -466,8 +466,9 @@
     ".chat-trigger[aria-expanded='true'], .chat-trigger:hover { background: var(--sh-hover); }",
     ".root[data-position='left-center'] .chat-trigger, .root[data-position='right-center'] .chat-trigger { width: 38px; height: 38px; border-right: 0; border-bottom: 1px solid var(--sh-line); }",
     ".root[data-position='left-center'] .chat-label, .root[data-position='right-center'] .chat-label { display: none; }",
-    ".chat-panel { position: absolute; top: calc(60px + var(--shinyhub-announcement-height, 0px)); right: 12px; bottom: 12px; width: min(430px, calc(100vw - 24px)); box-sizing: border-box; display: none; flex-direction: column; overflow: hidden; pointer-events: auto; color: var(--sh-text); background: var(--sh-surface); border: 1px solid var(--sh-line-strong); border-radius: var(--sh-r-lg); box-shadow: 0 32px 80px rgba(0,0,0,0.7); }",
+    ".chat-panel { position: absolute; top: calc(60px + var(--shinyhub-announcement-height, 0px)); right: 12px; bottom: 12px; width: min(var(--sh-chat-width, 440px), calc(100vw - 24px)); box-sizing: border-box; display: none; flex-direction: column; overflow: hidden; pointer-events: auto; color: var(--sh-text); background: var(--sh-surface); border: 1px solid var(--sh-line-strong); border-radius: var(--sh-r-lg); box-shadow: 0 32px 80px rgba(0,0,0,0.7); }",
     ".root.chat-native.chat-open .chat-panel { display: flex; }",
+    ".chat-panel [hidden] { display: none !important; }",
     ".chat-panel-head { display: flex; flex: none; align-items: center; gap: 10px; min-height: 48px; padding: 0 8px 0 16px; border-bottom: 1px solid var(--sh-line-strong); }",
     ".chat-panel-head .chat-mark { width: 26px; height: 26px; }",
     ".chat-panel-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 750; }",
@@ -477,7 +478,14 @@
     ".chat-panel-action:focus-visible { outline: 2px solid var(--sh-signal); outline-offset: -2px; }",
     ".chat-panel-close { display: grid; place-items: center; width: 34px; padding: 0; }",
     ".chat-panel-close svg { display: block; width: 16px; height: 16px; }",
-    ".chat-content { display: block; flex: 1; min-height: 0; overflow: hidden; }",
+    ".chat-panel-expand { display: grid; place-items: center; width: 34px; padding: 0; }",
+    ".chat-panel-expand svg { display: block; width: 16px; height: 16px; }",
+    ".chat-resize { position: absolute; z-index: 2; top: 48px; bottom: 0; left: 0; width: 12px; cursor: ew-resize; touch-action: none; }",
+    ".chat-resize::after { content: ''; position: absolute; left: 3px; top: calc(50% - 20px); width: 3px; height: 40px; border-radius: 3px; background: var(--sh-muted); }",
+    ".chat-resize:hover::after, .chat-resize:focus-visible::after, .chat-resizing .chat-resize::after { background: var(--sh-signal); }",
+    ".chat-resize:focus-visible { outline: 2px solid var(--sh-signal); outline-offset: -3px; }",
+    ".chat-resizing { user-select: none; cursor: ew-resize; }",
+    ".chat-content { position: relative; z-index: 0; display: block; flex: 1; min-height: 0; overflow: hidden; }",
     ".scrim {" +
       "  position: absolute; inset: 0; background: var(--sh-deep); opacity: 0;" +
       "  pointer-events: none; transition: opacity 160ms ease;" +
@@ -1106,6 +1114,7 @@
   // surface. A slot keeps the app's styles and event handlers on its element
   // while the chrome remains isolated in our shadow root.
   var chatPanel = div("chat-panel");
+  chatPanel.id = TAG_ID + "-chat-panel";
   chatPanel.setAttribute("role", "dialog");
   chatPanel.setAttribute("aria-modal", "true");
   chatPanel.setAttribute("aria-label", "Ask this app");
@@ -1121,6 +1130,11 @@
   chatNew.className = "chat-panel-action";
   chatNew.textContent = "New";
   chatNew.setAttribute("aria-label", "Start a new conversation");
+  var chatExpand = document.createElement("button");
+  chatExpand.type = "button";
+  chatExpand.className = "chat-panel-action chat-panel-expand";
+  chatExpand.appendChild(svg(["M8 3H3v5", "m3 3 6 6", "M16 21h5v-5", "m21 21-6-6"], 24));
+  var chatResize = div("chat-resize");
   var chatClose = document.createElement("button");
   chatClose.type = "button";
   chatClose.className = "chat-panel-action chat-panel-close";
@@ -1129,13 +1143,124 @@
   chatPanelHead.appendChild(chatPanelMark);
   chatPanelHead.appendChild(chatPanelTitle);
   chatPanelHead.appendChild(chatNew);
+  chatPanelHead.appendChild(chatExpand);
   chatPanelHead.appendChild(chatClose);
   var chatContent = document.createElement("slot");
   chatContent.className = "chat-content";
   chatContent.name = "shinyhub-chat-content";
   chatPanel.appendChild(chatPanelHead);
+  chatPanel.appendChild(chatResize);
   chatPanel.appendChild(chatContent);
 
+  // Both standalone bundles implement this small sizing contract so either
+  // panel works with older hosts/helpers. Browser tests exercise their parity.
+  function installChatSizing(surface, expandButton, grip, mobileWidth, margin, changing, unavailable) {
+    var key = "shinyhub:chat:size";
+    var width = 440, expanded = false, drag = null;
+    function load() {
+      try {
+        var saved = JSON.parse(window.sessionStorage.getItem(key));
+        if (saved && typeof saved.width === "number" && isFinite(saved.width) &&
+            saved.width >= 360 && saved.width <= 960) {
+          width = saved.width; expanded = saved.expanded === true;
+        }
+      } catch (e) { /* Storage is optional in embedded apps and privacy modes. */ }
+    }
+    load();
+
+    grip.tabIndex = 0;
+    grip.setAttribute("role", "separator");
+    grip.setAttribute("aria-orientation", "vertical");
+    grip.setAttribute("aria-label", "Resize assistant");
+    grip.setAttribute("aria-controls", surface.id);
+    grip.title = "Drag to resize. Left/Right arrows adjust width; Home/End choose the smallest/largest width.";
+
+    function maximum() { return Math.min(960, window.innerWidth - 2 * margin()); }
+    function clamp(value) { return Math.round(Math.max(360, Math.min(maximum(), value))); }
+    function save() {
+      try { window.sessionStorage.setItem(key, JSON.stringify({ width: width, expanded: expanded })); }
+      catch (e) { /* Resizing still works without storage. */ }
+    }
+    function update() {
+      var mobile = window.innerWidth <= mobileWidth || unavailable && unavailable();
+      changing(true);
+      var actual = mobile ? window.innerWidth : clamp(expanded ? maximum() : width);
+      surface.style.setProperty("--sh-chat-width", actual + "px");
+      var focused = surface.getRootNode().activeElement;
+      var moveFocus = mobile && (focused === grip || focused === expandButton);
+      grip.hidden = expandButton.hidden = mobile;
+      grip.setAttribute("aria-valuemin", "360");
+      grip.setAttribute("aria-valuemax", String(Math.max(360, maximum())));
+      grip.setAttribute("aria-valuenow", String(actual));
+      grip.setAttribute("aria-valuetext", actual + " pixels wide");
+      var label = expanded ? "Restore assistant width" : "Expand assistant";
+      expandButton.setAttribute("aria-label", label);
+      expandButton.setAttribute("aria-pressed", String(expanded));
+      expandButton.title = label;
+      var paths = expandButton.querySelectorAll("path");
+      var drawing = expanded ? ["M3 8h5V3", "m3 3 5 5", "M21 16h-5v5", "m21 21-5-5"] :
+        ["M8 3H3v5", "m3 3 6 6", "M16 21h5v-5", "m21 21-6-6"];
+      for (var i = 0; i < paths.length; i++) paths[i].setAttribute("d", drawing[i]);
+      changing(false, moveFocus);
+    }
+    function finish(cancel) {
+      if (!drag) return;
+      var previous = drag; drag = null;
+      if (cancel) { width = previous.width; expanded = previous.expanded; }
+      surface.classList.remove("chat-resizing");
+      if (typeof grip.hasPointerCapture === "function" && grip.hasPointerCapture(previous.id)) {
+        grip.releasePointerCapture(previous.id);
+      }
+      update();
+      if (!cancel) save();
+    }
+    expandButton.addEventListener("click", function () {
+      expanded = !expanded; update(); save();
+    });
+    grip.addEventListener("pointerdown", function (event) {
+      if (event.button !== 0 || grip.hidden || drag) return;
+      event.preventDefault();
+      grip.focus({ preventScroll: true });
+      drag = { id: event.pointerId, x: event.clientX,
+        actual: clamp(expanded ? maximum() : width), width: width, expanded: expanded };
+      surface.classList.add("chat-resizing");
+      if (typeof grip.setPointerCapture === "function") grip.setPointerCapture(event.pointerId);
+    });
+    grip.addEventListener("pointermove", function (event) {
+      if (!drag || drag.id !== event.pointerId) return;
+      width = clamp(drag.actual + drag.x - event.clientX);
+      expanded = false; update();
+    });
+    grip.addEventListener("pointerup", function (event) {
+      if (drag && drag.id === event.pointerId) finish(false);
+    });
+    grip.addEventListener("pointercancel", function (event) {
+      if (drag && drag.id === event.pointerId) finish(true);
+    });
+    grip.addEventListener("lostpointercapture", function () { finish(false); });
+    grip.addEventListener("keydown", function (event) {
+      if (event.key === "Escape" && drag) {
+        event.preventDefault(); event.stopPropagation(); finish(true); return;
+      }
+      if (grip.hidden ||
+          ["ArrowLeft", "ArrowRight", "Home", "End"].indexOf(event.key) < 0) return;
+      event.preventDefault(); event.stopPropagation();
+      var step = event.shiftKey ? 64 : 16;
+      width = event.key === "Home" ? 360 : event.key === "End" ? maximum() :
+        clamp(expanded ? maximum() : width) + (event.key === "ArrowLeft" ? step : -step);
+      width = clamp(width); expanded = false; update(); save();
+    });
+    window.addEventListener("blur", function () { finish(true); });
+    window.addEventListener("resize", function () { finish(true); update(); });
+    update();
+    return function () { load(); update(); };
+  }
+
+  var updateChatSizing = installChatSizing(chatPanel, chatExpand, chatResize, 949, function () { return 12; }, function (before, moveFocus) {
+    window.dispatchEvent(new window.CustomEvent("shinyhub:chat:layout", {
+      detail: { version: CHAT_PROTOCOL_VERSION, before: before, focusInput: !!moveFocus }
+    }));
+  });
   var closeBtn = document.createElement("button");
   closeBtn.type = "button";
   closeBtn.className = "control close";
@@ -1533,6 +1658,7 @@
 
   function announceChatHost() {
     if (typeof window.CustomEvent !== "function") return;
+    updateChatSizing();
     window.dispatchEvent(new window.CustomEvent(CHAT_HOST_EVENT, {
       detail: {
         version: CHAT_PROTOCOL_VERSION,
@@ -3091,8 +3217,10 @@
         return;
       }
       if (ev.key !== "Tab") return;
-      var chatItems = [chatNew, chatClose];
-      var chatCandidates = chatBody.querySelectorAll("button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), a[href]");
+      var chatItems = [chatNew, chatExpand, chatClose, chatResize].filter(function (item) {
+        return !item.hidden && !item.disabled;
+      });
+      var chatCandidates = chatBody.querySelectorAll("button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), a[href], [tabindex='0']");
       for (var ci = 0; ci < chatCandidates.length; ci++) {
         if (!chatCandidates[ci].hidden && chatCandidates[ci].offsetParent !== null) chatItems.push(chatCandidates[ci]);
       }

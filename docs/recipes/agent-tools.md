@@ -157,6 +157,12 @@ at least three hyphens per separator cell. Use `---:` for numeric columns and
 `:---:` for centered columns; escape a pipe within a cell as `\|`. Each body row
 must match the header width. Malformed rows remain visible as text so values are
 never silently dropped. Wide tables and code blocks scroll within the message.
+Descriptive cells wrap while numeric values stay together. On desktop, use
+**Expand assistant** or drag the panel's left edge to view more columns.
+**Restore assistant width** returns to the previous width. The resize edge
+supports arrow keys and Home/End, and the tab remembers your preferred size.
+Small screens keep the full-screen layout. Native resizing also requires
+support in the ShinyHub toolbar.
 
 Links, images, autolinks and raw HTML stay visible without creating active
 browser content. Blockquotes, task lists, footnotes, underscore emphasis and

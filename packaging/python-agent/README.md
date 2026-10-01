@@ -75,6 +75,14 @@ to right-align a column or `:---:` to center it. Body rows must match the header
 width; malformed rows remain visible as text rather than losing values. Wide
 tables and code blocks scroll horizontally inside the answer.
 
+On desktop, drag the panel's left edge or choose **Expand assistant** for more
+room; **Restore assistant width** returns to your previous width. The resize
+edge also supports Left/Right arrows (Shift for larger steps) and Home/End.
+Width and expansion are remembered for the tab, when session storage is
+available, and constrained to the viewport. Small screens keep the full-screen
+layout. Descriptive table cells wrap; numeric values stay together. Native
+panel resizing requires a ShinyHub toolbar that supports these controls.
+
 Links, autolinks, images and HTML never create active browser content. Their
 syntax stays visible, as do unsupported markers such as blockquotes, task lists,
 footnotes, underscore emphasis and strikethrough. Inline emphasis uses asterisks;

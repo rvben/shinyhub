@@ -70,12 +70,28 @@ async function start(tab) {
   await tab.locator('.sh-agent-send').click();
 }
 
+async function sizing(tab, native, action) {
+  return tab.evaluate(({ native, action }) => {
+    const root = native ? navRoot : document;
+    const surface = root.querySelector(native ? '.chat-panel' : '.sh-agent-panel');
+    const button = root.querySelector(native ? '.chat-panel-expand' : '.sh-agent-expand');
+    const grip = root.querySelector(native ? '.chat-resize' : '.sh-agent-resize');
+    if (action === 'expand') button.click();
+    if (action === 'focus') grip.focus();
+    const rect = surface.getBoundingClientRect(), edge = grip.getBoundingClientRect();
+    return { width: rect.width, right: rect.right, left: rect.left,
+      hidden: grip.hidden && button.hidden, pressed: button.getAttribute('aria-pressed'),
+      x: edge.left + edge.width / 2, y: edge.top + 60,
+      saved: JSON.parse(sessionStorage.getItem('shinyhub:chat:size')) };
+  }, { native, action });
+}
+
 try {
   browser = await chromium.launch({ channel: process.env.SHINYHUB_E2E_BROWSER_CHANNEL || 'chrome', headless: true });
   const context = await browser.newContext({ permissions: ['clipboard-read', 'clipboard-write'] });
   context.setDefaultTimeout(5000);
   for (const native of [false, true]) {
-    for (const width of [1280, 375]) {
+    for (const width of [1280, 800, 375]) {
       console.log(`Checking ${native ? 'native toolbar' : 'fallback'} at ${width}px`);
       const tab = await context.newPage();
       const errors = [], outbound = [];
@@ -89,8 +105,49 @@ try {
         assert.equal(await tab.locator('.sh-agent-panel').evaluate((panel) => panel.slot), 'shinyhub-chat-content');
       } else await tab.locator('.sh-agent-launcher').click();
       await start(tab);
-      const intro = '## Weekly comparison\n\n**Total cost:** $442.91K, up *2.1%*.\n\n- North leads the ranking.\n- South follows.\n\n| Business line | Cost (USD) | Share |\n| --- | ---: | ---: |\n';
-      const row = (i) => `| Business line ${i} with a descriptive name | $${(442910 / (i + 1)).toFixed(2)} | ${(65 / (i + 1)).toFixed(1)}% |\n`;
+      const small = '| Business line | Cost (USD) | Share |\n| --- | ---: | ---: |\n| North American customer support and business services | $442.91K | 65% |\n';
+      await delta(tab, small); await done(tab);
+      assert.ok(await tab.locator('.sh-agent-table-scroll').evaluate((w) => w.scrollWidth - w.clientWidth <= 1), 'ordinary tables should fit by wrapping descriptions');
+      assert.equal(await tab.locator('td').first().evaluate((cell) => getComputedStyle(cell).whiteSpace), 'normal');
+      assert.equal(await tab.locator('td').nth(1).evaluate((cell) => getComputedStyle(cell).whiteSpace), 'nowrap');
+      const desktop = width > (native ? 949 : 680);
+      const initial = await sizing(tab, native);
+      assert.equal(initial.hidden, !desktop);
+      if (desktop) {
+        assert.equal(initial.width, 440);
+        const roomy = await sizing(tab, native, 'expand');
+        assert.equal(roomy.width, Math.min(960, width - (native ? 24 : 48)));
+        assert.equal(roomy.pressed, 'true');
+        assert.ok(roomy.left >= 12 && roomy.right <= width - 12);
+        assert.equal((await sizing(tab, native, 'expand')).width, 440, 'restore returns to the compact width');
+        // Genuine pointer capture: moving outside the grip still resizes.
+        await tab.mouse.move(initial.x, initial.y); await tab.mouse.down();
+        await tab.mouse.move(initial.x - 180, initial.y, { steps: 8 }); await tab.mouse.up();
+        const dragged = await sizing(tab, native);
+        assert.equal(dragged.width, 620); assert.equal(dragged.right, initial.right);
+        assert.equal(dragged.saved.width, 620);
+        await sizing(tab, native, 'focus'); await tab.keyboard.press('Shift+ArrowLeft');
+        assert.equal((await sizing(tab, native)).width, 684);
+        await tab.keyboard.press('Home'); assert.equal((await sizing(tab, native)).width, 360);
+        await tab.keyboard.press('End');
+        assert.equal((await sizing(tab, native)).width, Math.min(960, width - (native ? 24 : 48)));
+        await tab.keyboard.press('Home');
+        const edge = await sizing(tab, native);
+        await tab.mouse.move(edge.x, edge.y); await tab.mouse.down();
+        await tab.mouse.move(edge.x - 100, edge.y); await tab.keyboard.press('Escape'); await tab.mouse.up();
+        assert.equal((await sizing(tab, native)).width, 360, 'Escape cancels a drag without closing the panel');
+        assert.equal(await tab.locator('.sh-agent-panel').isVisible(), true);
+        await sizing(tab, native, 'expand'); await sizing(tab, native, 'expand');
+        assert.equal((await sizing(tab, native)).width, 360);
+        // Restore the original width for the streaming checks.
+        for (let i = 0; i < 5; i++) await tab.keyboard.press('ArrowLeft');
+        assert.equal((await sizing(tab, native)).width, 440);
+      } else assert.equal(initial.width, width, 'small screens keep the full-screen layout');
+      if (screenshots) await tab.screenshot({ path: resolve(screenshots, `${native ? 'native' : 'fallback'}-${width}-compact.png`) });
+      await tab.evaluate(() => chatEvent({ type: 'reset' }));
+      await start(tab);
+      const intro = '## Weekly comparison\n\n**Total cost:** $442.91K, up *2.1%*.\n\n- North leads the ranking.\n- South follows.\n\n| Business line | Cost (USD) | Share | Prior cost | Forecast | Budget | Variance | Annual cost |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n';
+      const row = (i) => `| Business line ${i} with a descriptive name | $${(442910 / (i + 1)).toFixed(2)} | ${(65 / (i + 1)).toFixed(1)}% | $433,970.00 | $450,000.00 | $500,000.00 | -$50,000.00 | $5,200,000.00 |\n`;
       await delta(tab, intro + row(0));
       assert.equal(await tab.locator('tbody tr').count(), 1);
       assert.equal(await tab.locator('.sh-agent-message-body strong').textContent(), 'Total cost:');
@@ -109,6 +166,10 @@ try {
       assert.ok(geometry.logOverflow <= 1 && geometry.panelOverflow <= 1 && geometry.documentOverflow <= 1, JSON.stringify(geometry));
       assert.equal(geometry.aligned, 'right');
       assert.equal(geometry.headerColor, 'rgb(22, 32, 58)', 'host table rules must not override the panel');
+      assert.ok(await tab.locator('td').first().evaluate((cell) => {
+        const style = getComputedStyle(cell);
+        return cell.clientHeight <= 4 * parseFloat(style.lineHeight) + parseFloat(style.paddingTop) + parseFloat(style.paddingBottom) + 1;
+      }), 'a short description should not be squeezed into a tall stack of single words');
       await tab.keyboard.press('ArrowRight');
       await tab.waitForFunction(() => tableWrapper.scrollLeft > 0);
       await tab.waitForFunction(() => {
@@ -129,10 +190,24 @@ try {
       let source = intro + row(0) + row(1) + row(2);
       for (let i = 3; i < 25; i++) { source += row(i); await delta(tab, row(i)); }
       assert.ok(await tab.locator('.sh-agent-log').evaluate((log) => log.scrollHeight - log.scrollTop - log.clientHeight < 2), 'stream should follow the bottom');
+      if (desktop) {
+        const beforeOverflow = await tab.locator('.sh-agent-table-scroll').evaluate((w) => w.scrollWidth - w.clientWidth);
+        await sizing(tab, native, 'expand');
+        const afterOverflow = await tab.locator('.sh-agent-table-scroll').evaluate((w) => w.scrollWidth - w.clientWidth);
+        assert.ok(afterOverflow < beforeOverflow, 'expanding makes more table columns visible');
+        assert.equal(await tab.evaluate(() => document.querySelector('.sh-agent-table-scroll') === tableWrapper), true);
+        assert.ok(await tab.locator('.sh-agent-log').evaluate((log) => log.scrollHeight - log.scrollTop - log.clientHeight < 2), 'resizing should preserve follow-scroll');
+        await sizing(tab, native, 'expand');
+      }
       await tab.locator('.sh-agent-log').evaluate((log) => { log.scrollTop = 0; }); await frame(tab);
       const top = await tab.locator('.sh-agent-log').evaluate((log) => log.scrollTop);
       source += row(25); await delta(tab, row(25));
       assert.equal(await tab.locator('.sh-agent-log').evaluate((log) => log.scrollTop), top, 'stream should respect reading earlier content');
+      if (desktop) {
+        await sizing(tab, native, 'expand');
+        assert.ok(await tab.locator('.sh-agent-log').evaluate((log) => log.scrollTop < log.scrollHeight - log.clientHeight - 90), 'expanding should not jump a reader to the bottom');
+        await sizing(tab, native, 'expand');
+      }
       await tab.locator('.sh-agent-jump').click();
       const end = '\n```python\n' + 'long_code_line = '.repeat(30) + '\n```\n\n<img src=x onerror="window.pwned=true"> <script>window.pwned=true</script> [x](javascript:alert(1)) ![x](https://example.test/leak)';
       source += end; await delta(tab, end); await done(tab);
@@ -143,13 +218,57 @@ try {
       await tab.locator('.sh-agent-copy').click();
       assert.equal(await tab.evaluate(() => navigator.clipboard.readText()), source);
       await tab.addScriptTag({ content: axe.source });
+      // Scope to the conversation: native modal chrome makes the dashboard's
+      // main/heading inert, so whole-document landmark checks are inapplicable.
       const accessibility = await tab.evaluate(() => axe.run(document.querySelector('.sh-agent-panel'), { rules: { 'region': { enabled: false } } }));
       assert.deepEqual(accessibility.violations.map((v) => `${v.id}: ${v.description}`), []);
+      if (native || !desktop) {
+        await tab.locator('.sh-agent-input').fill('Next question');
+        await tab.evaluate((native) => {
+          const first = native ? navRoot.querySelector('.chat-panel-action[aria-label="Start a new conversation"]') :
+            document.querySelector('.sh-agent-header button[aria-label="Close assistant"]');
+          first.focus();
+        }, native);
+        await tab.keyboard.press('Shift+Tab');
+        assert.equal(await tab.evaluate(() => document.activeElement === document.querySelector('.sh-agent-send')), true, 'focus trap wraps through all conversation controls');
+        await tab.keyboard.press('Tab');
+        assert.equal(await tab.evaluate((native) => native ?
+          navRoot.activeElement === navRoot.querySelector('.chat-panel-action[aria-label="Start a new conversation"]') :
+          document.activeElement === document.querySelector('.sh-agent-header button[aria-label="Close assistant"]'), native), true);
+        await tab.locator('.sh-agent-input').fill('');
+      }
       if (screenshots) {
         // Keep the comparison and first table rows visible for the visual pass.
         await tab.locator('.sh-agent-log').evaluate((log) => { log.scrollTop = 0; });
         await tab.locator('.sh-agent-table-scroll').evaluate((wrapper) => { wrapper.scrollLeft = 0; });
         await tab.screenshot({ path: resolve(screenshots, `${native ? 'native' : 'fallback'}-${width}.png`) });
+        if (desktop) {
+          await sizing(tab, native, 'expand');
+          await tab.screenshot({ path: resolve(screenshots, `${native ? 'native' : 'fallback'}-${width}-expanded.png`) });
+          await sizing(tab, native, 'expand');
+        }
+      }
+      if (desktop) {
+        await sizing(tab, native, 'focus'); await tab.keyboard.press('End');
+        const wanted = (await sizing(tab, native)).saved.width;
+        const narrowWidth = native ? 950 : 700;
+        await tab.setViewportSize({ width: narrowWidth, height: 900 }); await frame(tab);
+        let size = await sizing(tab, native);
+        assert.equal(size.width, Math.min(wanted, narrowWidth - (native ? 24 : 48)), 'width is clamped to the viewport');
+        assert.ok(size.left >= 12 && size.right <= narrowWidth - 12);
+        await tab.setViewportSize({ width: 375, height: 700 }); await frame(tab);
+        size = await sizing(tab, native);
+        assert.equal(size.width, 375); assert.equal(size.hidden, true);
+        assert.equal(await tab.evaluate(() => document.activeElement === document.querySelector('.sh-agent-input')), true, 'hiding desktop controls keeps keyboard focus in the conversation');
+        await tab.setViewportSize({ width, height: 900 }); await frame(tab);
+        assert.equal((await sizing(tab, native)).width, wanted, 'returning to desktop restores the preferred width');
+        await sizing(tab, native, 'expand');
+        await tab.reload();
+        if (native) await tab.evaluate(() => navRoot.querySelector('.chat-trigger').click());
+        else await tab.locator('.sh-agent-launcher').click();
+        assert.equal((await sizing(tab, native)).pressed, 'true', 'expanded state survives reload in this tab');
+        await sizing(tab, native, 'expand');
+        assert.equal((await sizing(tab, native)).width, wanted, 'compact preference survives reload too');
       }
       assert.deepEqual(errors, []); assert.deepEqual(outbound, []);
       console.log(`PASS ${native ? 'native toolbar' : 'fallback'} at ${width}px: layout, streaming, keyboard, clipboard, injection, accessibility`);
