@@ -191,11 +191,11 @@ type TracingConfig struct {
 	AutoInstrumentExtraPackages []string
 }
 
-// MetricsConfig controls the Prometheus scrape endpoint for the ShinyHub server
-// process itself (HTTP request counters/latency, Go runtime + process metrics,
-// build/version, uptime). It is distinct from the per-app CPU/RAM sampling.
+// MetricsConfig controls the Prometheus scrape endpoint, dashboard history and
+// optional native workload OTLP export. Enabled governs only the scrape listener;
+// history and ProcessInterval are independent.
 //
-// When Enabled is false the feature is a no-op: no /metrics handler and no
+// When Enabled is false no /metrics handler and no
 // scrape listener are created. When enabled the endpoint is served on its own
 // listener at Addr, defaulting to loopback so server internals are never
 // exposed on a routable interface by accident; operators who scrape from
@@ -203,6 +203,9 @@ type TracingConfig struct {
 // controls (the conventional Prometheus pattern).
 type MetricsConfig struct {
 	Enabled bool
+	// ProcessInterval enables native workload OTLP metrics when non-zero.
+	// Opt-in; 0 disables export. Requires tracing.enabled and its OTLP endpoint.
+	ProcessInterval time.Duration
 	// Addr is the listen address for the dedicated metrics listener in
 	// "host:port" form. Defaults to "127.0.0.1:9090" when enabled and unset.
 	Addr string
@@ -1377,6 +1380,7 @@ func checkTopLevelKeys(data []byte) error {
 }
 
 type rawMetricsConfig struct {
+	ProcessInterval string `yaml:"process_interval"`
 	Enabled         bool   `yaml:"enabled"`
 	Addr            string `yaml:"addr"`
 	HistoryWindow   string `yaml:"history_window"`   // parsed as time.Duration; "0s" disables
@@ -1624,6 +1628,13 @@ func loadRaw(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	var processInterval time.Duration
+	if raw.Metrics.ProcessInterval != "" {
+		processInterval, err = time.ParseDuration(raw.Metrics.ProcessInterval)
+		if err != nil {
+			return nil, fmt.Errorf("metrics.process_interval: %w", err)
+		}
+	}
 
 	cfg := &Config{
 		Database:  raw.Database,
@@ -1651,6 +1662,7 @@ func loadRaw(path string) (*Config, error) {
 			AutoInstrumentExtraPackages: raw.Tracing.AutoInstrumentExtraPackages,
 		},
 		Metrics: MetricsConfig{
+			ProcessInterval: processInterval,
 			Enabled:         raw.Metrics.Enabled,
 			Addr:            raw.Metrics.Addr,
 			HistoryWindow:   histWindow,
@@ -2066,6 +2078,14 @@ func loadRaw(path string) (*Config, error) {
 	}
 	if err := validateMetricsHistory(cfg.Metrics.HistoryWindow, cfg.Metrics.HistoryInterval); err != nil {
 		return nil, err
+	}
+	if cfg.Metrics.ProcessInterval != 0 {
+		if cfg.Metrics.ProcessInterval < time.Second || cfg.Metrics.ProcessInterval > 10*time.Minute {
+			return nil, fmt.Errorf("metrics.process_interval must be between 1s and 10m (or 0 to disable)")
+		}
+		if !cfg.Tracing.Enabled || cfg.Tracing.OTLPEndpoint == "" {
+			return nil, fmt.Errorf("metrics.process_interval requires tracing.enabled and tracing.otlp_endpoint")
+		}
 	}
 	// Resolve scheduler timezone. Default to UTC when unset; validate when set.
 	if cfg.Scheduler.DefaultTimezone == "" {
@@ -3531,6 +3551,13 @@ func applyEnv(cfg *Config) error {
 	}
 	if v := os.Getenv("SHINYHUB_METRICS_ADDR"); v != "" {
 		cfg.Metrics.Addr = v
+	}
+	if v := os.Getenv("SHINYHUB_METRICS_PROCESS_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_METRICS_PROCESS_INTERVAL: %w", err)
+		}
+		cfg.Metrics.ProcessInterval = d
 	}
 	if v := os.Getenv("SHINYHUB_METRICS_HISTORY_WINDOW"); v != "" {
 		d, err := time.ParseDuration(v)

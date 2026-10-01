@@ -239,6 +239,8 @@ type StartParams struct {
 	// RunOnce, not Start). It namespaces the job's own cgroup (job-<slug>-<runID>)
 	// so a capped job never shares replica 0's app-<slug>-0 cgroup.
 	JobRunID int64
+	// JobSchedule is the immutable schedule name for workload observability.
+	JobSchedule string
 	// LifetimeFiles are host descriptors whose open-file lifetime must cover the
 	// entire native process tree. Native Start and RunOnce pass them through exec
 	// so descendants inherit the same open file descriptions. Other
@@ -1899,6 +1901,11 @@ func (m *Manager) Adopt(slug string, info ProcessInfo, handle RunHandle) {
 			slog.Warn("manager: resource-limit cgroup re-adopt failed",
 				"slug", slug, "idx", info.Index, "err", err)
 		}
+	}
+
+	if observer, ok := rt.(interface{ ObserveRecoveredWorkload(StartParams, RunHandle) }); ok {
+		p := StartParams{Slug: slug, Index: info.Index, DeploymentID: info.DeploymentID, AppVersion: info.AppVersion}
+		observer.ObserveRecoveredWorkload(p, handle)
 	}
 
 	go func() {

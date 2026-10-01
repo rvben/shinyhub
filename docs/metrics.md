@@ -42,6 +42,92 @@ cgroup/container limits, and the elastic-worker safety floor remains host
 `MemAvailable`. A PSS value can move merely because another sharer starts or
 stops, so using it as a hard cap would make the cap non-local and unstable.
 
+## Native workload metrics over OTLP
+
+ShinyHub can export resource usage for each native replica and scheduled command
+without instrumenting the application. This export is opt-in and independent of
+the Prometheus listener and dashboard history:
+
+```yaml
+tracing:
+  enabled: true
+  otlp_endpoint: http://collector:4318
+  otlp_protocol: http/protobuf  # or grpc
+  resource_attributes:
+    deployment.environment.name: production
+metrics:
+  process_interval: 30s         # default 0: disabled; allowed range 1s–10m
+```
+
+`SHINYHUB_METRICS_PROCESS_INTERVAL` overrides the interval. `0` disables it.
+Enabling export requires tracing and its OTLP endpoint; an endpoint alone does
+not enable workload metrics. The collector must have an **OTLP metrics pipeline**,
+even if it already accepts traces. Endpoint protocol and authentication headers
+come from the platform tracing configuration, including `/v1/metrics` appended
+to the base URL for HTTP. Per-app endpoint overrides do not redirect these
+platform observations.
+
+| Metric | OTLP type | Unit | Meaning |
+|---|---|---|---|
+| `shinyhub.process.memory.usage` | Gauge | `By` | Summed RSS of the native launch process group, including the launcher and workers that remain in that group. |
+| `shinyhub.process.cpu.time` | Monotonic cumulative sum | `s` | Observed user and system CPU seconds accumulated since registration. |
+| `shinyhub.replicas` | Gauge | `{replica}` | Native replica processes supervised by this ShinyHub instance, per app. Includes starting, draining and frozen replicas; excludes scheduled commands. |
+
+Resources carry `shinyhub.app`, `shinyhub.app.slug`, deployment identity when
+known, operator resource attributes, and either `shinyhub.replica` or
+`shinyhub.schedule`, `shinyhub.schedule.name`, and `shinyhub.schedule.run_id`.
+Schedule run IDs are strings, matching the injected `OTEL_RESOURCE_ATTRIBUTES`;
+the control-plane `schedule.run` span uses an integer run-ID attribute, so some
+backends require type normalization when joining it. Environment resource
+attributes are decoded with the same percent-encoding as application telemetry.
+Explicit app resource overrides are included, while workload identity and host
+identity remain authoritative. Unrelated environment variables and command lines
+are never exported.
+
+Each observed launch has a unique `service.instance.id` and a `host.name`.
+Registration after server recovery starts a new metric stream and CPU accounting
+interval. This distinguishes restarts and overlapping deployment generations.
+Replica counts use the hostname and server listener address, so a
+server restart does not create another count series; sum across hosts/listeners
+for a fleet count. Resource attributes remain resources in OTLP;
+Prometheus exporters may need resource-to-label conversion or a resource-info
+join to expose them as query labels.
+
+CPU data points include `shinyhub.process.cpu.accounting`. `cgroup` uses an
+existing dedicated cgroup's kernel counter, including children that exit between
+samples or leave the launch process group. Prior usage of a reused cgroup is
+excluded. `sampled` retains observed per-process CPU contributions after children
+exit and protects against PID reuse, but misses consumption from children that
+start and finish between observations. Accounting mode stays fixed for the
+observed launch. Workload metrics do not create cgroups or require root.
+
+RSS counts shared pages in every process that maps them; it is not additive
+physical-memory attribution. A failed member read omits that interval's RSS
+observation rather than reporting a partial sum as complete. CPU sampling can
+still report its observed lower bound. Detached processes outside the original
+process group are excluded from RSS.
+
+An initial observation is taken at registration, and available observations for
+a completed run are retained for export even if it ends before the first tick.
+The initial RSS may represent only the launcher. Periodic samples do **not**
+guarantee a run's peak memory or complete short-run CPU usage. Cgroup CPU is read
+again before teardown. Completed workloads are then exported once with their
+actual observation timestamps, subject to retries, and no longer sampled. An
+app's replica count receives a zero observation after its last replica exits.
+Backend retention and staleness determine when old series disappear from queries.
+
+Sampling and export run independently, with five-second network timeouts. Live
+observations coalesce during an outage; up to 4,096 completed workload observations
+are retained in memory, with oldest-first eviction and a warning when full.
+Transient failures retry with backoff and collector throttling hints. Permanently
+rejected observations are dropped; partial success is not retried. There is no
+durable telemetry spool. A bounded flush runs on shutdown.
+
+Run IDs create new historical series: a 15-minute schedule creates 192 series per
+day for these two resource metrics, before additional dimensions. Choose backend
+retention accordingly. This version covers native workloads on the ShinyHub host;
+Docker and remote runtimes are not sampled by this exporter.
+
 ## The /metrics endpoint
 
 Metrics are opt-in and served on their own listener, separate from the main

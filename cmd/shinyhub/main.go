@@ -74,6 +74,7 @@ import (
 	"github.com/rvben/shinyhub/internal/upgrade"
 	"github.com/rvben/shinyhub/internal/usage"
 	"github.com/rvben/shinyhub/internal/worker"
+	"github.com/rvben/shinyhub/internal/workloadmetrics"
 	"github.com/scaleway/scaleway-sdk-go/scw"
 	gopscpu "github.com/shirou/gopsutil/v4/cpu"
 	gopsmem "github.com/shirou/gopsutil/v4/mem"
@@ -1741,6 +1742,43 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		defer func() { _ = tracer.Shutdown(context.Background()) }()
 	}
 
+	var stopWorkloadMetrics func()
+	if cfg.Metrics.ProcessInterval > 0 {
+		// The ownership-lease ID defaults to hostname-PID and changes on restart.
+		// Counts need the stable server slot, while launch CPU streams stay unique.
+		listener := net.JoinHostPort(cfg.Server.Host, strconv.Itoa(cfg.Server.Port))
+		collector, setupErr := workloadmetrics.New(cfg.Tracing, cfg.Metrics.ProcessInterval, listener)
+		if setupErr != nil {
+			return fmt.Errorf("workload metrics setup: %w", setupErr)
+		}
+		for _, tier := range cfg.Runtime.Tiers {
+			if native, ok := mgr.RuntimeForTier(tier.Name).(*process.NativeRuntime); ok {
+				native.SetWorkloadObserver(collector.Observe)
+			}
+		}
+		metricsCtx, cancelMetrics := context.WithCancel(context.Background())
+		var metricsWG sync.WaitGroup
+		metricsWG.Add(1)
+		go func() {
+			defer metricsWG.Done()
+			collector.Run(metricsCtx)
+		}()
+		var stopOnce sync.Once
+		stopWorkloadMetrics = func() {
+			stopOnce.Do(func() {
+				cancelMetrics()
+				metricsWG.Wait()
+				flushCtx, cancelFlush := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancelFlush()
+				if err := collector.Shutdown(flushCtx); err != nil {
+					slog.Warn("workload metrics shutdown failed")
+				}
+			})
+		}
+		defer stopWorkloadMetrics()
+		slog.Info("native workload metrics enabled", "interval", cfg.Metrics.ProcessInterval)
+	}
+
 	// Running with neither metrics nor tracing means no external visibility into
 	// request rates, error rates, or a crashed-app fleet - an operational blind
 	// spot. Warn loudly so it is a deliberate choice, not an oversight.
@@ -3110,6 +3148,9 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		slog.Info("leaving app processes running for re-adoption (server.shutdown_apps=adopt)")
 	}
 
+	if stopWorkloadMetrics != nil {
+		stopWorkloadMetrics()
+	}
 	slog.Info("shutdown complete")
 	return nil
 }

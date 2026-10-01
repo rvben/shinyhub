@@ -1767,6 +1767,7 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	}
 
 	params.Env, params.SecretEnv = tracing.MergeResourceAttributes(params.Env, params.SecretEnv)
+	params.JobSchedule = sched.Name
 
 	// Run the command.
 	var logWriter io.Writer = logFile

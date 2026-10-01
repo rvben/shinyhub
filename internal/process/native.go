@@ -100,9 +100,11 @@ var (
 
 // NativeRuntime runs app processes as direct OS child processes.
 type NativeRuntime struct {
-	mu    sync.Mutex
-	cmds  map[int]*exec.Cmd
-	procs map[int]*gops.Process // cached gopsutil handles for CPU delta computation
+	observer        WorkloadObserver
+	observationEnds map[int]func()
+	mu              sync.Mutex
+	cmds            map[int]*exec.Cmd
+	procs           map[int]*gops.Process // cached gopsutil handles for CPU delta computation
 
 	// Per-app cgroup state, shared by warm-wake (Snapshotter) and native resource
 	// limits. snapshotEnabled is the warm-wake intent; cgroupBaseReady is set once
@@ -138,11 +140,12 @@ type NativeRuntime struct {
 // NewNativeRuntime returns a ready-to-use NativeRuntime.
 func NewNativeRuntime() *NativeRuntime {
 	return &NativeRuntime{
-		cmds:        make(map[int]*exec.Cmd),
-		procs:       make(map[int]*gops.Process),
-		appCgroups:  make(map[int]string),
-		oomBaseline: make(map[int]uint64),
-		oomVerdict:  make(map[int]bool),
+		observationEnds: make(map[int]func()),
+		cmds:            make(map[int]*exec.Cmd),
+		procs:           make(map[int]*gops.Process),
+		appCgroups:      make(map[int]string),
+		oomBaseline:     make(map[int]uint64),
+		oomVerdict:      make(map[int]bool),
 	}
 }
 
@@ -640,6 +643,7 @@ func (r *NativeRuntime) Start(_ context.Context, p StartParams, logWriter io.Wri
 	// warm-wake nor a limit applies, or when cgroup v2 delegation is unavailable;
 	// failures degrade gracefully (stop-hibernate / uncapped).
 	r.placeInAppCgroup(p, pid)
+	r.ObserveWorkload(p, RunHandle{PID: pid})
 	ep := ReplicaEndpoint{
 		URL:      fmt.Sprintf("http://127.0.0.1:%d", p.Port),
 		Provider: "native",
@@ -683,6 +687,7 @@ func (r *NativeRuntime) Wait(ctx context.Context, handle RunHandle) error {
 		}
 		// Read the OOM counter before teardown removes the cgroup dir.
 		r.recordOOMVerdict(handle.PID)
+		r.finishObservation(handle.PID)
 		r.teardownAppCgroupFor(handle.PID)
 		// Stats() lazily caches a gops.Process handle per PID for CPU-delta
 		// computation, and the metrics poller calls Stats() for adopted handles
@@ -710,6 +715,7 @@ func (r *NativeRuntime) Wait(ctx context.Context, handle RunHandle) error {
 	// The process has exited, so its cgroup is now empty and can be removed.
 	// Read the OOM counter first: teardown rmdirs the cgroup.
 	r.recordOOMVerdict(handle.PID)
+	r.finishObservation(handle.PID)
 	r.teardownAppCgroupFor(handle.PID)
 	if groupErr != nil {
 		return groupErr
@@ -888,7 +894,13 @@ func (r *NativeRuntime) placeJobInCgroup(p StartParams, pid int) func() {
 				"slug", p.Slug, "run_id", p.JobRunID, "quota_percent", p.CPUQuotaPercent, "err", err)
 		}
 	}
+	r.mu.Lock()
+	r.appCgroups[pid] = dir
+	r.mu.Unlock()
 	return func() {
+		r.mu.Lock()
+		delete(r.appCgroups, pid)
+		r.mu.Unlock()
 		// A one-shot job may background children that outlive its main process and
 		// stay in this cgroup. Reap them first so rmdir does not EBUSY-leak the
 		// cgroup (and the orphans). For a job whose process group is intact this is
@@ -942,6 +954,12 @@ func (r *NativeRuntime) RunOnce(ctx context.Context, p StartParams, logWriter io
 	// error, ctx timeout/cancel) via defer.
 	teardownJob := r.placeJobInCgroup(p, cmd.Process.Pid)
 	defer teardownJob()
+	if r.observer != nil {
+		// Registration and final accounting precede cgroup teardown. Export is
+		// asynchronous and cannot hold up the command on a collector outage.
+		r.ObserveWorkload(p, RunHandle{PID: cmd.Process.Pid})
+		defer r.finishObservation(cmd.Process.Pid)
+	}
 
 	waitDone := make(chan error, 1)
 	go func() { waitDone <- cmd.Wait() }()
