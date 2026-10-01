@@ -15,7 +15,9 @@ function loginDoc() {
     <div class="login-separator" hidden>or</div>
     <a class="github-login" href="/api/auth/github/login" hidden>Sign in with GitHub</a>
     <a class="google-login" href="/api/auth/google/login" hidden>Sign in with Google</a>
-  </div>`).window.document;
+    <p id="login-recovery-help" hidden></p>
+    <button class="login-recovery" type="button" hidden>Reconnect to dashboard</button>
+  </div>`, { url: 'https://dashboard.example/apps/demo/overview?tab=health#status' }).window.document;
 }
 
 // --- providerVisibility (pure) ---
@@ -137,6 +139,42 @@ test('re-applying with local re-enabled restores the form', () => {
   assert.equal(doc.querySelector('#login-form').hidden, true);
   applyLoginProviders(doc, { local: true, oidc: { enabled: true } });
   assert.equal(doc.querySelector('#login-form').hidden, false);
+});
+
+test('forward-auth-only login offers a full navigation back to the current dashboard', () => {
+  const doc = loginDoc();
+  applyLoginProviders(doc, { local: false, forward_auth: true });
+  assert.equal(doc.querySelector('#login-form').hidden, true);
+  const recovery = doc.querySelector('.login-recovery');
+  assert.equal(recovery.hidden, false);
+  assert.equal(recovery.type, 'button');
+  assert.equal(recovery.hasAttribute('data-nav'), false, 'authentication gateway needs a document request');
+  assert.equal(doc.querySelector('#login-recovery-help').hidden, false);
+  assert.match(doc.querySelector('#login-recovery-help').textContent, /sign-in service/);
+  assert.equal(doc.querySelector('.login-separator').hidden, true);
+});
+
+test('forward auth remains available alongside local sign-in', () => {
+  const doc = loginDoc();
+  applyLoginProviders(doc, { local: true, forward_auth: true });
+  assert.equal(doc.querySelector('#login-form').hidden, false);
+  assert.equal(doc.querySelector('.login-recovery').hidden, false);
+  assert.equal(doc.querySelector('.login-separator').hidden, false);
+});
+
+test('older servers with no sign-in options never show a brand-only card', () => {
+  const doc = loginDoc();
+  applyLoginProviders(doc, { local: false, github: false, google: false, oidc: { enabled: false } });
+  assert.equal(doc.querySelector('.login-recovery').hidden, false);
+  assert.match(doc.querySelector('#login-recovery-help').textContent, /contact your administrator/);
+  applyLoginProviders(doc, { local: false, oidc: { enabled: true } });
+  assert.equal(doc.querySelector('.login-recovery').hidden, true);
+  assert.equal(doc.querySelector('#login-recovery-help').hidden, true);
+});
+
+test('malformed forward-auth flags do not advertise gateway sign-in', () => {
+  assert.equal(providerVisibility({ forward_auth: 'true' }).recovery, false);
+  assert.equal(providerVisibility({ forward_auth: 1 }).recovery, false);
 });
 
 // --- groupAccessWarningText ---

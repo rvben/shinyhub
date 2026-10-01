@@ -5993,6 +5993,13 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch { /* clipboard blocked; user can select text manually */ }
   });
 
+  document.querySelector('.login-recovery')?.addEventListener('click', () => {
+    // Reload even when the current URL contains a fragment: a same-URL link
+    // can become an in-page jump and never reach the authentication gateway.
+    suppressUnloadGuard = true;
+    window.location.reload();
+  });
+
   loginForm.addEventListener('submit', async (event) => {
     event.preventDefault();
     setError(loginError, '');

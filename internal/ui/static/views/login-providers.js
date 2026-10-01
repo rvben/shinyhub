@@ -1,5 +1,5 @@
 // Login affordances: show each sign-in option ONLY when the server reports it
-// available (via /api/auth/providers { local, github, google, oidc:{enabled} }).
+// available (via /api/auth/providers { local, forward_auth, github, google, oidc:{enabled} }).
 //
 // - The GitHub/Google buttons are static markup in index.html, hidden by default;
 //   this reveals them per the response and appends the OIDC button when enabled.
@@ -26,6 +26,7 @@ export function providerVisibility(providers) {
   // the form (fail open).
   const local = p.local !== false;
   const anySSO = github || google || oidcEnabled;
+  const forwardAuth = p.forward_auth === true;
   return {
     local,
     github,
@@ -33,9 +34,13 @@ export function providerVisibility(providers) {
     oidc: oidcEnabled,
     oidcLabel: oidcEnabled ? (oidc.display_name || 'Sign in with SSO') : '',
     anySSO,
+    forwardAuth,
+    // Older servers do not report forward-auth. Never leave a deployment with
+    // every native sign-in option disabled at a brand-only dead end.
+    recovery: forwardAuth || (!local && !anySSO),
     // The "or" separator divides the password form from the SSO buttons, so it
     // shows only when BOTH are present.
-    separator: local && anySSO,
+    separator: local && (anySSO || forwardAuth),
   };
 }
 
@@ -54,6 +59,12 @@ export function applyLoginProviders(doc, providers) {
   setShown('.login-separator', v.separator);
   // Hide the username/password form for an SSO-only deployment.
   setShown('#login-form', v.local);
+  setShown('.login-recovery', v.recovery);
+  setShown('#login-recovery-help', v.recovery);
+  const help = doc.querySelector('#login-recovery-help');
+  if (help) help.textContent = v.forwardAuth
+    ? 'Reconnect to continue through your organisation’s sign-in service.'
+    : 'No sign-in options are available here. Reconnect to try again, or contact your administrator.';
 
   let oidcBtn = doc.querySelector('.oidc-login');
   if (v.oidc) {
@@ -82,8 +93,8 @@ export function applyLoginProviders(doc, providers) {
 // forward-auth proxy's trusted group header (see ReconcileUserFromGroups in
 // internal/db/reconcile.go) - a GitHub or Google login carries no group
 // claim, so github/google here do not help even though providerVisibility()
-// counts them toward anySSO. Forward-auth's enabled state is not reported by
-// /api/auth/providers, so an OIDC-less server may still have it running; the
+// counts them toward anySSO. Forward-auth's enabled state alone does not show
+// whether a trusted group header is configured; the
 // wording below names that possibility rather than claiming no provider can
 // ever supply groups.
 export function groupAccessWarningText(providers) {

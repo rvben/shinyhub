@@ -45,6 +45,32 @@ func TestProviders_ReportsLocalLoginState(t *testing.T) {
 	}
 }
 
+func TestProviders_ReportsForwardAuthWithoutSecrets(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		cfg := &config.Config{
+			Auth: config.AuthConfig{Secret: "test-secret-000000000000000000000000",
+				ForwardAuth: config.ForwardAuthConfig{Enabled: enabled, SharedSecret: "private-proxy-credential"}},
+			Storage: config.StorageConfig{AppsDir: t.TempDir(), AppDataDir: t.TempDir()},
+		}
+		srv := api.New(cfg, dbtest.New(t), nil, nil)
+		rec := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/auth/providers", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d", rec.Code)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["forward_auth"] != enabled {
+			t.Errorf("forward_auth = %v, want %v", payload["forward_auth"], enabled)
+		}
+		if strings.Contains(rec.Body.String(), cfg.Auth.ForwardAuth.SharedSecret) {
+			t.Fatal("providers exposed proxy credential")
+		}
+	}
+}
+
 // When local login is disabled the password endpoints must reject with 403,
 // independent of any UI change - otherwise a client could bypass the IdP by
 // POSTing credentials directly. This is the server-side half of the SSO-only

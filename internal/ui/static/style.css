@@ -920,7 +920,8 @@ body[data-auth="out"] {
 
 .github-login,
 .google-login,
-.oidc-login {
+.oidc-login,
+.login-recovery {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -943,15 +944,20 @@ body[data-auth="out"] {
    the hidden semantics explicitly (same pattern as .nav-item[hidden]). */
 .github-login[hidden],
 .google-login[hidden],
-.oidc-login[hidden] { display: none; }
+.oidc-login[hidden],
+.login-recovery[hidden] { display: none; }
 
 .github-login:hover,
 .google-login:hover,
-.oidc-login:hover {
+.oidc-login:hover,
+.login-recovery:hover {
   border-color: var(--cyan-bright);
   background: var(--surface-3);
   color: var(--cyan-bright);
 }
+
+#login-recovery-help { margin-top: 1rem; color: var(--text-muted); font-size: var(--fs-body); }
+.login-recovery { width: 100%; }
 
 /* ── Error ── */
 .error { margin-top: 0.75rem; color: var(--red); font-size: var(--fs-mono); }
