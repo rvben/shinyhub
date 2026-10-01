@@ -6,12 +6,18 @@ on:
     paths:
       - "docs/**"
       - "zensical.toml"
+      - "scripts/docs_search_test.mjs"
+      - "functions/**"
+      - "wrangler.toml"
       - "scripts/docs-descriptions.py"
       - ".github/workflows/docs.yml"
   pull_request:
     paths:
       - "docs/**"
       - "zensical.toml"
+      - "scripts/docs_search_test.mjs"
+      - "functions/**"
+      - "wrangler.toml"
       - "scripts/docs-descriptions.py"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
@@ -43,6 +49,13 @@ jobs:
             exit 1
           fi
 
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      - name: Test documentation search
+        run: node scripts/docs_search_test.mjs
+
       - name: Build documentation
         run: zensical build --clean
 
@@ -72,7 +85,10 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: docs-site
-          path: site/
+          path: |
+            site/
+            functions/
+            wrangler.toml
 
   deploy:
     needs: build
@@ -94,7 +110,7 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: docs-site
-          path: site/
+          path: .
 
       - name: Verify Cloudflare deployment credentials
         env:

@@ -1,0 +1,14 @@
+name = "shinyhub-dev"
+compatibility_date = "2026-01-21"
+pages_build_output_dir = "./site"
+send_metrics = false
+
+[[analytics_engine_datasets]]
+binding = "DOCS_SEARCH_ANALYTICS"
+dataset = "docs_search_trial"
+
+[env.production]
+
+[[env.production.analytics_engine_datasets]]
+binding = "DOCS_SEARCH_ANALYTICS"
+dataset = "docs_search_trial"

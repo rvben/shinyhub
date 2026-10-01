@@ -14,9 +14,11 @@ edit_uri = "blob/main/docs/"
 extra_css = [
   "https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&family=Space+Mono:wght@400;700&display=swap",
   "stylesheets/extra.css",
+  "stylesheets/docs-search.css",
 ]
 extra_javascript = [
   "javascripts/accessibility.js",
+  { path = "javascripts/docs-search.js", defer = true },
 ]
 
 nav = [
