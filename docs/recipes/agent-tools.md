@@ -4,10 +4,10 @@ description: "Give a Python Shiny app a session-scoped assistant and WebMCP tool
 
 # Agent tools in Python Shiny
 
-**Experimental.** The chat, WebMCP integration, and `shinyhub-agent` helper are
-available for evaluation. Their APIs and behavior may change between releases.
-Do not depend on them for critical workflows; review agent results and keep a
-manual way to complete consequential actions.
+`shinyhub-agent` is available as a regular `0.2.0` release. Its API is still
+below `1.0`; pin the package and review migration notes before upgrading.
+Browser WebMCP availability depends on the browser. Review agent results and
+keep a manual way to complete consequential actions.
 
 The `shinyhub-agent` helper lets an app author register a small set of typed
 tools for each viewer's Shiny session. The same tools are available to a chat
@@ -18,7 +18,7 @@ Install the [published `shinyhub-agent` package](https://pypi.org/project/shinyh
 in a Python Shiny app:
 
 ```text
-shinyhub-agent==0.2.0b4
+shinyhub-agent==0.2.0
 ```
 
 The repository contains a [runnable example](https://github.com/rvben/shinyhub/tree/main/examples/agent-shiny-demo)
@@ -107,8 +107,8 @@ appears in the app toolbar after the chat session connects. The helper uses its
 own launcher if the toolbar is unavailable or hidden. The app remains
 responsible for its panel, model instructions, and tools.
 It also decides what visitors need to know about the assistant's capabilities,
-limits, and how to check consequential results. ShinyHub's experimental status
-is guidance for app authors, not a label applied to every hosted app.
+limits, and how to check consequential results. These decisions belong to the
+app author; ShinyHub does not apply an assistant warning to every hosted app.
 
 ```python
 import os
@@ -122,7 +122,7 @@ chat = OpenAIChat(
 register(session=session, input=input, tools=tools, chat=chat)
 ```
 
-For Bedrock, install `shinyhub-agent[bedrock]==0.2.0b4` instead of the base
+For Bedrock, install `shinyhub-agent[bedrock]==0.2.0` instead of the base
 requirement. This installs `boto3` for the same package and version. Then supply
 an AWS region and a model ID that supports streaming tool use:
 

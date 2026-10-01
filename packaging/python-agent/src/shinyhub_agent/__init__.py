@@ -8,7 +8,7 @@ from ._openai import OpenAIChat
 from ._shiny import agent_dependency, chat_dependency, register
 from ._usage import UsageRecord
 
-__version__ = "0.2.0b4"
+__version__ = "0.2.0"
 __all__ = [
     "AGUIChat",
     "AgentTool",

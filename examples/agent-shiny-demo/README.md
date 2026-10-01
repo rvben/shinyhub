@@ -10,13 +10,13 @@ The demo explicitly opts in to browser writes where supported by the helper,
 because its only write changes the current viewer's display filter. Browser
 confirmation can be bypassed by a client; chat writes use server-side approval.
 Other apps should keep the new read-only browser default for consequential
-actions. The compatibility check allows the example to run with its older
-pinned helper, which exposed browser writes automatically.
+actions. The compatibility check also lets the example run with earlier helper
+versions, which exposed browser writes automatically.
 
 To run from this repository:
 
 ```bash
-uv run --prerelease allow --no-project --with 'shinyhub-agent[bedrock]==0.2.0b2' \
+uv run --no-project --with 'shinyhub-agent[bedrock]==0.2.0' \
   shiny run examples/agent-shiny-demo/app.py
 ```
 

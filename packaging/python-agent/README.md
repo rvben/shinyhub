@@ -1,9 +1,9 @@
 # ShinyHub agent tools for Python Shiny
 
-**Experimental.** This prerelease helper is for evaluation. Its APIs and
-behavior may change between releases. Do not depend on it for critical
-workflows; review agent results and keep a manual path for consequential
-actions.
+`0.2.0` is a regular release of the session-scoped Python helper. The API is
+still below `1.0`; pin the package and review migration notes before upgrading.
+Browser WebMCP availability depends on the browser. The app remains responsible
+for tool permissions and for checking consequential results.
 
 This helper lets an app declare a small, typed set of tools for the **current
 viewer session**. The app owns all data access and state changes. ShinyHub does
