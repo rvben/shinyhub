@@ -12,6 +12,7 @@ function fixture(policy: "default" | "durable_object" = "durable_object") {
   let monitorFails = false;
   let destroys = 0;
   const starts: (ContainerStartupOptions | undefined)[] = [];
+  const healthRequests: Request[] = [];
   const timeouts: number[] = [];
   const store = new Map<string, unknown>();
   let alarm: number | null = null;
@@ -38,7 +39,7 @@ function fixture(policy: "default" | "durable_object" = "durable_object") {
     monitor() { return monitorFails ? Promise.reject(new Error("container entrypoint exited with code 1")) : new Promise<void>(() => {}); },
     getTcpPort(port: number) {
       assert.equal(port, 8080);
-      return { async fetch() { return new Response(null, { status: healthy ? 204 : 503 }); } } as Fetcher;
+      return { async fetch(request: Request) { healthRequests.push(request); return new Response(null, { status: healthy ? 204 : 503 }); } } as Fetcher;
     },
   };
   const storage = {
@@ -49,8 +50,8 @@ function fixture(policy: "default" | "durable_object" = "durable_object") {
     async deleteAlarm() { alarm = null; },
   };
   const options = { policy, image: "digest-one", instance: "standard-1" as const };
-  const make = (image = "digest-one", entrypoint?: string[]) => new ContainerPreview(runtime, storage, { ...options, image, entrypoint }, () => now, async (ms) => { now += ms; });
-  return { controller: make(), make, runtime, starts, timeouts, store, snapshot,
+  const make = (image = "digest-one", entrypoint?: string[], origins: { controlOrigin?: string; appOrigin?: string } = {}) => new ContainerPreview(runtime, storage, { ...options, image, entrypoint, ...origins }, () => now, async (ms) => { now += ms; });
+  return { controller: make(), make, runtime, starts, timeouts, store, snapshot, healthRequests,
     scheduledAlarm() { return alarm; },
     destroyCount() { return destroys; },
     failRestore() { restoreFails = true; }, failImage() { imageFails = true; },
@@ -96,6 +97,24 @@ test("warm starts and admitted app requests extend idle time; old alarms use the
   await f.controller.alarm();
   assert.equal(f.scheduledAlarm(), deadline);
   assert.equal(f.runtime.running, true);
+});
+
+test("browser HTTPS requests use HTTP on the native port with host, body, headers and cancellation intact", async () => {
+  const f = fixture();
+  await f.controller.start();
+  const abort = new AbortController();
+  const response = await f.controller.proxy(new Request("https://apps.staging.demo.shinyhub.dev/app/demo/chat?view=week", {
+    method: "POST", headers: { "x-forwarded-proto": "https", "content-type": "application/json" },
+    body: '{"message":"hello"}', signal: abort.signal,
+  }));
+  assert.equal(response.status, 204);
+  const upstream = f.healthRequests.at(-1)!;
+  assert.equal(upstream.url, "http://apps.staging.demo.shinyhub.dev/app/demo/chat?view=week");
+  assert.equal(upstream.method, "POST");
+  assert.equal(upstream.headers.get("x-forwarded-proto"), "https");
+  assert.equal(await upstream.text(), '{"message":"hello"}');
+  abort.abort();
+  assert.equal(upstream.signal.aborted, true);
 });
 
 test("controller restarts preserve the idle deadline and explicit stop removes it", async () => {
@@ -405,4 +424,20 @@ test("asynchronous entrypoint failures are reported and the instance is stopped"
   f.failMonitor();
   await assert.rejects(f.controller.start(), /entrypoint exited/);
   assert.equal(f.runtime.running, false);
+});
+
+
+test("staging origins and encryption credentials survive snapshot starts together", async () => {
+  const f = fixture();
+  const controller = f.make("digest-one", undefined, {
+    controlOrigin: "https://staging.demo.shinyhub.dev", appOrigin: "https://apps.staging.demo.shinyhub.dev",
+  });
+  await controller.start(); await controller.snapshot(); await controller.stop();
+  assert.equal((await controller.start()).mode, "snapshot");
+  for (const start of f.starts) {
+    assert.equal(start!.env!.SHINYHUB_BASE_URL, "https://staging.demo.shinyhub.dev");
+    assert.equal(start!.env!.SHINYHUB_APP_ORIGIN, "https://apps.staging.demo.shinyhub.dev");
+    assert.equal(start!.env!.SHINYHUB_AUTH_SECRET, f.starts[0]!.env!.SHINYHUB_AUTH_SECRET);
+  }
+  assert.ok(f.healthRequests.every(r => new URL(r.url).hostname === "staging.demo.shinyhub.dev"));
 });

@@ -320,3 +320,90 @@ container build, so authentication failures stay fast and explicit.
 The Worker owns both custom domains and routes them to the named `public-demo`
 container. `standard-1` supplies 0.5 vCPU, 4 GiB memory, and 8 GB ephemeral disk;
 the ten-minute sleep timer limits idle spend.
+
+
+## Browser staging canary
+
+The canary uses the production edge admission, wake page, and one-click viewer
+login with its own Worker and Durable Object namespace:
+
+- Control: https://staging.demo.shinyhub.dev
+- Applications: https://apps.staging.demo.shinyhub.dev
+- Worker: `shinyhub-demo-canary`; config: `wrangler.canary.jsonc`.
+
+Every image/snapshot start receives the staging control and app origins.
+Encryption/bootstrap keys stay stable in private DO storage. Snapshot, stop,
+and fault-injection routes require the separate `CONTAINER_CANARY_TOKEN` bearer
+secret before obtaining a container handle.
+
+Resolve the release candidate to a concrete managed `linux/amd64` digest.
+In a private config copy, replace `containers[0].images.demo` with an `image`
+reference pinned by digest, removing Dockerfile/build-context fields. Check that
+both custom domains are unused or already belong to this canary. Deploy the
+private pinned config and set the operator secret through Wrangler standard
+input. Store the token outside the repo with mode 0600; never put it in URLs.
+
+Validate locally before the approved canary deployment:
+
+```bash
+npm run check
+npm test
+go test .
+npx wrangler deploy --dry-run --containers-rollout none --config wrangler.canary.jsonc
+npx wrangler deploy --config /private/path/to/pinned-canary-config.json
+npx wrangler secret put CONTAINER_CANARY_TOKEN --config /private/path/to/pinned-canary-config.json
+```
+
+Operator routes on the control origin:
+
+| Method | Path | Result |
+| --- | --- | --- |
+| GET | `/__canary/state` | Running/readiness, phase, and active connection count |
+| POST | `/__canary/start` | Explicit image or snapshot start |
+| POST | `/__canary/stop` | Stop the instance |
+| POST | `/__canary/snapshot` | Save a checkpoint; return only its size |
+| DELETE | `/__canary/snapshot` | Forget the saved handle |
+| POST | `/__canary/terminate` | Fixed SIGKILL fault injection in the canary |
+
+Verify fresh browser wake, deep-link redirects, viewer login, control/app cookie
+isolation, all seven app pages, and three WebSocket upgrades. The scripted agent
+app's `POST /app/agent-capabilities-demo/chat` exercises real SSE delivery without
+a paid model. Hold quiet WebSockets beyond ten minutes, close them, and verify
+shutdown after the last connection's ten-minute idle window. State/readiness
+probes must not allocate or extend idle. Check rapid and after-idle snapshot
+restores, all apps, and a previously issued viewer cookie. Use authenticated
+`terminate` to verify recovery through a later browser navigation; readiness
+polling alone must never allocate a replacement.
+
+Measure idle time from the last admitted request as well as the last open
+connection: warm page and asset requests extend activity even when the active
+connection count returns to zero. Keep other staging browsers closed and inspect
+Worker logs for interfering requests. An isolated lifecycle check may briefly
+gate public staging traffic before any DO access; restore the normal browser
+entry after verification. Native browser readiness uses passive HTTP health
+state and never goes through the activity-tracking proxy.
+
+### Production promotion and rollback
+
+Keep the production configuration and release workflow on the existing Worker
+until the canary passes. Before promotion, save its current Worker version,
+application configuration/image digest, and domain mapping privately. Compare
+the tested image's ShinyHub version with the production release: an older
+experimental image is not a release candidate merely because lifecycle checks
+pass.
+
+Prepare a new native DO class/namespace with production origins. Do not change
+scheduling policy underneath the existing default-policy class. Build the
+approved release image, repeat the new-digest allocation gate, and pin the
+validated digest. Production needs its own stable DO credentials. Snapshot only
+after fleet reconciliation; checkpoints are image-specific performance aids,
+not user-data backups.
+
+After explicit production approval, promote the two browser domains while
+retaining the original default-policy Worker/class/namespace and pinned image.
+If startup, login, any app, connections, or idle shutdown regress, restore both
+domains to the saved Worker/version and run the original viewer/app smoke suite,
+then stop the new native instance. Native allocation failures can require a
+Worker redeploy before cleanup finishes. Roll back routing and its compatible
+image together; never restore a checkpoint under a different image/key.
+Changing only `scheduling_policy` is not a complete rollback.

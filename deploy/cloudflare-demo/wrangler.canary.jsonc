@@ -1,0 +1,62 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "shinyhub-demo-canary",
+  "main": "src/canary-worker.ts",
+  "compatibility_date": "2026-09-30",
+  "compatibility_flags": [
+    "enable_request_signal"
+  ],
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    {
+      "pattern": "staging.demo.shinyhub.dev",
+      "custom_domain": true
+    },
+    {
+      "pattern": "apps.staging.demo.shinyhub.dev",
+      "custom_domain": true
+    }
+  ],
+  "containers": [
+    {
+      "class_name": "ShinyHubCanary",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "demo": {
+          "dockerfile": "./Dockerfile",
+          "build_context": "../.."
+        }
+      }
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SHINYHUB_CANARY",
+        "class_name": "ShinyHubCanary"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "ShinyHubCanary"
+      ]
+    }
+  ],
+  "observability": {
+    "enabled": true
+  },
+  "rules": [
+    {
+      "type": "Text",
+      "globs": [
+        "**/*.sh",
+        "**/*.svg"
+      ],
+      "fallthrough": true
+    }
+  ]
+}

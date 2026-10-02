@@ -39,14 +39,14 @@ func TestDemoWorkerAppOriginMatchesServer(t *testing.T) {
 // The policy module is only worth anything if the Worker consults it before it
 // reaches for the container, so this pins the call site and its position.
 func TestDemoWorkerAppliesEdgePolicyBeforeReachingTheContainer(t *testing.T) {
-	source, err := os.ReadFile("src/index.ts")
+	source, err := os.ReadFile("src/demo-worker.ts")
 	if err != nil {
 		t.Fatal(err)
 	}
 	worker := string(source)
 
 	for _, required := range []string{
-		`classifyEdgeRequest(url.hostname, url.pathname)`,
+		`classifyEdgeRequest(url.hostname === appHost ? APP_HOST : DEMO_HOST, url.pathname)`,
 		`verdict === "serve-robots"`,
 		`demoAsset(robotsBody, "text/plain; charset=utf-8")`,
 		`verdict === "reject"`,
@@ -56,9 +56,9 @@ func TestDemoWorkerAppliesEdgePolicyBeforeReachingTheContainer(t *testing.T) {
 		}
 	}
 
-	hostCheck := indexOf(t, worker, "src/index.ts", "allowedHosts.has(url.hostname)")
-	verdict := indexOf(t, worker, "src/index.ts", "classifyEdgeRequest(url.hostname, url.pathname)")
-	container := indexOf(t, worker, "src/index.ts", "getContainer(env.SHINYHUB_DEMO")
+	hostCheck := indexOf(t, worker, "src/demo-worker.ts", "allowedHosts.has(url.hostname)")
+	verdict := indexOf(t, worker, "src/demo-worker.ts", "classifyEdgeRequest(url.hostname === appHost ? APP_HOST : DEMO_HOST, url.pathname)")
+	container := indexOf(t, worker, "src/demo-worker.ts", "options.container(env)")
 	if verdict < hostCheck {
 		t.Error("the edge policy runs before the host check, so it classifies requests for hosts the Worker does not serve")
 	}
@@ -71,7 +71,7 @@ func TestDemoWorkerAppliesEdgePolicyBeforeReachingTheContainer(t *testing.T) {
 // sleepAfter window, so this pins that the Worker consults it and that the
 // release smoke test arrives the way the gate expects a visitor to.
 func TestDemoWorkerSpendsColdStartsOnVisitorsOnly(t *testing.T) {
-	source, err := os.ReadFile("src/index.ts")
+	source, err := os.ReadFile("src/demo-worker.ts")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func TestDemoWorkerSpendsColdStartsOnVisitorsOnly(t *testing.T) {
 		// which forwards to the container, which is the wake the gate exists
 		// to withhold. Only "forward" is meant to fall through.
 		`coldVerdict === "start"`,
-		`demoStartResponse(destination, request.method)`,
+		`demoStartResponse(destination, request.method, entryURL)`,
 		`coldVerdict === "wake"`,
 		`ctx.waitUntil(container.start()`,
 		// Which statuses mean the container is down decides whether the
@@ -117,10 +117,10 @@ func TestDemoWorkerSpendsColdStartsOnVisitorsOnly(t *testing.T) {
 	// first redirect after the branch, not merely looking for the right one
 	// somewhere in the file, because the handlers below issue redirects of
 	// their own that would cover for this one.
-	entryBranch := indexOf(t, worker, "src/index.ts", `coldVerdict === "redirect-to-entry"`)
+	entryBranch := indexOf(t, worker, "src/demo-worker.ts", `coldVerdict === "redirect-to-entry"`)
 	rest := worker[entryBranch:]
 	redirect := indexOf(t, rest, "the redirect-to-entry branch", "Response.redirect(")
-	if !strings.HasPrefix(rest[redirect:], `Response.redirect(demoURL("/", destination), 303)`) {
+	if !strings.HasPrefix(rest[redirect:], `Response.redirect(demoURL("/", destination, entryURL), 303)`) {
 		t.Errorf("the redirect-to-entry branch does not redirect through demoURL, so an app-origin visitor is sent to a path its own host does not serve: %.60s", rest[redirect:])
 	}
 
@@ -129,12 +129,12 @@ func TestDemoWorkerSpendsColdStartsOnVisitorsOnly(t *testing.T) {
 	// answers a cold request can get passes it on; the last hop is the session
 	// handler, which is where the visitor finally has the session the deep
 	// link needed.
-	destination := indexOf(t, worker, "src/index.ts", `requestedDestination(url.pathname, url.search)`)
+	destination := indexOf(t, worker, "src/demo-worker.ts", `requestedDestination(url.pathname, url.search)`)
 	if destination > entryBranch {
 		t.Error("the requested destination is resolved after the cold branches, so the page the visitor asked for cannot reach them")
 	}
 	for _, required := range []string{
-		`demoWakeResponse(destination)`,
+		`demoWakeResponse(destination, entryURL)`,
 		`const next = safeDestination(url.searchParams.get(DEMO_NEXT_PARAM))`,
 		`location: next ?? "/"`,
 	} {
@@ -165,9 +165,9 @@ func TestDemoWorkerSpendsColdStartsOnVisitorsOnly(t *testing.T) {
 
 	// Reading container state is a round trip to the Durable Object in front of
 	// every request, so the Worker consults its own recent observation first.
-	handle := indexOf(t, worker, "src/index.ts", "getContainer(env.SHINYHUB_DEMO")
-	memo := indexOf(t, worker, "src/index.ts", "mayAssumeAwake(lastHealthyAt, now)")
-	stateRead := indexOf(t, worker, "src/index.ts", "await container.getState()")
+	handle := indexOf(t, worker, "src/demo-worker.ts", "options.container(env)")
+	memo := indexOf(t, worker, "src/demo-worker.ts", "mayAssumeAwake(lastHealthyAt, now)")
+	stateRead := indexOf(t, worker, "src/demo-worker.ts", "await container.getState()")
 	if memo < handle {
 		t.Error("the awake memo is consulted before the container handle exists, so it cannot be gating the state read")
 	}
@@ -177,9 +177,9 @@ func TestDemoWorkerSpendsColdStartsOnVisitorsOnly(t *testing.T) {
 
 	// The readiness endpoint is polled by the wake page, so it must report the
 	// container's state rather than acquire it.
-	ready := indexOf(t, worker, "src/index.ts", `url.pathname === DEMO_READY_PATH`)
-	refuseWhenAsleep := indexOf(t, worker, "src/index.ts", `if (asleep) {`)
-	healthProbe := indexOf(t, worker, "src/index.ts", `new URL("/healthz", url)`)
+	ready := indexOf(t, worker, "src/demo-worker.ts", `url.pathname === DEMO_READY_PATH`)
+	refuseWhenAsleep := indexOf(t, worker, "src/demo-worker.ts", `if (asleep) {`)
+	healthProbe := indexOf(t, worker, "src/demo-worker.ts", `new URL("/healthz", url)`)
 	if refuseWhenAsleep < ready || refuseWhenAsleep > healthProbe {
 		t.Error("the readiness endpoint probes the container before checking whether it is asleep, so polling the wake page wakes it")
 	}
@@ -245,14 +245,14 @@ func TestDemoWorkerSpendsColdStartsOnVisitorsOnly(t *testing.T) {
 // Worker answers it itself; the deep link the visitor came for is still in the
 // query string and this is the hop that has to carry it.
 func TestDemoWorkerCarriesADeepLinkPastAStartButtonPressedTooLate(t *testing.T) {
-	source, err := os.ReadFile("src/index.ts")
+	source, err := os.ReadFile("src/demo-worker.ts")
 	if err != nil {
 		t.Fatal(err)
 	}
 	worker := string(source)
 
-	warmStart := indexOf(t, worker, "src/index.ts", `url.pathname === DEMO_START_PATH`)
-	session := indexOf(t, worker, "src/index.ts", `url.pathname === DEMO_SESSION_PATH`)
+	warmStart := indexOf(t, worker, "src/demo-worker.ts", `url.pathname === DEMO_START_PATH`)
+	session := indexOf(t, worker, "src/demo-worker.ts", `url.pathname === DEMO_SESSION_PATH`)
 	if warmStart > session {
 		t.Fatal("the warm start branch is below the session handler, so the anchors below read the wrong handler")
 	}
@@ -262,7 +262,7 @@ func TestDemoWorkerCarriesADeepLinkPastAStartButtonPressedTooLate(t *testing.T) 
 	// its visitor asked for.
 	redirect := indexOf(t, worker[warmStart:session], "the warm start branch", "Response.redirect(")
 	branch := worker[warmStart+redirect : session]
-	if !strings.HasPrefix(branch, `Response.redirect(demoURL("/", requestedDestination(url.pathname, url.search)), 303)`) {
+	if !strings.HasPrefix(branch, `Response.redirect(demoURL("/", requestedDestination(url.pathname, url.search), entryURL), 303)`) {
 		t.Errorf("a start button pressed once the demo is awake loses the page it was carrying, landing the visitor on the dashboard instead: %.90s", branch)
 	}
 }
@@ -325,13 +325,13 @@ func TestDemoEdgePagesAnswerAsThemselves(t *testing.T) {
 // gate that can, which is a real navigation. That recovery is written across two
 // files, and the state the probe reports is the only thing joining them.
 func TestDemoMonitoringBypassesActivityAndWarmMemo(t *testing.T) {
-	source, err := os.ReadFile("src/index.ts")
+	source, err := os.ReadFile("src/demo-worker.ts")
 	if err != nil {
 		t.Fatal(err)
 	}
 	worker := string(source)
-	status := indexOf(t, worker, "src/index.ts", "url.pathname === DEMO_STATUS_PATH")
-	memo := indexOf(t, worker, "src/index.ts", "const now = Date.now()")
+	status := indexOf(t, worker, "src/demo-worker.ts", "url.pathname === DEMO_STATUS_PATH")
+	memo := indexOf(t, worker, "src/demo-worker.ts", "const now = Date.now()")
 	if status > memo {
 		t.Fatal("monitoring must bypass the warm-state memo and activity-producing handlers")
 	}
@@ -345,7 +345,7 @@ func TestDemoMonitoringBypassesActivityAndWarmMemo(t *testing.T) {
 }
 
 func TestDemoWakePageRecoversAContainerThatNeverCameUp(t *testing.T) {
-	source, err := os.ReadFile("src/index.ts")
+	source, err := os.ReadFile("src/demo-worker.ts")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -356,8 +356,8 @@ func TestDemoWakePageRecoversAContainerThatNeverCameUp(t *testing.T) {
 	}
 	pages := string(source)
 
-	readyAt := indexOf(t, worker, "src/index.ts", "url.pathname === DEMO_READY_PATH")
-	coldAt := indexOf(t, worker, "src/index.ts", "const coldVerdict = gateUnconfirmed(classifyColdRequest(")
+	readyAt := indexOf(t, worker, "src/demo-worker.ts", "url.pathname === DEMO_READY_PATH")
+	coldAt := indexOf(t, worker, "src/demo-worker.ts", "const coldVerdict = gateUnconfirmed(classifyColdRequest(")
 	if readyAt > coldAt {
 		t.Fatal("the cold gate is above the ready handler, so the slice below reads the wrong code")
 	}

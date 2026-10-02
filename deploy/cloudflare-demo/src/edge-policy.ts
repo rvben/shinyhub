@@ -79,8 +79,8 @@ export function requestedDestination(pathname: string, search: string): string |
 // Builds an absolute URL on the control host, carrying destination when there is
 // one worth carrying. Every hop of the cold path is built through here, so a
 // destination can only ever move a visitor around the demo.
-export function demoURL(pathname: string, destination: string | null): string {
-  const url = new URL(pathname, ENTRY_URL);
+export function demoURL(pathname: string, destination: string | null, entryURL: string = ENTRY_URL): string {
+  const url = new URL(pathname, entryURL);
   const next = safeDestination(destination);
   if (next !== null && next !== "/") {
     url.searchParams.set(DEMO_NEXT_PARAM, next);

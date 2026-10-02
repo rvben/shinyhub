@@ -248,7 +248,7 @@ export const demoLoginScript = String.raw`
 })();
 `;
 
-function entryMarkup(showError: boolean, destination: string | null): string {
+function entryMarkup(showError: boolean, destination: string | null, entryURL?: string): string {
   const error = showError
     ? `<p class="demo-entry-error" role="alert">The demo could not open just now. Please try again.</p>`
     : "";
@@ -258,7 +258,7 @@ function entryMarkup(showError: boolean, destination: string | null): string {
   // sent once they have one. demoURL keeps the URL on this host and percent
   // encodes the destination into it; escaping it again is what makes the
   // attribute safe to read without tracing where the value came from.
-  const action = demoURL(DEMO_SESSION_PATH, destination)
+  const action = demoURL(DEMO_SESSION_PATH, destination, entryURL)
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
@@ -291,7 +291,7 @@ function entryMarkup(showError: boolean, destination: string | null): string {
     </button>`;
 }
 
-export function decorateDemoLogin(response: Response, showError: boolean, destination: string | null): Response {
+export function decorateDemoLogin(response: Response, showError: boolean, destination: string | null, entryURL?: string): Response {
   return new HTMLRewriter()
     .on("head", {
       element(element) {
@@ -311,7 +311,7 @@ export function decorateDemoLogin(response: Response, showError: boolean, destin
     })
     .on(".login-brand", {
       element(element) {
-        element.after(entryMarkup(showError, destination), { html: true });
+        element.after(entryMarkup(showError, destination, entryURL), { html: true });
       },
     })
     .on("body", {

@@ -270,9 +270,9 @@ const START_DESCRIPTION = "A real ShinyHub control plane running Python, R, Dash
 // what it is instead of as an error. The button is the way through: bots read
 // pages, they do not submit forms, so a post from here is the one request the
 // gate can believe without a header.
-export function demoStartResponse(destination: string | null, method: string): Response {
+export function demoStartResponse(destination: string | null, method: string, entryURL: string = ENTRY_URL): Response {
   const nonce = crypto.randomUUID().replaceAll("-", "");
-  const action = escapeHtml(demoURL(DEMO_START_PATH, destination));
+  const action = escapeHtml(demoURL(DEMO_START_PATH, destination, entryURL));
   const html = String.raw`<!doctype html>
 <html lang="en">
 <head>
@@ -282,7 +282,7 @@ export function demoStartResponse(destination: string | null, method: string): R
   <meta name="description" content="${escapeHtml(START_DESCRIPTION)}">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="ShinyHub">
-  <meta property="og:url" content="${escapeHtml(ENTRY_URL)}">
+  <meta property="og:url" content="${escapeHtml(entryURL)}">
   <meta property="og:title" content="${escapeHtml(START_TITLE)}">
   <meta property="og:description" content="${escapeHtml(START_DESCRIPTION)}">
   <meta name="twitter:card" content="summary">
@@ -333,9 +333,9 @@ export function demoStartResponse(destination: string | null, method: string): R
 // they originally asked for, which the wake outlives: it is folded into the URL
 // this page navigates to once the demo answers, so the demo login can send them
 // on to it rather than dropping them on the dashboard.
-export function demoWakeResponse(destination: string | null): Response {
+export function demoWakeResponse(destination: string | null, entryURL: string = ENTRY_URL): Response {
   const nonce = crypto.randomUUID().replaceAll("-", "");
-  const landing = escapeHtml(demoURL("/", destination));
+  const landing = escapeHtml(demoURL("/", destination, entryURL));
   const html = String.raw`<!doctype html>
 <html lang="en" data-landing="${landing}">
 <head>

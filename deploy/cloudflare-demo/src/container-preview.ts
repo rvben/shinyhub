@@ -29,6 +29,9 @@ export interface PreviewOptions {
   image: string;
   instance: "standard-1" | "standard-2";
   entrypoint?: string[];
+  // Browser canaries use their own origins with the same prepared image.
+  controlOrigin?: string;
+  appOrigin?: string;
 }
 export interface BootResult {
   mode: "warm" | "image" | "snapshot" | "image-after-snapshot-failure";
@@ -114,7 +117,9 @@ export class ContainerPreview {
   async ready(): Promise<boolean> {
     if (!this.runtime.running) return false;
     try {
-      const response = await this.runtime.getTcpPort(8080).fetch(new Request("http://demo.shinyhub.dev/healthz", {
+      const healthURL = new URL("/healthz", this.options.controlOrigin ?? "http://demo.shinyhub.dev");
+      healthURL.protocol = "http:";
+      const response = await this.runtime.getTcpPort(8080).fetch(new Request(healthURL, {
         headers: { "x-forwarded-proto": "https" }, signal: AbortSignal.timeout(3000),
       }));
       await response.body?.cancel();
@@ -189,7 +194,12 @@ export class ContainerPreview {
       return new Response("Client disconnected", { status: 499 });
     }
     try {
-      const response = await this.runtime.getTcpPort(8080).fetch(request);
+      // Native TCP ports serve plain HTTP. Keep the public host and forwarded
+      // scheme while converting only this secure internal transport hop.
+      const upstreamURL = new URL(request.url);
+      upstreamURL.protocol = "http:";
+      const upstream = new Request(upstreamURL, request);
+      const response = await this.runtime.getTcpPort(8080).fetch(upstream);
       // After an upgrade the accepted socket's close/error events own cleanup.
       if (response.webSocket) request.signal.removeEventListener("abort", finish);
       return trackResponse(response, finish);
@@ -274,6 +284,8 @@ export class ContainerPreview {
     // databases contain encrypted data, so every restore must reuse that key.
     this.phase = "reading-credentials";
     const startupEnv = this.options.policy === "durable_object" ? {
+      ...(this.options.controlOrigin ? { SHINYHUB_BASE_URL: this.options.controlOrigin } : {}),
+      ...(this.options.appOrigin ? { SHINYHUB_APP_ORIGIN: this.options.appOrigin } : {}),
       SHINYHUB_AUTH_SECRET: await this.secret(AUTH_SECRET_KEY),
       SHINYHUB_DEPLOY_TOKEN: `shk_${await this.secret(DEPLOY_TOKEN_KEY)}`,
     } : undefined;

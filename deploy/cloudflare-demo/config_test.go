@@ -74,7 +74,7 @@ func TestCloudflareDemoFleetIsCurated(t *testing.T) {
 }
 
 func TestCloudflareDemoOneClickEntryIsReadOnlyAndCoveredBySmokeTest(t *testing.T) {
-	worker, err := os.ReadFile("src/index.ts")
+	worker, err := os.ReadFile("src/demo-worker.ts")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestCloudflareDemoOneClickEntryIsReadOnlyAndCoveredBySmokeTest(t *testing.T
 }
 
 func TestCloudflareDemoColdStartStaysOffTheRootRequestPath(t *testing.T) {
-	worker, err := os.ReadFile("src/index.ts")
+	worker, err := os.ReadFile("src/demo-worker.ts")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestCloudflareDemoColdStartStaysOffTheRootRequestPath(t *testing.T) {
 		`container.getState()`,
 		`if (!healthy) {`,
 		`ctx.waitUntil(container.start()`,
-		`demoWakeResponse(destination)`,
+		`demoWakeResponse(destination, entryURL)`,
 		`url.pathname === DEMO_READY_PATH`,
 		`new URL("/healthz", url)`,
 	} {
