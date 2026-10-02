@@ -348,6 +348,7 @@ Validate locally before the approved canary deployment:
 ```bash
 npm run check
 npm test
+python3 -m unittest test_startup_readiness.py
 go test .
 npx wrangler deploy --dry-run --containers-rollout none --config wrangler.canary.jsonc
 npx wrangler deploy --config /private/path/to/pinned-canary-config.json
@@ -382,6 +383,16 @@ Worker logs for interfering requests. An isolated lifecycle check may briefly
 gate public staging traffic before any DO access; restore the normal browser
 entry after verification. Native browser readiness uses passive HTTP health
 state and never goes through the activity-tracking proxy.
+
+The bootstrap keeps Caddy's external port closed until every application in the
+bundled fleet returns HTTP 200 through ShinyHub's app-origin proxy. It checks the
+whole fleet in parallel, rejects redirects, errors, and HTTP 200 wait pages,
+and fails startup after 60 seconds if an application remains unavailable. This
+runs on fresh boots and
+snapshot restores before `/healthz` can release the browser wake page. Verify
+all app pages immediately after browser readiness, without retrying startup
+errors, as well as WebSockets and SSE; an HTTP gate alone does not test those
+connections.
 
 ### Production promotion and rollback
 
