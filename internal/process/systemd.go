@@ -216,28 +216,28 @@ func (r *SystemdRuntime) Signal(h RunHandle, sig syscall.Signal) error {
 	return err
 }
 func (r *SystemdRuntime) Wait(ctx context.Context, h RunHandle) error {
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
+	var waiter systemdExitWaiter
+	defer func() {
+		if waiter != nil {
+			waiter.close()
+		}
+	}()
 	for {
 		state, err := r.state(ctx, h)
 		if err != nil {
 			// Broker failure cannot prove physical worker exit.
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-ticker.C:
-				continue
+			if err := waitSystemdRetry(ctx); err != nil {
+				return err
 			}
+			continue
 		}
 		if !state.Active {
 			// A replica leader exiting makes its remaining descendants orphan workers.
 			if _, err = r.client.Call(ctx, nativebroker.Request{Op: "stop", Unit: h.ContainerID}, nil); err != nil {
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case <-ticker.C:
-					continue
+				if err := waitSystemdRetry(ctx); err != nil {
+					return err
 				}
+				continue
 			}
 			r.finishLogs(h.ContainerID)
 			r.forgetStats(h.PID)
@@ -246,10 +246,11 @@ func (r *SystemdRuntime) Wait(ctx context.Context, h RunHandle) error {
 			}
 			return nil
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
+		if waiter == nil {
+			waiter = newSystemdExitWaiter(state.PID)
+		}
+		if err := waiter.wait(ctx); err != nil {
+			return err
 		}
 	}
 }
@@ -273,15 +274,17 @@ func (r *SystemdRuntime) runOnce(ctx context.Context, p StartParams, kind string
 		r.finishLogs(ep.WorkerID)
 		r.forgetStats(ep.Handle.PID)
 	}()
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
+	var waiter systemdExitWaiter
+	defer func() {
+		if waiter != nil {
+			waiter.close()
+		}
+	}()
 	for {
 		state, err := r.state(ctx, ep.Handle)
 		if err != nil {
 			if ctx.Err() == nil {
-				select {
-				case <-ctx.Done():
-				case <-ticker.C:
+				if waitSystemdRetry(ctx) == nil {
 					continue
 				}
 			}
@@ -302,15 +305,16 @@ func (r *SystemdRuntime) runOnce(ctx context.Context, p StartParams, kind string
 			}
 			return ExitInfo{Code: state.Code, Signaled: state.Signaled}, nil
 		}
-		select {
-		case <-ctx.Done():
+		if waiter == nil {
+			waiter = newSystemdExitWaiter(state.PID)
+		}
+		if err := waiter.wait(ctx); err != nil {
 			stopCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
 			if _, err = r.client.Call(stopCtx, nativebroker.Request{Op: "stop", Unit: ep.WorkerID}, nil); err != nil {
 				return ExitInfo{}, fmt.Errorf("%w: %v", ErrStopUnconfirmed, err)
 			}
 			return ExitInfo{Code: -1, Signaled: true}, nil
-		case <-ticker.C:
 		}
 	}
 }
