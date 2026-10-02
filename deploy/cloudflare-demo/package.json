@@ -8,6 +8,8 @@
   },
   "scripts": {
     "check": "tsc --noEmit",
+    "test": "node --test src/*.test.ts",
+    "benchmark:containers": "node scripts/container-benchmark.mjs",
     "deploy": "wrangler deploy",
     "dev": "wrangler dev"
   },
@@ -15,8 +17,8 @@
     "@cloudflare/containers": "^0.3.7"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20260921.1",
+    "@cloudflare/workers-types": "^5.20261001.1",
     "typescript": "^5.9.3",
-    "wrangler": "^4.135.0"
+    "wrangler": "^4.146.0"
   }
 }

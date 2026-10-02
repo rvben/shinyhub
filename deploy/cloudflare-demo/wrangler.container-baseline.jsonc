@@ -1,0 +1,52 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "shinyhub-container-baseline",
+  "main": "src/container-preview-worker.ts",
+  "compatibility_date": "2026-09-30",
+  "compatibility_flags": ["enable_request_signal"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "routes": [],
+  "vars": {
+    "CONTAINER_POLICY": "default",
+    "CONTAINER_INSTANCE": "standard-1"
+  },
+  "containers": [
+    {
+      "class_name": "ShinyHubContainerPreview",
+      "scheduling_policy": "default",
+      "image": "./Dockerfile",
+      "image_build_context": "../..",
+      "max_instances": 1,
+      "instance_type": "standard-1"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CONTAINER_PREVIEW",
+        "class_name": "ShinyHubContainerPreview"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "ShinyHubContainerPreview"
+      ]
+    }
+  ],
+  "observability": {
+    "enabled": true
+  },
+  "rules": [
+    {
+      "type": "Text",
+      "globs": [
+        "**/*.sh"
+      ],
+      "fallthrough": true
+    }
+  ]
+}

@@ -131,9 +131,13 @@ on each readiness poll; monitoring adds no scheduled wake or background probe.
 ```bash
 npm ci
 npm run check
-docker build -f Dockerfile -t shinyhub-cloudflare-demo ../..
+docker build --platform linux/amd64 --provenance=false -f Dockerfile -t shinyhub-cloudflare-demo ../..
 docker run --rm -p 8080:8080 shinyhub-cloudflare-demo
 ```
+
+Cloudflare requires `linux/amd64`. The Go builder runs on the build machine's
+native architecture and cross-compiles the static binary for the selected target;
+the final Python/R/Caddy image uses that target architecture.
 
 ## Deploy
 
@@ -146,6 +150,157 @@ npx wrangler deploy
 
 The smoke suite verifies the one-click viewer session as well as HTTP and
 WebSocket traffic for the bundled applications.
+
+## Isolated container preview
+
+`wrangler.container-baseline.jsonc` and `wrangler.container-preview.jsonc` are
+separate benchmark Workers with separate Durable Object namespaces. They reuse
+the demo Dockerfile and `standard-1` size; the baseline uses the current `default`
+scheduling policy, while the preview uses `durable_object` and chooses its image
+and instance size at startup. Both supply the repository's `entrypoint.sh` as
+their startup command so the bootstrap script is identical even when reusing
+a previously prepared image. Neither configuration claims the public demo's
+domains. The production deployment and release workflow continue using
+`wrangler.jsonc`.
+
+Validate the preview locally:
+
+```bash
+npm run check
+npm test
+WRANGLER_SEND_METRICS=false npx wrangler deploy --dry-run --containers-rollout none \
+  --config wrangler.container-preview.jsonc
+WRANGLER_SEND_METRICS=false npx wrangler deploy --dry-run --containers-rollout none \
+  --config wrangler.container-baseline.jsonc
+```
+
+Dry runs bundle and validate the Worker configuration; they do not build images
+or prove Cloudflare allocation/snapshot support. Deploying either configuration
+and setting its `CONTAINER_BENCHMARK_TOKEN` secret require explicit approval.
+There is no default token: all endpoints authenticate before obtaining a DO stub.
+Only authenticated `POST /start` allocates an instance; `GET /state`, `GET /ready`,
+and proxy requests cannot wake an asleep container. The controller restores the
+ten-minute inactivity timeout after a DO restart, serializes mutations, and
+deduplicates concurrent starts. Temporary allocation failures retry for at most
+30 seconds and clear the failed instance before retrying. Allocation and health
+readiness each have a 90-second limit. Startup monitoring reports asynchronous
+container errors. Native cleanup can still remain pending after those limits;
+they are not an end-to-end response deadline. Redeploying the isolated Worker
+cleared a stalled allocation during live checks. A pending monitor can keep the
+DO resident for up to 15 minutes and delay the native inactivity timer. A
+persistent ten-minute alarm also stops the isolated container after its last
+admitted start, snapshot, or completed proxy request. Pending upstream requests,
+open WebSockets (including quiet ones), and streaming response bodies keep the
+container alive. The idle window begins when the last connection completes,
+cancels, or disconnects. WebSockets bridge text/binary messages and close/error
+events in both directions; response cancellation propagates upstream.
+Both isolated configs enable `enable_request_signal`: client disconnects release
+activity even if response-stream cancellation or native cleanup remains pending.
+HTTP bodies use Cloudflare's native stream pipe, as in its Containers SDK.
+State/readiness probes do not extend the deadline. A DO reset drops these
+non-hibernating connections and grants a fresh ten-minute window if they were
+open; other constructor recovery preserves the saved deadline. Explicit stop
+invalidates old connections so late disconnects cannot postpone a new instance's
+shutdown. Native timeout restoration runs outside the mutation queue so a
+pending allocation cannot block manual stop. The protected state endpoint
+includes a non-secret phase and active connection count. This remains an isolated
+prototype; validate allocation for each new image digest before adoption.
+`standard-2` can be selected through the preview's
+`CONTAINER_INSTANCE` variable for a separate sizing experiment.
+
+After the two isolated Workers have been approved and deployed, put the benchmark
+token in `CONTAINER_BENCHMARK_TOKEN` in the local environment and run:
+
+```bash
+npm run benchmark:containers -- --url https://shinyhub-container-baseline.SUBDOMAIN.workers.dev --mode fresh --runs 5
+npm run benchmark:containers -- --url https://shinyhub-container-preview.SUBDOMAIN.workers.dev --mode fresh --runs 5
+npm run benchmark:containers -- --url https://shinyhub-container-preview.SUBDOMAIN.workers.dev --mode snapshot --runs 5
+```
+
+The runner measures ShinyHub `/healthz` readiness and total request time, reports
+the median and individual samples as JSON, rejects a fallback boot as a snapshot
+measurement, and attempts to stop the instance at the end even after a failure.
+Verify the protected `/state` reports `running: false`; platform failures can
+prevent cleanup from completing. It uses a generic user-agent. Failed batches
+retain completed samples and report the error instead of a successful median.
+These are repeated stopped-instance starts, not guarantees
+of new VM placement on every sample. Compare the policies under the same image,
+size, location, and workload. Save measurements locally before considering a
+production migration.
+
+For prebuilt images, use the same concrete `linux/amd64` manifest digest in both
+configurations. `--provenance=false` omits the extra provenance manifest. Image
+preparation is a separate Cloudflare operation and can remain pending even for
+a concrete manifest. Reusing an already prepared image with the same bundled
+entrypoint in both Workers isolates bootstrap changes from image preparation.
+Set the baseline's `image` and preview's `images.demo.image` to the managed
+registry reference, removing the Dockerfile/build-context fields. Do not use
+`--containers-rollout none` for a live preview deployment: Wrangler must include
+its named-image bindings. That option remains useful for local dry runs.
+
+An image preparation result of `ready` is not a successful allocation check.
+Before promoting a digest, test repeated stopped-instance starts and at least
+one new Durable Object identity, then verify all seven HTTP applications and
+three WebSocket upgrades on both a fresh boot and a snapshot restore. Compare
+the exact pinned image, instance size, and startup command; do not infer an
+image defect from a single pending allocation. Record preparation status,
+startup phases, and platform instance state before changing configuration.
+If allocation or native cleanup remains pending, recover the isolated Worker,
+verify it is stopped, and retain the previous production image. A later
+successful test does not establish the cause of an earlier platform stall.
+
+Authenticated `POST /snapshot` captures a ready preview's filesystem;
+`DELETE /snapshot` forgets the saved handle, and `POST /stop` destroys the running
+instance. Forgetting a handle does not delete Cloudflare's retained snapshot.
+Snapshot handles are associated with the image digest, expire conservatively
+after 29 idle days, and refresh their retention timestamp after successful
+restoration. An incompatible checkpoint is discarded. A failed restore gets
+one bounded fallback to the current image. Image changes never silently replace
+a running instance: stop/start it before capturing another checkpoint.
+
+The preview retains randomly generated demo authentication and bootstrap
+credentials in private Durable Object storage and supplies them to both image
+and snapshot starts. The database contains encrypted records, so restoration must
+reuse its authentication key. Retaining the bootstrap token also keeps the demo's
+credential configuration stable through restoration. Credentials
+are never returned by the benchmark endpoints. The baseline keeps the existing
+image-generated credentials because it always starts a fresh filesystem.
+The image entrypoint waits for control-plane ownership (`/activez`) before
+bootstrap mutations, including after a restored ownership lease expires.
+
+Snapshots capture files, not memory or running processes. The existing entrypoint
+runs again after restoration, including fleet reconciliation. This experiment
+does not promise faster application startup or durable application state. Before
+production adoption, verify SQLite/WAL recovery, stale process/session handling,
+repeatable fleet reconciliation, idle shutdown, and HTTP/WebSocket smoke tests
+on Cloudflare. Snapshot creation is manual; no public visitor can trigger it.
+
+The protected `/control/<path>` and `/apps/<path>` proxy routes forward into the
+isolated container with its canonical demo hosts and preserve WebSocket upgrades.
+They are for HTTP/WebSocket checks, not a browser preview: generated links and
+redirects still use the production hostnames. Disable redirect following when
+testing them, and supply the benchmark bearer token with each request. A browser
+staging rollout needs separate control/app domains and matching server URLs.
+
+For billing verification, query `containersUsageAdaptiveGroups`, not only
+workload metrics. Its allocated memory/disk and CPU time include the micro VM
+and correspond to dashboard usage estimates. Keep each policy's application ID
+and time window separate, and normalize UUID formatting when comparing the
+application API's compact identifiers with the metrics API's hyphenated ones.
+Gross resource estimates do not include plan allowances, Workers/DO compute,
+network egress, logs, or retained snapshot storage. Reading `/state` after the
+idle window verifies shutdown without allocating another instance.
+
+Rapid snapshot replays can capture an unexpired database ownership lease and
+wait for handoff, while a wake after ten idle minutes uses an expired lease.
+Measure both paths, including the time until every bundled app responds. Native
+`/healthz` readiness alone is not the full application experience.
+
+Cloudflare references: [scheduling policies](https://developers.cloudflare.com/containers/configuration/scheduling-policy/),
+[direct API](https://developers.cloudflare.com/containers/api/durable-object-container/),
+and [filesystem snapshots](https://developers.cloudflare.com/containers/guides/snapshots/),
+[usage metrics](https://developers.cloudflare.com/analytics/graphql-api/tutorials/querying-container-metrics/),
+and [pricing](https://developers.cloudflare.com/containers/platform/pricing/).
 
 Release deployments use the GitHub `public-demo` environment. Configure the
 Cloudflare account ID as the environment variable `CLOUDFLARE_ACCOUNT_ID` and

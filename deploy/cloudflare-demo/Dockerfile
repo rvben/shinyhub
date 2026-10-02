@@ -1,15 +1,17 @@
 # syntax=docker/dockerfile:1.7
 
-FROM golang:1.26-bookworm AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS builder
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY package.json ./
 COPY cmd ./cmd
 COPY internal ./internal
+ARG TARGETOS
+ARG TARGETARCH
 RUN VERSION="$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' package.json)" \
     && test -n "$VERSION" \
-    && CGO_ENABLED=0 go build \
+    && GOOS=${TARGETOS} GOARCH=${TARGETARCH} CGO_ENABLED=0 go build \
     -trimpath \
     -ldflags "-s -w -X main.version=${VERSION}" \
     -o /out/shinyhub ./cmd/shinyhub
