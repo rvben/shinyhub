@@ -632,7 +632,9 @@ func restore(cfg *config.Config, archivePath string, force bool) (movedAside []s
 		return nil, fmt.Errorf("verify backup archive before restore: %w", err)
 	}
 
-	ts := time.Now().UTC().Format("20060102T150405Z")
+	// Second-resolution names let a quick retry overwrite a prior rollback DB
+	// before the matching directory rename fails on its nonempty destination.
+	ts := time.Now().UTC().Format("20060102T150405.000000000Z")
 
 	if postgres {
 		// Rollback safety mirroring SQLite's move-aside: snapshot the current
