@@ -1306,9 +1306,17 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 			break
 		}
 	}
-	rt, err := buildRuntime(ctx, defaultTierCfg, cfg, bundleTokenKey)
-	if err != nil {
-		return err
+	var rt process.Runtime
+	if defaultTierCfg.Runtime == "remote_docker" {
+		if workerReg == nil || dialer == nil {
+			return fmt.Errorf("tier %q requires worker hosting to be enabled", defaultTier)
+		}
+		rt = worker.NewRemoteRuntime(workerReg, defaultTier, dialer)
+	} else {
+		rt, err = buildRuntime(ctx, defaultTierCfg, cfg, bundleTokenKey)
+		if err != nil {
+			return err
+		}
 	}
 	slog.Info("runtime configured", "tier", defaultTier, "mode", defaultTierCfg.Runtime)
 	mgr := process.NewManager(cfg.Storage.AppsDir, rt)

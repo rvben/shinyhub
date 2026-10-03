@@ -30,4 +30,4 @@ done
 export SHINYHUB_TEST_POSTGRES_DSN="postgres://postgres:${PASS}@127.0.0.1:${PORT}/postgres?sslmode=disable"
 export GOWORK=off
 echo "running kill-the-active test against ${SHINYHUB_TEST_POSTGRES_DSN}"
-go test -tags=integration -run TestKillTheActive "$ROOT/cmd/shinyhub/..." -count=1 -v -timeout 5m
+go test -tags=integration -run 'TestKillTheActive|TestRemoteDefaultTierServesReadiness' "$ROOT/cmd/shinyhub/..." -count=1 -v -timeout 5m
