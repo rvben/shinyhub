@@ -55,9 +55,11 @@ func pgDump(dsn, destPath string) error {
 // becomes an exact copy. --no-owner / --no-privileges ignore the dump's
 // ownership so it lands under the connecting role. The target database must
 // already exist (pg_restore restores into a database, it does not create one).
+// Restore in one transaction so a SQL error cannot leave partially replaced
+// tables or data. This also makes pg_restore stop at the first error.
 func pgRestore(dsn, srcPath string) error {
 	cleanDSN, env := pgConnEnv(dsn)
-	cmd := exec.Command("pg_restore", "--clean", "--if-exists", "--no-owner", "--no-privileges",
+	cmd := exec.Command("pg_restore", "--single-transaction", "--clean", "--if-exists", "--no-owner", "--no-privileges",
 		"--dbname", cleanDSN, srcPath)
 	cmd.Env = env
 	var stderr bytes.Buffer
