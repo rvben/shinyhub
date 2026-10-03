@@ -1,12 +1,17 @@
 package db_test
 
 import (
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/dbtest"
+	"golang.org/x/sys/unix"
 )
 
 // TestMigrate_ConcurrentInstancesDoNotCorruptLedger reproduces OB-6: two
@@ -94,5 +99,69 @@ func TestMigrate_ConcurrentInstancesDoNotCorruptLedger(t *testing.T) {
 	}
 	if n != distinct {
 		t.Fatalf("schema_migrations has duplicate version rows: %d rows, %d distinct versions", n, distinct)
+	}
+}
+
+// Equivalent SQLite filenames must honor the same cross-process migration
+// lock. A percent-encoded URI must not race a server using an ordinary path.
+func TestMigrate_SQLiteURIHonorsDatabaseLock(t *testing.T) {
+	dbtest.SkipIfPostgres(t)
+	for _, kind := range []string{"filename", "escaped", "mixed escapes", "localhost", "fragment"} {
+		t.Run(kind, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "state + 100%.sqlite")
+			escaped := (&url.URL{Path: path}).EscapedPath()
+			dsn := "file:" + escaped
+			switch kind {
+			case "filename":
+				dsn = path
+			case "mixed escapes":
+				dsn = "file:" + strings.ReplaceAll(escaped, "%25", "%")
+			case "localhost":
+				dsn = "file://localhost" + escaped
+			case "fragment":
+				dsn += "#ignored"
+			}
+			store, err := db.Open(dsn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			// Make the repeat migration a quick ledger check, so a bypass cannot
+			// hide behind the time spent applying a fresh database's full schema.
+			if err := store.Migrate(); err != nil {
+				t.Fatal(err)
+			}
+			lock, err := os.OpenFile(path+".migrate.lock", os.O_CREATE|os.O_RDWR, 0o600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lock.Close()
+			if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX); err != nil {
+				t.Fatal(err)
+			}
+			defer unix.Flock(int(lock.Fd()), unix.LOCK_UN)
+			started, done := make(chan struct{}), make(chan error, 1)
+			go func() { close(started); done <- store.Migrate() }()
+			<-started
+			select {
+			case err := <-done:
+				t.Fatalf("migration bypassed the held database lock: %v", err)
+			case <-time.After(2 * time.Second):
+			}
+			if err := unix.Flock(int(lock.Fd()), unix.LOCK_UN); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("migration after releasing lock: %v", err)
+				}
+			case <-time.After(30 * time.Second):
+				t.Fatal("migration remained blocked after releasing lock")
+			}
+			if pending, err := store.PendingMigrations(); err != nil || len(pending) != 0 {
+				t.Fatalf("migration after lock release must complete: pending=%v err=%v", pending, err)
+			}
+		})
 	}
 }

@@ -14,7 +14,6 @@ import (
 	"math/rand/v2"
 	"os"
 	"path"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -109,7 +108,7 @@ type Store struct {
 	memory bool
 
 	// migrateLockPath is the sidecar flock file Migrate() serializes on for a
-	// file-backed SQLite database (see sqliteMigrateLockPath). Empty for
+	// file-backed SQLite database, using SQLite's resolved filename. Empty for
 	// Postgres (which uses a session advisory lock instead) and for in-memory
 	// SQLite (no other process can share the connection).
 	migrateLockPath string
@@ -239,32 +238,19 @@ func openSQLite(dsn string) (*Store, error) {
 		_ = raw.Close()
 		return nil, fmt.Errorf("foreign_keys pragma not enabled (got %d)", fk)
 	}
+	// Ask SQLite for its actual filename so URI aliases (percent escapes,
+	// localhost authorities and fragments) all share the same migration lock.
+	var filePath string
+	if err := raw.QueryRow("SELECT file FROM pragma_database_list WHERE name = 'main'").Scan(&filePath); err != nil {
+		_ = raw.Close()
+		return nil, fmt.Errorf("resolve sqlite filename: %w", err)
+	}
+	var lockPath string
+	if filePath != "" {
+		lockPath = filePath + ".migrate.lock"
+	}
 	d := sqliteDialect{}
-	return &Store{db: &boundDB{real: raw, d: d}, d: d, memory: memory, migrateLockPath: sqliteMigrateLockPath(dsn)}, nil
-}
-
-// sqliteMigrateLockPath returns the sidecar file used to serialize Migrate()
-// across every process that opens this SQLite database file concurrently, or
-// "" for an in-memory database: each connection to ":memory:" (or a
-// "mode=memory" DSN) is an independent, single-process database, so there is
-// nothing to serialize against another process.
-//
-// dsn is stripped of a leading "file:" scheme and any query string (pragmas,
-// cache mode, ...) and cleaned, so two DSNs that differ only in those
-// parameters but name the same underlying file still resolve to the same lock
-// path.
-func sqliteMigrateLockPath(dsn string) string {
-	if isMemoryDSN(dsn) {
-		return ""
-	}
-	p := strings.TrimPrefix(dsn, "file:")
-	if i := strings.IndexByte(p, '?'); i >= 0 {
-		p = p[:i]
-	}
-	if p == "" {
-		return ""
-	}
-	return filepath.Clean(p) + ".migrate.lock"
+	return &Store{db: &boundDB{real: raw, d: d}, d: d, memory: memory, migrateLockPath: lockPath}, nil
 }
 
 // acquireMigrateLock blocks until it holds an exclusive flock on path
@@ -379,7 +365,7 @@ func (s *Store) Migrate() error {
 	// set as empty, then both try to create the same tables and insert the same
 	// ledger rows: the loser gets a raw "duplicate column name" or "UNIQUE
 	// constraint failed" error instead of a clean no-op. An flock on a sidecar
-	// `<db>.migrate.lock` file (see sqliteMigrateLockPath) closes that window:
+	// `<db>.migrate.lock` file closes that window:
 	// held for the whole function, so the loser blocks until the winner
 	// finishes, then re-reads the ledger and finds every migration already
 	// applied. flock is process-scoped, so a killed holder releases it
