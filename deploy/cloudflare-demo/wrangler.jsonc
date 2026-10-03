@@ -7,7 +7,7 @@
   "rules": [
     {
       "type": "Text",
-      "globs": ["**/*.svg"],
+      "globs": ["**/*.svg", "**/*.sh"],
       "fallthrough": true
     }
   ],

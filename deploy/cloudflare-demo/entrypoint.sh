@@ -34,8 +34,10 @@ cleanup() {
 }
 trap cleanup INT TERM EXIT
 
+# A restored database can retain the previous owner's lease. Liveness alone
+# does not admit bootstrap mutations while that control-plane handoff finishes.
 attempt=0
-until python -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8081/healthz", timeout=2)' >/dev/null 2>&1; do
+until python -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8081/activez", timeout=2)' >/dev/null 2>&1; do
   attempt=$((attempt + 1))
   if [ "$attempt" -ge 60 ]; then
     echo "ShinyHub did not become ready" >&2
@@ -69,6 +71,70 @@ env -u SHINYHUB_CONFIG \
 SHINYHUB_HOST=http://127.0.0.1:8081 \
 SHINYHUB_TOKEN="$SHINYHUB_DEPLOY_TOKEN" \
   shinyhub fleet apply --prune --yes --file /opt/shinyhub-demo/fleet.toml
+
+# Fleet reconciliation can finish before framework processes accept requests.
+# Keep the externally probed port closed until every public application serves.
+# Run this on every boot, including restores; no persisted ready marker is used.
+python - "$server_pid" /opt/shinyhub-demo/fleet.toml <<'PY_FLEET_READY'
+import concurrent.futures
+import os
+import sys
+import time
+import tomllib
+import urllib.error
+import urllib.parse
+import urllib.request
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+server_pid = int(sys.argv[1])
+with open(sys.argv[2], "rb") as manifest:
+    slugs = [app["slug"] for app in tomllib.load(manifest)["app"]]
+if not slugs:
+    raise SystemExit("Demo fleet has no applications")
+app_host = urllib.parse.urlsplit(os.environ.get(
+    "SHINYHUB_APP_ORIGIN", "https://apps.demo.shinyhub.dev"
+)).netloc
+deadline = time.monotonic() + 60
+
+
+def ready(slug):
+    request = urllib.request.Request(
+        "http://127.0.0.1:8081/app/" + urllib.parse.quote(slug, safe="") + "/",
+        headers={"Host": app_host, "X-Forwarded-Proto": "https", "Accept": "application/octet-stream",
+                 "User-Agent": "demo-startup-check/1"},
+    )
+    try:
+        # Legacy/deploying browser wait pages can return 200. Reject their
+        # shared shell as well as the proxy's explicit rejection header.
+        with urllib.request.build_opener(NoRedirect()).open(request, timeout=2) as response:
+            return (response.status == 200
+                    and not response.headers.get("X-Shinyhub-Reject")
+                    and b'id="shinyhub-box"' not in response.read(262144))
+    except urllib.error.HTTPError as error:
+        error.close()
+        return False
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return False
+
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=len(slugs)) as pool:
+    while True:
+        try:
+            os.kill(server_pid, 0)
+        except ProcessLookupError:
+            raise SystemExit("ShinyHub exited before its applications became ready")
+        pending = [slug for slug, healthy in zip(slugs, pool.map(ready, slugs)) if not healthy]
+        if not pending:
+            break
+        if time.monotonic() >= deadline:
+            raise SystemExit("Demo applications did not become ready: " + ", ".join(pending))
+        time.sleep(1)
+PY_FLEET_READY
 
 caddy run --config /opt/shinyhub-demo/Caddyfile --adapter caddyfile &
 proxy_pid=$!
