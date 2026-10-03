@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -89,6 +90,34 @@ func TestExtractBundle_RejectsSymlinkEntry(t *testing.T) {
 	err := deploy.ExtractBundle(zipPath, filepath.Join(dir, "out"))
 	if err == nil {
 		t.Fatal("expected error for symlink entry, got nil")
+	}
+}
+
+func TestExtractBundle_RejectsDuplicateDestinations(t *testing.T) {
+	for _, alias := range []string{"app.py", "./app.py", "helpers/../app.py", "/app.py"} {
+		for _, reverse := range []bool{false, true} {
+			entries := []hardeningZipEntry{
+				{name: "app.py", mode: 0o644, body: "print(1)"},
+				{name: alias, mode: 0o644, body: "print(2)"},
+			}
+			if reverse {
+				entries[0], entries[1] = entries[1], entries[0]
+			}
+			t.Run(entries[0].name+"_then_"+entries[1].name, func(t *testing.T) {
+				dir := t.TempDir()
+				zipPath := filepath.Join(dir, "app.zip")
+				buildHardeningZip(t, zipPath, entries)
+				dest := filepath.Join(dir, "extracted")
+				err := deploy.ExtractBundle(zipPath, dest)
+				if err == nil {
+					got, readErr := os.ReadFile(filepath.Join(dest, "app.py"))
+					t.Fatalf("conflicting destination accepted: content %q, read error %v", got, readErr)
+				}
+				if !errors.Is(err, deploy.ErrBundleRejected) || !strings.Contains(err.Error(), "duplicate") {
+					t.Fatalf("error = %v, want duplicate destination rejection", err)
+				}
+			})
+		}
 	}
 }
 

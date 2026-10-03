@@ -135,11 +135,35 @@ func TestDigestRejectsDuplicateName(t *testing.T) {
 	}
 }
 
+func TestDigestRejectsDuplicateDestination(t *testing.T) {
+	for _, alias := range []string{"./app.py", "helpers/../app.py", "/app.py"} {
+		for _, reverse := range []bool{false, true} {
+			entries := []zipEntry{{"app.py", "print(1)", false}, {alias, "print(2)", false}}
+			if reverse {
+				entries[0], entries[1] = entries[1], entries[0]
+			}
+			t.Run(entries[0].name+"_then_"+entries[1].name, func(t *testing.T) {
+				if digest, err := DigestZipReader(zipReader(t, buildZip(t, entries))); err == nil {
+					t.Fatalf("conflicting destination accepted with digest %s", digest)
+				} else if !strings.Contains(err.Error(), "duplicate") {
+					t.Fatalf("error = %v, want duplicate destination error", err)
+				}
+			})
+		}
+	}
+}
+
 func TestDigestFormatIsStableContract(t *testing.T) {
 	z := buildZip(t, []zipEntry{{"app.py", "print(1)", false}})
 	d, err := DigestZipReader(zipReader(t, z))
 	if err != nil {
 		t.Fatalf("digest: %v", err)
+	}
+	// Independently derived from the documented serialization: big-endian
+	// uint64 name length, name, owner-executable byte, then SHA-256 of the body.
+	const want = "sha256:882d88300c175a9ea1e0e1fb7ec02cbccf2e1e2b9a151b774583a6d1811777f7"
+	if d != want {
+		t.Fatalf("digest = %s, want stable identity %s", d, want)
 	}
 	if !strings.HasPrefix(d, "sha256:") {
 		t.Fatalf("digest must be sha256:-prefixed, got %q", d)

@@ -7,7 +7,9 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"path"
 	"sort"
+	"strings"
 )
 
 // DigestZipReader computes a stable content digest over the accepted entries
@@ -21,7 +23,9 @@ import (
 //
 // Directory entries never contribute. Entries are sorted by name; the digest
 // is sha256 over a length-prefixed serialization so no field boundary is
-// ambiguous. A duplicate accepted name is a hard error.
+// ambiguous. A duplicate accepted destination, including path aliases, is a
+// hard error; otherwise entry order could change extracted content without
+// changing the digest.
 func DigestZipReader(zr *zip.Reader) (string, error) {
 	rules := DefaultRules()
 
@@ -49,10 +53,13 @@ func DigestZipReader(zr *zip.Reader) (string, error) {
 		if f.FileInfo().IsDir() {
 			continue
 		}
-		if _, dup := seen[f.Name]; dup {
+		// Match the destination the extractor resolves, while keeping raw names
+		// in the digest serialization so existing bundle identities are stable.
+		destination := strings.TrimLeft(path.Clean(f.Name), "/")
+		if _, dup := seen[destination]; dup {
 			return "", fmt.Errorf("bundle digest: duplicate entry %q", f.Name)
 		}
-		seen[f.Name] = struct{}{}
+		seen[destination] = struct{}{}
 
 		rc, err := f.Open()
 		if err != nil {

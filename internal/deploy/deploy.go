@@ -2387,6 +2387,7 @@ func ExtractBundleWithLimits(src, destDir string, maxEntrySize, maxTotalSize int
 	}
 
 	rules := bundle.DefaultRules()
+	seen := make(map[string]struct{})
 
 	var total int64
 	for _, f := range r.File {
@@ -2397,7 +2398,7 @@ func ExtractBundleWithLimits(src, destDir string, maxEntrySize, maxTotalSize int
 		// filepath.Rel returns a path starting with ".." when target is outside
 		// absDestDir. The separator-aware check catches both ".." and "../foo".
 		rel, err := filepath.Rel(absDestDir, target)
-		if err != nil || strings.HasPrefix(rel, "..") {
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return fmt.Errorf("%w: bundle entry %q escapes the destination directory", ErrBundleRejected, f.Name)
 		}
 
@@ -2432,6 +2433,10 @@ func ExtractBundleWithLimits(src, destDir string, maxEntrySize, maxTotalSize int
 			}
 			continue
 		}
+		if _, duplicate := seen[rel]; duplicate {
+			return fmt.Errorf("%w: bundle entry %q has duplicate destination %q", ErrBundleRejected, f.Name, rel)
+		}
+		seen[rel] = struct{}{}
 
 		// Trust-but-verify: reject up front when the declared size is already
 		// over budget so we avoid any extraction work for obviously malicious

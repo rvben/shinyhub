@@ -78,6 +78,30 @@ func TestExtractBundle_ZipSlip(t *testing.T) {
 	}
 }
 
+func TestExtractBundle_DotPrefixedNames(t *testing.T) {
+	for _, name := range []string{"..config", "..helpers/app.py"} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			zipPath := filepath.Join(dir, "app.zip")
+			const content = "application source"
+			if err := createTestBundle(zipPath, map[string]string{name: content}); err != nil {
+				t.Fatal(err)
+			}
+			dest := filepath.Join(dir, "extracted")
+			if err := deploy.ExtractBundle(zipPath, dest); err != nil {
+				t.Fatalf("safe dot-prefixed entry rejected: %v", err)
+			}
+			got, err := os.ReadFile(filepath.Join(dest, name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != content {
+				t.Fatalf("extracted content = %q, want %q", got, content)
+			}
+		})
+	}
+}
+
 func TestExtractBundle_RejectsPerEntryOverflow(t *testing.T) {
 	dir := t.TempDir()
 	zipPath := filepath.Join(dir, "bomb.zip")
