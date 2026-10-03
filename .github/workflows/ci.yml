@@ -366,6 +366,11 @@ jobs:
 
       - uses: ./.github/actions/setup-go
 
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+          freethreaded: false
+
       - name: Install uv
         run: |
           curl -LsSf https://astral.sh/uv/install.sh | sh
