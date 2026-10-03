@@ -95,6 +95,107 @@ func TestPythonDiagnosticReportsUnsupportedInterpreter(t *testing.T) {
 	}
 }
 
+func TestPythonDiagnosticDumpRecoversFromIncompleteSample(t *testing.T) {
+	for _, message := range []string{
+		"RuntimeError: Incomplete sample: did not reach base frame",
+		"RuntimeError: Failed to parse initial frame in chain",
+	} {
+		t.Run(message, func(t *testing.T) {
+			setupCLITest(t)
+			python := diagnosticPython(t, true)
+			// Model the real sampler at the executable boundary: its first read
+			// catches a changing stack and fails, then a new read succeeds. Output
+			// from the failed read must not leak into the successful stack report.
+			script := `#!/bin/sh
+if [ "$2" = '-c' ]; then
+  printf '%s\n' '{"version":"3.15.0","supported":true}'
+elif [ ! -f "$0.sampled" ]; then
+  touch "$0.sampled"
+  printf '%s\n' 'partial stack that must be discarded'
+  printf '%s\n' 'Traceback (most recent call last):' '` + message + `' >&2
+  exit 1
+else
+  printf '%s\n' 'Thread 4321: work at task.py:12'
+fi
+`
+			if err := os.WriteFile(python, []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			out, err := execCLI(t, "diagnose", "python", "4321", "--python", python, "-o", "json")
+			if err != nil {
+				t.Fatalf("transient incomplete sample prevented inspection: %v", err)
+			}
+			var report pythonDiagnosticReport
+			if err := json.Unmarshal([]byte(out), &report); err != nil {
+				t.Fatal(err)
+			}
+			if report.Status != "inspected" || report.Stacks != "Thread 4321: work at task.py:12\n" {
+				t.Fatalf("unexpected stack report: %+v", report)
+			}
+		})
+	}
+}
+
+func TestPythonDiagnosticDoesNotRetryPermanentFailuresOrProfiles(t *testing.T) {
+	for _, tc := range []struct {
+		name, message string
+		profile       bool
+	}{
+		{"permission", "PermissionError: cannot inspect process", false},
+		{"gone", "ProcessLookupError: target exited", false},
+		{"profile", "RuntimeError: Incomplete sample: did not reach base frame", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupCLITest(t)
+			python := diagnosticPython(t, true)
+			script := "#!/bin/sh\nif [ \"$2\" = '-c' ]; then\n" +
+				"  printf '%s\\n' '{\"version\":\"3.15.0\",\"supported\":true}'\n" +
+				"elif [ ! -f \"$0.sampled\" ]; then\n  touch \"$0.sampled\"\n" +
+				"  printf '%s\\n' 'Traceback (most recent call last):' '" + tc.message + "' >&2\n  exit 1\n" +
+				"else\n  printf '%s\\n' 'unexpected retry succeeded'\nfi\n"
+			if err := os.WriteFile(python, []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			args := []string{"diagnose", "python", "4321", "--python", python, "-o", "json"}
+			if tc.profile {
+				args = append(args, "--save", filepath.Join(t.TempDir(), "profile.html"), "--duration", "1s")
+			}
+			_, err := execCLI(t, args...)
+			if err == nil || !strings.Contains(err.Error(), tc.message) {
+				t.Fatalf("expected original failure without retry, got %v", err)
+			}
+		})
+	}
+}
+
+func TestPythonDiagnosticPersistentIncompleteSampleFailsWithinBound(t *testing.T) {
+	setupCLITest(t)
+	python := diagnosticPython(t, true)
+	script := `#!/bin/sh
+if [ "$2" = '-c' ]; then
+  printf '%s\n' '{"version":"3.15.0","supported":true}'
+else
+  printf x >> "$0.samples"
+  printf '%s\n' 'Traceback (most recent call last):' 'RuntimeError: Incomplete sample: did not reach base frame' >&2
+  exit 1
+fi
+`
+	if err := os.WriteFile(python, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := execCLI(t, "diagnose", "python", "4321", "--python", python, "-o", "json")
+	if err == nil || !strings.Contains(err.Error(), "RuntimeError: Incomplete sample:") {
+		t.Fatalf("persistent sampling failure was lost: %v", err)
+	}
+	samples, err := os.ReadFile(python + ".samples")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(samples) < 2 || len(samples) > 5 {
+		t.Fatalf("expected bounded retries, got %d sample attempts", len(samples))
+	}
+}
+
 func TestPrivateProfileRefusesSymlink(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "source")
 	os.WriteFile(source, []byte("new"), 0600)

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -129,13 +130,27 @@ func runPythonDiagnostic(cmd *cobra.Command, pidText string, f *pythonDiagnostic
 	args = append(args, strconv.Itoa(pid))
 	ctx, cancel := context.WithTimeout(cmd.Context(), limit)
 	defer cancel()
-	child := exec.CommandContext(ctx, path, args...)
-	child.WaitDelay = time.Second
 	var stdout, stderr bytes.Buffer
-	child.Stdout, child.Stderr = &stdout, &stderr
-	if err := child.Run(); err != nil {
+	for attempt := 0; ; attempt++ {
+		stdout.Reset()
+		stderr.Reset()
+		child := exec.CommandContext(ctx, path, args...)
+		child.WaitDelay = time.Second
+		child.Stdout, child.Stderr = &stdout, &stderr
+		err := child.Run()
+		if err == nil {
+			break
+		}
 		if ctx.Err() != nil {
 			return fmt.Errorf("Python diagnostic interrupted: %w", ctx.Err())
+		}
+		// Non-blocking reads can catch the interpreter between frame updates.
+		// Retry only that transient one-shot failure, within the original
+		// timeout, without suspending the target or repeating a profile.
+		transientSample := strings.Contains(stderr.String(), "\nRuntimeError: Incomplete sample:") ||
+			strings.Contains(stderr.String(), "\nRuntimeError: Failed to parse initial frame in chain\n")
+		if f.save == "" && attempt < 4 && transientSample {
+			continue
 		}
 		return fmt.Errorf("Python diagnostic failed: %w\n%s\nuse the Python PID and a matching interpreter, and check process-inspection permissions on the app host", err, stderr.String())
 	}
