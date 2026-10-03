@@ -106,7 +106,7 @@ on_success = "roll"
 			case "live-drift":
 				driftSQL = "UPDATE apps SET min_warm_replicas=8 WHERE id=?"
 			case "omitted-identity-drift":
-				driftSQL = "UPDATE apps SET identity_headers=1 WHERE id=?"
+				driftSQL = "UPDATE apps SET identity_headers=TRUE WHERE id=?"
 			case "omitted-usage-policy-drift":
 				driftSQL = "UPDATE apps SET usage_identity_mode='disabled' WHERE id=?"
 			case "changed-manifest", "changed-manifest-with-downtime":
