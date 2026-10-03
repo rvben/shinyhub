@@ -50,8 +50,8 @@ func (h *FargateBundleHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	digest := chi.URLParam(r, "digest")
-	bearer := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if bearer == "" {
+	scheme, bearer, separated := strings.Cut(r.Header.Get("Authorization"), " ")
+	if !separated || !strings.EqualFold(scheme, "Bearer") || bearer == "" {
 		writeError(w, http.StatusUnauthorized, "missing bearer token")
 		return
 	}

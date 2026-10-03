@@ -130,19 +130,48 @@ func TestFargateBundleHandler_ValidToken(t *testing.T) {
 	r.Get("/internal/fargate-bundle/{digest}", h.Handle)
 
 	tok := bundletoken.Mint(secret, digest, 10*time.Minute, time.Now().Unix())
-	req := httptest.NewRequest("GET", "/internal/fargate-bundle/"+digest, nil)
-	req.Header.Set("Authorization", "Bearer "+tok)
-	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	for _, scheme := range []string{"Bearer", "bearer", "BEARER", "bEaReR"} {
+		t.Run(scheme, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/internal/fargate-bundle/"+digest, nil)
+			req.Header.Set("Authorization", scheme+" "+tok)
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+			}
+			if ct := rec.Header().Get("Content-Type"); ct != "application/zip" {
+				t.Fatalf("want Content-Type application/zip, got %q", ct)
+			}
+			body, _ := io.ReadAll(rec.Body)
+			if string(body) != "fakebundledata" {
+				t.Fatalf("unexpected body %q", body)
+			}
+		})
 	}
-	if ct := rec.Header().Get("Content-Type"); ct != "application/zip" {
-		t.Fatalf("want Content-Type application/zip, got %q", ct)
-	}
-	body, _ := io.ReadAll(rec.Body)
-	if string(body) != "fakebundledata" {
-		t.Fatalf("unexpected body %q", body)
+}
+
+func TestFargateBundleHandler_RejectsOtherSchemes(t *testing.T) {
+	secret := []byte("aaaabbbbccccddddeeeeffffgggghhhh")
+	appsDir := t.TempDir()
+	store, digest := makeBundleTestDB(t, appsDir)
+	h := NewFargateBundleHandler(store, appsDir, secret)
+	r := chi.NewRouter()
+	r.Get("/internal/fargate-bundle/{digest}", h.Handle)
+	tok := bundletoken.Mint(secret, digest, 10*time.Minute, time.Now().Unix())
+	for name, authorization := range map[string]string{
+		"no scheme": tok, "wrong scheme": "Basic " + tok,
+		"scheme prefix": "BearerX " + tok, "missing token": "bearer ",
+		"invalid token": "bearer invalid",
+	} {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/internal/fargate-bundle/"+digest, nil)
+			req.Header.Set("Authorization", authorization)
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, req)
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("want 401, got %d", rec.Code)
+			}
+		})
 	}
 }
 
