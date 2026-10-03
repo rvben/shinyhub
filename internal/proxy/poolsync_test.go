@@ -3,6 +3,7 @@ package proxy_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/api"
+	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/dbtest"
 	"github.com/rvben/shinyhub/internal/proxy"
@@ -24,6 +27,14 @@ import (
 type staticSource struct {
 	rows []db.RoutableReplica
 	err  error
+}
+
+type checkingRoutableSource struct {
+	read func() ([]db.RoutableReplica, error)
+}
+
+func (s checkingRoutableSource) ListRoutableReplicas() ([]db.RoutableReplica, error) {
+	return s.read()
 }
 
 func (s *staticSource) ListRoutableReplicas() ([]db.RoutableReplica, error) {
@@ -84,6 +95,88 @@ func makeReplica(slug string, appID int64, idx int, url string, depID int64) db.
 }
 
 // --- tests ---
+
+func TestPoolSyncerPreservesDeploymentPoolDuringLifecycleMutation(t *testing.T) {
+	for _, targeted := range []bool{false, true} {
+		t.Run(fmt.Sprintf("targeted=%t", targeted), func(t *testing.T) {
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Write([]byte("healthy deployment"))
+			}))
+			defer backend.Close()
+			prx := proxy.New()
+			cfg := &config.Config{Storage: config.StorageConfig{AppsDir: t.TempDir()}}
+			store := dbtest.New(t)
+			srv := api.New(cfg, store, nil, prx)
+			defer srv.Close()
+			// A second server sharing storage must respect the same fence;
+			// looking only at the first server's in-memory locks is insufficient.
+			guardServer := api.New(cfg, store, nil, nil)
+			defer guardServer.Close()
+			syncer := proxy.NewPoolSyncer(prx, &staticSource{}, noopTransport{}, slog.Default(), false)
+			syncer.SetReconcileGuard(guardServer.TryAcquireFleetReconciliation)
+			release, err := srv.AcquireAppOperation("deploying-app")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer release()
+			prx.SetPoolAppID("deploying-app", 1)
+			prx.SetPoolSize("deploying-app", 1)
+			sync := func() {
+				if targeted {
+					syncer.SyncSlug(context.Background(), "deploying-app")
+				} else {
+					syncer.RunOnce(context.Background())
+				}
+			}
+			// A deployment reserves its slots before starting a process. Until
+			// promotion, those slots need not appear in the routable DB snapshot.
+			sync()
+			if err := prx.RegisterReplica("deploying-app", 0, backend.URL, nil, 42, 1); err != nil {
+				t.Fatalf("reconciliation erased an in-flight deployment pool: %v", err)
+			}
+			prx.MarkSynced()
+			rec := httptest.NewRecorder()
+			prx.ServeHTTP(rec, httptest.NewRequest("GET", "/app/deploying-app/", nil))
+			if rec.Code != http.StatusOK || rec.Body.String() != "healthy deployment" {
+				t.Fatalf("healthy deployment unavailable: %d %q", rec.Code, rec.Body.String())
+			}
+			release()
+			// Once the mutation ends, missing authoritative rows must remove
+			// the route normally, including on repeated reconciliation.
+			sync()
+			sync()
+			if prx.HasLiveReplica("deploying-app") {
+				t.Fatal("reconciliation did not remove a vanished replica after the mutation ended")
+			}
+		})
+	}
+}
+
+func TestPoolSyncerFencesSnapshotReadAndReleasesAfterDatabaseError(t *testing.T) {
+	prx := proxy.New()
+	srv := api.New(&config.Config{Storage: config.StorageConfig{AppsDir: t.TempDir()}}, dbtest.New(t), nil, prx)
+	defer srv.Close()
+	read := false
+	source := checkingRoutableSource{read: func() ([]db.RoutableReplica, error) {
+		read = true
+		if release, ok := srv.TryAcquireAppOperation("another-app"); ok {
+			release()
+			t.Error("a lifecycle mutation could race the snapshot read")
+		}
+		return nil, fmt.Errorf("database unavailable")
+	}}
+	syncer := proxy.NewPoolSyncer(prx, source, noopTransport{}, slog.Default(), false)
+	syncer.SetReconcileGuard(srv.TryAcquireFleetReconciliation)
+	syncer.RunOnce(context.Background())
+	if !read {
+		t.Fatal("idle reconciliation did not read its authoritative snapshot")
+	}
+	release, ok := srv.TryAcquireAppOperation("another-app")
+	if !ok {
+		t.Fatal("failed reconciliation left lifecycle mutations fenced")
+	}
+	release()
+}
 
 // TestPoolSyncer_BuildsPoolFromRows asserts that a standby with an empty pool
 // can serve an app after one sync tick.

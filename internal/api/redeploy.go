@@ -150,6 +150,19 @@ func (s *Server) TryAcquireAppOperation(slug string) (release func(), ok bool) {
 	return release, release != nil
 }
 
+// TryAcquireFleetReconciliation excludes lifecycle mutations without waiting
+// for an ongoing deploy. The shared fleet fence is held by every app operation.
+func (s *Server) TryAcquireFleetReconciliation() (release func(), ok bool) {
+	release, err := s.acquireFleetMutationFence(unix.LOCK_EX | unix.LOCK_NB)
+	if err != nil {
+		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EAGAIN) {
+			slog.Error("acquire fleet reconciliation fence", "err", err)
+		}
+		return nil, false
+	}
+	return release, true
+}
+
 // AcquireAppOperation serializes a foreground demand operation with every
 // deploy, rollback, scale, stop, and activation for the same app. Unlike the
 // watcher-oriented Try form, demand paths may wait because they already run in

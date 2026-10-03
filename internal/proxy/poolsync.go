@@ -46,7 +46,14 @@ type PoolSyncer struct {
 	// validate checks a newly adopted endpoint before it becomes routable. Live
 	// unchanged routes retain their readiness; deployment registers new routes
 	// only after its own health check.
-	validate func(context.Context, db.RoutableReplica, http.RoundTripper) error
+	validate       func(context.Context, db.RoutableReplica, http.RoundTripper) error
+	reconcileGuard func() (release func(), ok bool)
+}
+
+// SetReconcileGuard excludes lifecycle mutations while a snapshot is read and
+// applied. A busy guard skips this pass; reconciliation retries on the next tick.
+func (s *PoolSyncer) SetReconcileGuard(fn func() (func(), bool)) {
+	s.reconcileGuard = fn
 }
 
 // SetReplicaValidator installs the adoption readiness check before serving.
@@ -103,6 +110,13 @@ func (s *PoolSyncer) RunOnce(ctx context.Context) {
 // a cold-start or scale-up), so the extra scan cost is negligible.
 // A per-slug query is a future optimisation at large fleet scale.
 func (s *PoolSyncer) SyncSlug(ctx context.Context, slug string) {
+	if s.reconcileGuard != nil {
+		release, ok := s.reconcileGuard()
+		if !ok {
+			return
+		}
+		defer release()
+	}
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	rows, err := s.store.ListRoutableReplicas()
@@ -122,6 +136,13 @@ func (s *PoolSyncer) SyncSlug(ctx context.Context, slug string) {
 
 // sync fetches all routable replicas and reconciles every slug.
 func (s *PoolSyncer) sync(ctx context.Context) error {
+	if s.reconcileGuard != nil {
+		release, ok := s.reconcileGuard()
+		if !ok {
+			return nil
+		}
+		defer release()
+	}
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	rows, err := s.store.ListRoutableReplicas()

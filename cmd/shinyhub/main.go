@@ -1579,6 +1579,11 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 			"instance", cfg.Server.InstanceID)
 	}
 
+	srv := api.New(cfg, store, mgr, prx)
+	defer srv.Close()
+	srv.SetUsagePolicy(usagePolicy)
+	srv.SetVersion(version)
+
 	// In clustered deployments every instance runs a pool syncer that
 	// reconciles the proxy's backend pools against the DB replica table.
 	// This lets standbys serve off-host apps without relying on the local
@@ -1591,6 +1596,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		transportBuilder := worker.NewReplicaTransportBuilder(dialer, store)
 		syncer := proxy.NewPoolSyncer(prx, store, transportBuilder, slog.Default(), cfg.Auth.IdentityHeadersEnabled())
 		syncer.SetReplicaValidator(lifecycle.ReplicaRouteValidator(store, mgr))
+		syncer.SetReconcileGuard(srv.TryAcquireFleetReconciliation)
 		syncerCtx, cancelSyncer := context.WithCancel(context.Background())
 		syncerCancel = cancelSyncer
 		syncerWG.Add(1)
@@ -1606,10 +1612,6 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		slog.Info("pool syncer started", "interval", proxy.PoolSyncInterval)
 	}
 
-	srv := api.New(cfg, store, mgr, prx)
-	defer srv.Close()
-	srv.SetUsagePolicy(usagePolicy)
-	srv.SetVersion(version)
 	if fc := cfg.Runtime.Fargate; fc.Cluster != "" {
 		var opts []func(*awsconfig.LoadOptions) error
 		if fc.Region != "" {
