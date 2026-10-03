@@ -1,5 +1,5 @@
 ---
-description: "Opt-in Linux native workers with dedicated per-app users and a separate systemd broker."
+description: "Configure opt-in Linux native workers with dedicated per-app users, a separate systemd broker, and explicit administrator policy."
 ---
 
 # Native workers with separate app users
