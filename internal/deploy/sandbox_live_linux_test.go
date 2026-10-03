@@ -109,3 +109,47 @@ func TestRunSandboxedBuildStep_AllowsManagedPythonWrites_Live(t *testing.T) {
 		t.Errorf("expected the write to land in the per-app uv-python dir: %v", err)
 	}
 }
+
+// Python packages without a wheel (notably on a new interpreter) can invoke
+// Cargo. Its registry cache defaults to HOME/.cargo, outside the build's
+// writable roots. Exercise cache writes through the actual confined child,
+// including an inherited cache location that must remain protected.
+func TestRunSandboxedBuildStep_AllowsCargoCacheWrites_Live(t *testing.T) {
+	if !sandbox.Supported() {
+		t.Skip("no isolation backend on this platform")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home dir for an off-allowlist target")
+	}
+	base, err := os.MkdirTemp(home, "shinyhub-cargo-cache-test-")
+	if err != nil {
+		t.Skipf("home not writable, cannot stage an off-allowlist target: %v", err)
+	}
+	defer os.RemoveAll(base)
+	buildDir := filepath.Join(base, "app")
+	outside := filepath.Join(base, "operator-cache")
+	for _, path := range []string{buildDir, outside} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	script := `grep NoNewPrivs /proc/self/status;
+if ! grep -q '^NoNewPrivs:[[:space:]]*1$' /proc/self/status; then exit 78; fi
+mkdir -p "$CARGO_HOME/registry/cache" && printf crate > "$CARGO_HOME/registry/cache/probe"`
+	out, runErr := runSandboxedBuildStep(context.Background(), buildDir,
+		[]string{"sh", "-c", script}, []string{"CARGO_HOME=" + outside})
+	if !strings.Contains(string(out), "NoNewPrivs:\t1") {
+		t.Skipf("Landlock not active on this kernel: %s", out)
+	}
+	if runErr != nil {
+		t.Fatalf("Cargo registry writes must succeed inside the build: %v\n%s", runErr, out)
+	}
+	if _, err := os.Stat(filepath.Join(buildDir, ".cargo", "registry", "cache", "probe")); err != nil {
+		t.Fatalf("Cargo cache was not written inside the build: %v", err)
+	}
+	entries, err := os.ReadDir(outside)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("outside cache changed: entries=%v err=%v", entries, err)
+	}
+}

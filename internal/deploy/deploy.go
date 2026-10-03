@@ -138,7 +138,7 @@ func sandboxedCommand(dir string, argv []string) (wrapped, extraEnv, writePaths 
 // itself.
 //
 // Two writable trees beyond the shared scratch areas:
-//   - absDir, the build/bundle dir (.venv, .uv-cache, .cache, .renv-cache);
+//   - absDir, the build/bundle dir (.venv, .uv-cache, .cache, .renv-cache, .cargo);
 //   - the managed-Python dir, where uv provisions a downloaded interpreter
 //     when no system Python satisfies the bundle's requires-python. That store
 //     is a DATA dir (UV_PYTHON_INSTALL_DIR / XDG_DATA_HOME), not a cache, so
@@ -163,14 +163,15 @@ func buildConfinement(absDir string) (sandbox.Spec, []string) {
 	}
 	spec := sandbox.ComputeSpec(sandboxBuildLevel, absDir, pyDir)
 	env := []string{
-		// uv/renv default to a per-user cache outside dir; under the standard
+		// uv/renv/Cargo default to per-user caches outside dir; under the standard
 		// tier's read-only root that write would be denied and dependency
-		// resolution would fail even with network access, so both tools'
-		// caches are redirected into the writable build dir. Mirrors
-		// sandboxLaunchEnv in internal/process/native.go.
+		// resolution would fail even with network access, so these tools'
+		// caches are redirected into the writable build dir.
 		"UV_CACHE_DIR=" + filepath.Join(absDir, ".uv-cache"),
 		"XDG_CACHE_HOME=" + filepath.Join(absDir, ".cache"),
 		"RENV_PATHS_ROOT=" + filepath.Join(absDir, ".renv-cache"),
+		// Native Python dependencies can invoke Cargo when no wheel matches.
+		"CARGO_HOME=" + filepath.Join(absDir, ".cargo"),
 		"UV_PYTHON_INSTALL_DIR=" + pyDir,
 	}
 	// The renv policy (see process.RenvPolicyEnv) applies to the build for the
