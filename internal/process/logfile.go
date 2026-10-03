@@ -50,6 +50,11 @@ func (w *fanoutLogWriter) Close() error {
 // the file is rotated to app.log.1 and a fresh file is started.
 const DefaultLogMaxSize = 5 << 20
 
+// rotateBackoff bounds how often a failed rotation is retried. Without it a
+// persistent failure (EMFILE, ENOSPC, EACCES) is retried on every subsequent
+// oversized write; with it, one retry every 30s.
+const rotateBackoff = 30 * time.Second
+
 // LogFile is a size-capped, append-only log destination for one app process.
 // It implements io.WriteCloser and is safe for concurrent writes from the
 // stdout and stderr goroutines that the OS spawns when cmd.Stdout and
@@ -61,6 +66,21 @@ type LogFile struct {
 	backup  string
 	size    int64
 	maxSize int64
+
+	// pendingNext and onBackup track a rotation that renamed the current
+	// file to <path>.1 but could not rename its replacement into place.
+	// file keeps writing to the backup until a later retry renames
+	// pendingNext's file into <path> and swaps it in.
+	pendingNext    *os.File
+	onBackup       bool
+	rotateFailedAt time.Time
+
+	// rename and openFile are injection points so tests can simulate
+	// rotation failures (EMFILE, ENOSPC, EACCES) deterministically instead
+	// of relying on filesystem permission tricks.
+	rename   func(oldpath, newpath string) error
+	openFile func(name string, flag int, perm os.FileMode) (*os.File, error)
+	now      func() time.Time
 }
 
 // OpenLogFile opens or creates the log file at path for appending.
@@ -78,19 +98,25 @@ func OpenLogFile(path string, maxSize int64) (*LogFile, error) {
 		return nil, err
 	}
 	return &LogFile{
-		file:    f,
-		path:    path,
-		backup:  path + ".1",
-		size:    info.Size(),
-		maxSize: maxSize,
+		file:     f,
+		path:     path,
+		backup:   path + ".1",
+		size:     info.Size(),
+		maxSize:  maxSize,
+		rename:   os.Rename,
+		openFile: os.OpenFile,
+		now:      time.Now,
 	}, nil
 }
 
-// Write implements io.Writer. Rotates when the size cap would be exceeded.
+// Write implements io.Writer. Rotates when the size cap would be exceeded,
+// except when the file is still empty (a single write larger than maxSize is
+// written in place rather than rotating a file with nothing in it) or a
+// previous rotation attempt is still within its backoff window.
 func (l *LogFile) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.size+int64(len(p)) > l.maxSize {
+	if l.size > 0 && l.size+int64(len(p)) > l.maxSize && l.rotateReady() {
 		l.rotate()
 	}
 	n, err := l.file.Write(p)
@@ -98,34 +124,111 @@ func (l *LogFile) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// rotate renames the current file to <path>.1 and opens a fresh file.
-// Must be called with l.mu held.
-func (l *LogFile) rotate() {
-	l.file.Close()
-	if err := os.Rename(l.path, l.backup); err != nil {
-		// Rename failed — reopen the existing file for appending so writes continue.
-		if f, err2 := os.OpenFile(l.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o640); err2 == nil {
-			l.file = f
-		}
-		return
-	}
-	// Rename succeeded — open a fresh file at the primary path.
-	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY, 0o640)
-	if err != nil {
-		// Can't open new file — fall back to the backup so writes don't stop.
-		if f2, err2 := os.OpenFile(l.backup, os.O_APPEND|os.O_WRONLY, 0o640); err2 == nil {
-			l.file = f2
-		}
-		return
-	}
-	l.file = f
-	l.size = 0
+// rotateReady reports whether enough time has passed since the last failed
+// rotation attempt to retry, so a persistent failure backs off instead of
+// retrying on every write.
+func (l *LogFile) rotateReady() bool {
+	return l.rotateFailedAt.IsZero() || l.now().Sub(l.rotateFailedAt) >= rotateBackoff
 }
 
-// Close flushes and closes the underlying file.
+// rotate replaces the current file with a fresh one, retaining exactly one
+// backup at <path>.1. It never closes the handle currently being written to
+// before a replacement is ready, and a failed attempt never destroys an
+// existing backup that a completed rotation did not earn.
+//
+// A first attempt opens the replacement before touching <path>: (1) create
+// <path>.next; (2) rename <path> to <path>.1; (3) rename <path>.next to
+// <path>. Only after (3) succeeds does it close the old handle and swap in
+// the new one. A failure at (1) leaves the current file and any existing
+// backup untouched. A failure at (2) removes the now-orphaned <path>.next
+// and leaves the existing backup untouched. A failure at (3) first tries to
+// roll step (2) back by renaming <path>.1 to <path> again, so the live log
+// stays at the path readers open; the handle keeps writing to the same file
+// either way. Only if that rollback also fails is the current file left at
+// <path>.1, with <path>.next kept open so a later retry only repeats step
+// (3) instead of recreating it.
+// Must be called with l.mu held.
+func (l *LogFile) rotate() {
+	next := l.path + ".next"
+
+	if l.onBackup {
+		// Steps (1) and (2) already happened: the retained handle already
+		// writes to what is now the backup, and pendingNext already holds
+		// the open replacement. Retry only step (3).
+		if err := l.rename(next, l.path); err != nil {
+			l.rotateFailedAt = l.now()
+			if l.rollBackToPrimary() {
+				l.discardPendingNext()
+			}
+			return
+		}
+		old := l.file
+		l.file = l.pendingNext
+		l.pendingNext = nil
+		l.onBackup = false
+		l.size = 0
+		l.rotateFailedAt = time.Time{}
+		old.Close()
+		return
+	}
+
+	pending, err := l.openFile(next, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o640)
+	if err != nil {
+		l.rotateFailedAt = l.now()
+		return
+	}
+	if err := l.rename(l.path, l.backup); err != nil {
+		pending.Close()
+		os.Remove(next)
+		l.rotateFailedAt = l.now()
+		return
+	}
+	if err := l.rename(next, l.path); err != nil {
+		l.rotateFailedAt = l.now()
+		l.pendingNext = pending
+		if l.rollBackToPrimary() {
+			l.discardPendingNext()
+			return
+		}
+		l.onBackup = true
+		return
+	}
+	old := l.file
+	l.file = pending
+	l.size = 0
+	l.rotateFailedAt = time.Time{}
+	old.Close()
+}
+
+// rollBackToPrimary undoes step (2) of a rotation whose step (3) failed by
+// renaming the current file from <path>.1 back to <path>, so readers of the
+// primary path keep seeing the live log. It reports whether the rename
+// succeeded. Must be called with l.mu held.
+func (l *LogFile) rollBackToPrimary() bool {
+	return l.rename(l.backup, l.path) == nil
+}
+
+// discardPendingNext closes and removes the unused rotation replacement after
+// a rollback, leaving no half-finished rotation behind. Must be called with
+// l.mu held.
+func (l *LogFile) discardPendingNext() {
+	if l.pendingNext != nil {
+		l.pendingNext.Close()
+		l.pendingNext = nil
+	}
+	os.Remove(l.path + ".next")
+	l.onBackup = false
+}
+
+// Close flushes and closes the underlying file, plus a rotation replacement
+// left open by an unfinished retry so it is never leaked.
 func (l *LogFile) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.pendingNext != nil {
+		l.pendingNext.Close()
+		l.pendingNext = nil
+	}
 	return l.file.Close()
 }
 
@@ -176,7 +279,7 @@ func parseLogRunFile(name string) (index int, runID string, backup bool, ok bool
 	}
 	index, err := strconv.Atoi(body[:cut])
 	runID = body[cut+1:]
-	if err != nil || index < 0 || index > 255 || !validLogRunID(runID) {
+	if err != nil || index < 0 || !validLogRunID(runID) {
 		return 0, "", false, false
 	}
 	return index, runID, backup, true
@@ -311,7 +414,7 @@ func ListLogSources(appsDir, slug string) ([]LogSource, error) {
 		}
 		raw := strings.TrimSuffix(strings.TrimPrefix(name, "app-"), ".log")
 		index, err := strconv.Atoi(raw)
-		if err != nil || index < 0 || index > 255 {
+		if err != nil || index < 0 {
 			continue
 		}
 		info, err := entry.Info()

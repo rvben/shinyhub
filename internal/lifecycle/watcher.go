@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime/debug"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
+	"github.com/rvben/shinyhub/internal/safego"
 	"github.com/rvben/shinyhub/internal/spanerr"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -60,6 +62,148 @@ type replicaKey struct {
 	index int
 }
 
+// pendingStopKind distinguishes why a replica was queued for a confirmed-stop
+// retry, since different origins may need different bookkeeping once the
+// retry succeeds. Only one origin exists today.
+type pendingStopKind int
+
+const (
+	// pendingStopRecoveryUnready queues a replica that startup recovery
+	// adopted but could not confirm-stop before it was about to be restarted
+	// (an unconfirmed SIGTERM/SIGKILL, or a Wait that proved nothing). Once
+	// the retry confirms the exit (or the incarnation is gone, itself proof
+	// of exit), the row is marked crashed and its runtime identity cleared.
+	pendingStopRecoveryUnready pendingStopKind = iota
+	// pendingStopElasticHibernate queues an elastic worker slot that went
+	// idle (hibernatePool's elastic branch) but whose stop or deployment
+	// replica identity delete had not finished by the time the app's status
+	// had to move to hibernated. Unlike pendingStopRecoveryUnready this never
+	// writes a replica row (elastic workers have none): the retry only
+	// re-attempts the unfinished half via TerminateConfirmed's building
+	// blocks, keyed on the identity captured before the stop was first
+	// attempted.
+	pendingStopElasticHibernate
+	// pendingStopElasticRecovery queues a native elastic worker identity that
+	// startup recovery found recorded in deployment_replicas from before the
+	// restart but could not confirm stopped. Unlike pendingStopRecoveryUnready
+	// the worker was never adopted into the manager - it is a ledger row, not
+	// a replica row - so the retry re-runs recovery's own PID/bundle-identity
+	// checked signal path instead of StopReplicaIncarnation, and on success
+	// deletes the deployment replica identity row rather than marking a
+	// replica crashed.
+	pendingStopElasticRecovery
+)
+
+// PendingStopEntry queues one replica whose confirmed stop could not be
+// proven at the time it was requested. Every retry is bounded and continues
+// the stop's escalation where the previous one left off; see
+// processPendingStops for how retries share a tick.
+//
+// For Kind == pendingStopRecoveryUnready, the watcher retries
+// StopReplicaIncarnationWithin against Incarnation each tick until the exit is
+// confirmed, or the incarnation is gone (which is itself proof the process
+// exited), and then durably records the outcome via
+// MarkReplicaCrashedClearingIdentityIfCurrent, conditioned on the runtime
+// identity the entry was queued with (replicaIdentity), so a fast restart
+// that has since reused the row can never be mistaken for the placement this
+// entry meant to stop.
+//
+// For Kind == pendingStopElasticHibernate, the watcher retries
+// StopReplicaIncarnationWithin against Incarnation each tick until the exit is
+// confirmed or the incarnation is gone, records that in Stopped, then (when
+// Native) deletes the deployment replica identity row keyed by
+// AppID/DeploymentID/Index/PID. Once Stopped is set the slot is free and may
+// already hold a replacement, so an identity-only retry never signals it
+// again. It never re-looks-up the worker via GetReplica: a confirmed stop
+// removes the manager entry, so the identity fields captured at queue time
+// are the only copy left.
+//
+// For Kind == pendingStopElasticRecovery, the watcher steps
+// stepRecordedNativeStop against PID/DeploymentID each tick, re-running the
+// same bundle-identity check recovery used before every signal it sends, and
+// once confirmed (recorded in Stopped) deletes the deployment replica identity row
+// keyed by AppID/DeploymentID/Index/PID. Like pendingStopElasticHibernate
+// this never writes a replica row - the worker was never adopted into the
+// manager.
+type PendingStopEntry struct {
+	Kind         pendingStopKind
+	Slug         string
+	Index        int
+	AppID        int64
+	PID          int
+	Incarnation  uint64
+	Reason       string
+	LogRunID     string
+	DeploymentID int64
+	// Port, EndpointURL and WorkerID complete, with PID and DeploymentID,
+	// the replica row identity a pendingStopRecoveryUnready entry was queued
+	// for (see replicaIdentity). Container and remote runtimes persist pid 0
+	// for every placement, so PID alone cannot tell a replacement apart.
+	Port        int
+	EndpointURL string
+	WorkerID    string
+	Native      bool
+	// Stopped records that the exit was already confirmed, so a retry that
+	// only has the identity row left to clear never signals the slot again.
+	Stopped bool
+
+	// lastAttempt is when processPendingStops last started a retry of this
+	// entry. Retries run least recently attempted first, so entries a
+	// spent tick budget skipped go first on the next tick.
+	lastAttempt time.Time
+	// nativeStop carries a pendingStopElasticRecovery entry's escalation
+	// across ticks, so each bounded retry continues from the last signal
+	// sent instead of restarting at SIGTERM.
+	nativeStop nativeStopProgress
+}
+
+// replicaIdentity is the replica row identity a pendingStopRecoveryUnready
+// entry may crash-mark once its stop is confirmed.
+func (e PendingStopEntry) replicaIdentity() db.ReplicaRuntimeIdentity {
+	return db.ReplicaRuntimeIdentity{
+		PID: e.PID, Port: e.Port, EndpointURL: e.EndpointURL,
+		WorkerID: e.WorkerID, DeploymentID: e.DeploymentID,
+	}
+}
+
+// sameQueuedStop reports whether cur is still the queued entry e was copied
+// from, so a write-back never lands on an entry that replaced it.
+func (e PendingStopEntry) sameQueuedStop(cur PendingStopEntry) bool {
+	return cur.Kind == e.Kind && cur.PID == e.PID && cur.Incarnation == e.Incarnation && cur.DeploymentID == e.DeploymentID
+}
+
+// pendingStopKey identifies one queued entry. Every kind but
+// pendingStopElasticRecovery keys on the slot alone, so re-queueing a slot
+// replaces its entry. A pendingStopElasticRecovery entry also carries its
+// deployment generation: recovery can find unconfirmed worker identities at
+// the same index in several elastic generations, and each one must keep its
+// own retry until its row is deleted.
+type pendingStopKey struct {
+	slug         string
+	index        int
+	deploymentID int64
+}
+
+func (e PendingStopEntry) queueKey() pendingStopKey {
+	k := pendingStopKey{slug: e.Slug, index: e.Index}
+	if e.Kind == pendingStopElasticRecovery {
+		k.deploymentID = e.DeploymentID
+	}
+	return k
+}
+
+// pendingLogFinish is one terminal log-run verdict waiting to be persisted.
+type pendingLogFinish struct {
+	slug       string
+	index      int
+	runID      string
+	finishedAt time.Time
+	oomKilled  bool
+	exitCode   *int
+	signal     string
+	reason     string
+}
+
 // manager is the subset of *process.Manager used by the Watcher.
 // The interface enables testing with fakes without starting real processes.
 type manager interface {
@@ -82,6 +226,42 @@ type manager interface {
 	// the given tier/worker (nil selects the default local transport). Used
 	// when re-registering a still-live replica's proxy route after a revive.
 	TransportForWorker(tier, nodeID string) http.RoundTripper
+	// StopReplicaIncarnation makes a full confirmed stop against exactly the
+	// incarnation gen identifies, never a replacement that has since taken
+	// the slot. Used by an aborted wake to stop the replicas it started.
+	StopReplicaIncarnation(slug string, index int, gen uint64) error
+	// StopReplicaIncarnationWithin is StopReplicaIncarnation bounded by
+	// budget: it sends at most the next signal the escalation is due for,
+	// waits up to budget for proof of exit, and otherwise returns
+	// ErrStopUnconfirmed so a later call can continue. Used by the
+	// pending-stop retry loop so one stuck process cannot stall a tick.
+	StopReplicaIncarnationWithin(slug string, index int, gen uint64, budget time.Duration) error
+	// ReleaseStopPending removes a stopPending entry once its exit has been
+	// durably recorded, clearing the fence that kept Start and the watchdog
+	// away from the slot. Used by the pending-stop retry loop once its DB
+	// write succeeds.
+	ReleaseStopPending(slug string, index int, gen uint64)
+	// AllForSlug returns every tracked replica for slug, nil for down slots.
+	// Used by hibernatePool's elastic branch to enumerate the live worker
+	// slots a hibernating elastic pool must stop.
+	AllForSlug(slug string) []*process.ProcessInfo
+	// RuntimeForTier returns the runtime backing a replica's tier, falling
+	// back to the default tier. Used by hibernateElasticPool's no-terminator
+	// fallback to classify a slot as native the same way TerminateConfirmed
+	// does, when no ElasticSpawner is wired to ask directly.
+	RuntimeForTier(tier string) process.Runtime
+	// ReplicaIncarnation returns the current occupant's incarnation and PID
+	// for slug/index, or ok=false when the slot is empty. Used by the wake
+	// per-replica goroutine to capture enough identity, right after a replica
+	// starts, to stop it with confirmed semantics if a later step in the same
+	// wake attempt fails or panics.
+	ReplicaIncarnation(slug string, index int) (gen uint64, pid int, ok bool)
+	// ClaimStopPending marks a stopPending entry's fence as claimed by a retry
+	// queue, keyed to the exact incarnation gen identifies; a mismatch is a
+	// no-op returning false. Used by the pending-stop retry loop's callers so
+	// the exit monitor leaves the fence for ReleaseStopPending instead of
+	// clearing it once the process's exit is proven.
+	ClaimStopPending(slug string, index int, gen uint64) bool
 }
 
 // proxyBackend is the subset of *proxy.Proxy used by the Watcher.
@@ -147,6 +327,27 @@ type appStore interface {
 	// the failure of a restart launched from a lost row; RecordReplicaCrash
 	// leaves lost rows untouched.
 	RecordReplicaCrashFromLost(p db.UpsertReplicaParams) error
+	// MarkReplicaCrashedClearingIdentityIfCurrent atomically marks a
+	// replica crashed and clears its runtime identity, conditioned on the row
+	// still carrying expect. Used by the pending-stop retry loop once a
+	// queued unconfirmed stop is finally confirmed (or proven gone).
+	MarkReplicaCrashedClearingIdentityIfCurrent(p db.UpsertReplicaParams, expect db.ReplicaRuntimeIdentity) (bool, error)
+	// FinishAppLogRunWithExit closes an app log run with its terminal exit
+	// verdict. Used by the pending-stop retry loop to close the log run of a
+	// replica whose stop it just confirmed.
+	FinishAppLogRunWithExit(runID, status string, finishedAt time.Time, oomKilled bool, exitCode *int, signal, reason string) error
+	// DeleteDeploymentReplicaIdentity removes a confirmed-stopped native
+	// elastic worker's deployment replica row, conditioned on app/deployment/
+	// index/pid so a row already reused by a later worker is left alone. A
+	// no-op (nil error) when no row matches. Used by the elastic-hibernate
+	// pending-stop retry once TerminateConfirmed's own attempt did not clear
+	// it inline.
+	DeleteDeploymentReplicaIdentity(appID, deploymentID int64, index, pid int) error
+	// GetDeploymentByID loads a deployment's bundle directory so a
+	// pendingStopElasticRecovery retry can re-validate a recorded native
+	// process's identity exactly as startup recovery did, before signalling
+	// it again.
+	GetDeploymentByID(id int64) (*db.Deployment, error)
 	ListReconcilableApps() ([]*db.App, error)
 	// ListCrashedAppsWithLostReplicas returns crashed apps that still have at
 	// least one lost replica - apps terminalized by budget spent against a dead
@@ -195,10 +396,22 @@ type appStore interface {
 	AppCompatibilityQuarantined(appID int64) (bool, error)
 }
 
+// elasticTerminator is the subset of *lifecycle.ElasticSpawner used by the
+// Watcher to stop elastic worker slots on hibernate. A separate interface
+// (rather than folding TerminateConfirmed into manager) because it is
+// implemented by ElasticSpawner, not *process.Manager: the confirmed stop is
+// only half of what hibernation needs done per slot (identity cleanup and
+// proxy deregistration are the other half), and ElasticSpawner already owns
+// all three.
+type elasticTerminator interface {
+	TerminateConfirmed(slug string, slotID int) ElasticTerminateResult
+}
+
 // Compile-time interface satisfaction checks.
 var _ manager = (*process.Manager)(nil)
 var _ proxyBackend = (*proxy.Proxy)(nil)
 var _ appStore = (*db.Store)(nil)
+var _ elasticTerminator = (*ElasticSpawner)(nil)
 
 // Watcher owns crash-restart and idle-hibernation policy. It runs a background
 // loop that inspects process state on each tick and takes corrective action.
@@ -261,6 +474,24 @@ type Watcher struct {
 	// seenExitSequence prevents a crashed manager entry from being counted again
 	// on every watchdog tick while its restart is still inside backoff.
 	seenExitSequence map[replicaKey]int
+	// pendingStops holds replicas whose confirmed stop could not be proven
+	// when it was requested (currently: recovery adopting a not-yet-healthy
+	// process it then failed to confirm-stop). Each tick retries the stop
+	// against the exact incarnation queued; see processPendingStops. Entries
+	// fence both the crash dispatch loop and reconcileReplicas so nothing
+	// else drives the slot while a retry might still be racing the old
+	// process. Guarded by mu like the other per-replica maps above.
+	pendingStops map[pendingStopKey]PendingStopEntry
+	// pendingStopRetry and pendingStopTick override the default per-entry
+	// and per-tick pending-stop budgets when positive. Tests only.
+	pendingStopRetry time.Duration
+	pendingStopTick  time.Duration
+	// pendingLogFinishes holds terminal log-run verdicts whose write failed
+	// after their stop was already confirmed and recorded, keyed by run ID.
+	// Each tick retries them; unlike pendingStops they fence nothing, since
+	// the process is provably gone and only the run history is behind.
+	// Guarded by mu.
+	pendingLogFinishes map[string]pendingLogFinish
 	// driving tracks slugs currently being driven by driveWakingApp so a
 	// concurrent trigger (e.g. inline from the miss path and from the reconciler)
 	// does not spawn two parallel deploys for the same wake. The guard is
@@ -294,6 +525,20 @@ type Watcher struct {
 	// acquireConsumerBootGate serializes fresh consumer startup with serving-data
 	// publishers. nil is safe when no jobs manager is configured.
 	acquireConsumerBootGate func(appID int64) (func(), error)
+
+	// elasticTerm stops elastic worker slots with a confirmed exit on
+	// hibernate. nil leaves an elastic app's hibernatePool branch unable to
+	// stop anything (every live slot is queued for retry instead of being
+	// terminated inline); production always wires it via
+	// SetElasticTerminator. Set once at startup before Start.
+	elasticTerm elasticTerminator
+
+	// testPanicAfterWakeStart, when set, is called with a started replica's
+	// index from inside the wake per-replica goroutine, after the replica's
+	// incarnation is captured but before it is persisted. Test-only hook for
+	// exercising the wake panic-recovery path without a runtime that actually
+	// crashes mid-launch.
+	testPanicAfterWakeStart func(idx int)
 }
 
 // wakeDrainTimeout bounds how long Start waits for outstanding wake
@@ -323,6 +568,7 @@ func New(cfg Config, mgr *process.Manager, prx *proxy.Proxy, st *db.Store,
 		seenExitSequence: make(map[replicaKey]int),
 		driving:          make(map[string]bool),
 		expandingWarm:    make(map[string]bool),
+		pendingStops:     make(map[pendingStopKey]PendingStopEntry),
 	}
 }
 
@@ -397,9 +643,13 @@ func (w *Watcher) Start(ctx context.Context) {
 // runGuarded runs fn, recovering and logging any panic so a bug in one
 // background loop iteration cannot crash the whole process and take down every
 // app's routing and self-healing. The caller's loop continues on the next tick.
+// A watchdog restart reaches Manager.Start's launch-to-publish window, so a
+// safego.Fatal panic from there is re-panicked instead of absorbed: swallowing
+// it would leave a launched process with no entry tracking it.
 func runGuarded(name string, fn func()) {
 	defer func() {
 		if r := recover(); r != nil {
+			safego.RepanicFatal(r)
 			slog.Error("lifecycle: recovered panic in background loop",
 				"loop", name, "panic", r, "stack", string(debug.Stack()))
 		}
@@ -491,6 +741,320 @@ func (w *Watcher) consumerBootGate(appID int64) (func(), error) {
 	return w.acquireConsumerBootGate(appID)
 }
 
+// SetElasticTerminator wires the confirmed-stop executor for elastic worker
+// slots (*lifecycle.ElasticSpawner). Call once at startup before Start;
+// leaving it unset means an idle elastic app's live slots are queued for
+// retry without an inline stop attempt (they are still eventually stopped,
+// once wired, or reaped by the next process restart's recovery pass).
+func (w *Watcher) SetElasticTerminator(t elasticTerminator) {
+	w.elasticTerm = t
+}
+
+// QueuePendingStop registers a replica whose confirmed stop could not be
+// proven, so the watchdog keeps retrying it instead of driving a slot
+// that may still be occupied by the process the caller meant to stop. Safe
+// to call before Start: recovery calls it during startup, before the
+// watchdog loop begins, and the queue is drained by the first tick.
+func (w *Watcher) QueuePendingStop(e PendingStopEntry) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.pendingStops == nil {
+		w.pendingStops = make(map[pendingStopKey]PendingStopEntry)
+	}
+	w.pendingStops[e.queueKey()] = e
+}
+
+// isPendingStop reports whether any entry for a replica slot is currently
+// queued for a confirmed-stop retry. Callers use it to fence the slot away
+// from every other path that would otherwise drive or crash-record it. The
+// queue holds only stops that could not be confirmed, so the scan stays small.
+func (w *Watcher) isPendingStop(key replicaKey) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for k := range w.pendingStops {
+		if k.slug == key.slug && k.index == key.index {
+			return true
+		}
+	}
+	return false
+}
+
+// Pending-stop retries are bounded so a process that ignores its signals, or
+// a runtime call that hangs, delays the watchdog tick by seconds rather than
+// by a full stop grace per queued entry.
+const (
+	// defaultPendingStopRetryBudget bounds one entry's retry: the next due
+	// signal plus the wait for proof of exit.
+	defaultPendingStopRetryBudget = 2 * time.Second
+	// defaultPendingStopTickBudget bounds the retries one tick starts. The
+	// first entry always runs, so a single entry still makes progress.
+	defaultPendingStopTickBudget = 5 * time.Second
+)
+
+func (w *Watcher) pendingStopRetryBudget() time.Duration {
+	if w.pendingStopRetry > 0 {
+		return w.pendingStopRetry
+	}
+	return defaultPendingStopRetryBudget
+}
+
+func (w *Watcher) pendingStopTickBudget() time.Duration {
+	if w.pendingStopTick > 0 {
+		return w.pendingStopTick
+	}
+	return defaultPendingStopTickBudget
+}
+
+// processPendingStops retries queued unconfirmed stops, at most once per tick
+// each, least recently attempted first, and starts no further retry once the
+// tick budget is spent. Each retry is itself bounded and resumes its
+// escalation where the previous one left off, so an entry skipped this tick
+// loses nothing but time and is first in line on the next. Run at the start
+// of runOnce, before the manager snapshot is taken, so an entry confirmed
+// this tick never appears in that snapshot as StatusCrashed and never needs
+// the runOnce/reconcileReplicas fencing at all.
+func (w *Watcher) processPendingStops() {
+	// Log-run verdicts queued by an earlier tick go first, so one this tick's
+	// stops fail to write waits a full tick rather than retrying at once.
+	w.retryPendingLogFinishes()
+
+	w.mu.Lock()
+	entries := make([]PendingStopEntry, 0, len(w.pendingStops))
+	for _, e := range w.pendingStops {
+		entries = append(entries, e)
+	}
+	w.mu.Unlock()
+
+	sort.Slice(entries, func(i, j int) bool {
+		a, b := entries[i], entries[j]
+		if !a.lastAttempt.Equal(b.lastAttempt) {
+			return a.lastAttempt.Before(b.lastAttempt)
+		}
+		if a.Slug != b.Slug {
+			return a.Slug < b.Slug
+		}
+		if a.Index != b.Index {
+			return a.Index < b.Index
+		}
+		return a.DeploymentID < b.DeploymentID
+	})
+
+	start := time.Now()
+	budget := w.pendingStopTickBudget()
+	for i, e := range entries {
+		if i > 0 && time.Since(start) >= budget {
+			slog.Warn("watcher: pending-stop tick budget spent; deferring remaining retries", "deferred", len(entries)-i)
+			return
+		}
+		e.lastAttempt = time.Now()
+		w.mu.Lock()
+		if cur, ok := w.pendingStops[e.queueKey()]; ok && e.sameQueuedStop(cur) {
+			cur.lastAttempt = e.lastAttempt
+			w.pendingStops[e.queueKey()] = cur
+		}
+		w.mu.Unlock()
+		w.retryPendingStop(e)
+	}
+}
+
+// finishLogRun writes a confirmed exit's terminal verdict to its log run,
+// queuing it for retry on a transient failure. A run that no longer exists
+// (ErrNotFound) has nothing left to close.
+func (w *Watcher) finishLogRun(f pendingLogFinish) {
+	err := w.store.FinishAppLogRunWithExit(f.runID, "crashed", f.finishedAt, f.oomKilled, f.exitCode, f.signal, f.reason)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if err == nil || errors.Is(err, db.ErrNotFound) {
+		delete(w.pendingLogFinishes, f.runID)
+		return
+	}
+	slog.Warn("watcher: close pending-stop log run failed; will retry", "slug", f.slug, "index", f.index, "run_id", f.runID, "err", err)
+	if w.pendingLogFinishes == nil {
+		w.pendingLogFinishes = make(map[string]pendingLogFinish)
+	}
+	w.pendingLogFinishes[f.runID] = f
+}
+
+// retryPendingLogFinishes makes one write attempt for every queued log-run
+// verdict.
+func (w *Watcher) retryPendingLogFinishes() {
+	w.mu.Lock()
+	queued := make([]pendingLogFinish, 0, len(w.pendingLogFinishes))
+	for _, f := range w.pendingLogFinishes {
+		queued = append(queued, f)
+	}
+	w.mu.Unlock()
+	for _, f := range queued {
+		w.finishLogRun(f)
+	}
+}
+
+// retryPendingStop makes one confirmed-stop attempt for a queued entry,
+// dispatching on Kind since the two origins need different follow-up work
+// once the stop is confirmed.
+func (w *Watcher) retryPendingStop(e PendingStopEntry) {
+	switch e.Kind {
+	case pendingStopElasticHibernate:
+		w.retryElasticHibernateStop(e)
+	case pendingStopElasticRecovery:
+		w.retryElasticRecoveryStop(e)
+	default:
+		w.retryRecoveryUnreadyStop(e)
+	}
+}
+
+// retryElasticHibernateStop retries the unfinished half of an elastic worker
+// slot's hibernate teardown: a stop that had not yet been confirmed, or (for
+// a native worker) a deployment replica identity delete that had not yet
+// succeeded. It never re-looks-up the worker via GetReplica - once the stop
+// is confirmed the manager entry is gone, so the identity captured when the
+// entry was queued is the only copy left. The entry is dequeued only once
+// both halves are done.
+func (w *Watcher) retryElasticHibernateStop(e PendingStopEntry) {
+	key := e.queueKey()
+
+	if !e.Stopped {
+		switch err := w.mgr.StopReplicaIncarnationWithin(e.Slug, e.Index, e.Incarnation, w.pendingStopRetryBudget()); {
+		case err == nil, errors.Is(err, process.ErrIncarnationGone), errors.Is(err, process.ErrReplicaNotFound):
+			// Confirmed, or that incarnation already left the slot, which is
+			// itself proof it exited.
+		default:
+			slog.Warn("watcher: elastic-hibernate pending stop still unconfirmed", "slug", e.Slug, "index", e.Index, "err", err)
+			return // retry next tick
+		}
+		// The slot is free from here on and may be reused before the identity
+		// half finishes, so a later retry must never signal it again.
+		e.Stopped = true
+		w.mu.Lock()
+		if cur, ok := w.pendingStops[key]; ok && e.sameQueuedStop(cur) {
+			cur.Stopped = true
+			w.pendingStops[key] = cur
+		}
+		w.mu.Unlock()
+	}
+
+	if e.Native {
+		if derr := w.store.DeleteDeploymentReplicaIdentity(e.AppID, e.DeploymentID, e.Index, e.PID); derr != nil {
+			slog.Warn("watcher: elastic-hibernate pending identity delete failed", "slug", e.Slug, "index", e.Index, "err", derr)
+			return // stop confirmed, but identity row not yet cleared: retry next tick
+		}
+	}
+
+	w.mu.Lock()
+	delete(w.pendingStops, key)
+	w.mu.Unlock()
+}
+
+// retryElasticRecoveryStop retries a pendingStopElasticRecovery entry: a
+// native elastic worker identity that startup recovery found recorded in
+// deployment_replicas but could not confirm stopped. Unlike a
+// pendingStopElasticHibernate entry, this worker was never adopted into the
+// manager - elastic identities recovery reconciles are ledger rows, not
+// replica rows - so the retry re-runs recovery's own PID/bundle-identity
+// checked signal path rather than going through the manager at all. Each
+// retry advances that path by one bounded step (stepRecordedNativeStop),
+// carrying the escalation on the entry, so a worker that ignores SIGTERM is
+// escalated to SIGKILL across ticks without ever blocking one for the full
+// grace. Once the stop is confirmed, the identity row is deleted and the
+// entry dequeued.
+func (w *Watcher) retryElasticRecoveryStop(e PendingStopEntry) {
+	key := e.queueKey()
+	if !e.Stopped {
+		deploymentID := e.DeploymentID
+		pid := e.PID
+		app := &db.App{Slug: e.Slug}
+		progress := e.nativeStop
+		result := stepRecordedNativeStop(w.store, app, &pid, "native", &deploymentID, &progress, w.pendingStopRetryBudget())
+		w.mu.Lock()
+		if cur, ok := w.pendingStops[key]; ok && e.sameQueuedStop(cur) {
+			cur.nativeStop = progress
+			cur.Stopped = result == nativeStopConfirmed
+			w.pendingStops[key] = cur
+		}
+		w.mu.Unlock()
+		if result != nativeStopConfirmed {
+			return // retry next tick
+		}
+	}
+	if derr := w.store.DeleteDeploymentReplicaIdentity(e.AppID, e.DeploymentID, e.Index, e.PID); derr != nil {
+		slog.Warn("watcher: elastic-recovery pending identity delete failed", "slug", e.Slug, "index", e.Index, "err", derr)
+		return // stop confirmed, but identity row not yet cleared: retry next tick
+	}
+	w.mu.Lock()
+	delete(w.pendingStops, key)
+	w.mu.Unlock()
+}
+
+// retryRecoveryUnreadyStop makes one confirmed-stop attempt for a
+// pendingStopRecoveryUnready entry. A confirmed exit (nil error) or
+// ErrIncarnationGone (itself proof the process is gone - see
+// StopReplicaIncarnation) is recorded via
+// MarkReplicaCrashedClearingIdentityIfCurrent, conditioned on the replica
+// identity the entry was queued with, and the manager's stopPending fence is
+// then released. Any other error (still unconfirmed) leaves the entry queued
+// for the next tick.
+func (w *Watcher) retryRecoveryUnreadyStop(e PendingStopEntry) {
+	key := e.queueKey()
+	err := w.mgr.StopReplicaIncarnationWithin(e.Slug, e.Index, e.Incarnation, w.pendingStopRetryBudget())
+	if err != nil && !errors.Is(err, process.ErrIncarnationGone) {
+		// Still unconfirmed (another sigterm failed, or the grace window
+		// elapsed without proof). Retry on the next tick.
+		return
+	}
+
+	reason := e.Reason
+	runID := e.LogRunID
+	observedAt := time.Now().UTC()
+	var exitCode *int
+	var signal string
+	var oomKilled bool
+	if err == nil {
+		// A confirmed exit: prefer the exit monitor's own verdict, computed
+		// from the runtime's Wait result, over the reason recorded at queue
+		// time.
+		if v, ok := w.mgr.LastExit(e.Slug, e.Index); ok {
+			exitCode, signal = v.ExitCode, v.Signal
+			oomKilled = v.OOMKilled
+			if !v.At.IsZero() {
+				observedAt = v.At
+			}
+			if v.Reason != "" {
+				reason = v.Reason
+			}
+			if v.RunID != "" {
+				runID = v.RunID
+			}
+		}
+	}
+
+	wrote, werr := w.store.MarkReplicaCrashedClearingIdentityIfCurrent(db.UpsertReplicaParams{
+		AppID: e.AppID, Index: e.Index, Reason: reason,
+		ExitCode: exitCode, Signal: signal, ExitObservedAt: observedAt,
+		ExitOOMKilled: oomKilled, ExitRunID: runID,
+	}, e.replicaIdentity())
+	if werr != nil {
+		slog.Warn("watcher: persist pending-stop outcome failed", "slug", e.Slug, "index", e.Index, "err", werr)
+		return // retry next tick; the manager entry stays fenced either way
+	}
+
+	// Release the manager's fence and drop the queue entry regardless of
+	// wrote: false means the row already moved on (an identity mismatch), which is
+	// just as much a reason to stop retrying as a successful write. Releasing
+	// first lets the manager re-persist its own failed run record before the
+	// more specific verdict below is written over it.
+	w.mgr.ReleaseStopPending(e.Slug, e.Index, e.Incarnation)
+	w.mu.Lock()
+	delete(w.pendingStops, key)
+	w.mu.Unlock()
+
+	if wrote && runID != "" {
+		w.finishLogRun(pendingLogFinish{
+			slug: e.Slug, index: e.Index, runID: runID, finishedAt: observedAt,
+			oomKilled: oomKilled, exitCode: exitCode, signal: signal, reason: reason,
+		})
+	}
+}
+
 // hibernatePool removes a slug's replicas from host resources on hibernate,
 // preferring a memory-preserving Suspend when the runtime supports it and the
 // warmed RAM was actually freed. On freed=true the replica rows are marked
@@ -505,7 +1069,18 @@ func (w *Watcher) consumerBootGate(appID int64) (func(), error) {
 // trips ErrReplicaAlreadyRunning on wake. Callers should keep the app in a
 // non-terminal status and let the next tick retry rather than treating this
 // as a completed hibernation.
+//
+// Elastic apps (grouped/per_session) never reach the Suspend/Stop path below:
+// their live backends are worker slots tracked by the proxy's pool, not
+// fixed-index replica rows, so Suspend's freeze and the replica-row loop
+// would either do nothing (no manager entries for a multiplex slug) or write
+// rows that do not correspond to anything real. See hibernateElasticPool.
 func (w *Watcher) hibernatePool(app *db.App) bool {
+	resolvedIso := deploy.ResolveWorkerIsolation(app.WorkerIsolation, w.cfg.DefaultWorkerIsolation)
+	if isElasticIsolation(resolvedIso) {
+		return w.hibernateElasticPool(app)
+	}
+
 	freed, err := w.mgr.Suspend(app.Slug)
 	if freed && err == nil {
 		for i := 0; i < app.Replicas; i++ {
@@ -530,6 +1105,82 @@ func (w *Watcher) hibernatePool(app *db.App) bool {
 		}); uerr != nil {
 			slog.Warn("watcher: persist hibernated replica failed", "slug", app.Slug, "index", i, "err", uerr)
 		}
+	}
+	return true
+}
+
+// hibernateElasticPool stops every live worker slot of an elastic
+// (grouped/per_session) app's pool with a confirmed exit, via
+// ElasticSpawner.TerminateConfirmed. Unlike hibernatePool's multiplex path it
+// never calls Suspend (elastic workers are not snapshot-and-freeze
+// candidates the way fixed replicas are) and never writes app.Replicas
+// replica rows (elastic workers have none - their liveness lives in the
+// process manager and the proxy's pool, not the replicas table).
+//
+// It always returns true: by the time this runs, BeginHibernate has already
+// removed the pool from the proxy's routing table, so the app is already
+// unroutable in its old "running" state. Returning false here would leave it
+// stuck there with nothing to trigger a retry or a wake (see handleIdle).
+// A slot whose stop or identity cleanup does not finish inline is queued in
+// pendingStops and retried on later ticks; the proxy's per-slug slot high-water
+// mark (Stage A) guarantees a queued slot ID can never be reissued to a new
+// worker while it is still being retried, so leaving it live briefly is safe.
+func (w *Watcher) hibernateElasticPool(app *db.App) bool {
+	var live []*process.ProcessInfo
+	for _, info := range w.mgr.AllForSlug(app.Slug) {
+		if info != nil {
+			live = append(live, info)
+		}
+	}
+	// Each confirmed stop can take a full stop grace window, and this runs on
+	// the watcher tick, so every worker is stopped at once: the tick waits
+	// for the slowest worker, not for the sum of them.
+	results := make([]ElasticTerminateResult, len(live))
+	var wg sync.WaitGroup
+	for i, info := range live {
+		// Until a terminator reports otherwise, the stop is unconfirmed. This
+		// is also what is queued when no terminator is wired, or when the
+		// terminator panics before returning a result.
+		_, native := w.mgr.RuntimeForTier(info.Tier).(*process.NativeRuntime)
+		results[i] = ElasticTerminateResult{
+			Slug: app.Slug, SlotID: info.Index,
+			AppID: info.AppID, DeploymentID: info.DeploymentID, PID: info.PID,
+			Native: native,
+		}
+		if gen, pid, ok := w.mgr.ReplicaIncarnation(app.Slug, info.Index); ok && pid == info.PID {
+			results[i].Incarnation = gen
+		}
+		if w.elasticTerm == nil {
+			// Nothing stops the slot inline, but it is still queued so a later
+			// tick (once wired) or the next restart's recovery pass finishes
+			// the job.
+			continue
+		}
+		wg.Add(1)
+		go func(i, slotID int) {
+			defer wg.Done()
+			defer safego.Recover("elastic hibernate stop")()
+			results[i] = w.elasticTerm.TerminateConfirmed(app.Slug, slotID)
+		}(i, info.Index)
+	}
+	wg.Wait()
+
+	for i, result := range results {
+		if result.Stopped && result.IdentityCleared {
+			continue
+		}
+		w.QueuePendingStop(PendingStopEntry{
+			Kind:         pendingStopElasticHibernate,
+			Slug:         app.Slug,
+			Index:        live[i].Index,
+			AppID:        result.AppID,
+			PID:          result.PID,
+			Incarnation:  result.Incarnation,
+			DeploymentID: result.DeploymentID,
+			Native:       result.Native,
+			Stopped:      result.Stopped,
+			Reason:       "elastic hibernate: stop or identity cleanup unconfirmed",
+		})
 	}
 	return true
 }
@@ -888,6 +1539,79 @@ type wakeReplicaFailure struct {
 	err   error
 }
 
+// startedWakeReplica captures one replica's identity from the moment a wake
+// attempt started it: its manager incarnation and PID, plus the row identity
+// the wake persists for it (row), so a later failure
+// elsewhere in the same wake attempt (a sibling replica's persistence
+// failure, or a panic) can stop it with confirmed semantics even when the
+// replica's row was never - or not yet - persisted as running.
+type startedWakeReplica struct {
+	index       int
+	incarnation uint64
+	pid         int
+	row         db.ReplicaRuntimeIdentity
+	logRunID    string
+}
+
+// replicaLogRunID returns the log run ID of the replica at slug/index when it
+// is still the process with pid, or "" when the manager no longer holds it.
+func (w *Watcher) replicaLogRunID(slug string, index, pid int) string {
+	for _, info := range w.mgr.AllForSlug(slug) {
+		if info != nil && info.Index == index && info.PID == pid {
+			return info.LogRunID
+		}
+	}
+	return ""
+}
+
+// stopStartedWakeReplicas stops every replica a wake attempt started before
+// the attempt was aborted. mgr.Stop(slug) alone is not enough here: it can
+// return nil on an unconfirmed exit, after which the wake guard's deferred
+// AbortWake would revert the app to hibernated with the process still alive.
+// So each replica is stopped individually against the exact incarnation
+// captured when it started; a confirmed exit (or an incarnation already gone,
+// itself proof of exit) marks its row crashed and clears its identity, the
+// same write the pendingStops retry loop performs on its own confirmed
+// branch (retryRecoveryUnreadyStop). One that cannot be confirmed is queued
+// into pendingStops instead, so isPendingStop keeps both the crash dispatch
+// loop and the next wake's boot loop off that index until a later tick
+// proves the exit.
+func (w *Watcher) stopStartedWakeReplicas(slug string, appID int64, started []startedWakeReplica) {
+	for _, sr := range started {
+		err := w.mgr.StopReplicaIncarnation(slug, sr.index, sr.incarnation)
+		if err != nil && !errors.Is(err, process.ErrIncarnationGone) {
+			slog.Warn("watcher: wake cleanup stop unconfirmed; queuing retry",
+				"slug", slug, "index", sr.index, "err", err)
+			if !w.mgr.ClaimStopPending(slug, sr.index, sr.incarnation) {
+				// The slot no longer holds this incarnation - it left some other,
+				// safe way between the failed stop above and this claim, so there
+				// is nothing left to queue a retry for.
+				continue
+			}
+			w.QueuePendingStop(PendingStopEntry{
+				Kind:         pendingStopRecoveryUnready,
+				Slug:         slug,
+				Index:        sr.index,
+				AppID:        appID,
+				PID:          sr.row.PID,
+				Port:         sr.row.Port,
+				EndpointURL:  sr.row.EndpointURL,
+				WorkerID:     sr.row.WorkerID,
+				DeploymentID: sr.row.DeploymentID,
+				Incarnation:  sr.incarnation,
+				Reason:       "wake aborted: replica stop could not be confirmed",
+				LogRunID:     sr.logRunID,
+			})
+			continue
+		}
+		if _, werr := w.store.MarkReplicaCrashedClearingIdentityIfCurrent(db.UpsertReplicaParams{
+			AppID: appID, Index: sr.index, Reason: "wake aborted after starting this replica",
+		}, sr.row); werr != nil {
+			slog.Warn("watcher: persist wake cleanup stop failed", "slug", slug, "index", sr.index, "err", werr)
+		}
+	}
+}
+
 // wakeReplica brings one replica back up. For a replica persisted as suspended it
 // tries the warm Resume path first; on any resume error (or when resume is
 // unconfigured / the replica was not suspended) it falls back to the existing
@@ -987,6 +1711,12 @@ func (w *Watcher) traceOp(ctx context.Context, op, slug string, attrs ...attribu
 // As the active (owner) instance it also reaps stale replica_sessions rows so
 // counts from crashed or restarted peers do not linger in the fleet view.
 func (w *Watcher) runOnce() {
+	// Retry any queued confirmed-stop entries first, before the manager
+	// snapshot below. An entry confirmed this call is fully removed from the
+	// manager (ReleaseStopPending) and the queue, so it never appears in that
+	// snapshot as StatusCrashed and never needs the fencing further down.
+	w.processPendingStops()
+
 	// Snapshot the manager once and derive both the crash set and the per-slug
 	// running count in a single pass. runningCounts feeds the warm-shrink floor
 	// guard in handleIdle: when runningCount <= app.MinWarmReplicas the app is
@@ -1005,9 +1735,19 @@ func (w *Watcher) runOnce() {
 		if w.appOperationInFlight(info.Slug) {
 			continue
 		}
+		key := replicaKey{info.Slug, info.Index}
+		if w.isPendingStop(key) {
+			// A confirmed-stop retry owns this slot until it durably records
+			// the outcome (processPendingStops above already made this
+			// tick's attempt). Driving it here would race
+			// handleCrashedLocked's unconditional RecordReplicaCrash write
+			// against the retry's own atomic, PID-conditional write.
+			handled[key] = true
+			continue
+		}
 		switch info.Status {
 		case process.StatusCrashed:
-			handled[replicaKey{info.Slug, info.Index}] = true
+			handled[key] = true
 			w.handleCrashed(info.Slug, info.Index)
 		case process.StatusRunning:
 			if !idleChecked[info.Slug] {
@@ -1105,7 +1845,8 @@ func (w *Watcher) runOnce() {
 func (w *Watcher) reconcileReplicas(apps []*db.App, repMap map[int64][]*db.Replica, handled map[replicaKey]bool) {
 	for _, app := range apps {
 		for _, r := range repMap[app.ID] {
-			if r.Index >= app.Replicas || handled[replicaKey{app.Slug, r.Index}] {
+			key := replicaKey{app.Slug, r.Index}
+			if r.Index >= app.Replicas || handled[key] || w.isPendingStop(key) {
 				continue
 			}
 			switch r.Status {
@@ -2386,8 +3127,21 @@ func (w *Watcher) driveWakingApp(parent context.Context, slug, trigger string) <
 			var wg sync.WaitGroup
 			var started atomic.Int32
 			var persistenceFailed atomic.Bool
+			var cleanupNeeded atomic.Bool
 			var firstFailure atomic.Pointer[wakeReplicaFailure]
+			var startedMu sync.Mutex
+			var startedReplicas []startedWakeReplica
+			fenced := 0
 			for i := 0; i < bootCount; i++ {
+				if w.isPendingStop(replicaKey{slug, i}) {
+					fenced++
+					// A confirmed-stop retry still owns this slot (queued by an
+					// earlier crash, or by this same cleanup below on a previous
+					// wake attempt); starting a new process here could race the
+					// retry and double-run the index. The retry loop dequeues it
+					// once confirmed, and a later wake tick picks the index back up.
+					continue
+				}
 				wg.Add(1)
 				go func(idx int) {
 					defer wg.Done()
@@ -2407,6 +3161,36 @@ func (w *Watcher) driveWakingApp(parent context.Context, slug, trigger string) <
 						slog.Warn("wake replica failed", "slug", slug, "idx", idx, "err", err)
 						firstFailure.CompareAndSwap(nil, &wakeReplicaFailure{index: idx, err: err})
 						return
+					}
+					// The replica is now live in the manager. A panic anywhere
+					// from here through started.Add(1) below must not leave it
+					// untracked: recover before anything else, and capture enough
+					// identity up front (incarnation + PID) that cleanup can stop
+					// it with confirmed semantics even if the panic lands before
+					// persistence below ever runs.
+					defer func() {
+						if r := recover(); r != nil {
+							safego.RepanicFatal(r)
+							slog.Error("watcher: wake replica panicked after start",
+								"slug", slug, "idx", idx, "panic", r, "stack", string(debug.Stack()))
+							firstFailure.CompareAndSwap(nil, &wakeReplicaFailure{index: idx, err: fmt.Errorf("panic: %v", r)})
+							cleanupNeeded.Store(true)
+						}
+					}()
+					if gen, pid, ok := w.mgr.ReplicaIncarnation(slug, idx); ok {
+						runID := w.replicaLogRunID(slug, idx, pid)
+						startedMu.Lock()
+						startedReplicas = append(startedReplicas, startedWakeReplica{
+							index: idx, incarnation: gen, pid: pid, logRunID: runID,
+							row: db.ReplicaRuntimeIdentity{
+								PID: res.PID, Port: res.Port, EndpointURL: res.EndpointURL,
+								WorkerID: res.WorkerID, DeploymentID: deploymentID,
+							},
+						})
+						startedMu.Unlock()
+					}
+					if w.testPanicAfterWakeStart != nil {
+						w.testPanicAfterWakeStart(idx)
 					}
 					pid, port := res.PID, res.Port
 					if err := w.store.UpsertReplica(db.UpsertReplicaParams{
@@ -2433,12 +3217,24 @@ func (w *Watcher) driveWakingApp(parent context.Context, slug, trigger string) <
 				}(i)
 			}
 			wg.Wait()
-			if persistenceFailed.Load() {
-				opErr = errors.New("persist woken consumer provenance")
-				w.prx.Deregister(slug)
-				if err := w.mgr.Stop(slug); err != nil {
-					slog.Warn("watcher: stop wake after provenance persistence failure", "slug", slug, "err", err)
+			if persistenceFailed.Load() || cleanupNeeded.Load() {
+				if persistenceFailed.Load() {
+					opErr = errors.New("persist woken consumer provenance")
+				} else {
+					opErr = errors.New("wake panicked after starting a replica")
 				}
+				w.prx.Deregister(slug)
+				w.stopStartedWakeReplicas(slug, app.ID, startedReplicas)
+				return
+			}
+			if started.Load() == 0 && fenced > 0 && firstFailure.Load() == nil {
+				// Every slot this wake could try is fenced by a pending stop, so
+				// nothing booted but nothing failed either. Leave the wake
+				// unfinalized: the deferred guard reverts the app to hibernated,
+				// and a later wake boots the slots once the retry loop confirms
+				// the stops.
+				opErr = errors.New("wake deferred: every replica slot has a stop pending confirmation")
+				slog.Info("watcher: wake deferred; replica stops pending confirmation", "slug", slug, "fenced", fenced)
 				return
 			}
 			if started.Load() == 0 {

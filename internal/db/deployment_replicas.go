@@ -168,3 +168,34 @@ func (s *Store) DeleteDeploymentReplicaIdentity(appID, deploymentID int64, index
 	_, err := s.db.Exec(`DELETE FROM deployment_replicas WHERE app_id = ? AND deployment_id = ? AND idx = ? AND pid = ?`, appID, deploymentID, index, pid)
 	return err
 }
+
+// DeletePIDlessDeploymentReplica removes a deployment replica row that never
+// recorded a PID, and only while it still has none: a row that gained a PID
+// in the meantime names a process and is left for a confirmed stop.
+func (s *Store) DeletePIDlessDeploymentReplica(appID, deploymentID int64, index int) error {
+	_, err := s.db.Exec(`DELETE FROM deployment_replicas WHERE app_id = ? AND deployment_id = ? AND idx = ? AND pid IS NULL`, appID, deploymentID, index)
+	return err
+}
+
+// ListAppIDsWithDeploymentReplicas returns the distinct app IDs that still
+// have at least one deployment_replicas row, regardless of the app's current
+// status. Startup recovery uses this to find elastic apps that fell out of
+// the running/degraded set (hibernated, crashed, or otherwise) before a
+// restart while a durable native worker identity was still recorded for
+// them, so that identity can be reconciled instead of left orphaned forever.
+func (s *Store) ListAppIDsWithDeploymentReplicas() ([]int64, error) {
+	rows, err := s.db.Query(`SELECT DISTINCT app_id FROM deployment_replicas ORDER BY app_id`)
+	if err != nil {
+		return nil, fmt.Errorf("list app ids with deployment replicas: %w", err)
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("list app ids with deployment replicas: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}

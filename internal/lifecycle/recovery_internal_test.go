@@ -193,3 +193,73 @@ func TestWorkerDeclaredGone_JoiningIsNotGone(t *testing.T) {
 		}
 	}
 }
+
+// mustCreateActiveBundleDirTestApp creates a user-owned app with no
+// deployment yet, for the activeBundleDir tests below.
+func mustCreateActiveBundleDirTestApp(t *testing.T, store *db.Store, slug string) *db.App {
+	t.Helper()
+	if err := store.CreateUser(db.CreateUserParams{Username: "u-" + slug, PasswordHash: "h", Role: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, err := store.GetUserByUsername("u-" + slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: owner.ID, Access: "private"}); err != nil {
+		t.Fatal(err)
+	}
+	app, err := store.GetAppBySlug(slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return app
+}
+
+// TestActiveBundleDir_PropagatesLookupError is the regression guard for the
+// defect PrepareRecovery exists to close: a database error while resolving
+// an app's active bundle directory must reach the caller, not collapse to
+// "". A caller that saw "" instead of the error would let
+// validateNativeProcessIdentity skip its cwd check (see "no bundle dir: port
+// probe still enforced" in TestValidateNativeProcess above) and adopt a
+// reused PID on port evidence alone, and would make reAdoptFrozenWarmReplica
+// fail closed and rewrite a still-stopped frozen-warm row to stopped.
+func TestActiveBundleDir_PropagatesLookupError(t *testing.T) {
+	store := dbtest.New(t)
+	app := mustCreateActiveBundleDirTestApp(t, store, "bundle-lookup-error")
+	dep, err := store.BeginDeployment(app.ID, "v1", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PromoteDeployment(dep.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// SQLite's type affinity lets an INTEGER column hold non-numeric TEXT: the
+	// write below succeeds, but ListRecentDeployments's later Scan of that
+	// column into a Go int fails, which is the lookup error activeBundleDir
+	// must now propagate instead of swallowing.
+	if _, err := store.DB().Exec(`UPDATE deployments SET prepared = 'not-a-number' WHERE id = ?`, dep.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	dir, err := activeBundleDir(store, app.ID)
+	if err == nil {
+		t.Fatalf("activeBundleDir: want error for a corrupted deployment row, got dir=%q, err=nil - a lookup failure must not collapse to an empty bundle dir", dir)
+	}
+}
+
+// TestActiveBundleDir_NoDeploymentIsNotAnError confirms the two outcomes stay
+// distinguishable: an app with no deployment yet is "" with a nil error,
+// never conflated with a lookup failure.
+func TestActiveBundleDir_NoDeploymentIsNotAnError(t *testing.T) {
+	store := dbtest.New(t)
+	app := mustCreateActiveBundleDirTestApp(t, store, "bundle-never-deployed")
+
+	dir, err := activeBundleDir(store, app.ID)
+	if err != nil {
+		t.Fatalf("activeBundleDir: unexpected error for a never-deployed app: %v", err)
+	}
+	if dir != "" {
+		t.Fatalf("activeBundleDir = %q, want empty for a never-deployed app", dir)
+	}
+}

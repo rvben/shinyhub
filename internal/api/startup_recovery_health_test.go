@@ -16,6 +16,17 @@ import (
 	"github.com/rvben/shinyhub/internal/proxy"
 )
 
+// mustPrepareRecovery resolves the inputs RecoverProcesses requires, failing
+// the test if the read-only prepare step itself errors.
+func mustPrepareRecovery(t *testing.T, store *db.Store) *lifecycle.RecoveryInputs {
+	t.Helper()
+	inputs, err := lifecycle.PrepareRecovery(store)
+	if err != nil {
+		t.Fatalf("PrepareRecovery: %v", err)
+	}
+	return inputs
+}
+
 // A full control-plane restart can prove that a formerly running native
 // process is gone. Recovery deliberately makes the app wakeable rather than
 // terminal, so its replica projection must agree: otherwise the API overlays
@@ -60,7 +71,7 @@ func TestStartupRecoveryDeadReplicaIsExposedAsHibernated(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "")
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil, mustPrepareRecovery(t, store))
 
 	token, err := auth.IssueJWT(owner.ID, owner.Username, owner.Role, "test-secret")
 	if err != nil {
@@ -167,7 +178,7 @@ func TestStartupRecoveryRepairsInheritedCrashedReplica(t *testing.T) {
 		t.Fatalf("precondition: inherited state reports %q, want crashed - the fixture no longer reproduces the bug", before)
 	}
 
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "")
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil, mustPrepareRecovery(t, store))
 
 	if got := statusOfApp(t, srv, owner, "inherited"); got != "hibernated" {
 		t.Errorf("status after recovery = %q, want hibernated", got)

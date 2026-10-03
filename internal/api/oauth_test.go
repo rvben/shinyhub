@@ -218,7 +218,7 @@ func TestGitHubLogin_SetsStateCookie(t *testing.T) {
 func TestGitHubCallback_RejectsMissingStateCookie(t *testing.T) {
 	srv, store := newOAuthTestServer(t)
 	// Seed a valid server-side state so the only thing missing is the cookie.
-	if err := store.CreateOAuthState("server-side-state"); err != nil {
+	if err := store.CreateOAuthState("server-side-state", "github"); err != nil {
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest("GET", "/api/auth/github/callback?state=server-side-state&code=xyz", nil)
@@ -231,14 +231,14 @@ func TestGitHubCallback_RejectsMissingStateCookie(t *testing.T) {
 	// Server-side state must NOT be consumed: a missing cookie indicates the
 	// callback isn't from the same browser, so the nonce should remain valid
 	// for the legitimate user to use.
-	if err := store.ConsumeOAuthState("server-side-state"); err != nil {
+	if err := store.ConsumeOAuthState("server-side-state", "github"); err != nil {
 		t.Errorf("server-side state was consumed despite cookie rejection: %v", err)
 	}
 }
 
 func TestGitHubCallback_RejectsMismatchedStateCookie(t *testing.T) {
 	srv, store := newOAuthTestServer(t)
-	if err := store.CreateOAuthState("real-state"); err != nil {
+	if err := store.CreateOAuthState("real-state", "github"); err != nil {
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest("GET", "/api/auth/github/callback?state=real-state&code=xyz", nil)
@@ -249,7 +249,7 @@ func TestGitHubCallback_RejectsMismatchedStateCookie(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 on cookie mismatch, got %d (%s)", rec.Code, rec.Body.String())
 	}
-	if err := store.ConsumeOAuthState("real-state"); err != nil {
+	if err := store.ConsumeOAuthState("real-state", "github"); err != nil {
 		t.Errorf("server-side state was consumed despite mismatched cookie: %v", err)
 	}
 }
@@ -272,7 +272,7 @@ func TestGoogleLogin_SetsStateCookie(t *testing.T) {
 
 func TestGoogleCallback_RejectsMissingStateCookie(t *testing.T) {
 	srv, store := newGoogleOAuthTestServer(t)
-	if err := store.CreateOAuthState("g-state"); err != nil {
+	if err := store.CreateOAuthState("g-state", "google"); err != nil {
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest("GET", "/api/auth/google/callback?state=g-state&code=xyz", nil)
@@ -282,7 +282,7 @@ func TestGoogleCallback_RejectsMissingStateCookie(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 when oauth state cookie is missing, got %d", rec.Code)
 	}
-	if err := store.ConsumeOAuthState("g-state"); err != nil {
+	if err := store.ConsumeOAuthState("g-state", "google"); err != nil {
 		t.Errorf("server-side state was consumed despite cookie rejection: %v", err)
 	}
 }

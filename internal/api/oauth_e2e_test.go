@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/api"
@@ -87,13 +88,14 @@ func e2eTestServer(t *testing.T) (*api.Server, *db.Store) {
 	return api.New(cfg, store, nil, nil), store
 }
 
-// driveCallback seeds a server-side oauth state, attaches the matching state
-// cookie, and drives the real callback route through the router - the
-// production code path (state verification, token exchange, user fetch,
-// provisioning, session issuance), not a hand-rolled re-implementation.
-func driveCallback(t *testing.T, srv *api.Server, store *db.Store, path, state string) *httptest.ResponseRecorder {
+// driveCallback seeds a server-side oauth state bound to provider, attaches
+// the matching state cookie, and drives the real callback route through the
+// router - the production code path (state verification, token exchange,
+// user fetch, provisioning, session issuance), not a hand-rolled
+// re-implementation.
+func driveCallback(t *testing.T, srv *api.Server, store *db.Store, path, state, provider string) *httptest.ResponseRecorder {
 	t.Helper()
-	if err := store.CreateOAuthState(state); err != nil {
+	if err := store.CreateOAuthState(state, provider); err != nil {
 		t.Fatalf("seed oauth state: %v", err)
 	}
 	req := httptest.NewRequest(http.MethodGet, path+"?state="+state+"&code=mock-code", nil)
@@ -124,7 +126,7 @@ func TestGitHubCallback_EndToEnd_ProvisionsUserAndSession(t *testing.T) {
 	srv, store := e2eTestServer(t)
 	srv.SetGitHubProvider(gh)
 
-	rec := driveCallback(t, srv, store, "/api/auth/github/callback", "gh-state-happy")
+	rec := driveCallback(t, srv, store, "/api/auth/github/callback", "gh-state-happy", "github")
 	if rec.Code != http.StatusFound {
 		t.Fatalf("callback: expected 302, got %d (%s)", rec.Code, rec.Body.String())
 	}
@@ -154,7 +156,7 @@ func TestGitHubCallback_EndToEnd_TokenExchangeFault(t *testing.T) {
 	srv, store := e2eTestServer(t)
 	srv.SetGitHubProvider(gh)
 
-	rec := driveCallback(t, srv, store, "/api/auth/github/callback", "gh-state-fault")
+	rec := driveCallback(t, srv, store, "/api/auth/github/callback", "gh-state-fault", "github")
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("expected 502 on token-exchange fault, got %d (%s)", rec.Code, rec.Body.String())
 	}
@@ -182,7 +184,7 @@ func TestGoogleCallback_EndToEnd_ProvisionsUserAndSession(t *testing.T) {
 	srv, store := e2eTestServer(t)
 	srv.SetGoogleProvider(g)
 
-	rec := driveCallback(t, srv, store, "/api/auth/google/callback", "g-state-happy")
+	rec := driveCallback(t, srv, store, "/api/auth/google/callback", "g-state-happy", "google")
 	if rec.Code != http.StatusFound {
 		t.Fatalf("callback: expected 302, got %d (%s)", rec.Code, rec.Body.String())
 	}
@@ -214,7 +216,7 @@ func TestGoogleCallback_EndToEnd_TokenExchangeFault_InvalidGrant(t *testing.T) {
 	srv, store := e2eTestServer(t)
 	srv.SetGoogleProvider(g)
 
-	rec := driveCallback(t, srv, store, "/api/auth/google/callback", "g-state-fault")
+	rec := driveCallback(t, srv, store, "/api/auth/google/callback", "g-state-fault", "google")
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("expected 502 on invalid_grant, got %d (%s)", rec.Code, rec.Body.String())
 	}
@@ -230,5 +232,107 @@ func TestGoogleCallback_EndToEnd_TokenExchangeFault_InvalidGrant(t *testing.T) {
 	}
 	if _, err := store.GetUserByUsername("dana"); err == nil {
 		t.Error("user should not be provisioned when token exchange fails")
+	}
+}
+
+// TestOAuthState_RejectedAcrossProviders is the regression test for the OAuth
+// state binding fix: a state nonce minted for one provider's login flow must
+// not be accepted by a different provider's callback. Before the fix,
+// ConsumeOAuthState matched on the state string alone, so a state minted for
+// GitHub was consumed by the Google callback and only then failed the token
+// exchange - after a real request had already reached Google's token
+// endpoint. The correct behavior is the same invalid-state response the
+// callback already returns for a missing or expired state, returned before
+// any token exchange is attempted, and the original state must remain usable
+// afterward by the provider it was actually minted for.
+func TestOAuthState_RejectedAcrossProviders(t *testing.T) {
+	var googleTokenHits atomic.Int32
+	gh := newFakeGitHub(t, nil,
+		`{"id":801,"login":"octocat","name":"Octo Cat","email":"octocat@corp.example"}`, "")
+	g := newFakeGoogle(t, func(w http.ResponseWriter, r *http.Request) {
+		googleTokenHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"access_token":"g-mock-token","token_type":"Bearer"}`)
+	}, `{"id":"9201","email":"dana2@corp.example","name":"Dana Scully"}`)
+
+	srv, store := e2eTestServer(t)
+	srv.SetGitHubProvider(gh)
+	srv.SetGoogleProvider(g)
+
+	const state = "cross-provider-state"
+	if err := store.CreateOAuthState(state, "github"); err != nil {
+		t.Fatalf("seed oauth state: %v", err)
+	}
+
+	// Present the github-minted state to the google callback.
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/google/callback?state="+state+"&code=mock-code", nil)
+	req.AddCookie(&http.Cookie{Name: auth.OAuthStateCookieName, Value: state})
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("cross-provider state on google callback: want 400, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var body map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if !strings.Contains(body["error"], "invalid or expired state") {
+		t.Errorf("cross-provider state on google callback: want invalid-state error, got %q", body["error"])
+	}
+	if sessionCookie(rec) != nil {
+		t.Error("session cookie set despite cross-provider state")
+	}
+	if n := googleTokenHits.Load(); n != 0 {
+		t.Errorf("google token endpoint hit %d times; a cross-provider state must be rejected before any token exchange", n)
+	}
+	if _, err := store.GetUserByUsername("dana2"); err == nil {
+		t.Error("user should not be provisioned from a cross-provider state")
+	}
+
+	// The state must still be usable by the provider it was actually minted for.
+	req2 := httptest.NewRequest(http.MethodGet, "/api/auth/github/callback?state="+state+"&code=mock-code", nil)
+	req2.AddCookie(&http.Cookie{Name: auth.OAuthStateCookieName, Value: state})
+	rec2 := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec2, req2)
+
+	if rec2.Code != http.StatusFound {
+		t.Fatalf("github callback with its own state: want 302, got %d (%s)", rec2.Code, rec2.Body.String())
+	}
+	if sessionCookie(rec2) == nil {
+		t.Fatal("github callback with its own state issued no session cookie")
+	}
+}
+
+// TestOAuthState_OIDCStateRejectedByGitHubCallback extends the cross-provider
+// binding proof to the third provider path (OIDC), without needing a full
+// mock identity provider: rejection happens in ConsumeOAuthState, before the
+// callback touches the configured provider at all, so seeding a state bound
+// to "oidc" and presenting it to the GitHub callback exercises the same
+// shared binding check that guards GitHub, Google, and OIDC alike.
+func TestOAuthState_OIDCStateRejectedByGitHubCallback(t *testing.T) {
+	gh := newFakeGitHub(t, nil,
+		`{"id":803,"login":"octocat3","name":"Octo Cat Three","email":"octocat3@corp.example"}`, "")
+	srv, store := e2eTestServer(t)
+	srv.SetGitHubProvider(gh)
+
+	const state = "oidc-minted-state"
+	if err := store.CreateOAuthState(state, "oidc"); err != nil {
+		t.Fatalf("seed oauth state: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/github/callback?state="+state+"&code=mock-code", nil)
+	req.AddCookie(&http.Cookie{Name: auth.OAuthStateCookieName, Value: state})
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("oidc-minted state on github callback: want 400, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if sessionCookie(rec) != nil {
+		t.Error("session cookie set despite an oidc-minted state presented to github")
+	}
+	if _, err := store.GetUserByUsername("octocat3"); err == nil {
+		t.Error("user should not be provisioned from a cross-provider state")
 	}
 }

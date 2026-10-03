@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/rvben/shinyhub/internal/process"
+	"github.com/rvben/shinyhub/internal/safego"
 )
 
 // fakeRuntime is an in-process Runtime for tests. It captures the env passed
@@ -1601,6 +1602,124 @@ func TestManager_ExitMonitorRecoversFromPanic(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("StopReplica hung; a panic in the exit monitor left the done channel unclosed")
+	}
+}
+
+type panicStartRuntime struct{ *fakeRuntime }
+
+func (panicStartRuntime) Start(context.Context, process.StartParams, io.Writer) (process.ReplicaEndpoint, error) {
+	panic("rt.Start boom")
+}
+
+// TestManagerStart_PanicInRuntimeStartRePanicsAsFatal proves a panic inside
+// rt.Start (before any entry is published) is not just logged and swallowed:
+// a live child could already exist with nothing in m.entries pointing at it,
+// so recovering silently would leak it until the next startup's recovery
+// scan. Start re-panics the original value wrapped in safego.Fatal so a
+// caller under safego recovery (e.g. a spawn or watchdog-restart goroutine)
+// still crashes instead of absorbing it.
+func TestManagerStart_PanicInRuntimeStartRePanicsAsFatal(t *testing.T) {
+	m := process.NewManager(t.TempDir(), panicStartRuntime{newFakeRuntime()})
+
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		_, _ = m.Start(process.StartParams{
+			Slug:    "boom",
+			Dir:     t.TempDir(),
+			Command: []string{"x"},
+			Port:    19501,
+		})
+	}()
+
+	f, ok := recovered.(safego.Fatal)
+	if !ok {
+		t.Fatalf("expected a safego.Fatal panic out of Start, got %#v", recovered)
+	}
+	if f.Value != "rt.Start boom" {
+		t.Fatalf("expected original panic value preserved, got %v", f.Value)
+	}
+	if len(f.Stack) == 0 {
+		t.Fatal("expected a captured stack trace")
+	}
+}
+
+// TestManagerStart_PanicInRunningRecorderRePanicsAsFatal covers the second
+// half of the launch-to-publish window: a panic in the durable Running
+// recorder callback, called after the process is already live but before the
+// entry is published to m.entries. Same reasoning as the rt.Start case above.
+func TestManagerStart_PanicInRunningRecorderRePanicsAsFatal(t *testing.T) {
+	m := process.NewManager(t.TempDir(), newFakeRuntime())
+	m.SetLogRunRecorder(process.LogRunRecorder{
+		Running: func(process.LogRun) error {
+			panic("running-recorder boom")
+		},
+	})
+
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		_, _ = m.Start(process.StartParams{
+			Slug:    "boom2",
+			Dir:     t.TempDir(),
+			Command: []string{"x"},
+			Port:    19502,
+		})
+	}()
+
+	f, ok := recovered.(safego.Fatal)
+	if !ok {
+		t.Fatalf("expected a safego.Fatal panic out of Start, got %#v", recovered)
+	}
+	if f.Value != "running-recorder boom" {
+		t.Fatalf("expected original panic value preserved, got %v", f.Value)
+	}
+}
+
+type panicSignalRuntime struct{ *fakeRuntime }
+
+func (panicSignalRuntime) Signal(process.RunHandle, syscall.Signal) error {
+	panic("signal boom")
+}
+
+// TestStop_PanicInFanOutBecomesAggregatedError proves a panic inside the stop
+// fan-out goroutine (e.g. a runtime whose Signal panics) is converted into an
+// error joined into Stop's return value, not swallowed into a false success
+// or left to crash the process.
+func TestStop_PanicInFanOutBecomesAggregatedError(t *testing.T) {
+	m := process.NewManager(t.TempDir(), panicSignalRuntime{newFakeRuntime()})
+	if _, err := m.Start(process.StartParams{
+		Slug: "boom", Dir: t.TempDir(), Command: []string{"x"}, Port: 19503,
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	err := m.Stop("boom")
+	if err == nil {
+		t.Fatal("expected Stop to return an error for a panicking replica, got nil")
+	}
+	if !strings.Contains(err.Error(), "panic") {
+		t.Fatalf("expected the error to mention the panic, got: %v", err)
+	}
+}
+
+// TestStopAll_PanicInFanOutBecomesAggregatedError is the StopAll analogue of
+// TestStop_PanicInFanOutBecomesAggregatedError: its own goroutine fan-out (one
+// per slug) must convert a panic from m.Stop into an error too.
+func TestStopAll_PanicInFanOutBecomesAggregatedError(t *testing.T) {
+	m := process.NewManager(t.TempDir(), panicSignalRuntime{newFakeRuntime()})
+	if _, err := m.Start(process.StartParams{
+		Slug: "boom", Dir: t.TempDir(), Command: []string{"x"}, Port: 19504,
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	err := m.StopAll()
+	if err == nil {
+		t.Fatal("expected StopAll to return an error for a panicking replica, got nil")
+	}
+	if !strings.Contains(err.Error(), "panic") {
+		t.Fatalf("expected the error to mention the panic, got: %v", err)
 	}
 }
 

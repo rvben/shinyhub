@@ -304,11 +304,13 @@ func (s *Server) handleListSupportSessionApps(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusNotFound, "eligible user not found")
 		return
 	}
+	// ListAppsLean: the loop below reads only app.ID, app.Slug and app.Name,
+	// never a deployment-derived field.
 	var apps []*db.App
 	if subject.Role == "admin" || subject.Role == "operator" {
-		apps, err = s.store.ListApps(0, 0)
+		apps, err = s.store.ListAppsLean(0, 0)
 	} else {
-		apps, err = s.store.ListAppsVisibleToUser(subject.ID, 0, 0)
+		apps, err = s.store.ListAppsVisibleToUserLean(subject.ID, 0, 0)
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")

@@ -64,6 +64,7 @@ import (
 	"github.com/rvben/shinyhub/internal/oauth"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
+	"github.com/rvben/shinyhub/internal/safego"
 	"github.com/rvben/shinyhub/internal/sandbox"
 	scalewayruntime "github.com/rvben/shinyhub/internal/scaleway"
 	"github.com/rvben/shinyhub/internal/schedulespec"
@@ -2133,17 +2134,23 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		Proxy:               prx,
 		RuntimeCfg:          cfg.Runtime,
 		AcquireAppOperation: srv.AcquireAppOperation,
+		EnqueuePendingStop:  watcher.QueuePendingStop,
 	}
 	prx.SetSpawnFunc(func(slug string, slotID int) {
-		go elasticSpawner.Spawn(slug, slotID)
+		safego.Go("elastic spawn", func() { elasticSpawner.Spawn(slug, slotID) })
 	})
 	prx.SetResumeFunc(func(slug string, slotID int) {
-		go elasticSpawner.Resume(slug, slotID)
+		safego.Go("elastic resume", func() { elasticSpawner.Resume(slug, slotID) })
 	})
 	prx.SetWarmSpareConsumedFunc(elasticSpawner.WarmSpareConsumed)
 	prx.SetTerminateFunc(elasticSpawner.Terminate)
 	prx.SetCancelElasticLifetimeFunc(elasticSpawner.CancelLifetime)
 	prx.SetElasticLifetimeUpdateFunc(elasticSpawner.UpdateSessionLifetime)
+	// The watcher's hibernation sweep stops elastic worker slots through the
+	// same confirmed-exit path as a demand-driven terminate, so it needs the
+	// spawner too. Wired here because elasticSpawner does not exist yet when
+	// the watcher is constructed above.
+	watcher.SetElasticTerminator(elasticSpawner)
 
 	// Host-memory admission floor for elastic pools: while MemAvailable is
 	// below the configured floor, new worker allocation is shed (503) instead
@@ -2576,6 +2583,20 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		// Report (do not delete) slug dirs with no owning row. Run AFTER
 		// ReconcileDeletingApps so freshly-cleaned slugs are not reported.
 		lifecycle.LogOrphanAppDirs(store, cfg)
+		// Resolve every running app and its active bundle directory before
+		// recovery mutates anything. Fail closed and retry: a mid-scan database
+		// error must never fall through as an unresolved bundle directory, which
+		// would let validateNativeProcessIdentity skip its cwd check and adopt a
+		// reused PID on port evidence alone, or make reAdoptFrozenWarmReplica fail
+		// closed and rewrite a still-SIGSTOPped frozen-warm row to stopped.
+		var recoveryInputs *lifecycle.RecoveryInputs
+		if !retryOwnerStep("prepare process recovery", func() error {
+			var err error
+			recoveryInputs, err = lifecycle.PrepareRecovery(store)
+			return err
+		}) {
+			return
+		}
 		// Re-adopt any processes that survived a server restart. Must run after
 		// ReconcileInflightDeployments so recovery adopts the last-good deployment,
 		// not a half-applied one.
@@ -2587,7 +2608,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		}) {
 			return
 		}
-		lifecycle.RecoverProcesses(store, mgr, prx, cfg.Runtime.DefaultMaxSessionsPerReplica, cfg.Auth.IdentityHeadersEnabled(), cfg.Runtime.DefaultWorkerIsolation)
+		lifecycle.RecoverProcesses(store, mgr, prx, cfg.Runtime.DefaultMaxSessionsPerReplica, cfg.Auth.IdentityHeadersEnabled(), cfg.Runtime.DefaultWorkerIsolation, watcher, recoveryInputs)
 		// Stop any native processes in the Manager that belong to elastic-mode
 		// apps. Elastic workers are ephemeral and must not be re-adopted; the
 		// pool starts empty and clients trigger fresh spawns on next request.

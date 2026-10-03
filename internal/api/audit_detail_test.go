@@ -206,7 +206,7 @@ func TestGitHubCallback_AuditRecordsProvider(t *testing.T) {
 	srv, store := e2eTestServer(t)
 	srv.SetGitHubProvider(gh)
 
-	rec := driveCallback(t, srv, store, "/api/auth/github/callback", "gh-state-audit")
+	rec := driveCallback(t, srv, store, "/api/auth/github/callback", "gh-state-audit", "github")
 	if rec.Code != http.StatusFound {
 		t.Fatalf("callback: want 302, got %d (%s)", rec.Code, rec.Body.String())
 	}
@@ -236,7 +236,7 @@ func TestGoogleCallback_AuditRecordsProvider(t *testing.T) {
 	srv, store := e2eTestServer(t)
 	srv.SetGoogleProvider(g)
 
-	rec := driveCallback(t, srv, store, "/api/auth/google/callback", "goog-state-audit")
+	rec := driveCallback(t, srv, store, "/api/auth/google/callback", "goog-state-audit", "google")
 	if rec.Code != http.StatusFound {
 		t.Fatalf("callback: want 302, got %d (%s)", rec.Code, rec.Body.String())
 	}

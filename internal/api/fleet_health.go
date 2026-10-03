@@ -102,7 +102,14 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 	// limit" convention (see queries.go), already used the same way by every
 	// other whole-fleet caller in this codebase; a literal like 1_000_000
 	// would silently under-count past that many apps instead of failing loudly.
-	apps, err := s.store.ListApps(0, 0)
+	//
+	// ListAppsLean: fleetHealthResponse below is built from a.ID, a.Slug and
+	// a.Status only (Status is then overwritten by decorateAppObservation from
+	// live replica data, never from a deployment field). decorateApp below does
+	// read LastDeploymentStatus to compute a.Deploying, but a.Deploying is
+	// never read by this handler, so that result is discarded; if this handler
+	// ever starts surfacing Deploying, switch this call back to ListApps first.
+	apps, err := s.store.ListAppsLean(0, 0)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return

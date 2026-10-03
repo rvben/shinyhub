@@ -405,17 +405,17 @@ func TestGetAppMembers_ReturnsUsernameAndRole(t *testing.T) {
 func TestOAuthState_ConsumeOnce(t *testing.T) {
 	store := dbtest.New(t)
 
-	if err := store.CreateOAuthState("nonce-abc123"); err != nil {
+	if err := store.CreateOAuthState("nonce-abc123", "github"); err != nil {
 		t.Fatalf("CreateOAuthState: %v", err)
 	}
 
 	// First consume: should succeed.
-	if err := store.ConsumeOAuthState("nonce-abc123"); err != nil {
+	if err := store.ConsumeOAuthState("nonce-abc123", "github"); err != nil {
 		t.Errorf("first ConsumeOAuthState failed: %v", err)
 	}
 
 	// Second consume: state is gone, should fail.
-	if err := store.ConsumeOAuthState("nonce-abc123"); err == nil {
+	if err := store.ConsumeOAuthState("nonce-abc123", "github"); err == nil {
 		t.Error("expected error on second ConsumeOAuthState, got nil")
 	}
 }
@@ -425,10 +425,10 @@ func TestOAuthState_ExpiredStateIsRejected(t *testing.T) {
 	store := dbtest.New(t)
 
 	// Create two states: one fresh, one that will be backdated.
-	if err := store.CreateOAuthState("nonce-fresh"); err != nil {
+	if err := store.CreateOAuthState("nonce-fresh", "github"); err != nil {
 		t.Fatalf("CreateOAuthState fresh: %v", err)
 	}
-	if err := store.CreateOAuthState("nonce-stale"); err != nil {
+	if err := store.CreateOAuthState("nonce-stale", "github"); err != nil {
 		t.Fatalf("CreateOAuthState stale: %v", err)
 	}
 
@@ -440,14 +440,41 @@ func TestOAuthState_ExpiredStateIsRejected(t *testing.T) {
 	}
 
 	// Consuming the fresh state triggers the sweep and must succeed.
-	if err := store.ConsumeOAuthState("nonce-fresh"); err != nil {
+	if err := store.ConsumeOAuthState("nonce-fresh", "github"); err != nil {
 		t.Fatalf("ConsumeOAuthState fresh: %v", err)
 	}
 
 	// The sweep that ran during nonce-fresh consume should have deleted nonce-stale.
 	// Consuming it now must fail.
-	if err := store.ConsumeOAuthState("nonce-stale"); err == nil {
+	if err := store.ConsumeOAuthState("nonce-stale", "github"); err == nil {
 		t.Error("expected error consuming expired state, got nil")
+	}
+}
+
+// TestOAuthState_BoundToProvider is the store-level regression test for the
+// OAuth CSRF state binding fix: a state nonce minted for one provider must
+// not be consumable by presenting a different provider name, and must remain
+// consumable by the provider it was actually minted for.
+func TestOAuthState_BoundToProvider(t *testing.T) {
+	store := dbtest.New(t)
+
+	if err := store.CreateOAuthState("nonce-xyz", "github"); err != nil {
+		t.Fatalf("CreateOAuthState: %v", err)
+	}
+
+	// A mismatched provider must not consume the state.
+	if err := store.ConsumeOAuthState("nonce-xyz", "google"); err == nil {
+		t.Error("expected error consuming a github-minted state as google, got nil")
+	}
+
+	// The state must still be intact for the provider it was minted for.
+	if err := store.ConsumeOAuthState("nonce-xyz", "github"); err != nil {
+		t.Errorf("expected github to still consume its own state: %v", err)
+	}
+
+	// Now that it is consumed, neither provider can consume it again.
+	if err := store.ConsumeOAuthState("nonce-xyz", "github"); err == nil {
+		t.Error("expected error on second ConsumeOAuthState by the original provider, got nil")
 	}
 }
 

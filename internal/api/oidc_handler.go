@@ -84,7 +84,7 @@ func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 	state := hex.EncodeToString(stateBytes)
 	nonce := deriveOIDCNonce(s.cfg.Auth.Secret, state)
 
-	if err := s.store.CreateOAuthState(state); err != nil {
+	if err := s.store.CreateOAuthState(state, providerOIDC); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
@@ -113,7 +113,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid or expired state")
 		return
 	}
-	if err := s.store.ConsumeOAuthState(state); err != nil {
+	if err := s.store.ConsumeOAuthState(state, providerOIDC); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid or expired state")
 		return
 	}

@@ -203,7 +203,10 @@ func (s *Server) AcquireFleetAppOperations() (func(), error) {
 		releaseFleet()
 	}
 	for {
-		apps, err := s.store.ListApps(0, 0)
+		// ListAppsLean: this loop only reads app.Slug below, never a
+		// deployment-derived field, so it does not need the per-row
+		// deployment subqueries ListApps runs.
+		apps, err := s.store.ListAppsLean(0, 0)
 		if err != nil {
 			releaseAll()
 			return nil, fmt.Errorf("list apps for lifecycle startup fence: %w", err)

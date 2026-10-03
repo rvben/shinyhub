@@ -104,7 +104,7 @@ func TestRecoveryRemovesRejectedStaleRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := &db.Replica{AppID: app.ID, Index: 0, EndpointURL: stale, Status: "running"}
-	if recoverNativeReplica(store, nil, p, app, r, t.TempDir(), "") {
+	if alive, _ := recoverNativeReplica(store, nil, p, app, r, t.TempDir(), "", nil); alive {
 		t.Fatal("missing process adopted")
 	}
 	if p.ReplicaTargetURL(app.Slug, 0) != "" {
@@ -183,7 +183,11 @@ func TestRecoveryThenStartupWarmFloorWithRealStore(t *testing.T) {
 	}
 	p := proxy.New()
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
-	RecoverProcesses(store, mgr, p, 0, false, "")
+	inputs, err := PrepareRecovery(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	RecoverProcesses(store, mgr, p, 0, false, "", nil, inputs)
 	recovered, err := store.GetAppBySlug(app.Slug)
 	if err != nil || recovered.Status != "hibernated" {
 		t.Fatalf("recovered app = %+v, err=%v", recovered, err)

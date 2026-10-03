@@ -461,6 +461,11 @@ func (r *DockerRuntime) Wait(ctx context.Context, handle RunHandle) error {
 		}
 	}
 	code, err := r.client.waitContainer(ctx, handle.ContainerID)
+	if errors.Is(err, errContainerNotFound) {
+		// Removed (an aborted guarded launch, a forced cleanup, an operator's
+		// docker rm), so it is not running; its exit code is unknown.
+		return &ProcessExitError{Code: -1}
+	}
 	if err != nil {
 		return err
 	}

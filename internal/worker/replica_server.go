@@ -377,10 +377,20 @@ func (s *replicaServer) handleWait(w http.ResponseWriter, r *http.Request) {
 	logw := &frameLogWriter{enc: json.NewEncoder(w), flusher: flusher}
 	defer logw.close()
 
-	// Wait reports completion through error alone; it does not surface an exit
-	// code. The caller uses this purely to detect that the replica has stopped.
+	// A Wait error is a proven exit only when it is a *ProcessExitError; the
+	// frame says which, so the control plane neither mistakes a transport
+	// failure for an exit nor this worker for one that predates the marker.
 	if err := s.runtime.Wait(r.Context(), rec.handle); err != nil {
-		_ = logw.writeFrame(api.Frame{Kind: api.FrameError, Error: err.Error()})
+		proven := false
+		frame := api.Frame{Kind: api.FrameError, Error: err.Error(), ExitProven: &proven}
+		var exitErr *process.ProcessExitError
+		if errors.As(err, &exitErr) {
+			proven = true
+			code := exitErr.Code
+			frame.Code = &code
+			frame.Signal = int(exitErr.Signal)
+		}
+		_ = logw.writeFrame(frame)
 		return
 	}
 	s.forgetReplica(rec)

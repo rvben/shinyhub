@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -60,6 +61,41 @@ func writeCurrentLogsTestOutput(t *testing.T, store *db.Store, appsDir string, c
 	const runID = "99999999-9999-4999-8999-999999999999"
 	if err := store.CreateAppLogRun(db.CreateAppLogRunParams{
 		RunID: runID, AppID: app.ID, ReplicaIndex: 0, Tier: "local",
+		Status: "starting", StartedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkAppLogRunRunning(runID, "native", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendAppLogChunk(runID, 0, 0, content, db.AppLogRetentionBytes, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeReplicaLogsTestOutput is writeCurrentLogsTestOutput for an arbitrary
+// replica index, to exercise indices above the legacy 255 cap: elastic
+// worker slot IDs grow monotonically per app and are never bounded to a
+// byte, so a long-lived elastic app reaches replica indices well past 255.
+func writeReplicaLogsTestOutput(t *testing.T, store *db.Store, appsDir string, index int, content []byte) {
+	t.Helper()
+	if !store.IsPostgres() {
+		logPath := filepath.Join(appsDir, "myapp", fmt.Sprintf("app-%d.log", index))
+		if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(logPath, content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	app, err := store.GetAppBySlug("myapp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID := fmt.Sprintf("%08d-9999-4999-8999-999999999999", index)
+	if err := store.CreateAppLogRun(db.CreateAppLogRunParams{
+		RunID: runID, AppID: app.ID, ReplicaIndex: index, Tier: "local",
 		Status: "starting", StartedAt: time.Now(),
 	}); err != nil {
 		t.Fatal(err)
@@ -759,6 +795,57 @@ func TestHandleLogs_TailZeroRejected(t *testing.T) {
 		srv.Router().ServeHTTP(rec, req)
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("tail=%s: status = %d, want 400", raw, rec.Code)
+		}
+	}
+}
+
+// TestHandleLogs_ReplicaIndexAbove255Accepted verifies the ?replica= query
+// parameter accepts indices above the old 255 cap. Elastic worker slot IDs
+// grow monotonically per app and are never reused, so a long-lived elastic
+// app reaches replica indices well past 255; the query validation must not
+// treat that as an out-of-range request. Negative and non-numeric values are
+// still rejected.
+func TestHandleLogs_ReplicaIndexAbove255Accepted(t *testing.T) {
+	srv, store, appsDir := newLogsTestServer(t)
+	hash, _ := testHashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	u, _ := store.GetUserByUsername("owner")
+	store.CreateApp(db.CreateAppParams{Slug: "myapp", Name: "My App", OwnerID: u.ID})
+
+	writeReplicaLogsTestOutput(t, store, appsDir, 256, []byte("elastic slot 256\n"))
+
+	token, _ := auth.IssueJWT(u.ID, "owner", "developer", "test-secret")
+	req := httptest.NewRequest("GET", "/api/apps/myapp/logs?replica=256&follow=false", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("replica=256: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != "elastic slot 256\n" {
+		t.Errorf("replica=256: body = %q, want %q", rec.Body.String(), "elastic slot 256\n")
+	}
+
+	// An index with no plausible small-cap justification (elastic slot IDs
+	// are never bounded, and nothing here is a byte or a uint16) must fail
+	// because no log exists at that index (404), not because the query was
+	// rejected by range validation (400).
+	req = httptest.NewRequest("GET", "/api/apps/myapp/logs?replica=100000000&follow=false", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("replica=100000000: status = %d, want 404 (no log at that index, not a range rejection)", rec.Code)
+	}
+
+	for _, raw := range []string{"-1", "abc"} {
+		req := httptest.NewRequest("GET", "/api/apps/myapp/logs?replica="+raw, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("replica=%s: status = %d, want 400", raw, rec.Code)
 		}
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -320,8 +321,13 @@ func (c *dockerClient) inspectContainer(id string) (containerState, error) {
 	return containerState{Running: resp.State.Running, Paused: resp.State.Paused, Pid: resp.State.Pid, ExitCode: resp.State.ExitCode}, nil
 }
 
+// errContainerNotFound reports that Docker has no container with the given
+// ID: it was removed, so nothing of it can still be running.
+var errContainerNotFound = errors.New("no such container")
+
 // waitContainer blocks until the container exits and returns its exit code.
-// ctx cancellation aborts the wait.
+// ctx cancellation aborts the wait. A container Docker does not know yields
+// an error wrapping errContainerNotFound.
 func (c *dockerClient) waitContainer(ctx context.Context, id string) (int, error) {
 	url := fmt.Sprintf("%s/containers/%s/wait?condition=not-running", c.base, id)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
@@ -333,6 +339,10 @@ func (c *dockerClient) waitContainer(ctx context.Context, id string) (int, error
 		return 0, fmt.Errorf("wait container: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		body, _ := io.ReadAll(resp.Body)
+		return 0, fmt.Errorf("wait container: %w: %s", errContainerNotFound, body)
+	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return 0, fmt.Errorf("wait container: status %d: %s", resp.StatusCode, body)

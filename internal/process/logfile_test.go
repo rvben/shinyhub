@@ -131,6 +131,109 @@ func TestPruneLogRunFilesRemovesOnlyUnretainedImmutableFiles(t *testing.T) {
 	}
 }
 
+// TestParseLogRunFile_AcceptsIndexAbove255 pins that the replica index parsed
+// from a run filename is not capped at a byte's range. Elastic worker slot
+// IDs grow monotonically per app (they are never reused, even across
+// hibernation) and an app can run far more than 256 replicas over its
+// lifetime, so an index above 255 must still parse. Malformed input (a
+// non-numeric index) is still rejected.
+func TestParseLogRunFile_AcceptsIndexAbove255(t *testing.T) {
+	runID := "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+	for _, want := range []int{255, 256, 100000} {
+		name := logRunFilename(want, runID)
+		index, gotRunID, backup, ok := parseLogRunFile(name)
+		if !ok {
+			t.Errorf("parseLogRunFile(%q) ok = false, want true", name)
+			continue
+		}
+		if index != want || gotRunID != runID || backup {
+			t.Errorf("parseLogRunFile(%q) = (%d, %q, backup=%v), want (%d, %q, backup=false)", name, index, gotRunID, backup, want, runID)
+		}
+	}
+	if _, _, _, ok := parseLogRunFile("replica-abc-" + runID + ".log"); ok {
+		t.Error("parseLogRunFile accepted a non-numeric index")
+	}
+}
+
+// TestListLogRuns_IncludesAndPrunesReplicaAbove255 exercises the read and
+// prune paths together: a run file for a replica index above the old 255
+// cap must be visible to ListLogRuns (so it can be tailed and served) and to
+// PruneLogRunFiles (so it is not retained forever once its run ID is no
+// longer known to the database).
+func TestListLogRuns_IncludesAndPrunesReplicaAbove255(t *testing.T) {
+	appsDir := t.TempDir()
+	dir := filepath.Join(appsDir, "demo", logRunsDir)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	highID := "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+	hugeID := "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+	for _, name := range []string{
+		logRunFilename(256, highID),
+		logRunFilename(100000, hugeID),
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("log\n"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := ListLogRuns(appsDir, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	indices := map[int]bool{}
+	for _, s := range got {
+		indices[s.Index] = true
+	}
+	if !indices[256] || !indices[100000] {
+		t.Fatalf("ListLogRuns = %+v, want indices 256 and 100000 present", got)
+	}
+
+	removed, err := PruneLogRunFiles(appsDir, map[string]struct{}{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 2 {
+		t.Fatalf("PruneLogRunFiles removed = %d, want 2 (both above-255 run files must be prunable)", removed)
+	}
+}
+
+// TestListLogSources_IncludesLegacyReplicaAbove255 pins that the legacy
+// app-N.log discovery (pre-run-history upgrades) is not capped either, while
+// negative and non-numeric suffixes are still ignored.
+func TestListLogSources_IncludesLegacyReplicaAbove255(t *testing.T) {
+	appsDir := t.TempDir()
+	dir := filepath.Join(appsDir, "demo")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"app-256.log":    "high\n",
+		"app-100000.log": "huge\n",
+		"app--1.log":     "ignored\n",
+		"app-nope.log":   "ignored\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := ListLogSources(appsDir, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	indices := map[int]bool{}
+	for _, s := range got {
+		indices[s.Index] = true
+	}
+	if !indices[256] || !indices[100000] {
+		t.Fatalf("ListLogSources = %+v, want indices 256 and 100000 present", got)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ListLogSources = %+v, want exactly the two valid high indices (negative/non-numeric still rejected)", got)
+	}
+}
+
 // TestTail_EdgeCases pins the exact line semantics Tail must preserve: last-n in
 // order, files with and without a trailing newline, CRLF stripping, n larger
 // than the line count, and n<=0. These guard the backward-read implementation.

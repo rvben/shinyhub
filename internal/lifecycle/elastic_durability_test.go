@@ -79,7 +79,7 @@ func TestElasticNativeLaunchRequiresDurableIdentity(t *testing.T) {
 				oldWorker, _ := mgr.GetReplica(app.Slug, 0)
 				replacement := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 				t.Cleanup(func() { _ = replacement.StopAll() })
-				lifecycle.RecoverProcesses(store, replacement, proxy.New(), 0, false, "multiplex")
+				lifecycle.RecoverProcesses(store, replacement, proxy.New(), 0, false, "multiplex", nil, mustPrepareRecovery(t, store))
 				if !errors.Is(syscall.Kill(oldWorker.PID, 0), syscall.ESRCH) || replacement.HasRunning(app.Slug) {
 					t.Fatal("controller replacement left old worker running or adopted it without session bindings")
 				}
@@ -107,7 +107,7 @@ func TestElasticRecoveryRetainsUnconfirmedRemoteIdentity(t *testing.T) {
 	}
 	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
 	prx := proxy.New()
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "multiplex")
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "multiplex", nil, mustPrepareRecovery(t, store))
 	rows, err := store.ListDeploymentReplicas(app.ID)
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("lost unresolved worker identity: %v %v", rows, err)

@@ -1320,6 +1320,11 @@ const appColumns = `id, slug, name, project_slug, owner_id, access, status,
 		       redeploy_seq_launched, last_redeploy_seq, last_redeploy_outcome,
 		       last_redeploy_reason, last_redeploy_at,`
 
+// appColumnsLean is appColumns without its trailing comma, for queries that
+// select only the plain apps.* columns and never append deploymentSummarySQL.
+// Derived rather than duplicated so the two column lists can never drift.
+var appColumnsLean = strings.TrimSuffix(appColumns, ",")
+
 type CreateAppParams struct {
 	Slug        string
 	Name        string
@@ -1402,7 +1407,12 @@ func inPlaceholders[T any](items []T) (string, []any) {
 
 // GetAppsBySlugs returns the apps for the given slugs in one query (unknown
 // slugs are simply absent), so the batch metrics endpoint need not call
-// GetAppBySlug per card.
+// GetAppBySlug per card. It applies no visibility predicate and returns rows
+// in no defined order: a caller scoping a listing by an app allowlist wants
+// ListAppsInSlugs or ListAppsVisibleToUserInSlugs instead. It keeps a
+// per-slug placeholder rather than the single-parameter allowlist those use
+// because its slugs come from a caller-supplied ?slugs= query parameter, not
+// an allowlist that can be configured arbitrarily large.
 func (s *Store) GetAppsBySlugs(slugs []string) ([]*App, error) {
 	ph, args := inPlaceholders(slugs)
 	if ph == "" {
@@ -1456,12 +1466,101 @@ func (s *Store) ListApps(limit, offset int) ([]*App, error) {
 	return apps, rows.Err()
 }
 
+// ListAppsLean is ListApps without deploymentSummarySQL: it returns the same
+// rows in the same order with every plain apps.* field populated, but leaves
+// the six deployment-derived fields (LastDeployedAt, ReleaseNumber,
+// ReleasedAt, CurrentVersion, ContentDigest, LastDeploymentStatus) at their
+// zero value. deploymentSummarySQL runs six correlated subqueries against
+// deployments per row; use this for a caller that never reads any of those
+// six fields, to skip that cost on a whole-fleet listing.
+func (s *Store) ListAppsLean(limit, offset int) ([]*App, error) {
+	if limit <= 0 {
+		limit = s.d.noLimit()
+	}
+	rows, err := s.db.Query(`
+		SELECT `+appColumnsLean+`
+		FROM apps ORDER BY created_at DESC
+		LIMIT ? OFFSET ?`, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var apps []*App
+	for rows.Next() {
+		app, err := scanAppLean(rows)
+		if err != nil {
+			return nil, err
+		}
+		apps = append(apps, app)
+	}
+	return apps, rows.Err()
+}
+
 // CountApps returns the total number of apps, matching the row set ListApps
 // draws its page from (no WHERE clause). Used to report an accurate "total" in
 // a paginated response without loading every row into memory just to count them.
 func (s *Store) CountApps() (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM apps`).Scan(&n)
+	return n, err
+}
+
+// ListAppsInSlugs returns the page of apps whose slug is in the allowlist,
+// for a scoped identity (a deploy token or service account restricted to a
+// fixed set of apps, see auth.ContextUser.AppScope) whose role would
+// otherwise see the whole fleet. The allowlist is bound as a single
+// parameter regardless of size (see dialect.slugAllowlistClause), so it never
+// approaches the backend's per-statement bind-variable limit the way an
+// "IN (?,?,...)" placeholder per slug would. An empty allowlist means "no
+// apps" (AppScopeRestricted with no slugs) and returns immediately without
+// touching the database.
+func (s *Store) ListAppsInSlugs(slugs []string, limit, offset int) ([]*App, error) {
+	if len(slugs) == 0 {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = s.d.noLimit()
+	}
+	arg, err := s.d.slugAllowlistArg(slugs)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(`
+		SELECT `+appColumns+deploymentSummarySQL+`
+		FROM apps
+		WHERE `+s.d.slugAllowlistClause()+`
+		ORDER BY created_at DESC
+		LIMIT ? OFFSET ?`, arg, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var apps []*App
+	for rows.Next() {
+		app, err := scanApp(rows)
+		if err != nil {
+			return nil, err
+		}
+		apps = append(apps, app)
+	}
+	return apps, rows.Err()
+}
+
+// CountAppsInSlugs returns the number of apps in the allowlist, matching the
+// row set ListAppsInSlugs draws its page from. An empty allowlist returns 0
+// without touching the database, matching ListAppsInSlugs.
+func (s *Store) CountAppsInSlugs(slugs []string) (int, error) {
+	if len(slugs) == 0 {
+		return 0, nil
+	}
+	arg, err := s.d.slugAllowlistArg(slugs)
+	if err != nil {
+		return 0, err
+	}
+	var n int
+	err = s.db.QueryRow(`
+		SELECT COUNT(*) FROM apps
+		WHERE `+s.d.slugAllowlistClause(), arg).Scan(&n)
 	return n, err
 }
 
@@ -1769,6 +1868,33 @@ func (s *Store) ListAppsVisibleToUser(userID int64, limit, offset int) ([]*App, 
 	return apps, rows.Err()
 }
 
+// ListAppsVisibleToUserLean is ListAppsVisibleToUser without
+// deploymentSummarySQL; see ListAppsLean for what that skips and why.
+func (s *Store) ListAppsVisibleToUserLean(userID int64, limit, offset int) ([]*App, error) {
+	if limit <= 0 {
+		limit = s.d.noLimit()
+	}
+	rows, err := s.db.Query(`
+		SELECT `+appColumnsLean+`
+		FROM apps
+		WHERE `+appVisibleToUserWhere+`
+		ORDER BY created_at DESC
+		LIMIT ? OFFSET ?`, userID, userID, userID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var apps []*App
+	for rows.Next() {
+		app, err := scanAppLean(rows)
+		if err != nil {
+			return nil, err
+		}
+		apps = append(apps, app)
+	}
+	return apps, rows.Err()
+}
+
 // CountAppsVisibleToUser returns the number of apps visible to userID, matching
 // the row set ListAppsVisibleToUser draws its page from (same WHERE clause).
 // Used to report an accurate "total" in a paginated response without loading
@@ -1778,6 +1904,67 @@ func (s *Store) CountAppsVisibleToUser(userID int64) (int, error) {
 	err := s.db.QueryRow(`
 		SELECT COUNT(*) FROM apps
 		WHERE `+appVisibleToUserWhere, userID, userID, userID).Scan(&n)
+	return n, err
+}
+
+// ListAppsVisibleToUserInSlugs returns the page of apps visible to userID
+// that are also in the allowlist, for a scoped identity whose role still
+// limits visibility by ownership, membership, or sharing on top of the
+// allowlist (see auth.ContextUser.AppScope). The allowlist is bound as a
+// single parameter regardless of size, exactly as ListAppsInSlugs. An empty
+// allowlist means "no apps" and returns immediately without touching the
+// database.
+func (s *Store) ListAppsVisibleToUserInSlugs(userID int64, slugs []string, limit, offset int) ([]*App, error) {
+	if len(slugs) == 0 {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = s.d.noLimit()
+	}
+	arg, err := s.d.slugAllowlistArg(slugs)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(`
+		SELECT `+appColumns+deploymentSummarySQL+`
+		FROM apps
+		WHERE (`+appVisibleToUserWhere+`)
+		  AND `+s.d.slugAllowlistClause()+`
+		ORDER BY created_at DESC
+		LIMIT ? OFFSET ?`, userID, userID, userID, arg, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var apps []*App
+	for rows.Next() {
+		app, err := scanApp(rows)
+		if err != nil {
+			return nil, err
+		}
+		apps = append(apps, app)
+	}
+	return apps, rows.Err()
+}
+
+// CountAppsVisibleToUserInSlugs returns the number of apps visible to userID
+// that are also in the allowlist, matching the row set
+// ListAppsVisibleToUserInSlugs draws its page from. An empty allowlist
+// returns 0 without touching the database, matching
+// ListAppsVisibleToUserInSlugs.
+func (s *Store) CountAppsVisibleToUserInSlugs(userID int64, slugs []string) (int, error) {
+	if len(slugs) == 0 {
+		return 0, nil
+	}
+	arg, err := s.d.slugAllowlistArg(slugs)
+	if err != nil {
+		return 0, err
+	}
+	var n int
+	err = s.db.QueryRow(`
+		SELECT COUNT(*) FROM apps
+		WHERE (`+appVisibleToUserWhere+`)
+		  AND `+s.d.slugAllowlistClause(), userID, userID, userID, arg).Scan(&n)
 	return n, err
 }
 
@@ -3786,8 +3973,8 @@ func (s *Store) ProvisionOAuthUser(p ProvisionOAuthUserParams) (*User, bool, err
 
 // --- OAuth State (CSRF nonce) ---
 
-func (s *Store) CreateOAuthState(state string) error {
-	_, err := s.db.Exec(`INSERT INTO oauth_states (state) VALUES (?)`, state)
+func (s *Store) CreateOAuthState(state, provider string) error {
+	_, err := s.db.Exec(`INSERT INTO oauth_states (state, provider) VALUES (?, ?)`, state, provider)
 	if err != nil {
 		return fmt.Errorf("create oauth state: %w", err)
 	}
@@ -3795,12 +3982,15 @@ func (s *Store) CreateOAuthState(state string) error {
 }
 
 // ConsumeOAuthState validates the state nonce and deletes it (one-time use).
-// Returns an error if the state does not exist or has expired (>10 minutes old).
-// Also sweeps all expired states to prevent unbounded table growth.
-func (s *Store) ConsumeOAuthState(state string) error {
+// Returns an error if the state does not exist for this provider or has
+// expired (>10 minutes old). Binding the delete to provider prevents a state
+// minted for one provider's login flow from being accepted by a different
+// provider's callback. Also sweeps all expired states to prevent unbounded
+// table growth.
+func (s *Store) ConsumeOAuthState(state, provider string) error {
 	// Sweep stale nonces — ignore errors; this is best-effort cleanup.
 	s.db.Exec(`DELETE FROM oauth_states WHERE created_at < ` + s.d.nowMinusSeconds(600)) //nolint:errcheck
-	res, err := s.db.Exec(`DELETE FROM oauth_states WHERE state = ?`, state)
+	res, err := s.db.Exec(`DELETE FROM oauth_states WHERE state = ? AND provider = ?`, state, provider)
 	if err != nil {
 		return fmt.Errorf("consume oauth state: %w", err)
 	}
@@ -4666,6 +4856,59 @@ func (s *Store) recordReplicaCrash(p UpsertReplicaParams, overwriteLost bool) er
 	default:
 		return nil
 	}
+}
+
+// ReplicaRuntimeIdentity is the runtime identity a replica row carried when
+// a caller captured it: every column a replacement placement rewrites. A
+// zero Port or DeploymentID stands for a NULL column.
+type ReplicaRuntimeIdentity struct {
+	PID          int
+	Port         int
+	EndpointURL  string
+	WorkerID     string
+	DeploymentID int64
+}
+
+// MarkReplicaCrashedClearingIdentityIfCurrent atomically marks a replica
+// crashed and clears its runtime identity (pid, port, endpoint, worker), but
+// only when the row still carries exactly the identity in expect. This is
+// how a confirmed-stop retry (the watcher's pending-stop queue) durably
+// records an exit it finally proved: recovery adopted the row without being
+// able to confirm the old process had stopped, so a fast restart may already
+// have written a replacement into the same row by the time the retry
+// succeeds. The guard makes the write a no-op in that case instead of
+// crash-marking a placement the retry never meant to touch. PID alone cannot
+// tell them apart: container and remote runtimes persist pid 0 for every
+// placement, so the endpoint, worker and deployment are compared too. Zero
+// rows affected (ok=false) means the row already moved on; the caller treats
+// it as an obsolete queue entry, not an error.
+func (s *Store) MarkReplicaCrashedClearingIdentityIfCurrent(p UpsertReplicaParams, expect ReplicaRuntimeIdentity) (bool, error) {
+	if p.Reason == "" {
+		p.Reason = "replica process exited unexpectedly"
+	}
+	if p.ExitObservedAt.IsZero() {
+		p.ExitObservedAt = time.Now().UTC()
+	}
+	res, err := s.db.Exec(`
+		UPDATE replicas
+		   SET status = 'crashed', exit_code = ?, exit_signal = ?, exit_reason = ?,
+		       exit_observed_at = ?, exit_oom_killed = ?, exit_run_id = ?,
+		       restart_count = restart_count + 1, updated_at = `+s.d.nowEpoch()+`,
+		       pid = NULL, port = NULL, endpoint_url = '', worker_id = ''
+		 WHERE app_id = ? AND idx = ? AND pid = ?
+		   AND COALESCE(port, 0) = ? AND endpoint_url = ? AND worker_id = ?
+		   AND COALESCE(deployment_id, 0) = ?`,
+		p.ExitCode, p.Signal, p.Reason, p.ExitObservedAt.Unix(), boolToInt(p.ExitOOMKilled),
+		p.ExitRunID, p.AppID, p.Index, expect.PID,
+		expect.Port, expect.EndpointURL, expect.WorkerID, expect.DeploymentID)
+	if err != nil {
+		return false, fmt.Errorf("mark replica crashed clearing identity: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("mark replica crashed clearing identity: %w", err)
+	}
+	return n > 0, nil
 }
 
 // ListReplicas returns all replicas for the given app, ordered by index.
@@ -5746,6 +5989,51 @@ func scanApp(s scanner) (*App, error) {
 	}
 	if lastDeploymentStatus.Valid {
 		a.LastDeploymentStatus = lastDeploymentStatus.String
+	}
+	return &a, nil
+}
+
+// scanAppLean scans a row selected with appColumnsLean: the same plain
+// apps.* fields scanApp reads, in the same order, but none of the six
+// deployment-derived fields scanApp reads afterward (those stay at their zero
+// value on the returned App). Keep the field list and order here identical to
+// scanApp's leading block; a query using appColumnsLean and a scan using
+// scanApp (or vice versa) would misalign silently.
+func scanAppLean(s scanner) (*App, error) {
+	var a App
+	var projectSlug sql.NullString
+	var autoscaleEnabledInt int
+	var ephemeralDataAckInt int
+	var lastRedeploy RedeployOutcome
+	var lastRedeployAt int64
+	err := s.Scan(
+		&a.ID, &a.Slug, &a.Name, &projectSlug, &a.OwnerID, &a.Access,
+		&a.Status, &a.Replicas, &a.MaxSessionsPerReplica, &a.DeployCount,
+		&a.HibernateTimeoutMinutes, &a.MemoryLimitMB, &a.CPUQuotaPercent,
+		&a.CreatedAt, &a.UpdatedAt,
+		&a.ManagedBy, &a.ReplicaPlacement,
+		&autoscaleEnabledInt, &a.AutoscaleMinReplicas, &a.AutoscaleMaxReplicas, &a.AutoscaleTarget,
+		&a.LastAutoscaleAt, &a.IdentityHeaders, &a.UsageIdentityMode, &a.MinWarmReplicas,
+		&a.LastError, &a.CrashedAt, &a.Description, &a.IconMime, &a.IconEmoji,
+		&a.WorkerIsolation, &a.WorkerGroupedSize, &a.WorkerMaxWorkers,
+		&a.WorkerWarmSpares, &a.WorkerMaxSessionLifetimeSecs, &ephemeralDataAckInt, &a.RenderSeconds,
+		&a.RedeploySeqLaunched, &lastRedeploy.Seq, &lastRedeploy.Outcome,
+		&lastRedeploy.Reason, &lastRedeployAt,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	a.AutoscaleEnabled = autoscaleEnabledInt != 0
+	a.EphemeralDataAck = ephemeralDataAckInt != 0
+	if lastRedeploy.Seq > 0 {
+		lastRedeploy.At = time.Unix(lastRedeployAt, 0).UTC()
+		a.LastRedeploy = &lastRedeploy
+	}
+	if projectSlug.Valid {
+		a.ProjectSlug = projectSlug.String
 	}
 	return &a, nil
 }

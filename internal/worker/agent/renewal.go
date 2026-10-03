@@ -7,7 +7,6 @@ import (
 	"crypto/x509"
 	"fmt"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"time"
 )
@@ -120,18 +119,28 @@ func (a *Agent) recordRenewal(ctx context.Context, phase renewalPhase, notAfter 
 	slog.Log(ctx, level, msg, attrs...)
 }
 
-// applyRenewedCert rebuilds the keypair from the re-signed cert and the retained
-// private key, swaps it into the holder so live listeners and clients present it
-// on their next handshake, and persists it for restart re-adoption.
+// applyRenewedCert rebuilds the keypair from the re-signed cert and the
+// retained private key, persists it durably for restart re-adoption, and only
+// then swaps it into the holder so live listeners and clients present it on
+// their next handshake. Persisting before swapping matters: if the write
+// fails, returning early leaves the holder still presenting the previous
+// (still valid) cert and the on-disk file unchanged, so the next heartbeat
+// still sees renewal as due and retries. Swapping first would report success
+// to the caller while leaving the new cert unwritten, permanently stranding
+// the holder ahead of disk with no trigger to retry.
 func (a *Agent) applyRenewedCert(certPEM string) error {
 	newCert, err := tls.X509KeyPair([]byte(certPEM), a.keyPEM)
 	if err != nil {
 		return fmt.Errorf("load renewed keypair: %w", err)
 	}
-	a.certs.Set(newCert)
 	path := filepath.Join(a.cfg.DataDir, "agent", "client-cert.pem")
-	if err := os.WriteFile(path, []byte(certPEM), 0o600); err != nil {
+	dirWarn, err := persistAtomically(path, []byte(certPEM), 0o600)
+	if err != nil {
 		return fmt.Errorf("persist renewed cert: %w", err)
+	}
+	a.certs.Set(newCert)
+	if dirWarn != nil {
+		slog.Warn("worker renewed cert: parent directory fsync failed after rename", "node_id", a.nodeID, "err", dirWarn)
 	}
 	return nil
 }

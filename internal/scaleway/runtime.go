@@ -325,7 +325,8 @@ func (r *Runtime) Wait(ctx context.Context, handle process.RunHandle) error {
 			case StatusDeleting:
 				return nil
 			case StatusError:
-				return fmt.Errorf("scaleway: container %s failed: %s", id, container.ErrorMessage)
+				r.log.Error("scaleway: container failed", "container_id", id, "error_message", container.ErrorMessage)
+				return &process.ProcessExitError{Code: -1}
 			}
 		}
 	}

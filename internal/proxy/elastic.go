@@ -16,6 +16,7 @@ import (
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/proxytrust"
+	"github.com/rvben/shinyhub/internal/safego"
 )
 
 // clientSlot tracks the live state of one client's binding to an elastic worker.
@@ -305,12 +306,12 @@ func (p *Proxy) reconcileElasticWarmSpares(slug string, expectedEpoch *uint64) {
 
 	if terminate != nil {
 		for _, id := range stopIDs {
-			go terminate(slug, id)
+			safego.Go("proxy elastic warm spare terminate", func() { terminate(slug, id) })
 		}
 	}
 	if spawn != nil {
 		for _, id := range spawnIDs {
-			go spawn(slug, id)
+			safego.Go("proxy elastic warm spare spawn", func() { spawn(slug, id) })
 		}
 	}
 }
@@ -430,7 +431,8 @@ func (p *Proxy) bindClientLocked(slug, clientID string, slotID int) {
 				if w.assignedClients == 0 && p.terminate != nil {
 					// Dispatch via goroutine: the callback must never run
 					// inline under the write lock (re-entry / deadlock).
-					go p.terminate(slug, old.slotID)
+					oldSlotID := old.slotID
+					safego.Go("proxy elastic client migrate terminate", func() { p.terminate(slug, oldSlotID) })
 				}
 			}
 		}
@@ -444,7 +446,8 @@ func (p *Proxy) bindClientLocked(slug, clientID string, slotID int) {
 			if w.handoffReady && !w.everAssigned {
 				w.handoffReady = false
 				if p.warmSpareConsumed != nil {
-					go p.warmSpareConsumed(slug, slotID, p.poolEpoch[slug])
+					epoch := p.poolEpoch[slug]
+					safego.Go("proxy elastic warm spare consumed", func() { p.warmSpareConsumed(slug, slotID, epoch) })
 				}
 			}
 			w.assignedClients++
@@ -602,7 +605,7 @@ func (p *Proxy) graceExpiry(slug, clientID string, armed *clientSlot) func() {
 		p.mu.Unlock()
 		if term != nil {
 			// Dispatch outside the lock to avoid re-entry / deadlock.
-			go term(slug, slotID)
+			safego.Go("proxy elastic grace expiry terminate", func() { term(slug, slotID) })
 		}
 	}
 }
@@ -617,7 +620,7 @@ func (p *Proxy) armClientReleaseLocked(slug, clientID string) {
 	if cs == nil || cs.liveConns != 0 || cs.releaseTimer != nil {
 		return
 	}
-	cs.releaseTimer = time.AfterFunc(clientGraceTTL, p.graceExpiry(slug, clientID, cs))
+	cs.releaseTimer = safego.AfterFunc(clientGraceTTL, "proxy elastic client grace expiry", p.graceExpiry(slug, clientID, cs))
 }
 
 // clientConnClosed records that one connection from clientID has closed. When
@@ -647,7 +650,7 @@ func (p *Proxy) clientConnClosed(slug, clientID string, expected ...*clientSlot)
 	}
 	// liveConns just hit zero: arm the grace-period release timer under cs.mu.
 	if cs.releaseTimer == nil {
-		cs.releaseTimer = time.AfterFunc(clientGraceTTL, p.graceExpiry(slug, clientID, cs))
+		cs.releaseTimer = safego.AfterFunc(clientGraceTTL, "proxy elastic client grace expiry", p.graceExpiry(slug, clientID, cs))
 	}
 }
 

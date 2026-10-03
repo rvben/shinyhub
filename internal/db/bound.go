@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"sync/atomic"
 )
 
 // boundDB wraps *sql.DB and rebinds `?` placeholders to the active dialect on
@@ -11,22 +12,49 @@ import (
 type boundDB struct {
 	real *sql.DB
 	d    dialect
+
+	// observer, when set via Store.ObserveQueries, receives the rebound SQL
+	// text of every Exec/Query/QueryRow call issued directly through this
+	// boundDB (not through a boundTx or boundConn, which serve the write
+	// path and are never used for listing queries). nil by default; reading
+	// an atomic pointer costs one load, so the hot path pays nothing when no
+	// test has installed an observer.
+	observer atomic.Pointer[func(string)]
+}
+
+// observe reports the rebound SQL text to the currently installed observer,
+// if any. It is a no-op (a single atomic load) when ObserveQueries has never
+// been called.
+func (b *boundDB) observe(query string) {
+	if fn := b.observer.Load(); fn != nil {
+		(*fn)(query)
+	}
 }
 
 func (b *boundDB) Exec(query string, args ...any) (sql.Result, error) {
-	return b.real.Exec(b.d.rebind(query), args...)
+	rebound := b.d.rebind(query)
+	b.observe(rebound)
+	return b.real.Exec(rebound, args...)
 }
 func (b *boundDB) Query(query string, args ...any) (*sql.Rows, error) {
-	return b.real.Query(b.d.rebind(query), args...)
+	rebound := b.d.rebind(query)
+	b.observe(rebound)
+	return b.real.Query(rebound, args...)
 }
 func (b *boundDB) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
-	return b.real.QueryContext(ctx, b.d.rebind(query), args...)
+	rebound := b.d.rebind(query)
+	b.observe(rebound)
+	return b.real.QueryContext(ctx, rebound, args...)
 }
 func (b *boundDB) QueryRow(query string, args ...any) *sql.Row {
-	return b.real.QueryRow(b.d.rebind(query), args...)
+	rebound := b.d.rebind(query)
+	b.observe(rebound)
+	return b.real.QueryRow(rebound, args...)
 }
 func (b *boundDB) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
-	return b.real.QueryRowContext(ctx, b.d.rebind(query), args...)
+	rebound := b.d.rebind(query)
+	b.observe(rebound)
+	return b.real.QueryRowContext(ctx, rebound, args...)
 }
 func (b *boundDB) Begin() (*boundTx, error) {
 	tx, err := b.real.Begin()

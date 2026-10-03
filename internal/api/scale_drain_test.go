@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"syscall"
@@ -31,13 +32,31 @@ func newClusteredScaleTestServer(t *testing.T, slug string, replicas int) (*Serv
 type drainingCheckRuntime struct {
 	stopFailRuntime
 	onSignal func()
+	exitOnce sync.Once
+	exited   chan struct{}
+}
+
+func newDrainingCheckRuntime() *drainingCheckRuntime {
+	return &drainingCheckRuntime{exited: make(chan struct{})}
 }
 
 func (r *drainingCheckRuntime) Signal(h process.RunHandle, sig syscall.Signal) error {
 	if r.onSignal != nil {
 		r.onSignal()
 	}
-	return nil // succeed (allow the stop to proceed)
+	// The signal is accepted, so the process exits: Wait observes that exit
+	// and the stop is confirmed rather than reported as unconfirmed.
+	r.exitOnce.Do(func() { close(r.exited) })
+	return nil
+}
+
+func (r *drainingCheckRuntime) Wait(ctx context.Context, _ process.RunHandle) error {
+	select {
+	case <-r.exited:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // TestClusteredScaleDown_WritesDesiredStateDraining verifies that in clustered
@@ -51,7 +70,7 @@ func TestClusteredScaleDown_WritesDesiredStateDraining(t *testing.T) {
 	srv.SetCluster("this-instance")
 
 	var desiredStateAtStop string
-	rt := &drainingCheckRuntime{}
+	rt := newDrainingCheckRuntime()
 	rt.onSignal = func() {
 		reps, err := srv.store.ListReplicas(app.ID)
 		if err != nil {

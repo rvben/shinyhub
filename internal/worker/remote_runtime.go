@@ -240,6 +240,42 @@ func toStartRequest(p process.StartParams) api.ReplicaStartRequest {
 // answer, everything else must be retried.
 var errWorkerReportedFailure = errors.New("worker error")
 
+// workerFailure is a FrameError a worker sent. It unwraps to
+// errWorkerReportedFailure and, when the worker proved the replica exited
+// (Code set), to the *process.ProcessExitError that exit rebuilds, so a
+// caller's errors.As sees the same proof the worker's own Wait had.
+type workerFailure struct {
+	msg   string
+	frame api.Frame
+}
+
+func (e *workerFailure) exit() *process.ProcessExitError {
+	if e.frame.Code == nil {
+		return nil
+	}
+	return &process.ProcessExitError{Code: *e.frame.Code, Signal: syscall.Signal(e.frame.Signal)}
+}
+
+// legacy reports a frame from a worker that predates exit reporting: it
+// carries neither an exit code nor the ExitProven marker.
+func (e *workerFailure) legacy() bool {
+	return e.frame.Code == nil && e.frame.ExitProven == nil
+}
+
+func (e *workerFailure) Error() string {
+	if exit := e.exit(); exit != nil {
+		return fmt.Sprintf("%v: %s: %v", errWorkerReportedFailure, e.msg, exit)
+	}
+	return fmt.Sprintf("%v: %s", errWorkerReportedFailure, e.msg)
+}
+
+func (e *workerFailure) Unwrap() []error {
+	if exit := e.exit(); exit != nil {
+		return []error{errWorkerReportedFailure, exit}
+	}
+	return []error{errWorkerReportedFailure}
+}
+
 // streamFrames reads NDJSON frames from rc, writing log data to logWriter,
 // returning the first FrameResult data bytes, or an error from a FrameError frame.
 // On a result, it spawns a goroutine to drain remaining log frames until close.
@@ -267,7 +303,7 @@ func streamFrames(rc io.ReadCloser, logWriter io.Writer) (json.RawMessage, error
 			if msg == "" {
 				msg = "unknown worker error"
 			}
-			return nil, fmt.Errorf("%w: %s", errWorkerReportedFailure, msg)
+			return nil, &workerFailure{msg: msg, frame: fr}
 		case api.FrameResult:
 			// Drain remaining log frames in the background so the worker's
 			// streaming write side does not block.
@@ -453,6 +489,12 @@ func (r *remoteRuntime) waitOnce(ctx context.Context, h process.RunHandle) (bool
 		return true, nil
 	case http.StatusOK:
 		if _, err := streamFrames(resp.Body, nil); err != nil {
+			var wf *workerFailure
+			if errors.As(err, &wf) && wf.legacy() {
+				// A worker that predates exit reporting sent this when its
+				// Wait returned, which is how it reports a stopped replica.
+				return true, fmt.Errorf("%w: %w", err, &process.ProcessExitError{Code: -1})
+			}
 			if errors.Is(err, errWorkerReportedFailure) {
 				return true, err
 			}

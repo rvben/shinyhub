@@ -48,7 +48,7 @@ func ReplicaRouteValidator(store *db.Store, mgr *process.Manager) func(context.C
 
 func replicaBundleDir(store *db.Store, r *db.Replica) (string, error) {
 	if r.DeploymentID == nil {
-		return activeBundleDir(store, r.AppID), nil
+		return activeBundleDir(store, r.AppID)
 	}
 	d, err := store.GetDeploymentByID(*r.DeploymentID)
 	if err != nil {

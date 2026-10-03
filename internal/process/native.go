@@ -720,7 +720,25 @@ func (r *NativeRuntime) Wait(ctx context.Context, handle RunHandle) error {
 	if groupErr != nil {
 		return groupErr
 	}
-	return rootErr
+	return wrapExitError(rootErr)
+}
+
+// wrapExitError converts a raw *exec.ExitError into *ProcessExitError so a
+// caller can distinguish a genuine, code/signal-carrying exit from a
+// transport or timeout failure that proves nothing about whether the process
+// is still alive. Any other error (including nil) passes through unchanged.
+func wrapExitError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return err
+	}
+	if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+		return &ProcessExitError{Code: -1, Signal: status.Signal()}
+	}
+	return &ProcessExitError{Code: exitErr.ExitCode()}
 }
 
 // teardownAppCgroupFor removes a replica's per-app cgroup once its process has

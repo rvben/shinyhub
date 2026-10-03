@@ -42,6 +42,22 @@ type recordingRuntime struct {
 	// onStart, when set, runs after each Start is recorded with the 1-based
 	// call number; a non-nil return fails that Start.
 	onStart func(call int) error
+	// exitOnSignal models workers that keep running until they are signalled:
+	// each Start gets its own PID, and Wait for that PID returns only after a
+	// Signal reaches it (or the test ends).
+	exitOnSignal bool
+	exits        map[int]chan struct{}
+}
+
+// closeExits releases every worker still waiting in exitOnSignal mode, so
+// the manager's monitor goroutines end with the test.
+func (r *recordingRuntime) closeExits() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for pid, ch := range r.exits {
+		close(ch)
+		delete(r.exits, pid)
+	}
 }
 
 func (r *recordingRuntime) Start(_ context.Context, p process.StartParams, _ io.Writer) (process.ReplicaEndpoint, error) {
@@ -61,21 +77,51 @@ func (r *recordingRuntime) Start(_ context.Context, p process.StartParams, _ io.
 	if url == "" {
 		url = "http://127.0.0.1:9000"
 	}
+	pid := 12345
+	if r.exitOnSignal {
+		pid += call
+		r.mu.Lock()
+		if r.exits == nil {
+			r.exits = map[int]chan struct{}{}
+		}
+		r.exits[pid] = make(chan struct{})
+		r.mu.Unlock()
+	}
 	return process.ReplicaEndpoint{
 		URL:      url,
 		Provider: "native",
 		WorkerID: "test-worker",
-		Handle:   process.RunHandle{PID: 12345},
+		Handle:   process.RunHandle{PID: pid},
 	}, nil
 }
 
-func (r *recordingRuntime) Signal(_ process.RunHandle, sig syscall.Signal) error {
+func (r *recordingRuntime) Signal(h process.RunHandle, sig syscall.Signal) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.signals = append(r.signals, sig)
+	if r.signalErr == nil {
+		if ch, ok := r.exits[h.PID]; ok {
+			close(ch)
+			delete(r.exits, h.PID)
+		}
+	}
 	return r.signalErr
 }
-func (r *recordingRuntime) Wait(ctx context.Context, _ process.RunHandle) error {
+func (r *recordingRuntime) Wait(ctx context.Context, h process.RunHandle) error {
+	if r.exitOnSignal {
+		r.mu.Lock()
+		ch, ok := r.exits[h.PID]
+		r.mu.Unlock()
+		if !ok {
+			return nil
+		}
+		select {
+		case <-ch:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	if r.waitCh == nil {
 		return nil
 	}
@@ -721,7 +767,7 @@ func TestRecoverProcesses_ElasticAppSetsUpPoolAndStaysRunning(t *testing.T) {
 	mgr := process.NewManager(t.TempDir(), rt)
 	prx := proxy.New()
 
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "")
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "", nil, mustPrepareRecovery(t, store))
 
 	// App must still be "running" - an empty elastic pool is a valid running state.
 	got, err := store.GetAppBySlug("elasticpool")
@@ -759,7 +805,7 @@ func TestRecoverProcesses_FleetDefaultElastic_SetsUpPoolAndStaysRunning(t *testi
 	prx := proxy.New()
 
 	// Pass "per_session" as the fleet default; the per-app field is empty.
-	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "per_session")
+	lifecycle.RecoverProcesses(store, mgr, prx, 0, false, "per_session", nil, mustPrepareRecovery(t, store))
 
 	// App must still be "running": the elastic pool is ready, no replicas needed.
 	got, err := store.GetAppBySlug("inheritpool")
@@ -998,7 +1044,12 @@ func TestSpawnElasticWorker_ManifestTracingAutoOverridesFleet(t *testing.T) {
 
 func TestSpawnElasticWorker_InstrumentedHealthFailureRetriesUninstrumented(t *testing.T) {
 	const slotID = 2
-	f := newElasticTracingFixture(t, "retry", mustMinimalBundle(t), &recordingRuntime{})
+	// The first worker must still be running when its health check fails, so
+	// the retry has a live process to stop; an instantly exiting fake would let
+	// the stop find nothing to signal.
+	rt := &recordingRuntime{exitOnSignal: true}
+	t.Cleanup(rt.closeExits)
+	f := newElasticTracingFixture(t, "retry", mustMinimalBundle(t), rt)
 	f.mgr.SetAutoInstrumentAppsDefault(true)
 	(&lifecycle.ElasticSpawner{Store: f.store, Manager: f.mgr, Proxy: f.prx, HealthCheck: failingThenPassingHealth(1)}).Spawn("retry", slotID)
 

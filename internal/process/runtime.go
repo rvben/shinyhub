@@ -37,6 +37,21 @@ var ErrStopUnconfirmed = errors.New("replica stop unconfirmed")
 // use it to return a bounded Retry-After hint without exposing provider errors.
 var ErrExternalLogsThrottled = errors.New("external logs throttled")
 
+// ErrReplicaStopPending is returned (wrapped) by Manager.Start when the target
+// slug+index slot holds an entry whose confirmed stop could not prove the
+// process exited. The slot stays refused until the outstanding stop retry
+// observes the exit and its owner releases the entry, so a successor is never
+// started while the original may still be alive.
+var ErrReplicaStopPending = errors.New("replica stop pending")
+
+// ErrIncarnationGone is returned by Manager.StopReplicaIncarnation when the
+// targeted slug+index slot no longer holds the incarnation the caller captured.
+// It is a real proof of exit: the slot changed hands only because an owning
+// teardown (app delete, eviction, or an earlier confirmed stop) already
+// resolved that incarnation and wrote its own state, so a caller retrying a
+// stop by incarnation must treat this as done, not as a failure to retry.
+var ErrIncarnationGone = errors.New("replica incarnation gone")
+
 // ReplicaEndpoint is the result of starting a replica: where the proxy routes
 // to it, which provider owns it, a stable worker identity used for recovery,
 // and the operational RunHandle for Signal/Wait/Stats/removal. A remote runtime
@@ -338,12 +353,20 @@ type ExitInfo struct {
 
 // ProcessExitError carries a runtime-reported exit code through Runtime.Wait.
 // Long-running replicas are expected not to exit at all, so code 0 is still an
-// exit event worth surfacing rather than a successful Wait to discard.
+// exit event worth surfacing rather than a successful Wait to discard. Signal
+// is set (and Code is -1) when the process was killed by a signal rather than
+// exiting with a code, preserving crash-reason fidelity across runtimes.
 type ProcessExitError struct {
-	Code int
+	Code   int
+	Signal syscall.Signal
 }
 
-func (e *ProcessExitError) Error() string { return fmt.Sprintf("process exited with code %d", e.Code) }
+func (e *ProcessExitError) Error() string {
+	if e.Signal != 0 {
+		return fmt.Sprintf("process killed by signal %s", e.Signal)
+	}
+	return fmt.Sprintf("process exited with code %d", e.Code)
+}
 
 // SharedMount is a read-only mount of another app's data dir into the consumer.
 type SharedMount struct {

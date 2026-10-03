@@ -64,7 +64,7 @@ func TestExitReason_LiveCrashVsRestartDiscoveredCrash(t *testing.T) {
 	}
 
 	restartMgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
-	adopted := recoverNativeReplica(store, restartMgr, nil, app, replicaAt(t, store, app.ID, 0), t.TempDir(), "")
+	adopted, _ := recoverNativeReplica(store, restartMgr, nil, app, replicaAt(t, store, app.ID, 0), t.TempDir(), "", nil)
 	if adopted {
 		t.Fatal("a replica with a dead PID must not be reported as adopted")
 	}
