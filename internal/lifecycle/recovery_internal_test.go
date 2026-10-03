@@ -224,6 +224,7 @@ func mustCreateActiveBundleDirTestApp(t *testing.T, store *db.Store, slug string
 // reused PID on port evidence alone, and would make reAdoptFrozenWarmReplica
 // fail closed and rewrite a still-stopped frozen-warm row to stopped.
 func TestActiveBundleDir_PropagatesLookupError(t *testing.T) {
+	dbtest.SkipIfPostgres(t) // corrupts a row through SQLite type affinity, which Postgres rejects on write
 	store := dbtest.New(t)
 	app := mustCreateActiveBundleDirTestApp(t, store, "bundle-lookup-error")
 	dep, err := store.BeginDeployment(app.ID, "v1", t.TempDir())

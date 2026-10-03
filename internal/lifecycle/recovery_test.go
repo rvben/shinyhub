@@ -2296,6 +2296,7 @@ func TestRecoverProcesses_ElasticGenerationsAreReapedWithoutFixedReplicaAdoption
 // skip its cwd check and adopt a reused PID on port evidence alone (a real,
 // still-running, wrong-cwd process is seeded below to make that concrete).
 func TestPrepareRecovery_FailsClosedOnCorruptedDeploymentRow(t *testing.T) {
+	dbtest.SkipIfPostgres(t) // corrupts a row through SQLite type affinity, which Postgres rejects on write
 	store := mustOpenStore(t)
 
 	// A second, healthy app confirms the failure is attributable to the
