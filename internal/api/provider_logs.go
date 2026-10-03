@@ -2,10 +2,14 @@ package api
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
+	"runtime/debug"
 	"sync"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/process"
+	"github.com/rvben/shinyhub/internal/safego"
 )
 
 const (
@@ -84,7 +88,7 @@ func (c *providerLogCoordinator) read(ctx context.Context, details process.Exter
 	c.inflight[key] = call
 	c.mu.Unlock()
 
-	go c.execute(ctx, key, details, cursor, limit, call)
+	safego.Go("provider log read", func() { c.execute(ctx, key, details, cursor, limit, call) })
 	select {
 	case <-ctx.Done():
 		return process.ExternalLogPage{}, false, ctx.Err()
@@ -98,8 +102,7 @@ func (c *providerLogCoordinator) execute(parent context.Context, key providerLog
 	defer cancel()
 	select {
 	case c.slots <- struct{}{}:
-		call.page, call.err = c.reader.Read(ctx, details, cursor, limit)
-		<-c.slots
+		call.page, call.err = c.readHoldingSlot(ctx, details, cursor, limit)
 	case <-ctx.Done():
 		call.err = ctx.Err()
 	}
@@ -125,4 +128,20 @@ func (c *providerLogCoordinator) execute(parent context.Context, key providerLog
 	}
 	close(call.done)
 	c.mu.Unlock()
+}
+
+// readHoldingSlot runs one provider read while holding a concurrency slot,
+// and frees the slot on every exit. A panic in the provider reader becomes
+// the read's error, so the caller's cleanup still removes the inflight entry
+// and wakes every coalesced waiter instead of wedging them and the slot.
+func (c *providerLogCoordinator) readHoldingSlot(ctx context.Context, details process.ExternalLogs, cursor string, limit int32) (page process.ExternalLogPage, err error) {
+	defer func() { <-c.slots }()
+	defer func() {
+		if p := recover(); p != nil {
+			safego.RepanicFatal(p)
+			slog.Error("provider log read panicked", "provider", details.Provider, "panic", p, "stack", string(debug.Stack()))
+			page, err = process.ExternalLogPage{}, fmt.Errorf("provider log read panicked: %v", p)
+		}
+	}()
+	return c.reader.Read(ctx, details, cursor, limit)
 }

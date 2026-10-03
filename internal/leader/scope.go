@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"runtime/debug"
 	"sync"
+
+	"github.com/rvben/shinyhub/internal/safego"
 )
 
 // OwnerScope runs a unit of owner-only work in a fresh context each time
@@ -54,6 +56,7 @@ func (o *OwnerScope) Acquire(epoch int64) {
 		// acquisition re-runs work rather than the fleet losing its control plane.
 		defer func() {
 			if r := recover(); r != nil {
+				safego.RepanicFatal(r)
 				slog.Error("leader: owner work panicked",
 					"epoch", epoch, "panic", r, "stack", string(debug.Stack()))
 			}

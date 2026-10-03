@@ -14,11 +14,13 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/lifecycle/scheduler"
 	"github.com/rvben/shinyhub/internal/process"
+	"github.com/rvben/shinyhub/internal/safego"
 	"github.com/rvben/shinyhub/internal/schedulespec"
 )
 
@@ -1127,7 +1129,7 @@ func (s *Server) handleScheduleRunLogs(w http.ResponseWriter, r *http.Request) {
 		// code afterwards.
 		ctx, cancel := context.WithCancel(r.Context())
 		defer cancel()
-		go s.cancelWhenRunDone(ctx, cancel, runID)
+		safego.Go("run log completion watch", func() { s.cancelWhenRunDone(ctx, cancel, runID) })
 		streamLogFile(w, r.WithContext(ctx), run.LogPath, true)
 		return
 	}

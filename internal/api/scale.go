@@ -13,6 +13,7 @@ import (
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
+	"github.com/rvben/shinyhub/internal/safego"
 )
 
 // defaultMaxReplicas is the fallback per-app replica ceiling when the runtime
@@ -408,6 +409,7 @@ func (s *Server) scaleDownLocked(app *db.App, grace time.Duration, persistSize b
 func (s *Server) cycleResize(slug string) (outcome, reason string) {
 	defer func() {
 		if p := recover(); p != nil {
+			safego.RepanicFatal(p)
 			slog.Error("resize app: panic", "slug", slug, "panic", p, "stack", string(debug.Stack()))
 			outcome, reason = db.RedeployFailed, fmt.Sprintf("internal error: %v", p)
 		}

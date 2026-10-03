@@ -14,9 +14,11 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/logstream"
 	"github.com/rvben/shinyhub/internal/process"
+	"github.com/rvben/shinyhub/internal/safego"
 )
 
 // defaultLogTail is the initial-burst line count when no ?tail= is given.
@@ -588,7 +590,16 @@ func streamLogReader(w http.ResponseWriter, r *http.Request, lr appLogReader, ta
 
 	// Follow new output until the client disconnects.
 	ch := make(chan logstream.Record, 64)
-	go lr.FollowFrom(r.Context(), cursor, ch)
+	// followDone ends the response if the follower stops on its own, which it
+	// does only after a contained panic (on the normal path it returns when the
+	// request context ends, and that case returns first). The client then
+	// reconnects with Last-Event-ID instead of holding a stream that only ever
+	// emits heartbeats.
+	followDone := make(chan struct{})
+	safego.Go("log follow", func() {
+		defer close(followDone)
+		lr.FollowFrom(r.Context(), cursor, ch)
+	})
 
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
@@ -596,6 +607,8 @@ func streamLogReader(w http.ResponseWriter, r *http.Request, lr appLogReader, ta
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-followDone:
 			return
 		case record := <-ch:
 			writeLogEvent(w, record)

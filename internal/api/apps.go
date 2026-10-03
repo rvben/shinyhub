@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+
 	"github.com/rvben/shinyhub/internal/appmetaspec"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/bundle"
@@ -32,6 +33,7 @@ import (
 	"github.com/rvben/shinyhub/internal/lifecycle"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
+	"github.com/rvben/shinyhub/internal/safego"
 	slugpkg "github.com/rvben/shinyhub/internal/slug"
 	"github.com/rvben/shinyhub/internal/storage"
 )
@@ -1433,7 +1435,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		s.markRedeployInFlight(slug)
 		defer func() {
 			if launchRedeploy {
-				go s.redeployApp(slug, seq)
+				safego.Go("settings redeploy", func() { s.redeployApp(slug, seq) })
 			} else {
 				s.clearRedeployInFlight(slug)
 			}
@@ -2278,18 +2280,18 @@ func (s *Server) retryGenerationLedgerCleanup(ctx context.Context, slug string, 
 
 func (s *Server) startGenerationLedgerCleanup(slug string, deploymentID int64) {
 	s.generationWG.Add(1)
-	go func() {
+	safego.Go("generation ledger cleanup", func() {
 		defer s.generationWG.Done()
 		s.retryGenerationLedgerCleanup(s.generationCtx, slug, deploymentID)
-	}()
+	})
 }
 
 func (s *Server) startGenerationRetirement(slug string, deploymentID int64) {
 	s.generationWG.Add(1)
-	go func() {
+	safego.Go("generation retirement", func() {
 		defer s.generationWG.Done()
 		s.retireGenerationWhenIdle(s.generationCtx, slug, deploymentID)
-	}()
+	})
 }
 
 // guardDeploymentConsumerStart closes the native exec-before-checkpoint window

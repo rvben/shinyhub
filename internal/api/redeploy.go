@@ -13,11 +13,13 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/rvben/shinyhub/internal/appstatus"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
-	"golang.org/x/sys/unix"
+	"github.com/rvben/shinyhub/internal/safego"
 )
 
 // deployLockFor returns the per-slug mutex used to serialize all
@@ -610,6 +612,7 @@ func (s *Server) redeployApp(slug string, seq int64) {
 func (s *Server) cycleRedeploy(slug string) (outcome, reason string) {
 	defer func() {
 		if p := recover(); p != nil {
+			safego.RepanicFatal(p)
 			slog.Error("redeployApp: panic", "slug", slug, "panic", p, "stack", string(debug.Stack()))
 			outcome, reason = db.RedeployFailed, fmt.Sprintf("internal error: %v", p)
 		}
@@ -869,7 +872,8 @@ func (s *Server) RelaunchOwedRedeploys() {
 	}
 	for _, o := range owed {
 		slog.Info("relaunching owed settings redeploy", "slug", o.Slug, "seq", o.Seq)
-		s.markRedeployInFlight(o.Slug)
-		go s.redeployApp(o.Slug, o.Seq)
+		slug, seq := o.Slug, o.Seq
+		s.markRedeployInFlight(slug)
+		safego.Go("settings redeploy", func() { s.redeployApp(slug, seq) })
 	}
 }

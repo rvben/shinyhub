@@ -3022,7 +3022,8 @@ func (w *Watcher) driveWakingApp(parent context.Context, slug, trigger string) <
 		// status is still waking), so it never clobbers a newer intent.
 		finalized := false
 		defer func() {
-			if r := recover(); r != nil {
+			r := recover()
+			if r != nil {
 				opErr = fmt.Errorf("wake panicked: %v", r)
 				slog.Error("watcher: wake panicked", "slug", slug, "panic", r)
 			}
@@ -3031,6 +3032,9 @@ func (w *Watcher) driveWakingApp(parent context.Context, slug, trigger string) <
 					slog.Warn("watcher: abort wake failed", "slug", slug, "err", aerr)
 				}
 			}
+			// A Fatal still reverts the wake first, then keeps unwinding so the
+			// process exits.
+			safego.RepanicFatal(r)
 		}()
 
 		app, err := w.store.GetAppBySlug(slug)

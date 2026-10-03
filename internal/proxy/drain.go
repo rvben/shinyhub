@@ -4,6 +4,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/rvben/shinyhub/internal/safego"
 )
 
 // connTracker is the registry of live hijacked (upgraded / WebSocket)
@@ -54,7 +56,7 @@ func (t *connTracker) trackWithSession(c net.Conn, principal ConnPrincipal, onCl
 		// callback may start immediately, but Close will wait until the pointer is
 		// assigned; an early manual Close can then cancel and release the closure.
 		tc.timerMu.Lock()
-		tc.deadlineTimer = time.AfterFunc(delay, func() { _ = tc.closeWithReason(reason) })
+		tc.deadlineTimer = safego.AfterFunc(delay, "proxy drain deadline close", func() { _ = tc.closeWithReason(reason) })
 		tc.timerMu.Unlock()
 	}
 	t.mu.Unlock()
