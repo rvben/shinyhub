@@ -220,6 +220,115 @@ func TestBodilessStatusesPassThrough(t *testing.T) {
 	}
 }
 
+func TestPreservesMultipleContentEncodings(t *testing.T) {
+	body := payload(20000)
+	var encoded bytes.Buffer
+	zw := gzip.NewWriter(&encoded)
+	if _, err := zw.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if encoded.Len() < MinSize {
+		t.Fatal("fixture must be large enough to trigger compression")
+	}
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header()["Content-Encoding"] = []string{"identity", "gzip"}
+		w.Header().Set("Content-Type", "text/javascript")
+		_, _ = w.Write(encoded.Bytes())
+	})
+	for _, wrapped := range []bool{false, true} {
+		t.Run("wrapped="+strconv.FormatBool(wrapped), func(t *testing.T) {
+			var handler http.Handler = h
+			if wrapped {
+				handler = Handler(h)
+			}
+			srv := httptest.NewServer(handler)
+			defer srv.Close()
+			resp, wire := get(t, srv, http.MethodGet, "gzip", nil)
+			if got := strings.Join(resp.Header.Values("Content-Encoding"), ","); got != "identity,gzip" {
+				t.Errorf("Content-Encoding = %q, want identity,gzip", got)
+			}
+			if !bytes.Equal(wire, encoded.Bytes()) {
+				t.Error("already encoded response body was changed")
+			}
+			if !bytes.Equal(gunzip(t, wire), body) {
+				t.Error("decoding the declared encoding did not recover the original body")
+			}
+		})
+	}
+}
+
+func TestCommitsHeadersBeforeBufferedBody(t *testing.T) {
+	for _, explicit := range []bool{false, true} {
+		for _, size := range []int{8, 2 * MinSize} {
+			for _, wrapped := range []bool{false, true} {
+				name := "explicit=" + strconv.FormatBool(explicit) + "/size=" + strconv.Itoa(size) + "/wrapped=" + strconv.FormatBool(wrapped)
+				t.Run(name, func(t *testing.T) {
+					body := append([]byte("first"), payload(size)...)
+					h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						w.Header().Set("Content-Type", "text/plain")
+						w.Header().Set("X-Early", "hint")
+						w.WriteHeader(http.StatusEarlyHints)
+						w.Header().Set("X-Early", "original")
+						w.Header().Set("Trailer", "X-End")
+						if explicit {
+							w.WriteHeader(http.StatusCreated)
+						} else {
+							_, _ = w.Write(body[:5])
+						}
+						w.Header()["X-Early"][0] = "changed"
+						w.Header().Set("X-Late", "must not be sent")
+						w.Header().Set("Content-Type", "application/octet-stream")
+						if explicit {
+							_, _ = w.Write(body[:5])
+						}
+						trailerValues := []string{"pending trailer"}
+						w.Header()["X-End"] = trailerValues
+						_, _ = w.Write(body[5:])
+						trailerValues[0] = "declared trailer"
+						w.Header().Set(http.TrailerPrefix+"X-Dynamic", "late trailer")
+					})
+					var handler http.Handler = h
+					if wrapped {
+						handler = Handler(h)
+					}
+					srv := httptest.NewServer(handler)
+					defer srv.Close()
+					resp, wire := get(t, srv, http.MethodGet, "gzip", nil)
+					wantStatus := http.StatusOK
+					if explicit {
+						wantStatus = http.StatusCreated
+					}
+					if resp.StatusCode != wantStatus {
+						t.Errorf("status = %d, want %d", resp.StatusCode, wantStatus)
+					}
+					if resp.Header.Get("X-Early") != "original" || resp.Header.Get("X-Late") != "" || resp.Header.Get("Content-Type") != "text/plain" {
+						t.Errorf("committed headers changed: %v", resp.Header)
+					}
+					if wrapped && size >= MinSize {
+						if resp.Header.Get("Content-Encoding") != "gzip" {
+							t.Error("late Content-Type changed the compression decision")
+						} else {
+							wire = gunzip(t, wire)
+						}
+					}
+					if !bytes.Equal(wire, body) {
+						t.Error("response body changed")
+					}
+					if resp.Trailer.Get("X-End") != "declared trailer" || resp.Trailer.Get("X-Dynamic") != "late trailer" {
+						t.Errorf("trailers changed: %v", resp.Trailer)
+					}
+					if resp.Header.Get("X-End") != "" || resp.Header.Get("X-Dynamic") != "" {
+						t.Error("trailer values appeared in response headers")
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestSmallBodiesAreNotCompressed(t *testing.T) {
 	body := payload(MinSize - 1)
 	for _, declared := range []bool{true, false} {

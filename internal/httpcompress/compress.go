@@ -14,6 +14,7 @@ package httpcompress
 
 import (
 	"compress/gzip"
+	"maps"
 	"net/http"
 	"strconv"
 	"strings"
@@ -55,6 +56,7 @@ type writer struct {
 	accepts bool
 
 	status  int
+	headers http.Header
 	decided bool
 	gz      *gzip.Writer
 	pending []byte
@@ -81,6 +83,7 @@ func (w *writer) WriteHeader(code int) {
 		return
 	}
 	w.status = code
+	w.headers = w.Header().Clone()
 }
 
 func (w *writer) Write(p []byte) (int, error) {
@@ -91,16 +94,16 @@ func (w *writer) Write(p []byte) (int, error) {
 		return w.rw.Write(p)
 	}
 	if w.status == 0 {
-		w.status = http.StatusOK
+		w.WriteHeader(http.StatusOK)
 	}
-	if _, typed := w.Header()["Content-Type"]; !typed && len(w.pending)+len(p) > 0 {
+	if _, typed := w.headers["Content-Type"]; !typed && len(w.pending)+len(p) > 0 {
 		// net/http sniffs the type of an untyped body from its first bytes.
 		// Doing it here keeps that behavior and lets the type decide
 		// eligibility; an empty write has nothing to sniff, so it waits.
 		sniff := append(w.pending[:len(w.pending):len(w.pending)], p...)
-		w.Header().Set("Content-Type", http.DetectContentType(sniff))
+		w.headers.Set("Content-Type", http.DetectContentType(sniff))
 	}
-	if declaredLength(w.Header()) >= 0 {
+	if declaredLength(w.headers) >= 0 {
 		// A declared length already answers the size question; no need to
 		// hold bytes back.
 		if err := w.decide(false); err != nil {
@@ -124,7 +127,7 @@ func (w *writer) Flush() { _ = w.FlushError() }
 func (w *writer) FlushError() error {
 	if !w.decided {
 		if w.status == 0 {
-			w.status = http.StatusOK
+			w.WriteHeader(http.StatusOK)
 		}
 		if err := w.decide(false); err != nil {
 			return err
@@ -159,7 +162,7 @@ func (w *writer) finish() {
 // handler has returned, so the pending bytes are the whole body.
 func (w *writer) decide(final bool) error {
 	w.decided = true
-	h := w.Header()
+	h := w.headers
 	if w.varies() {
 		addVary(h, "Accept-Encoding")
 		if w.accepts && w.bigEnough(final) {
@@ -174,7 +177,14 @@ func (w *writer) decide(final bool) error {
 			w.gz.Reset(w.rw)
 		}
 	}
+	// Send the headers captured at the first final WriteHeader (or Write),
+	// then restore the handler's live map so declared and late trailers keep
+	// their values. Ordinary late mutations must not affect the wire headers.
+	live := w.rw.Header()
+	saved := maps.Clone(live)
+	replaceHeader(live, h)
 	w.rw.WriteHeader(w.status)
+	replaceHeader(live, saved)
 	pending := w.pending
 	w.pending = nil
 	if len(pending) == 0 {
@@ -189,6 +199,13 @@ func (w *writer) decide(final bool) error {
 	return err
 }
 
+func replaceHeader(dst, src http.Header) {
+	clear(dst)
+	for key, values := range src {
+		dst[key] = values
+	}
+}
+
 // varies reports whether this response's encoding depends on the request's
 // Accept-Encoding, which is exactly when it would be compressed for a client
 // that accepts gzip and is large enough.
@@ -198,9 +215,11 @@ func (w *writer) varies() bool {
 		w.status == http.StatusPartialContent, w.status == http.StatusNotModified:
 		return false
 	}
-	h := w.Header()
-	if enc := h.Get("Content-Encoding"); enc != "" && !strings.EqualFold(enc, "identity") {
-		return false
+	h := w.headers
+	for _, enc := range h.Values("Content-Encoding") {
+		if enc != "" && !strings.EqualFold(enc, "identity") {
+			return false
+		}
 	}
 	if hasToken(h.Values("Cache-Control"), "no-transform") {
 		return false
@@ -209,7 +228,7 @@ func (w *writer) varies() bool {
 }
 
 func (w *writer) bigEnough(final bool) bool {
-	if n := declaredLength(w.Header()); n >= 0 {
+	if n := declaredLength(w.headers); n >= 0 {
 		return n >= MinSize
 	}
 	return !final || len(w.pending) >= MinSize
