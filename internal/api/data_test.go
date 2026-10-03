@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -230,6 +231,29 @@ func TestDataPut_QuotaOverwriteAware(t *testing.T) {
 	// Overwrite a.bin with 50 KiB → (900-900)+50=50 KiB → should succeed.
 	if code := send(t, "a.bin", 50*KiB); code != http.StatusOK {
 		t.Fatalf("overwrite a.bin (50 KiB): expected 200, got %d", code)
+	}
+}
+
+func TestDataPut_RejectsOverflowingContentLength(t *testing.T) {
+	appsDir, dataDir := t.TempDir(), t.TempDir()
+	srv, store := newDataTestServer(t, appsDir, dataDir, 1)
+	_, token := seedOwnerAndApp(t, store, "owner", "demo")
+	appDataDir := filepath.Join(dataDir, "demo")
+	if err := os.MkdirAll(appDataDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appDataDir, "existing.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	req := dataPutReq(t, "demo", "incoming.txt", []byte("body must not be stored"), token)
+	req.ContentLength = math.MaxInt64
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("huge declared upload must be rejected before writing, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(appDataDir, "incoming.txt")); !os.IsNotExist(err) {
+		t.Fatalf("rejected upload reached storage: %v", err)
 	}
 }
 

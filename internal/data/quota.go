@@ -1,6 +1,9 @@
 package data
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 // QuotaError is returned by QuotaCheck when the projected size exceeds the
 // configured quota. Handlers map this to HTTP 413.
@@ -17,8 +20,13 @@ func (e *QuotaError) Error() string {
 
 // ProjectedSize returns the on-disk total after replacing a file of
 // existingDestSize with incoming bytes (existingDestSize=0 for new files).
+// Totals beyond int64 are reported as math.MaxInt64 rather than wrapping.
 func ProjectedSize(used, existingDestSize, incoming int64) int64 {
-	return used - existingDestSize + incoming
+	base := used - existingDestSize
+	if incoming > 0 && base > math.MaxInt64-incoming {
+		return math.MaxInt64
+	}
+	return base + incoming
 }
 
 // QuotaCheck returns nil when the projected size fits inside quotaBytes.
@@ -28,12 +36,15 @@ func QuotaCheck(used, existingDestSize, incoming, quotaBytes int64) error {
 		return nil
 	}
 	proj := ProjectedSize(used, existingDestSize, incoming)
-	if proj > quotaBytes {
+	remaining := quotaBytes - used + existingDestSize
+	// Compare against the space left: adding a client-supplied length to
+	// used can overflow, including when the quota itself is MaxInt64.
+	if incoming > remaining {
 		return &QuotaError{
 			QuotaBytes:     quotaBytes,
 			UsedBytes:      used,
 			WouldBeBytes:   proj,
-			RemainingBytes: quotaBytes - used + existingDestSize,
+			RemainingBytes: remaining,
 		}
 	}
 	return nil
