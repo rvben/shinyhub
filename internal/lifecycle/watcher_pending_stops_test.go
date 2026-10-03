@@ -55,11 +55,11 @@ func TestWatcher_RetryPendingStop_StillUnconfirmedLeavesEntryQueued(t *testing.T
 
 // TestWatcher_RetryPendingStop_ConfirmedExitPrefersLastExitAndReleasesFence
 // asserts the confirmed-exit path: once StopReplicaIncarnation reports nil,
-// the write prefers the exit monitor's own verdict (LastExit) over the
-// reason/run recorded at queue time, since the monitor actually observed the
-// real exit and the queued values were only a best-effort guess. The fence
-// is released and the log run closed only after the store write durably
-// succeeds.
+// the write prefers the exit monitor's own verdict (LastExit) for the stopped
+// run over the reason recorded at queue time, since the monitor actually
+// observed the real exit and the queued reason was only a best-effort guess.
+// The fence is released and the log run closed only after the store write
+// durably succeeds.
 func TestWatcher_RetryPendingStop_ConfirmedExitPrefersLastExitAndReleasesFence(t *testing.T) {
 	verdictCode := 137
 	verdictAt := time.Date(2026, 6, 1, 8, 0, 0, 0, time.UTC)
@@ -67,7 +67,7 @@ func TestWatcher_RetryPendingStop_ConfirmedExitPrefersLastExitAndReleasesFence(t
 		lastExit: map[replicaKey]process.ExitVerdict{
 			{slug: "myapp", index: 0}: {
 				Reason: "killed: out of memory", ExitCode: &verdictCode, Signal: "SIGKILL",
-				OOMKilled: true, At: verdictAt, RunID: "run-verdict",
+				OOMKilled: true, At: verdictAt, RunID: "run-queued",
 			},
 		},
 	}
@@ -121,14 +121,131 @@ func TestWatcher_RetryPendingStop_ConfirmedExitPrefersLastExitAndReleasesFence(t
 	if !w1.params.ExitObservedAt.Equal(verdictAt) {
 		t.Fatalf("ExitObservedAt = %v, want %v (the verdict's own timestamp)", w1.params.ExitObservedAt, verdictAt)
 	}
-	if w1.params.ExitRunID != "run-verdict" {
-		t.Fatalf("ExitRunID = %q, want run-verdict (the verdict's own run, not the stale queued one)", w1.params.ExitRunID)
+	if w1.params.ExitRunID != "run-queued" {
+		t.Fatalf("ExitRunID = %q, want run-queued (the stopped run)", w1.params.ExitRunID)
 	}
-	if len(finished) != 1 || finished[0] != "run-verdict" {
-		t.Fatalf("FinishAppLogRunWithExit calls = %v, want exactly [run-verdict]", finished)
+	if len(finished) != 1 || finished[0] != "run-queued" {
+		t.Fatalf("FinishAppLogRunWithExit calls = %v, want exactly [run-queued]", finished)
 	}
 	if w.isPendingStop(replicaKey{"myapp", 0}) {
 		t.Fatal("entry still queued after a confirmed, durably recorded exit")
+	}
+}
+
+// TestWatcher_RetryPendingStop_IgnoresVerdictOfAnotherRun is the regression
+// guard for LastExit being keyed by replica index rather than by run. The exit
+// monitor records a verdict only for a crash, never for a requested stop, so
+// after the queued run is stopped LastExit can still hold the verdict of an
+// earlier crashed run on the same index. That verdict describes a different
+// process: its exit code, signal, OOM flag, timestamp, reason and run ID must
+// not be written onto the stopped run, and the earlier run's log record must
+// not be finished a second time.
+func TestWatcher_RetryPendingStop_IgnoresVerdictOfAnotherRun(t *testing.T) {
+	verdictCode := 137
+	verdictAt := time.Date(2026, 6, 1, 8, 0, 0, 0, time.UTC)
+	mgr := &fakeManager{
+		lastExit: map[replicaKey]process.ExitVerdict{
+			{slug: "myapp", index: 0}: {
+				Reason: "killed: out of memory", ExitCode: &verdictCode, Signal: "SIGKILL",
+				OOMKilled: true, At: verdictAt, RunID: "run-A",
+			},
+		},
+	}
+	st := newFakeStore(map[string]*db.App{"myapp": {ID: 1, Slug: "myapp", Status: "running", Replicas: 1}}, nil)
+	pid := 4242
+	st.replicas = map[int64][]*db.Replica{
+		1: {{AppID: 1, Index: 0, PID: &pid, Status: "running"}},
+	}
+	w := newTestWatcher(Config{}, mgr, newFakeProxy(), st, nil)
+
+	w.QueuePendingStop(PendingStopEntry{
+		Slug: "myapp", Index: 0, AppID: 1, PID: pid, Incarnation: 11,
+		Reason: "queued reason", LogRunID: "run-B",
+	})
+
+	w.processPendingStops()
+
+	mgr.mu.Lock()
+	releases := append([]stopIncarnationCall(nil), mgr.releaseStopPendingCalls...)
+	mgr.mu.Unlock()
+	if len(releases) != 1 || releases[0] != (stopIncarnationCall{"myapp", 0, 11}) {
+		t.Fatalf("ReleaseStopPending calls = %+v, want exactly one for (myapp,0,11)", releases)
+	}
+
+	st.mu.Lock()
+	writes := append([]markCrashedClearingIdentityCall(nil), st.markCrashedClearingIdentityCalls...)
+	finished := append([]string(nil), st.finishedLogRuns...)
+	st.mu.Unlock()
+	if len(writes) != 1 {
+		t.Fatalf("MarkReplicaCrashedClearingIdentityIfCurrent called %d times, want 1", len(writes))
+	}
+	p := writes[0].params
+	if p.Reason != "queued reason" {
+		t.Fatalf("Reason = %q, want the queued reason (the verdict belongs to run-A)", p.Reason)
+	}
+	if p.ExitCode != nil {
+		t.Fatalf("ExitCode = %d, want nil (run-B's exit code was never observed)", *p.ExitCode)
+	}
+	if p.Signal != "" {
+		t.Fatalf("Signal = %q, want empty", p.Signal)
+	}
+	if p.ExitOOMKilled {
+		t.Fatal("ExitOOMKilled = true, want false (run-A's OOM kill must not be attributed to run-B)")
+	}
+	if p.ExitObservedAt.Equal(verdictAt) {
+		t.Fatalf("ExitObservedAt = %v, the timestamp of run-A's crash", p.ExitObservedAt)
+	}
+	if p.ExitRunID != "run-B" {
+		t.Fatalf("ExitRunID = %q, want run-B (the stopped run)", p.ExitRunID)
+	}
+	if len(finished) != 1 || finished[0] != "run-B" {
+		t.Fatalf("FinishAppLogRunWithExit calls = %v, want exactly [run-B]", finished)
+	}
+	if w.isPendingStop(replicaKey{"myapp", 0}) {
+		t.Fatal("entry still queued after a confirmed, durably recorded exit")
+	}
+}
+
+// TestWatcher_RetryPendingStop_NoQueuedRunIgnoresVerdict covers an entry
+// queued without a log run: no verdict can be proven to belong to the stopped
+// process, so none is used, and no log run is finished.
+func TestWatcher_RetryPendingStop_NoQueuedRunIgnoresVerdict(t *testing.T) {
+	verdictCode := 1
+	mgr := &fakeManager{
+		lastExit: map[replicaKey]process.ExitVerdict{
+			{slug: "myapp", index: 0}: {
+				Reason: "exited with code 1", ExitCode: &verdictCode,
+				At: time.Date(2026, 6, 1, 8, 0, 0, 0, time.UTC), RunID: "run-A",
+			},
+		},
+	}
+	st := newFakeStore(map[string]*db.App{"myapp": {ID: 1, Slug: "myapp", Status: "running", Replicas: 1}}, nil)
+	pid := 4242
+	st.replicas = map[int64][]*db.Replica{
+		1: {{AppID: 1, Index: 0, PID: &pid, Status: "running"}},
+	}
+	w := newTestWatcher(Config{}, mgr, newFakeProxy(), st, nil)
+
+	w.QueuePendingStop(PendingStopEntry{
+		Slug: "myapp", Index: 0, AppID: 1, PID: pid, Incarnation: 12,
+		Reason: "queued reason",
+	})
+
+	w.processPendingStops()
+
+	st.mu.Lock()
+	writes := append([]markCrashedClearingIdentityCall(nil), st.markCrashedClearingIdentityCalls...)
+	finished := append([]string(nil), st.finishedLogRuns...)
+	st.mu.Unlock()
+	if len(writes) != 1 {
+		t.Fatalf("MarkReplicaCrashedClearingIdentityIfCurrent called %d times, want 1", len(writes))
+	}
+	p := writes[0].params
+	if p.Reason != "queued reason" || p.ExitCode != nil || p.ExitRunID != "" {
+		t.Fatalf("params = reason %q, exit code %v, run %q; want the queued reason, nil, empty", p.Reason, p.ExitCode, p.ExitRunID)
+	}
+	if len(finished) != 0 {
+		t.Fatalf("FinishAppLogRunWithExit calls = %v, want none", finished)
 	}
 }
 
