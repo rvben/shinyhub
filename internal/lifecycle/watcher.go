@@ -993,6 +993,13 @@ func (w *Watcher) retryElasticRecoveryStop(e PendingStopEntry) {
 // identity the entry was queued with, and the manager's stopPending fence is
 // then released. Any other error (still unconfirmed) leaves the entry queued
 // for the next tick.
+//
+// The exit monitor's verdict (LastExit) is used only when it carries the run
+// ID the entry was queued with. LastExit is keyed by replica index, and the
+// monitor records a verdict for a crash but never for a requested stop, so
+// after this stop it can still hold the verdict of an earlier crashed run on
+// the same index. Any other verdict describes a different process; the write
+// then keeps the queued reason and leaves the exit facts unobserved.
 func (w *Watcher) retryRecoveryUnreadyStop(e PendingStopEntry) {
 	key := e.queueKey()
 	err := w.mgr.StopReplicaIncarnationWithin(e.Slug, e.Index, e.Incarnation, w.pendingStopRetryBudget())
@@ -1009,10 +1016,10 @@ func (w *Watcher) retryRecoveryUnreadyStop(e PendingStopEntry) {
 	var signal string
 	var oomKilled bool
 	if err == nil {
-		// A confirmed exit: prefer the exit monitor's own verdict, computed
-		// from the runtime's Wait result, over the reason recorded at queue
-		// time.
-		if v, ok := w.mgr.LastExit(e.Slug, e.Index); ok {
+		// A confirmed exit: prefer the exit monitor's own verdict for the
+		// stopped run, computed from the runtime's Wait result, over the
+		// reason recorded at queue time.
+		if v, ok := w.mgr.LastExit(e.Slug, e.Index); ok && e.LogRunID != "" && v.RunID == e.LogRunID {
 			exitCode, signal = v.ExitCode, v.Signal
 			oomKilled = v.OOMKilled
 			if !v.At.IsZero() {
@@ -1020,9 +1027,6 @@ func (w *Watcher) retryRecoveryUnreadyStop(e PendingStopEntry) {
 			}
 			if v.Reason != "" {
 				reason = v.Reason
-			}
-			if v.RunID != "" {
-				runID = v.RunID
 			}
 		}
 	}
@@ -3018,7 +3022,8 @@ func (w *Watcher) driveWakingApp(parent context.Context, slug, trigger string) <
 		// status is still waking), so it never clobbers a newer intent.
 		finalized := false
 		defer func() {
-			if r := recover(); r != nil {
+			r := recover()
+			if r != nil {
 				opErr = fmt.Errorf("wake panicked: %v", r)
 				slog.Error("watcher: wake panicked", "slug", slug, "panic", r)
 			}
@@ -3027,6 +3032,9 @@ func (w *Watcher) driveWakingApp(parent context.Context, slug, trigger string) <
 					slog.Warn("watcher: abort wake failed", "slug", slug, "err", aerr)
 				}
 			}
+			// A Fatal still reverts the wake first, then keeps unwinding so the
+			// process exits.
+			safego.RepanicFatal(r)
 		}()
 
 		app, err := w.store.GetAppBySlug(slug)

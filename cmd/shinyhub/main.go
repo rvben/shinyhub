@@ -2692,7 +2692,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		// owed; serve it now that this owner can boot pools. The scan retries
 		// through transient store failures, so it runs beside the owner's
 		// loops instead of delaying them.
-		go srv.RelaunchOwedRedeploys()
+		safego.Go("relaunch owed redeploys", srv.RelaunchOwedRedeploys)
 
 		var loops sync.WaitGroup
 		if monitor != nil {

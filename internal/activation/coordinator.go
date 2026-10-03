@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/safego"
 )
 
 var (
@@ -241,6 +242,7 @@ func capacityRetryDelay(base time.Duration, priorDeferrals int) time.Duration {
 func (c *Coordinator) safeRoll(ctx context.Context, a *db.ScheduleActivation) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
+			safego.RepanicFatal(recovered)
 			err = &RepairRequiredError{
 				Reason:     fmt.Sprintf("activation runner panicked: %v", recovered),
 				RetryAfter: 5 * time.Second,

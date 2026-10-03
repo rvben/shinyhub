@@ -3,6 +3,8 @@ package lifecycle
 import (
 	"strings"
 	"time"
+
+	"github.com/rvben/shinyhub/internal/safego"
 )
 
 // UpdateSessionLifetime extends or disables already-armed worker deadlines.
@@ -29,7 +31,7 @@ func (s *ElasticSpawner) UpdateSessionLifetime(slug string, seconds int) {
 		replacement := &elasticLifetime{epoch: old.epoch, started: old.started, limit: limit, slot: old.slot}
 		// Slot identity comes from the same key cancellation uses. Replacing the
 		// map entry also fences an old expiry already queued behind an operation.
-		replacement.timer = time.AfterFunc(time.Until(old.started.Add(limit)), func() {
+		replacement.timer = safego.AfterFunc(time.Until(old.started.Add(limit)), "elastic lifetime backstop", func() {
 			s.expireLifetime(slug, old.slot, replacement)
 		})
 		s.lifetimeTimers.Store(key, replacement)
