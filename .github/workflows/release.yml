@@ -78,10 +78,12 @@ jobs:
         run: make test-provisioning
 
       # Exercise the tagged application with real Shiny and a fresh browser
-      # before any release artifact is published.
+      # before any release artifact is published. The interpreter must match
+      # the Makefile's PYTHON_VERSION baseline: the gate forbids uv downloads,
+      # so it can only find a Python that this step provisions.
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
       - name: Install Chromium system dependencies
         run: |
