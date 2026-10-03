@@ -6,16 +6,64 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.19.1](https://github.com/rvben/shinyhub/compare/v0.19.0...v0.19.1) - 2026-10-03
+
 ### Added
 
 - **runtime**: opt-in Linux native execution under dedicated per-app users through a separate, root-owned systemd broker. Dependency builds, hooks, replicas and jobs use the registered app identity; startup guards, lifetime locks and unit-based recovery are preserved. Includes an offline plan/apply helper for new app accounts and private storage; an administrator-owned policy is still required. See [setup and limitations](docs/native-user-isolation.md).
 - **runtime**: startup diagnostics identify isolated native execution and warn when apps share the controller UID. Backend selection remains explicit for this release; unavailable configured isolation prevents startup.
+- **cloudflare**: add isolated browser staging canary ([b60ad3e](https://github.com/rvben/shinyhub/commit/b60ad3e5060b581a8aed54a7c5b2a62b430ab092))
+- **cloudflare**: add isolated native container preview ([77e6b27](https://github.com/rvben/shinyhub/commit/77e6b2707b248df9ce37baaa3bd14d6bbe0da7e3))
+- **python**: adopt 3.14 baseline and add runtime diagnostics ([1ab328c](https://github.com/rvben/shinyhub/commit/1ab328c6cc885d2cba31712d02b9948bbf737f0b))
+- **cloudflare**: add passive demo startup monitoring ([9fd87ba](https://github.com/rvben/shinyhub/commit/9fd87ba3dc20370b65ce8d89691feda46132cb62))
+- **docs**: add question search and aggregate usage tracking ([ddbd6ec](https://github.com/rvben/shinyhub/commit/ddbd6ec00a9ba66c763ae44d1fd40b069f3a9885))
+- **agent**: validate actions and recover bounded chat turns ([678a075](https://github.com/rvben/shinyhub/commit/678a07567c93b9e0c5e24c796f4c8fa97ec12232))
+- **agent**: add resizable chat panels and readable tables ([3d6aa53](https://github.com/rvben/shinyhub/commit/3d6aa53dde98b214440610c1cd22482e21eba5c6))
+- **agent**: render safe Markdown in assistant answers ([07c3a43](https://github.com/rvben/shinyhub/commit/07c3a436694dec5e752c252e0a72763d40377e99))
 
 ### Security
 
 - **auth**: default forward-auth users to `viewer`, requiring deployment rights to be granted explicitly. Explicit `default_role` settings are unchanged; deployments relying on the previous `developer` default should configure it explicitly if intended. Group-role reconciliation also uses the new default.
 - **agent**: expose and execute only read-only tools on the browser bridge by default. Apps must opt in with `register(..., allow_browser_writes=True)` to retain browser writes; chat writes keep their server-side approval flow.
 - **docs**: filter Caddy runtime headers, document private systemd secret configuration, and clarify agent data minimisation and per-viewer schemas.
+
+### Fixed
+
+- **backup**: restore PostgreSQL databases transactionally ([b564ba9](https://github.com/rvben/shinyhub/commit/b564ba9c33e1c9fb70d0f486ca485b2a628383ee))
+- **api**: push app-scoped listing allowlist into SQL ([e3fd039](https://github.com/rvben/shinyhub/commit/e3fd039ed3c7d29ea9dd5a4c5a44d588c21f1d6f))
+- **worker**: reuse the mTLS transport across calls to the same worker ([7e8d494](https://github.com/rvben/shinyhub/commit/7e8d494b1fc327a986286a6978e1cedc7241a8d2))
+- **process**: stop rejecting replica log indices above 255 ([6abd791](https://github.com/rvben/shinyhub/commit/6abd791ef29bb18e1237a20f4f579974aad47f68))
+- **process**: stop log rotation from losing bytes or retrying on every write ([fc3e766](https://github.com/rvben/shinyhub/commit/fc3e766dee4c2744d9066740d96aa14d015acef3))
+- **oauth**: bind CSRF state nonces to the issuing provider ([2646f89](https://github.com/rvben/shinyhub/commit/2646f896cf5af144e1dc12a19a3e249f0d38fd92))
+- **deploy**: kill a hook's whole process group instead of just its leader ([d49b195](https://github.com/rvben/shinyhub/commit/d49b195f48489bacc368702a5d4f98063a812c7f))
+- **worker**: persist renewed cert and CA bundle before swapping into memory ([dbb5a9d](https://github.com/rvben/shinyhub/commit/dbb5a9dd4e26e73ea6a6f30cd0730b81420a20bd))
+- **safego**: recover panics in background goroutines and timers ([8e40669](https://github.com/rvben/shinyhub/commit/8e40669ab49c838b31e76afe2e945b3c650cf0a4))
+- **elastic**: reconcile stale worker bindings across hibernate and restart ([b079db1](https://github.com/rvben/shinyhub/commit/b079db16f7ca0b0c68413899266e8a2b8f403789))
+- **lifecycle**: fail closed instead of adopting on a swallowed bundle lookup error ([a9fb7e2](https://github.com/rvben/shinyhub/commit/a9fb7e2e5be96a123485e509e0d89a0e07ff0443))
+- **lifecycle**: stop recovery from crash-marking a replica it never confirmed stopped ([56371a2](https://github.com/rvben/shinyhub/commit/56371a2f96d48a1dd8b6441252154c338fe195d4))
+- **deploy**: confine Cargo caches to the build directory ([2b24b52](https://github.com/rvben/shinyhub/commit/2b24b520d1fa13afef300079493faab472b30aa6))
+- **backup**: avoid rollback collisions on rapid restores ([0830492](https://github.com/rvben/shinyhub/commit/0830492ecee1b9c0762b11bb5175cfdaaae1952a))
+- **backup**: verify archives before replacing state ([f555b7e](https://github.com/rvben/shinyhub/commit/f555b7ea30c8a417ede0d7e2e28740f10d3c0710))
+- **backup**: retain SQLite WAL recovery in rollback copies ([74caed2](https://github.com/rvben/shinyhub/commit/74caed2094e234961900be8309a76d742ed8c698))
+- **db**: share migration locks across SQLite URI aliases ([d2da6fe](https://github.com/rvben/shinyhub/commit/d2da6fe4e6aebce144db471e9b6f8de6fe5f62b7))
+- **backup**: resolve SQLite URI aliases consistently ([6df54de](https://github.com/rvben/shinyhub/commit/6df54de1e8ec21f372c03691ac9deba4dad103eb))
+- **config**: recognize the systemd wait test helper ([614f460](https://github.com/rvben/shinyhub/commit/614f460564f49f37993640de6e8c2bac7bbf8790))
+- **data**: reject overflowing quota projections ([84d8361](https://github.com/rvben/shinyhub/commit/84d8361d817ef70258f3ac42f52b9d2160b65338))
+- **api**: parse bundle bearer schemes case-insensitively ([0ef17ff](https://github.com/rvben/shinyhub/commit/0ef17ffa1e5114a427b5a9080f3136e00a6f1d67))
+- **backup**: respect literal database paths in snapshots ([d802ffa](https://github.com/rvben/shinyhub/commit/d802ffafd3aaa1f35d50bba79982b70b1bd384cf))
+- **httpcompress**: preserve committed headers and content encodings ([94a900b](https://github.com/rvben/shinyhub/commit/94a900b11c9efb0c6a1288e6ec659a8ef0ac12e3))
+- **bundle**: validate resolved extraction paths ([37c4351](https://github.com/rvben/shinyhub/commit/37c43510746f09ce703ef02405d694375d68ef95))
+- **cloudflare**: use fleet-ready startup in the demo SDK ([a68bcb2](https://github.com/rvben/shinyhub/commit/a68bcb2cd082bfa89e9bf88d9ddc99db8f30fc1d))
+- **cloudflare**: wait for demo applications before readiness ([a00a510](https://github.com/rvben/shinyhub/commit/a00a510a3a54ca70aebee8124d614ca7a3120e4a))
+- **cloudflare**: gate production SDK startup on fleet readiness ([7f5b40e](https://github.com/rvben/shinyhub/commit/7f5b40e44b45c9f4c04e72d2504f4767d92333eb))
+- **agent**: make approval details inspectable and expiring ([737f1cb](https://github.com/rvben/shinyhub/commit/737f1cbbc21b9927cf4bfa5185ecd4c67d660bed))
+- **deploy**: hand off multiplex apps with unchanged manifests ([af4add8](https://github.com/rvben/shinyhub/commit/af4add8fe82528f5601b84fc68b952ef39f8ab6f))
+- **lifecycle**: restore warm pools safely after restart ([d71cd8e](https://github.com/rvben/shinyhub/commit/d71cd8e626fa1952eec1fd9ca3c0add8878d82c3))
+
+### Performance
+
+- **api**: skip per-row deployment subqueries on non-deployment listings ([9a7e16e](https://github.com/rvben/shinyhub/commit/9a7e16e8448063d8748b8abee75d28cb348d53d4))
+- **runtime**: avoid busy polling isolated workers ([ee24c77](https://github.com/rvben/shinyhub/commit/ee24c7716caccee1a2ba5187eccccd1ed92e3fb4))
 
 ## [0.19.0](https://github.com/rvben/shinyhub/compare/v0.18.8...v0.19.0) - 2026-10-01
 
