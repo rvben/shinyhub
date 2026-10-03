@@ -638,9 +638,20 @@ func restore(cfg *config.Config, archivePath string, force bool) (movedAside []s
 		movedAside = append(movedAside, rollback)
 	} else {
 		// Move current DB file aside. Sidecars (-wal/-shm) are relocated too so a
-		// stale WAL cannot graft onto the restored single-file snapshot.
-		for _, p := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
-			aside, mErr := preserve(p, ts)
+		// stale WAL cannot graft onto the restored single-file snapshot. Keep
+		// them beside the preserved DB under its basename, so SQLite can recover
+		// committed frames left by a crashed server when opening that rollback.
+		rollbackDB := dbPath + ".pre-restore-" + ts
+		aside, mErr := preserve(dbPath, ts)
+		if mErr != nil {
+			return movedAside, mErr
+		}
+		if aside != "" {
+			rollbackDB = aside
+			movedAside = append(movedAside, aside)
+		}
+		for _, suffix := range []string{"-wal", "-shm"} {
+			aside, mErr := preserveTo(dbPath+suffix, rollbackDB+suffix)
 			if mErr != nil {
 				return movedAside, mErr
 			}
@@ -764,10 +775,15 @@ func serverProbeAddr(cfg *config.Config) (addr string, ok bool) {
 // preserve renames p to "p.pre-restore-<ts>" and returns the new path, or ""
 // when p does not exist (nothing to keep). It never deletes.
 func preserve(p, ts string) (string, error) {
+	return preserveTo(p, p+".pre-restore-"+ts)
+}
+
+// preserveTo moves a state file to a chosen rollback path. SQLite sidecars use
+// this to retain their association with the preserved database's basename.
+func preserveTo(p, aside string) (string, error) {
 	if _, statErr := os.Lstat(p); statErr != nil {
 		return "", nil
 	}
-	aside := p + ".pre-restore-" + ts
 	if mvErr := os.Rename(p, aside); mvErr != nil {
 		return "", fmt.Errorf("preserve %s: %w", p, mvErr)
 	}
