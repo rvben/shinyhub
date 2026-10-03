@@ -115,9 +115,26 @@ func dbFilePath(dsn string) (path string, ok bool) {
 		// SQLite decodes percent escapes in file: URI paths, but ordinary
 		// filenames keep literal percent signs and plus signs.
 		dsn = strings.TrimPrefix(dsn, "file:")
-		if decoded, err := url.PathUnescape(dsn); err == nil {
-			dsn = decoded
+		// The localhost authority names a local absolute path, and SQLite
+		// ignores URI fragments. Neither is part of the disk filename.
+		dsn, _, _ = strings.Cut(dsn, "#")
+		if strings.HasPrefix(dsn, "//localhost/") {
+			dsn = strings.TrimPrefix(dsn, "//localhost")
 		}
+		// SQLite decodes each valid %HH escape even when another percent
+		// sign is literal. PathUnescape on the whole path rejects that mix.
+		var decoded strings.Builder
+		for i := 0; i < len(dsn); i++ {
+			if dsn[i] == '%' && i+2 < len(dsn) {
+				if escaped, err := url.PathUnescape(dsn[i : i+3]); err == nil {
+					decoded.WriteString(escaped)
+					i += 2
+					continue
+				}
+			}
+			decoded.WriteByte(dsn[i])
+		}
+		dsn = decoded.String()
 	}
 	if dsn == "" {
 		return "", false

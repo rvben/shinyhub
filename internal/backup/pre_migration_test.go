@@ -272,7 +272,7 @@ func TestPreMigrationSnapshot_PrunesOldSnapshotsBeyondRetention(t *testing.T) {
 }
 
 func TestPreMigrationSnapshot_UsesSQLiteURIPath(t *testing.T) {
-	for _, kind := range []string{"filename", "escaped URI", "literal percent URI"} {
+	for _, kind := range []string{"filename", "escaped URI", "literal percent URI", "mixed escapes URI", "localhost URI", "fragment URI"} {
 		t.Run(kind, func(t *testing.T) {
 			dbPath := filepath.Join(t.TempDir(), "state + 100%.sqlite")
 			dbtest.WriteSQLiteFile(t, dbPath)
@@ -282,6 +282,12 @@ func TestPreMigrationSnapshot_UsesSQLiteURIPath(t *testing.T) {
 				dsn = "file:" + (&url.URL{Path: dbPath}).EscapedPath() + "?cache=shared"
 			case "literal percent URI":
 				dsn = "file:" + dbPath + "?cache=shared"
+			case "mixed escapes URI":
+				dsn = "file:" + strings.ReplaceAll((&url.URL{Path: dbPath}).EscapedPath(), "%25", "%") + "?cache=shared"
+			case "localhost URI":
+				dsn = "file://localhost" + (&url.URL{Path: dbPath}).EscapedPath() + "?cache=shared"
+			case "fragment URI":
+				dsn = "file:" + (&url.URL{Path: dbPath}).EscapedPath() + "#ignored"
 			}
 			store, err := db.Open(dsn)
 			if err != nil {
