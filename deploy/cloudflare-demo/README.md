@@ -16,6 +16,14 @@ down the page reopens the demo rather than waiting on it: reopening is a
 navigation, and a navigation is the only request that may start a container.
 Warm requests continue to proxy directly without showing the boot page.
 
+The SDK class supplies the bundled `entrypoint.sh` as its startup command. This
+allows a bootstrap fix to reuse a pinned release image. Caddy opens the public
+port only after every bundled app serves its actual page, so `/healthz` cannot
+release the wake page while frameworks still return startup responses. Record
+the Worker source and entrypoint hash alongside the image digest for a rollout.
+Command changes apply on the next cold start; rolling back the Worker restores
+the previous startup configuration.
+
 Memory and disk bill for the whole time the container is awake, so the Worker
 decides at the edge what is allowed to reach it (`src/edge-policy.ts`). It
 serves `robots.txt` itself, and on the app origin it answers with a static 404
