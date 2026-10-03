@@ -92,6 +92,40 @@ Cloudflare Containers do not expose a Docker daemon, and the seven bundled apps
 are repository-reviewed examples rather than visitor-provided code. This is a
 product demo, not a multi-tenant sandbox.
 
+## Startup monitoring
+
+Use `GET https://demo.shinyhub.dev/__demo/status` for passive monitoring. It
+returns HTTP 200 with `{"state":"asleep"}`, `{"state":"starting"}`, or
+`{"state":"ready"}` and disables caching. Sleeping is normal for this demo.
+This endpoint reads the SDK's observed lifecycle state from the Durable Object;
+it never starts the container, forwards a request, or refreshes its idle timer.
+It also bypasses the Worker's warm-state memo. It is an observation, not an
+application request or a guarantee that a process cannot fail just afterward.
+The visitor wake page continues to use `/__demo/ready`, whose health request
+may refresh activity while a visitor is waiting. Do not poll that endpoint for
+background monitoring.
+
+The existing Cloudflare observability configuration captures JSON startup
+events from stdout/stderr and the Worker:
+
+- `demo_boot_started`: the entrypoint began.
+- `demo_fleet_ready`: every application passed the startup gate. `elapsed_ms`
+  measures from entrypoint start, including bootstrap and fleet reconciliation;
+  `fleet_wait_ms` measures only the final readiness gate. `application_count`
+  records the verified fleet size. These timings exclude Cloudflare allocation
+  before the entrypoint begins and do not measure a visitor's network latency.
+- `demo_boot_failed`: the entrypoint failed before readiness, with `phase`,
+  `reason`, `exit_code`, and `elapsed_ms`. A readiness failure also emits
+  `demo_fleet_readiness_failed`, with `reason` and the pending application slugs.
+  Count `demo_boot_failed` for boot failures; the fleet event supplies detail.
+- `demo_wake_failed`: the SDK failed to start the container, including failures
+  that happen before the entrypoint can run. It records the request attempt's
+  elapsed time and a bounded reason without request URLs, cookies, or tokens.
+
+Search Cloudflare Logs for these event names to inspect successful boot
+durations and failed attempts. Events are emitted at startup transitions, not
+on each readiness poll; monitoring adds no scheduled wake or background probe.
+
 ## Verify locally
 
 ```bash

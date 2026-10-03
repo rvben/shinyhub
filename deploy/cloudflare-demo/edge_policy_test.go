@@ -324,6 +324,26 @@ func TestDemoEdgePagesAnswerAsThemselves(t *testing.T) {
 // number of polls can recover it: the poll has to hand the visitor back to the
 // gate that can, which is a real navigation. That recovery is written across two
 // files, and the state the probe reports is the only thing joining them.
+func TestDemoMonitoringBypassesActivityAndWarmMemo(t *testing.T) {
+	source, err := os.ReadFile("src/index.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := string(source)
+	status := indexOf(t, worker, "src/index.ts", "url.pathname === DEMO_STATUS_PATH")
+	memo := indexOf(t, worker, "src/index.ts", "const now = Date.now()")
+	if status > memo {
+		t.Fatal("monitoring must bypass the warm-state memo and activity-producing handlers")
+	}
+	handler := worker[status:memo]
+	if !strings.Contains(handler, "return passiveDemoStatus(request.method, container)") {
+		t.Fatal("monitoring falls through to activity-producing handlers")
+	}
+	if strings.Contains(handler, "container.fetch(") || strings.Contains(handler, "container.start(") {
+		t.Fatal("monitoring must not send traffic to or wake the container")
+	}
+}
+
 func TestDemoWakePageRecoversAContainerThatNeverCameUp(t *testing.T) {
 	source, err := os.ReadFile("src/index.ts")
 	if err != nil {

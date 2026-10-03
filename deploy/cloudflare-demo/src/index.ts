@@ -8,6 +8,7 @@ import {
   demoLoginStyles,
 } from "./demo-login";
 import { DEMO_READY_PATH, demoStartResponse, demoWakeResponse } from "./demo-wake";
+import { DEMO_STATUS_PATH, passiveDemoStatus } from "./demo-status.ts";
 import {
   APP_HOST,
   classifyColdRequest,
@@ -112,6 +113,11 @@ export default {
     headers.set("x-forwarded-proto", "https");
 
     const container = getContainer(env.SHINYHUB_DEMO, "public-demo");
+    // Separate from the visitor wake probe: polling this never reaches the
+    // container and never refreshes its idle deadline or the warm-state memo.
+    if (url.hostname === DEMO_HOST && url.pathname === DEMO_STATUS_PATH) {
+      return passiveDemoStatus(request.method, container);
+    }
     // Container state lives in the Durable Object, so reading it is a round trip
     // in front of every request, each warm app proxy hop included. An isolate
     // that saw the container healthy moments ago forwards without asking again.
@@ -184,7 +190,12 @@ export default {
       }
       if (coldVerdict === "wake") {
         ctx.waitUntil(container.start().catch((error: unknown) => {
-          console.error("Unable to start the ShinyHub demo container", error);
+          console.error({
+            event: "demo_wake_failed",
+            elapsed_ms: Date.now() - now,
+            reason: error instanceof Error && /timeout|timed out/i.test(error.message)
+              ? "timeout" : "start_failed",
+          });
         }));
         // A wake is only ever a document navigation or the start page's form
         // submission, so there is always a page to render the wait in. Starting
