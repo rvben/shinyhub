@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/config"
@@ -110,9 +111,25 @@ func pruneOldSnapshots(dbPath string, keep int) error {
 	if keep <= 0 {
 		keep = 5
 	}
-	matches, err := filepath.Glob(dbPath + ".pre-migration-v*-*.sqlite")
+	dir := filepath.Dir(dbPath)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
 		return fmt.Errorf("list pre-migration snapshots: %w", err)
+	}
+	// Match the database name literally. A legal '[' or '*' in its path
+	// must neither hide its snapshots nor select another database's files.
+	prefix := filepath.Base(dbPath) + ".pre-migration-"
+	var matches []string
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), prefix) {
+			continue
+		}
+		if match, _ := filepath.Match("v*-*.sqlite", strings.TrimPrefix(entry.Name(), prefix)); match {
+			matches = append(matches, filepath.Join(dir, entry.Name()))
+		}
 	}
 	if len(matches) <= keep {
 		return nil

@@ -2,6 +2,7 @@ package backup_test
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -267,6 +268,95 @@ func TestPreMigrationSnapshot_PrunesOldSnapshotsBeyondRetention(t *testing.T) {
 		if _, err := os.Stat(gone); err == nil {
 			t.Errorf("oldest snapshot %s must be pruned, still exists", gone)
 		}
+	}
+}
+
+func TestPreMigrationSnapshot_UsesSQLiteURIPath(t *testing.T) {
+	for _, kind := range []string{"filename", "escaped URI", "literal percent URI"} {
+		t.Run(kind, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "state + 100%.sqlite")
+			dbtest.WriteSQLiteFile(t, dbPath)
+			dsn := dbPath
+			switch kind {
+			case "escaped URI":
+				dsn = "file:" + (&url.URL{Path: dbPath}).EscapedPath() + "?cache=shared"
+			case "literal percent URI":
+				dsn = "file:" + dbPath + "?cache=shared"
+			}
+			store, err := db.Open(dsn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			makePending(t, store)
+			cfg := &config.Config{Database: config.DatabaseConfig{DSN: dsn, PreMigrationSnapshot: true}}
+			res, err := backup.PreMigrationSnapshot(cfg, store, snapAt)
+			if err != nil || res.Path == "" {
+				t.Fatalf("snapshot of existing database: path=%q skipped=%q err=%v", res.Path, res.Skipped, err)
+			}
+			if !strings.HasPrefix(res.Path, dbPath+".pre-migration-") {
+				t.Fatalf("snapshot %q is not beside the actual database %q", res.Path, dbPath)
+			}
+			snap, err := db.Open(res.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer snap.Close()
+			pending, err := snap.PendingMigrations()
+			if err != nil || len(pending) != 1 || pending[0] != 2 {
+				t.Fatalf("snapshot must preserve pre-upgrade migration ledger: pending=%v err=%v", pending, err)
+			}
+		})
+	}
+}
+
+func TestPreMigrationSnapshot_PrunesOnlyExactDatabasePath(t *testing.T) {
+	for _, name := range []string{"db.sqlite", "db[prod].sqlite", "db*.sqlite", "state[prod]/db.sqlite"} {
+		t.Run(name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), name)
+			if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			dbtest.WriteSQLiteFile(t, dbPath)
+			store, err := db.Open(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			makePending(t, store)
+			cfg := &config.Config{Database: config.DatabaseConfig{DSN: dbPath, PreMigrationSnapshot: true, PreMigrationSnapshotRetention: 1}}
+			// This other database's snapshot must survive, even when '*' in
+			// this database's name would match it in a glob.
+			unrelated := filepath.Join(filepath.Dir(dbPath), "db-other.sqlite.pre-migration-v1-old.sqlite")
+			const otherBytes = "another database's rollback point"
+			if err := os.WriteFile(unrelated, []byte(otherBytes), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(unrelated, snapAt.Add(-time.Hour), snapAt.Add(-time.Hour)); err != nil {
+				t.Fatal(err)
+			}
+			var paths []string
+			for i := 0; i < 2; i++ {
+				at := snapAt.Add(time.Duration(i) * time.Second)
+				res, err := backup.PreMigrationSnapshot(cfg, store, at)
+				if err != nil || res.Path == "" || res.PruneErr != "" {
+					t.Fatalf("snapshot %d: %+v, err=%v", i, res, err)
+				}
+				if err := os.Chtimes(res.Path, at, at); err != nil {
+					t.Fatal(err)
+				}
+				paths = append(paths, res.Path)
+			}
+			if _, err := os.Stat(paths[0]); !os.IsNotExist(err) {
+				t.Errorf("old snapshot must be pruned: %v", err)
+			}
+			if _, err := os.Stat(paths[1]); err != nil {
+				t.Errorf("new snapshot must survive: %v", err)
+			}
+			if data, err := os.ReadFile(unrelated); err != nil || string(data) != otherBytes {
+				t.Errorf("unrelated snapshot changed: data=%q err=%v", data, err)
+			}
+		})
 	}
 }
 

@@ -52,6 +52,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -110,7 +111,14 @@ func dbFilePath(dsn string) (path string, ok bool) {
 	if i := strings.IndexByte(dsn, '?'); i >= 0 {
 		dsn = dsn[:i]
 	}
-	dsn = strings.TrimPrefix(dsn, "file:")
+	if strings.HasPrefix(dsn, "file:") {
+		// SQLite decodes percent escapes in file: URI paths, but ordinary
+		// filenames keep literal percent signs and plus signs.
+		dsn = strings.TrimPrefix(dsn, "file:")
+		if decoded, err := url.PathUnescape(dsn); err == nil {
+			dsn = decoded
+		}
+	}
 	if dsn == "" {
 		return "", false
 	}
