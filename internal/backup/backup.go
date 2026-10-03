@@ -625,6 +625,13 @@ func restore(cfg *config.Config, archivePath string, force bool) (movedAside []s
 			archiveBackend, targetBackend)
 	}
 
+	// A readable manifest is not proof that the snapshot and file trees made
+	// it into the archive. Validate all entries and the gzip trailer before
+	// moving current state, so interrupted or corrupted archives fail safely.
+	if err := Verify(archivePath); err != nil {
+		return nil, fmt.Errorf("verify backup archive before restore: %w", err)
+	}
+
 	ts := time.Now().UTC().Format("20060102T150405Z")
 
 	if postgres {
