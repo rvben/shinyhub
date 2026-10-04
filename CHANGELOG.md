@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.19.2](https://github.com/rvben/shinyhub/compare/v0.19.1...v0.19.2) - 2026-10-04
+
+### Fixed
+
+- **server**: contain background task panics and let safego.Fatal exit ([66db347](https://github.com/rvben/shinyhub/commit/66db34748a448097ca35870a4c090fbaf9c1410a))
+- **lifecycle**: bind recovery stop exit verdicts to the stopped run ([61ba2a6](https://github.com/rvben/shinyhub/commit/61ba2a6308a9408d81194794c87505847b5c926e))
+- **proxy**: fence pool reconciliation against lifecycle mutations ([fd468cb](https://github.com/rvben/shinyhub/commit/fd468cbee16ba0c700cf3a93a34d6bd18f3bb103))
+- **server**: support a default remote Docker tier ([02e3011](https://github.com/rvben/shinyhub/commit/02e301163fecb648eac9a7c0b4f7ee7dde5a5b18))
+- **cli**: retry transient Python stack sampling failures ([b2e2a48](https://github.com/rvben/shinyhub/commit/b2e2a489c558545ff1adcda75c42190deff7e397))
+
 ## [0.19.1](https://github.com/rvben/shinyhub/compare/v0.19.0...v0.19.1) - 2026-10-03
 
 ### Added
