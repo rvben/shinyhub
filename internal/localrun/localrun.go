@@ -27,6 +27,10 @@ import (
 
 // Options configures a local foreground run.
 type Options struct {
+	// ScheduleName executes one manifest schedule without starting the app.
+	ScheduleName string
+	// Seed runs enabled deploy-trigger schedules once before the initial boot.
+	Seed bool
 	// BundleDir is the app bundle directory to run (required).
 	BundleDir string
 	// Slug is a human label for log output. Defaults to the basename of BundleDir.
@@ -133,6 +137,8 @@ func (w *synchronizedWriter) Write(p []byte) (int, error) {
 // --check mode, until the first healthy poll or crash). It streams all app
 // output to stdout/stderr and returns a non-nil error on any failure.
 func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel() // stop watchers even when initial preparation or a producer fails
 	stdout, stderr = synchronizedWriterPair(stdout, stderr)
 	sourceDir, err := filepath.Abs(o.BundleDir)
 	if err != nil {
@@ -227,11 +233,24 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 		return &ValidationError{Err: err}
 	}
 	defer releaseWorkspace()
+	// All local consumers share a data lock; writers require exclusive access,
+	// including when another workspace uses the same explicit data directory.
+	dataLock, err := acquireDataLock(w.DataDir, o.Seed || o.ScheduleName != "")
+	if err != nil {
+		return &ValidationError{Err: err}
+	}
+	defer dataLock.Close()
+	w.dataLock = dataLock
 	heading := "Local development"
+	if o.ScheduleName != "" {
+		heading = "Local schedule"
+	}
 	reloadDescription := "staged and readiness-checked"
 	if o.Check {
 		heading = "Local preflight"
 		reloadDescription = "off; exits after the first healthy start"
+	} else if o.ScheduleName != "" {
+		reloadDescription = "off; executes the named schedule once"
 	} else if o.NoReload {
 		reloadDescription = "off; the initial process stays in the foreground"
 	}
@@ -255,6 +274,27 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 	depsChanged, err := w.syncSourceWithInputs(sourceDir, inputSnapshots)
 	if err != nil {
 		return err
+	}
+
+	if o.ScheduleName != "" {
+		manifest, err := deploy.LoadManifest(w.BundleDir)
+		if err != nil {
+			return &ValidationError{Err: err}
+		}
+		if _, err := selectSchedules(manifest, o.ScheduleName); err != nil {
+			return err
+		}
+	}
+
+	runInitialSchedules := func() error {
+		plan, err := prepareCandidate(ctx, w, slug, 1, userEnv, o.NoSync, depsChanged, stdout)
+		if err != nil {
+			return err
+		}
+		return runSchedules(ctx, w, slug, userEnv, plan, o.ScheduleName, stdout, stderr)
+	}
+	if o.ScheduleName != "" {
+		return runInitialSchedules()
 	}
 
 	lp, err := newLocalProxy(o.Port, slug)
@@ -283,6 +323,18 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 			return nil
 		case <-watchReady:
 		}
+	}
+
+	if o.Seed {
+		// Watch before preparing or producing data so edits during a long initial
+		// producer are queued for the normal staged reload loop.
+		if err := runInitialSchedules(); err != nil {
+			return err
+		}
+		if err := syscall.Flock(int(dataLock.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
+			return fmt.Errorf("retain local data consumer lock: %w", err)
+		}
+		depsChanged = false
 	}
 
 	current, err := startCandidate(ctx, w, slug, userEnv, o.NoSync, depsChanged, stdout, stderr)
@@ -441,8 +493,7 @@ func resolveInputSnapshots(manifestRoot, sourceDir string, specs []bundle.FileIn
 
 var errReloadSuperseded = errors.New("reload superseded by a newer change")
 
-func startCandidate(ctx context.Context, w *workspace, slug string, userEnv []string, noSync, depsChanged bool, stdout, stderr io.Writer) (*childProcess, error) {
-	port := deploy.AllocatePort()
+func prepareCandidate(ctx context.Context, w *workspace, slug string, port int, userEnv []string, noSync, depsChanged bool, stdout io.Writer) (*deploy.LaunchPlan, error) {
 	baseOpts := deploy.LaunchOptions{
 		AppPath: "/app/" + slug,
 		Port:    port, Workers: 1, BindHost: "127.0.0.1", Reload: false,
@@ -480,6 +531,16 @@ func startCandidate(ctx context.Context, w *workspace, slug string, userEnv []st
 		}
 	}
 
+	return plan, nil
+}
+
+func startCandidate(ctx context.Context, w *workspace, slug string, userEnv []string, noSync, depsChanged bool, stdout, stderr io.Writer) (*childProcess, error) {
+	port := deploy.AllocatePort()
+	plan, err := prepareCandidate(ctx, w, slug, port, userEnv, noSync, depsChanged, stdout)
+	if err != nil {
+		return nil, err
+	}
+
 	appType := plan.AppType
 	if appType == "" {
 		appType = "manifest command"
@@ -504,6 +565,10 @@ func startCandidate(ctx context.Context, w *workspace, slug string, userEnv []st
 	c := exec.CommandContext(ctx, command[0], command[1:]...) //nolint:gosec
 	c.Dir = w.BundleDir
 	c.Env = childEnv
+	if w.dataLock != nil {
+		c.ExtraFiles = []*os.File{w.dataLock, w.workspaceLock}
+	}
+	c.WaitDelay = time.Second
 	c.Stdout = stdout
 	c.Stderr = stderr
 	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -647,6 +712,9 @@ func stopChild(cmd *exec.Cmd, exitCh <-chan error, stderr io.Writer) {
 	if cmd.Process == nil {
 		return
 	}
+	// Always remove surviving group members, including after a leader exits
+	// promptly on SIGTERM while its descendants ignore it.
+	defer syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	// If the leader has already been reaped, there is nothing left to do but
 	// ensure any surviving grandchildren in its group are gone.
 	select {

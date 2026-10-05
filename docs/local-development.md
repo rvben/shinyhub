@@ -100,6 +100,63 @@ Requests use the production-shaped `/app/<slug>/` route with prefix stripping,
 forwarding headers, WebSocket support, and cookie handling. The root URL
 redirects to the app route.
 
+## Local data producers
+
+Schedules do not run automatically during local development. To execute a
+manifest-defined job once, without a server or login:
+
+```bash
+shinyhub schedule run --local fetch .
+shinyhub schedule run --local fetch -f fleet.toml --app sales
+```
+
+The job runs in the same generated workspace and durable data directory as
+`dev`, including composed `[[bundle_file]]` inputs. Dependencies are prepared
+first; output streams with the schedule name and failures preserve the job's
+exit code. At a fleet root the named schedule runs sequentially for each
+selected local-source app; `--app`, `--all`, and `--standalone` select the same
+scope as `dev`. All selected apps’ manifests, schedule names, and environment
+files are checked before the first producer runs. Explicit execution can run a
+disabled schedule and reports that choice. Cron timing and server-side replica activation are not applied locally.
+
+To run enabled schedules whose `deploy_trigger` is `first_deploy` or
+`bundle_change` before starting the app, opt in on each invocation:
+
+```bash
+shinyhub dev . --seed
+shinyhub run . --seed --check
+```
+
+Producers run in manifest order after dependency preparation and before the
+initial app boot. They never run on reloads. Every invocation with `--seed`
+runs them again, regardless of existing data; there is no freshness marker or
+empty-directory heuristic. Disabled schedules and cron-only schedules are
+skipped. A failed producer stops startup, but may have partially changed data;
+fix the producer and rerun it before serving that data. Producer steps must
+finish in the foreground; a leader exiting while background work keeps output
+pipes open fails the run and terminates that background work. Changed code may need
+an explicit refresh even when a previous producer succeeded.
+
+Stop local sessions using the same data directory before running a job or
+starting with `--seed`. Local readers and writers coordinate through a data
+lock, including across different `--state-dir` values. This lock coordinates
+ShinyHub local sessions only; external scripts do not participate. Locks live
+in ShinyHub’s user cache outside app data, so clearing the data directory does
+not remove its lock. Cleanup targets the launched process group; programs that
+deliberately detach into another session are outside that guarantee.
+
+Local jobs accept `--env`, `--env-file`, `--data-dir`, `--state-dir`, `--fresh`,
+and `--no-sync`. By default they load the app directory's `.env`. Host cloud
+credentials are not inherited automatically. Supply app-specific values
+explicitly, for example `--env AWS_PROFILE=development`, or allow exact host
+variable names:
+
+```bash
+SHINYHUB_APP_ENV_ALLOW=AWS_PROFILE,AWS_CONFIG_FILE shinyhub dev . --seed
+```
+
+Both app processes and producers use these explicit environment controls.
+
 ## Common options
 
 ```bash

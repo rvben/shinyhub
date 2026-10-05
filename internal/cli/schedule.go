@@ -875,15 +875,32 @@ func patchScheduleEnabled(enabled bool) func(*cobra.Command, []string) error {
 
 func newScheduleRunCmd() *cobra.Command {
 	var follow bool
+	var local bool
+	f := &localScheduleFlags{}
 
 	runCmd := &cobra.Command{
-		Use:   "run <slug> <name>",
+		Use:   "run <slug> <name> | run --local <name> [dir]",
 		Short: "Trigger a scheduled job immediately",
-		Args:  cobra.ExactArgs(2),
+		Args: func(cmd *cobra.Command, args []string) error {
+			if local {
+				return cobra.RangeArgs(1, 2)(cmd, args)
+			}
+			return cobra.ExactArgs(2)(cmd, args)
+		},
 	}
+	configureLocalScheduleFlags(runCmd, f, &local)
 	runCmd.Flags().BoolVar(&follow, "follow", false, "Stream logs after triggering")
 
 	runCmd.RunE = func(cmd *cobra.Command, args []string) error {
+		if local {
+			if cmd.Flags().Changed("follow") {
+				return validationErr("--follow applies only to remote runs", "local output always streams")
+			}
+			return runLocalSchedule(cmd, args, f)
+		}
+		if changed := changedDevFlags(cmd, localScheduleFlagNames); len(changed) > 0 {
+			return validationErr(strings.Join(changed, ", ")+" require --local", "add --local to run without a server")
+		}
 		slug, name := args[0], args[1]
 
 		// Resolve format once at command start: streaming=true when following

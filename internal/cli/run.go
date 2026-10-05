@@ -77,17 +77,19 @@ func resolveLocalRunSlug(dir, requested string) (string, error) {
 }
 
 type localRunFlags struct {
-	port     int
-	noSync   bool
-	noReload bool
-	env      []string
-	envFile  string
-	dataDir  string
-	stateDir string
-	fresh    bool
-	slug     string
-	open     bool
-	check    bool
+	seed         bool
+	scheduleName string
+	port         int
+	noSync       bool
+	noReload     bool
+	env          []string
+	envFile      string
+	dataDir      string
+	stateDir     string
+	fresh        bool
+	slug         string
+	open         bool
+	check        bool
 }
 
 func configureLocalRunCommand(cmd *cobra.Command, f *localRunFlags, includeSlug bool) {
@@ -101,6 +103,7 @@ Flags:
 {{.LocalFlags.FlagUsages | trimTrailingWhitespaces}}{{end}}
 `)
 	cmd.Flags().IntVarP(&f.port, "port", "p", 0, "Local TCP port to bind (0 = auto-allocate)")
+	cmd.Flags().BoolVar(&f.seed, "seed", false, "Run enabled deploy-trigger schedules before the initial start (never on reload)")
 	cmd.Flags().BoolVar(&f.noSync, "no-sync", false, "Skip dep-prep steps (uv sync / renv restore)")
 	cmd.Flags().BoolVar(&f.noReload, "no-reload", false, "Disable staged reload when source files change")
 	cmd.Flags().BoolVar(&f.fresh, "fresh", false, "Rebuild generated workspace state from scratch (preserves app data)")
@@ -131,17 +134,19 @@ func executeLocalRun(cmd *cobra.Command, dir, slug string, f *localRunFlags, con
 		return err
 	}
 	opts := localrun.Options{
-		BundleDir: dir,
-		Slug:      slug,
-		DataDir:   f.dataDir,
-		StateDir:  f.stateDir,
-		Port:      f.port,
-		Env:       combined,
-		NoSync:    f.noSync,
-		NoReload:  f.noReload,
-		Fresh:     f.fresh,
-		Open:      f.open,
-		Check:     f.check,
+		BundleDir:    dir,
+		Seed:         f.seed,
+		ScheduleName: f.scheduleName,
+		Slug:         slug,
+		DataDir:      f.dataDir,
+		StateDir:     f.stateDir,
+		Port:         f.port,
+		Env:          combined,
+		NoSync:       f.noSync,
+		NoReload:     f.noReload,
+		Fresh:        f.fresh,
+		Open:         f.open,
+		Check:        f.check,
 		// The server refuses a stale uv.lock on upload; judging the exact
 		// archive a deploy would send makes --check fail the same way.
 		CheckBundle: checkSourceLock,
@@ -160,7 +165,12 @@ func executeLocalRun(cmd *cobra.Command, dir, slug string, f *localRunFlags, con
 		if errors.As(err, &validationErr) {
 			kind = KindValidation
 		}
-		return &ExitCodeError{Code: 1, Kind: kind, Err: err}
+		code := 1
+		var scheduleErr *localrun.ScheduleError
+		if errors.As(err, &scheduleErr) {
+			code = scheduleErr.Code
+		}
+		return &ExitCodeError{Code: code, Kind: kind, Err: err}
 	}
 	return nil
 }

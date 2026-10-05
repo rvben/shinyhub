@@ -31,12 +31,14 @@ var workspaceExcludedDirs = map[string]bool{
 // mirror of the developer's source that dependency tools and app processes may
 // freely mutate; DataDir is durable local app data. Neither lives in source.
 type workspace struct {
-	Root      string
-	BundleDir string
-	DataDir   string
-	indexPath string
-	dirtyPath string
-	slot      int
+	workspaceLock *os.File
+	dataLock      *os.File // inherited by children so parent shutdown cannot release their data fence
+	Root          string
+	BundleDir     string
+	DataDir       string
+	indexPath     string
+	dirtyPath     string
+	slot          int
 }
 
 func workspaceFor(sourceDir, stateDir, dataDir string) (*workspace, error) {
@@ -122,12 +124,14 @@ func (w *workspace) alternate() *workspace {
 		slot = 0
 	}
 	return &workspace{
-		Root:      w.Root,
-		BundleDir: filepath.Join(w.Root, "bundles", fmt.Sprintf("%d", slot)),
-		DataDir:   w.DataDir,
-		indexPath: filepath.Join(w.Root, fmt.Sprintf("source-index-%d.json", slot)),
-		dirtyPath: filepath.Join(w.Root, fmt.Sprintf("deps-dirty-%d", slot)),
-		slot:      slot,
+		workspaceLock: w.workspaceLock,
+		dataLock:      w.dataLock,
+		Root:          w.Root,
+		BundleDir:     filepath.Join(w.Root, "bundles", fmt.Sprintf("%d", slot)),
+		DataDir:       w.DataDir,
+		indexPath:     filepath.Join(w.Root, fmt.Sprintf("source-index-%d.json", slot)),
+		dirtyPath:     filepath.Join(w.Root, fmt.Sprintf("deps-dirty-%d", slot)),
+		slot:          slot,
 	}
 }
 
@@ -332,8 +336,10 @@ func (w *workspace) acquireLock() (func(), error) {
 		_ = f.Close()
 		return nil, fmt.Errorf("this local workspace already has a runner; use --state-dir to run another copy")
 	}
+	w.workspaceLock = f
 	return func() {
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		// Close our reference without unlocking the description inherited by
+		// surviving children; their workspace remains protected until exit.
 		_ = f.Close()
 	}, nil
 }

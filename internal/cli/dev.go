@@ -26,6 +26,7 @@ type devFlags struct {
 	all        bool
 	standalone bool
 
+	seed     bool
 	port     int
 	noSync   bool
 	env      []string
@@ -45,7 +46,7 @@ type devFlags struct {
 }
 
 var (
-	devLocalOnlyFlags  = []string{"port", "no-sync", "env", "env-file", "data-dir", "state-dir", "fresh"}
+	devLocalOnlyFlags  = []string{"seed", "port", "no-sync", "env", "env-file", "data-dir", "state-dir", "fresh"}
 	devRemoteOnlyFlags = []string{
 		"create", "ephemeral", "ttl", "visibility", "watch-delay",
 		"allow-repeated-hooks", "wait-timeout", "wait-for-server",
@@ -131,6 +132,7 @@ Remote flags:
 	cmd.Flags().BoolVar(&f.standalone, "standalone", false, "Ignore an enclosing fleet and treat the directory as one app")
 
 	cmd.Flags().IntVarP(&f.port, "port", "p", 0, "TCP port for the local proxy (0 = auto-allocate)")
+	cmd.Flags().BoolVar(&f.seed, "seed", false, "Run enabled deploy-trigger schedules before the initial start (never on reload)")
 	cmd.Flags().BoolVar(&f.noSync, "no-sync", false, "Skip dependency preparation (uv sync / renv restore)")
 	cmd.Flags().BoolVar(&f.fresh, "fresh", false, "Rebuild generated workspace state; preserve app data")
 	cmd.Flags().StringArrayVar(&f.env, "env", nil, "Extra KEY=VALUE environment variable (repeatable)")
@@ -213,7 +215,7 @@ func runLocalDev(cmd *cobra.Command, args []string, f *devFlags, scope *devScope
 		return err
 	}
 	local := &localRunFlags{
-		port: f.port, noSync: f.noSync, env: f.env, envFile: f.envFile,
+		seed: f.seed, port: f.port, noSync: f.noSync, env: f.env, envFile: f.envFile,
 		dataDir: f.dataDir, stateDir: f.stateDir, fresh: f.fresh,
 		slug: slug, open: f.open,
 	}
@@ -251,7 +253,7 @@ func runLocalFleetDev(cmd *cobra.Command, f *devFlags, scope *devScope) error {
 				child.SetErr(cmd.ErrOrStderr())
 			}
 			local := &localRunFlags{
-				port: f.port, noSync: f.noSync, env: f.env, envFile: f.envFile,
+				seed: f.seed, port: f.port, noSync: f.noSync, env: f.env, envFile: f.envFile,
 				dataDir:  fleetChildPath(f.dataDir, target.Slug, len(scope.Targets)),
 				stateDir: fleetChildPath(f.stateDir, target.Slug, len(scope.Targets)),
 				fresh:    f.fresh, slug: target.Slug, open: f.open,
