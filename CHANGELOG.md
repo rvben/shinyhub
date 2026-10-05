@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.20.0](https://github.com/rvben/shinyhub/compare/v0.19.2...v0.20.0) - 2026-10-05
+
+### Added
+
+- **localrun**: run manifest schedules without a server using `shinyhub schedule run --local <name>`, including fleet app selection. Opt-in `dev` and `run --seed` execute enabled deploy-trigger schedules before the app starts; producers hold an exclusive data lock and failures stop startup. See [local development](docs/local-development.md).
+- **dev**: add `--seed=missing` to reuse successful local producer initialization, while bare `--seed` always refreshes and `--seed=never` skips startup producers. Explicit local schedule runs update the same records; failed or interrupted runs and replaced data directories require initialization again. Records track initialization, not freshness.
+- **dev**: configure shared local environment values, explicit host-variable passthrough and a default seed mode in the fleet manifest's optional `[dev]` table. These defaults apply to fleet-aware local development and local schedule runs. Local apps and schedules receive the reserved `SHINYHUB_RUN_MODE=local` indicator. Server deployment and standalone `run` do not apply fleet defaults.
+
 ## [0.19.2](https://github.com/rvben/shinyhub/compare/v0.19.1...v0.19.2) - 2026-10-04
 
 ### Fixed
