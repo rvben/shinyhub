@@ -102,7 +102,8 @@ redirects to the app route.
 
 ## Local data producers
 
-Schedules do not run automatically during local development. To execute a
+Local development defaults to leaving schedules idle. Fleet-local settings can
+opt into initialization before the first app boot. To execute a
 manifest-defined job once, without a server or login:
 
 ```bash
@@ -128,14 +129,35 @@ shinyhub run . --seed --check
 ```
 
 Producers run in manifest order after dependency preparation and before the
-initial app boot. They never run on reloads. Every invocation with `--seed`
-runs them again, regardless of existing data; there is no freshness marker or
-empty-directory heuristic. Disabled schedules and cron-only schedules are
-skipped. A failed producer stops startup, but may have partially changed data;
-fix the producer and rerun it before serving that data. Producer steps must
-finish in the foreground; a leader exiting while background work keeps output
-pipes open fails the run and terminates that background work. Changed code may need
-an explicit refresh even when a previous producer succeeded.
+initial app boot. They never run on reloads. Choose a policy explicitly:
+
+- `--seed` or `--seed=always` runs every enabled deploy-trigger producer again.
+- `--seed=missing` runs producers without a successful initialization record for
+  this app, schedule, parsed command, and data-directory generation.
+- `--seed=never` skips startup producers, overriding a fleet default.
+
+Successful manual local schedule runs update the same records. Before a job
+starts, ShinyHub durably marks the data as being written. A failed or interrupted
+attempt invalidates previous initialization records, so a subsequent `missing`
+start retries the producers. Success records live outside app data; a hidden
+`.shinyhub-local-generation` marker in app data binds them to the current data
+instance. Replacing the data directory or removing that marker requires new
+initialization. If a later startup producer replaces data initialized by an
+earlier producer, startup stops rather than serving an incomplete generation.
+Keep producers scoped to their own output directories; a subsequent `missing`
+run repairs the invalidated initialization. `--fresh` preserves data and its
+initialization records.
+
+These records track initialization, not freshness or compatibility with changed
+code or credentials. Deleting individual output files while retaining the
+marker cannot be detected. Use an explicit schedule run or `--seed=always` when
+data needs refreshing; there is no parquet-specific or empty-directory check.
+Disabled schedules and cron-only schedules are never startup producers.
+
+A failed producer stops startup, but may have partially changed data. Fix and
+rerun it before serving that data. Producer steps must finish in the foreground;
+a leader exiting while background work keeps output pipes open fails the run
+and terminates that background work.
 
 Stop local sessions using the same data directory before running a job or
 starting with `--seed`. Local readers and writers coordinate through a data
@@ -157,6 +179,47 @@ SHINYHUB_APP_ENV_ALLOW=AWS_PROFILE,AWS_CONFIG_FILE shinyhub dev . --seed
 
 Both app processes and producers use these explicit environment controls.
 
+## Fleet-local defaults
+
+Add local defaults once to `fleet.toml` (or the supported legacy filename
+`shinyhub-fleet.toml`):
+
+```toml
+[dev]
+seed = "missing"
+env_allow = ["AWS_PROFILE", "AWS_CONFIG_FILE"]
+env = { IS_LOCAL = "1" }
+```
+
+Then develop an app from either the fleet root or its declared source directory:
+
+```bash
+shinyhub dev . --app alpha-user-dashboard --open
+shinyhub dev ./alpha_user_dashboard --open
+```
+
+Both paths select the manifest slug, bundle inputs, durable data directory, and
+local defaults. Discovery prefers `fleet.toml` when both filenames exist. The
+startup summary shows the selected app, manifest, data path, and seed policy;
+producer output explains runs and skips.
+
+Only the exact host variable names in `env_allow` are inherited. They form the
+lowest local environment layer, followed by `[dev].env`, the app's `.env` (or
+an explicit `--env-file` replacing it), and CLI `--env` overrides. No global
+allow-list is changed, and values are not printed in diagnostics.
+
+Defaults apply to fleet-aware local `dev`, `fleet dev`, and
+`schedule run --local`. They are validated with the fleet manifest but never
+applied to deployments or remote development. Plain `run` and `dev --standalone`
+keep standalone behavior and do not inherit fleet defaults. CLI `--seed=never`
+or `--seed=always` overrides `[dev].seed`.
+
+Every local app and schedule receives reserved `SHINYHUB_RUN_MODE=local`, so
+apps can detect local execution without inventing a flag. This is an execution
+mode indicator, not identity or authentication. `PORT`, `SHINYHUB_APP_DATA`,
+`SHINYHUB_APP_SLUG`, and `SHINYHUB_RUN_MODE` cannot be overridden through local
+environment settings.
+
 ## Common options
 
 ```bash
@@ -171,7 +234,7 @@ shinyhub dev . --state-dir /tmp/sales # choose generated workspace state
 
 Environment values come from `.env` by default and may be overridden with
 repeatable `--env KEY=VALUE` flags. Values are never printed; diagnostics list
-keys only. `PORT`, `SHINYHUB_APP_DATA`, and `SHINYHUB_APP_SLUG` are managed by
+keys only. `PORT`, `SHINYHUB_APP_DATA`, and `SHINYHUB_APP_SLUG`, and `SHINYHUB_RUN_MODE` are managed by
 ShinyHub and cannot be overridden.
 
 Use `[app] readiness_path` when `/` is not a meaningful health endpoint. By

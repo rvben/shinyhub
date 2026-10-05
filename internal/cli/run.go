@@ -77,7 +77,8 @@ func resolveLocalRunSlug(dir, requested string) (string, error) {
 }
 
 type localRunFlags struct {
-	seed         bool
+	seed         string
+	baseEnv      []string
 	scheduleName string
 	port         int
 	noSync       bool
@@ -103,7 +104,7 @@ Flags:
 {{.LocalFlags.FlagUsages | trimTrailingWhitespaces}}{{end}}
 `)
 	cmd.Flags().IntVarP(&f.port, "port", "p", 0, "Local TCP port to bind (0 = auto-allocate)")
-	cmd.Flags().BoolVar(&f.seed, "seed", false, "Run enabled deploy-trigger schedules before the initial start (never on reload)")
+	configureSeedFlag(cmd, &f.seed)
 	cmd.Flags().BoolVar(&f.noSync, "no-sync", false, "Skip dep-prep steps (uv sync / renv restore)")
 	cmd.Flags().BoolVar(&f.noReload, "no-reload", false, "Disable staged reload when source files change")
 	cmd.Flags().BoolVar(&f.fresh, "fresh", false, "Rebuild generated workspace state from scratch (preserves app data)")
@@ -135,7 +136,7 @@ func executeLocalRun(cmd *cobra.Command, dir, slug string, f *localRunFlags, con
 	}
 	opts := localrun.Options{
 		BundleDir:    dir,
-		Seed:         f.seed,
+		SeedMode:     f.seed,
 		ScheduleName: f.scheduleName,
 		Slug:         slug,
 		DataDir:      f.dataDir,
@@ -194,10 +195,23 @@ func resolveLocalRunEnvironment(dir string, f *localRunFlags) ([]string, error) 
 		}
 	}
 
-	combinedEntries := append([]envFileEntry(nil), fileEnv...)
+	combinedEntries := []envFileEntry{}
+	for _, kv := range f.baseEnv {
+		key, value, _ := strings.Cut(kv, "=")
+		combinedEntries = append(combinedEntries, envFileEntry{Key: key, Value: value})
+	}
+	// Merge without losing precedence when defaults and app files share keys.
+	combinedEntries = append(combinedEntries, fileEnv...)
 	positions := make(map[string]int, len(combinedEntries))
-	for i, entry := range combinedEntries {
-		positions[entry.Key] = i
+	entries := combinedEntries
+	combinedEntries = nil
+	for _, entry := range entries {
+		if i, ok := positions[entry.Key]; ok {
+			combinedEntries[i] = entry
+		} else {
+			positions[entry.Key] = len(combinedEntries)
+			combinedEntries = append(combinedEntries, entry)
+		}
 	}
 	for _, assignment := range f.env {
 		parsed, err := parseEnvFile(strings.NewReader(assignment + "\n"))

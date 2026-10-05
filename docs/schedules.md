@@ -19,7 +19,8 @@ disk; the app reads it next time it serves traffic.
 `shinyhub.toml`, using the same workspace, dependencies, environment, and data
 directory as `shinyhub dev`. No server or login is needed. Use `--app` and `-f`
 for fleet selection. `shinyhub dev --seed` explicitly runs enabled deploy-trigger
-schedules before the initial app start. See [local data producers](local-development.md#local-data-producers)
+schedules before the initial app start. Use `--seed=missing` to reuse successful
+local initialization; fleet `[dev]` defaults also apply to local jobs. See [local data producers](local-development.md#local-data-producers)
 for execution, locking, and refresh behavior.
 
 ## Defining a schedule

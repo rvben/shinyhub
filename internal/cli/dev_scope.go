@@ -21,6 +21,7 @@ type devTarget struct {
 }
 
 type devScope struct {
+	Dev        fleet.DevSettings
 	Manifest   string
 	FleetID    string
 	Targets    []devTarget
@@ -141,7 +142,7 @@ func resolveDevScope(source, explicitManifest string, manifestExplicit, standalo
 		}
 	}
 
-	scope := &devScope{Manifest: manifest, FleetID: m.FleetID}
+	scope := &devScope{Manifest: manifest, FleetID: m.FleetID, Dev: m.Dev}
 	for _, slug := range requested {
 		entry, ok := entries[slug]
 		if !ok {

@@ -77,19 +77,47 @@ func selectSchedules(manifest *deploy.Manifest, name string) ([]deploy.ScheduleS
 	return selected, nil
 }
 
-func runSchedules(ctx context.Context, w *workspace, slug string, userEnv []string, plan *deploy.LaunchPlan, name string, stdout, stderr io.Writer) error {
+func runSchedules(ctx context.Context, w *workspace, slug string, userEnv []string, plan *deploy.LaunchPlan, name string, seedMode string, stdout, stderr io.Writer) error {
 	selected, err := selectSchedules(plan.Manifest, name)
 	if err != nil {
 		return err
 	}
+	state, err := loadSeedState(w)
+	if err != nil {
+		return err
+	}
+	if state.InProgress {
+		fmt.Fprintln(stdout, "==> previous local job failed or was interrupted; initialization records will be rebuilt")
+		state.Records = map[string]seedRecord{}
+		state.InProgress = false
+		if err := saveSeedState(w, state); err != nil {
+			return err
+		}
+	}
 	for _, schedule := range selected {
+		generation, err := dataGeneration(w.DataDir)
+		if err != nil {
+			return err
+		}
+		key, owner := seedIdentity(slug, schedule)
+		if name == "" && seedMode == "missing" && state.Records[key].Generation == generation {
+			fmt.Fprintf(stdout, "==> schedule %s: skipped; already initialized (use --seed=always to refresh)\n", schedule.Name)
+			continue
+		}
 		if schedule.Disabled {
 			fmt.Fprintf(stderr, "note: schedule %q is disabled; running explicitly\n", schedule.Name)
 		}
-		fmt.Fprintf(stdout, "==> schedule %s\n", schedule.Name)
+		reason := "explicit refresh"
+		if name == "" {
+			reason = "forced startup refresh"
+			if seedMode == "missing" {
+				reason = "initialization missing"
+			}
+		}
+		fmt.Fprintf(stdout, "==> schedule %s: running; %s\n", schedule.Name, reason)
 		env := append(process.SanitizedEnv(), userEnv...)
 		env = append(env, process.RenvPolicyEnvFor(w.BundleDir)...)
-		env = append(env, "SHINYHUB_APP_DATA="+w.DataDir, "SHINYHUB_APP_SLUG="+slug)
+		env = append(env, "SHINYHUB_APP_DATA="+w.DataDir, "SHINYHUB_APP_SLUG="+slug, "SHINYHUB_RUN_MODE=local")
 		command, indexEnv, err := process.RequirementsLaunch(w.BundleDir, schedule.Command, env)
 		if err != nil {
 			return fmt.Errorf("schedule %q launch: %w", schedule.Name, err)
@@ -105,6 +133,16 @@ func runSchedules(ctx context.Context, w *workspace, slug string, userEnv []stri
 		cmd.WaitDelay = time.Second
 		cmd.Stdout = &scheduleWriter{out: stdout, prefix: "[" + schedule.Name + "] ", lineStart: true}
 		cmd.Stderr = &scheduleWriter{out: stderr, prefix: "[" + schedule.Name + "] ", lineStart: true}
+		// Invalidate all old command versions of this writer before it can run.
+		for existing, record := range state.Records {
+			if record.Owner == owner {
+				delete(state.Records, existing)
+			}
+		}
+		state.InProgress = true
+		if err := saveSeedState(w, state); err != nil {
+			return err
+		}
 		jobCtx, cancel := context.WithTimeout(ctx, time.Duration(*schedule.TimeoutSeconds)*time.Second)
 		err = executeSchedule(jobCtx, cmd)
 		cancel()
@@ -124,6 +162,30 @@ func runSchedules(ctx context.Context, w *workspace, slug string, userEnv []stri
 			}
 			fmt.Fprintln(stderr, "Local jobs use .env, --env-file and --env; inherited variables must be named in SHINYHUB_APP_ENV_ALLOW.")
 			return &ScheduleError{Name: schedule.Name, Code: code, Err: err}
+		}
+		// A producer may replace its data directory. Bind success to the new
+		// generation and invalidate successes for generations it removed.
+		generation, err = dataGeneration(w.DataDir)
+		if err != nil {
+			return err
+		}
+		state.Records[key] = seedRecord{Owner: owner, Generation: generation}
+		state.InProgress = false
+		if err := saveSeedState(w, state); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "==> schedule %s: initialized successfully\n", schedule.Name)
+	}
+	if name == "" && len(selected) > 0 {
+		generation, err := dataGeneration(w.DataDir)
+		if err != nil {
+			return err
+		}
+		for _, schedule := range selected {
+			key, _ := seedIdentity(slug, schedule)
+			if state.Records[key].Generation != generation {
+				return validationErrorf("schedule %q initialization was invalidated by a later producer replacing app data; keep producer writes scoped to their own output directories and rerun --seed=missing", schedule.Name)
+			}
 		}
 	}
 	return nil

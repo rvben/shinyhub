@@ -158,6 +158,7 @@ type BundleFileEntry struct {
 
 // Manifest is a validated fleet.toml.
 type Manifest struct {
+	Dev         DevSettings       `toml:"dev"`
 	FleetID     string            `toml:"fleet_id"`
 	Projects    []ProjectEntry    `toml:"project"`
 	BundleFiles []BundleFileEntry `toml:"bundle_file"`
@@ -176,7 +177,7 @@ var validVisibility = map[string]bool{"private": true, "shared": true, "public":
 // knownKeys is the set of accepted manifest keys, used for "did you mean"
 // suggestions on unknown-key rejection.
 var knownKeys = []string{
-	"fleet_id", "app", "project", "bundle_file", "from", "to", "consumers",
+	"dev", "env", "env_allow", "seed", "fleet_id", "app", "project", "bundle_file", "from", "to", "consumers",
 	"slug", "source", "visibility", "config",
 	"name", "description", "icon",
 	"hibernate_timeout_minutes", "replicas", "max_sessions_per_replica",
@@ -224,6 +225,10 @@ func ParseManifest(data []byte, file string) (*Manifest, []Problem) {
 			emitted[msg] = true
 			probs = append(probs, Problem{File: file, Msg: msg})
 		}
+	}
+
+	for _, message := range m.Dev.problems() {
+		probs = append(probs, Problem{File: file, Msg: message})
 	}
 
 	if m.FleetID == "" {

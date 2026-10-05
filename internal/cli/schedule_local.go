@@ -57,6 +57,8 @@ func runLocalSchedule(cmd *cobra.Command, args []string, f *localScheduleFlags) 
 	if len(scope.SkippedGit) > 0 {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Note: skipping git-backed apps: %v\n", scope.SkippedGit)
 	}
+	configured := withFleetDevDefaults(f.run, scope.Dev, true)
+	f.run = configured
 	// Catch deterministic fleet configuration errors before any producer runs.
 	for _, target := range scope.Targets {
 		combined, err := resolveLocalRunEnvironment(target.Dir, &f.run)

@@ -31,6 +31,8 @@ type Options struct {
 	ScheduleName string
 	// Seed runs enabled deploy-trigger schedules once before the initial boot.
 	Seed bool
+	// SeedMode is never (default), always, or missing. Seed is a compatibility alias for always.
+	SeedMode string
 	// BundleDir is the app bundle directory to run (required).
 	BundleDir string
 	// Slug is a human label for log output. Defaults to the basename of BundleDir.
@@ -87,7 +89,7 @@ func validationErrorf(format string, args ...any) error {
 }
 
 // reservedEnvKeys are platform-authoritative in local and deployed apps.
-var reservedEnvKeys = []string{"PORT", "SHINYHUB_APP_DATA", "SHINYHUB_APP_SLUG"}
+var reservedEnvKeys = []string{"PORT", "SHINYHUB_APP_DATA", "SHINYHUB_APP_SLUG", "SHINYHUB_RUN_MODE"}
 
 func validateUserEnv(env []string) ([]string, error) {
 	reserved := make(map[string]struct{}, len(reservedEnvKeys))
@@ -140,6 +142,13 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel() // stop watchers even when initial preparation or a producer fails
 	stdout, stderr = synchronizedWriterPair(stdout, stderr)
+	seedMode, err := normalizeSeedMode(o.SeedMode)
+	if err != nil {
+		return &ValidationError{Err: err}
+	}
+	if o.Seed {
+		seedMode = "always"
+	}
 	sourceDir, err := filepath.Abs(o.BundleDir)
 	if err != nil {
 		return validationErrorf("resolve bundle dir: %v", err)
@@ -235,7 +244,7 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 	defer releaseWorkspace()
 	// All local consumers share a data lock; writers require exclusive access,
 	// including when another workspace uses the same explicit data directory.
-	dataLock, err := acquireDataLock(w.DataDir, o.Seed || o.ScheduleName != "")
+	dataLock, err := acquireDataLock(w.DataDir, seedMode != "never" || o.ScheduleName != "")
 	if err != nil {
 		return &ValidationError{Err: err}
 	}
@@ -255,6 +264,13 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 		reloadDescription = "off; the initial process stays in the foreground"
 	}
 	fmt.Fprintln(stdout, heading)
+	fmt.Fprintf(stdout, "  App: %s\n", slug)
+	if manifestPath != "" {
+		fmt.Fprintf(stdout, "  Fleet manifest: %s\n", manifestPath)
+	}
+	if o.ScheduleName == "" {
+		fmt.Fprintf(stdout, "  Seed: %s\n", seedMode)
+	}
 	fmt.Fprintf(stdout, "  Source: %s\n", sourceDir)
 	fmt.Fprintf(stdout, "  Workspace: %s\n", w.BundleDir)
 	fmt.Fprintf(stdout, "  Data: %s\n", w.DataDir)
@@ -265,6 +281,7 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 	if len(userEnv) > 0 {
 		fmt.Fprintf(stdout, "  Environment: %s\n", strings.Join(environmentKeys(userEnv), ", "))
 	}
+	userEnv = append(userEnv, "SHINYHUB_RUN_MODE=local")
 	if o.Fresh {
 		if err := w.resetAllBundles(); err != nil {
 			return err
@@ -291,7 +308,7 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 		if err != nil {
 			return err
 		}
-		return runSchedules(ctx, w, slug, userEnv, plan, o.ScheduleName, stdout, stderr)
+		return runSchedules(ctx, w, slug, userEnv, plan, o.ScheduleName, seedMode, stdout, stderr)
 	}
 	if o.ScheduleName != "" {
 		return runInitialSchedules()
@@ -325,7 +342,7 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 		}
 	}
 
-	if o.Seed {
+	if seedMode != "never" {
 		// Watch before preparing or producing data so edits during a long initial
 		// producer are queued for the normal staged reload loop.
 		if err := runInitialSchedules(); err != nil {

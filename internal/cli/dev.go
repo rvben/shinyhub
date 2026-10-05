@@ -26,7 +26,7 @@ type devFlags struct {
 	all        bool
 	standalone bool
 
-	seed     bool
+	seed     string
 	port     int
 	noSync   bool
 	env      []string
@@ -132,7 +132,7 @@ Remote flags:
 	cmd.Flags().BoolVar(&f.standalone, "standalone", false, "Ignore an enclosing fleet and treat the directory as one app")
 
 	cmd.Flags().IntVarP(&f.port, "port", "p", 0, "TCP port for the local proxy (0 = auto-allocate)")
-	cmd.Flags().BoolVar(&f.seed, "seed", false, "Run enabled deploy-trigger schedules before the initial start (never on reload)")
+	configureSeedFlag(cmd, &f.seed)
 	cmd.Flags().BoolVar(&f.noSync, "no-sync", false, "Skip dependency preparation (uv sync / renv restore)")
 	cmd.Flags().BoolVar(&f.fresh, "fresh", false, "Rebuild generated workspace state; preserve app data")
 	cmd.Flags().StringArrayVar(&f.env, "env", nil, "Extra KEY=VALUE environment variable (repeatable)")
@@ -232,6 +232,26 @@ func runLocalFleetDev(cmd *cobra.Command, f *devFlags, scope *devScope) error {
 	fmt.Fprintf(cmd.OutOrStdout(), "Fleet development\n  Fleet: %s\n  Manifest: %s\n  Apps: %s\n\n",
 		scope.FleetID, scope.Manifest, strings.Join(devTargetSlugs(scope.Targets), ", "))
 
+	// Validate every local target before any producer can start. Defaults are
+	// snapshotted once per invocation, outside the concurrent launch loop.
+	locals := make([]localRunFlags, len(scope.Targets))
+	for i, target := range scope.Targets {
+		locals[i] = withFleetDevDefaults(localRunFlags{
+			seed: f.seed, port: f.port, noSync: f.noSync, env: f.env, envFile: f.envFile,
+			dataDir:  fleetChildPath(f.dataDir, target.Slug, len(scope.Targets)),
+			stateDir: fleetChildPath(f.stateDir, target.Slug, len(scope.Targets)),
+			fresh:    f.fresh, slug: target.Slug, open: f.open,
+		}, scope.Dev, cmd.Flags().Changed("seed"))
+		combined, err := resolveLocalRunEnvironment(target.Dir, &locals[i])
+		if err != nil {
+			return fmt.Errorf("%s: %w", target.Slug, err)
+		}
+		if err := localrun.ValidateSchedule(localrun.Options{
+			BundleDir: target.Dir, ManifestPath: target.Manifest, BundleInputs: target.BundleInputs, Env: combined,
+		}); err != nil {
+			return &ExitCodeError{Code: 1, Kind: KindValidation, Err: fmt.Errorf("%s: %w", target.Slug, err)}
+		}
+	}
 	ctx, cancel := context.WithCancel(cmd.Context())
 	defer cancel()
 	type result struct {
@@ -240,8 +260,9 @@ func runLocalFleetDev(cmd *cobra.Command, f *devFlags, scope *devScope) error {
 	}
 	results := make(chan result, len(scope.Targets))
 	var outputMu sync.Mutex
-	for _, target := range scope.Targets {
+	for i, target := range scope.Targets {
 		target := target
+		local := locals[i]
 		go func() {
 			child := &cobra.Command{}
 			child.SetContext(ctx)
@@ -252,13 +273,7 @@ func runLocalFleetDev(cmd *cobra.Command, f *devFlags, scope *devScope) error {
 				child.SetOut(cmd.OutOrStdout())
 				child.SetErr(cmd.ErrOrStderr())
 			}
-			local := &localRunFlags{
-				seed: f.seed, port: f.port, noSync: f.noSync, env: f.env, envFile: f.envFile,
-				dataDir:  fleetChildPath(f.dataDir, target.Slug, len(scope.Targets)),
-				stateDir: fleetChildPath(f.stateDir, target.Slug, len(scope.Targets)),
-				fresh:    f.fresh, slug: target.Slug, open: f.open,
-			}
-			err := executeLocalRun(child, target.Dir, target.Slug, local, func(options *localrun.Options) {
+			err := executeLocalRun(child, target.Dir, target.Slug, &local, func(options *localrun.Options) {
 				options.ManifestPath = target.Manifest
 				options.BundleInputs = target.BundleInputs
 			})

@@ -87,6 +87,8 @@ func runFleetDev(cmd *cobra.Command, slug string, f *fleetDevFlags) error {
 			}
 		}
 	}
+	configured := withFleetDevDefaults(f.run, m.Dev, cmd.Flags().Changed("seed"))
+	f.run = configured
 	return executeLocalRun(cmd, parsed.LocalPath, slug, &f.run, func(options *localrun.Options) {
 		options.ManifestPath = f.file
 		options.BundleInputs = inputs
