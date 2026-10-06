@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.20.1](https://github.com/rvben/shinyhub/compare/v0.20.0...v0.20.1) - 2026-10-06
+
+### Added
+
+- **dev**: add an automatic local terminal development view with per-app, All apps, and ShinyHub logs; runtime and latest-change tabs; filtering, bounded retention, pause and scroll controls; browser opening; and readiness-checked retries. Serving state stays distinct from a failed save. The view adapts to narrow terminals and respects terminal colors and `NO_COLOR`.
+- **dev**: monitor host CPU, available RAM, and filesystem free space, with a resource inspector showing CPU and RSS for serving and starting app process groups, including child processes. Unavailable and stale readings remain explicit; resource polling is limited to the interactive view.
+- **dev**: expose app-attributed lifecycle, log, and process events through local `--output ndjson`. Pipes, CI, and agents retain streaming output without terminal control sequences; `--tui=false` or `--output table` selects plain logs. See [local development](docs/local-development.md).
+- **dev**: refresh open browser tabs after healthy local reloads, preserving their URL. Failed changes keep the last healthy app serving without refreshing; each successful refresh starts a new app session. Remote development does not inject browser refresh.
+
 ## [0.20.0](https://github.com/rvben/shinyhub/compare/v0.19.2...v0.20.0) - 2026-10-05
 
 ### Added
