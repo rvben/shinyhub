@@ -2,10 +2,12 @@ package localrun
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/appnav"
@@ -13,12 +15,15 @@ import (
 )
 
 type localProxy struct {
-	slug       string
-	listener   net.Listener
-	server     *http.Server
-	proxy      *shinyproxy.Proxy
-	publicPort int
-	generation int64
+	slug           string
+	listener       net.Listener
+	server         *http.Server
+	proxy          *shinyproxy.Proxy
+	publicPort     int
+	generation     int64
+	revision       atomic.Int64
+	session        string
+	browserRefresh bool
 }
 
 func newLocalProxy(port int, slug string) (*localProxy, error) {
@@ -40,10 +45,27 @@ func newLocalProxy(port int, slug string) (*localProxy, error) {
 	// deployed app. The one-app payload keeps the switch action truthful while
 	// still exposing opt-in capabilities such as bookmarking.
 	p.SetAppNav(true, "/")
-	lp := &localProxy{slug: slug, listener: ln, proxy: p, publicPort: actualPort}
+	lp := &localProxy{slug: slug, listener: ln, proxy: p, publicPort: actualPort, session: fmt.Sprintf("%x", randomSession())}
 	lp.server = &http.Server{
 		ReadHeaderTimeout: 10 * time.Second,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if lp.browserRefresh {
+				w.Header().Set("Cache-Control", "no-store")
+				if r.URL.Path == lp.reloadURL() {
+					if r.Method != http.MethodGet {
+						w.Header().Set("Allow", "GET")
+						w.WriteHeader(http.StatusMethodNotAllowed)
+						return
+					}
+					if lp.revision.Load() == 0 {
+						w.WriteHeader(http.StatusServiceUnavailable)
+						return
+					}
+					w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+					_, _ = fmt.Fprint(w, lp.currentRevision())
+					return
+				}
+			}
 			if r.URL.Path == "/" {
 				http.Redirect(w, r, "/app/"+slug+"/", http.StatusTemporaryRedirect)
 				return
@@ -90,3 +112,25 @@ func (p *localProxy) close() {
 	defer cancel()
 	_ = p.server.Shutdown(ctx)
 }
+
+// A session token also refreshes tabs when dev is restarted on the same port.
+func randomSession() []byte {
+	token := make([]byte, 16)
+	_, _ = rand.Read(token) // crypto/rand.Read cannot fail on supported Go versions.
+	return token
+}
+
+func (p *localProxy) reloadURL() string { return "/app/" + p.slug + "/__shinyhub_dev_revision" }
+func (p *localProxy) currentRevision() string {
+	return fmt.Sprintf("%s:%d", p.session, p.revision.Load())
+}
+
+// Called before serving: the one-shot/check path never injects a watcher.
+func (p *localProxy) enableBrowserRefresh() {
+	p.browserRefresh = true
+	p.proxy.SetDevReload(p.reloadURL(), p.currentRevision)
+}
+
+// Routing a candidate is provisional until its public readiness check passes.
+// Rollbacks therefore never change the revision observed by open browsers.
+func (p *localProxy) activateBrowserRevision() { p.revision.Add(1) }

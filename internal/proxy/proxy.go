@@ -495,7 +495,8 @@ type Proxy struct {
 	// rather than two atomics, so a reader can never observe the switcher
 	// enabled with a home link that has not been set yet. A nil pointer means
 	// off, which is the zero value.
-	appNav atomic.Pointer[appNavSettings]
+	appNav    atomic.Pointer[appNavSettings]
+	devReload atomic.Pointer[devReloadSettings]
 
 	// appFavicon adds the app's ShinyHub identity only when its HTML does not
 	// already declare a favicon. Off by default for embedders and tests; main.go

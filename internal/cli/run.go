@@ -28,7 +28,8 @@ resolves the same launch plan the hub would use, mirrors the source into a
 ShinyHub-owned cache, and serves it through the production proxy route at
 /app/<slug>/. The source directory is never modified. Changes are staged and
 health-checked before the running app is replaced, so a broken save leaves the
-last healthy version online. App output streams to the terminal and Ctrl-C
+last healthy version online. Open browser tabs refresh after each healthy
+reload. App output streams to the terminal and Ctrl-C
 shuts everything down cleanly.
 
 For the everyday development loop, prefer 'shinyhub dev [dir]'. This run

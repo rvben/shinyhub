@@ -37,3 +37,49 @@ func TestLocalProxyEnablesAppChromeWithCurrentAppNavigation(t *testing.T) {
 		t.Fatalf("payload = %+v", payload)
 	}
 }
+
+func TestBrowserRevisionChangesOnlyOnActivation(t *testing.T) {
+	lp, err := newLocalProxy(0, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lp.close()
+	lp.enableBrowserRefresh()
+	unavailable := httptest.NewRecorder()
+	lp.server.Handler.ServeHTTP(unavailable, httptest.NewRequest("GET", lp.reloadURL(), nil))
+	if unavailable.Code != http.StatusServiceUnavailable {
+		t.Fatalf("before first readiness = %d", unavailable.Code)
+	}
+	lp.activateBrowserRevision()
+	revision := func() string {
+		t.Helper()
+		rr := httptest.NewRecorder()
+		lp.server.Handler.ServeHTTP(rr, httptest.NewRequest("GET", lp.reloadURL(), nil))
+		if rr.Code != http.StatusOK || rr.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("revision endpoint: %d %v", rr.Code, rr.Header())
+		}
+		return rr.Body.String()
+	}
+	initial := revision()
+	if err := lp.routeTo(12345); err != nil {
+		t.Fatal(err)
+	}
+	if revision() != initial {
+		t.Fatal("provisional route refreshed the browser")
+	}
+	if err := lp.routeTo(12346); err != nil {
+		t.Fatal(err)
+	}
+	if revision() != initial {
+		t.Fatal("rollback refreshed the browser")
+	}
+	lp.activateBrowserRevision()
+	if revision() == initial {
+		t.Fatal("healthy activation did not refresh the browser")
+	}
+	rr := httptest.NewRecorder()
+	lp.server.Handler.ServeHTTP(rr, httptest.NewRequest("POST", lp.reloadURL(), nil))
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST = %d", rr.Code)
+	}
+}

@@ -96,6 +96,18 @@ becomes healthy, so a syntax error, missing dependency, crash, or failed
 readiness check leaves the last healthy version serving. Fix the file and the
 next save retries automatically.
 
+Open browser tabs refresh automatically after a successful local reload. Use
+`shinyhub dev . --open` to open the first tab as soon as the app is ready; later
+saves refresh that tab and any others viewing the app, preserving their URL.
+Failed changes do not trigger a refresh. Refresh starts a new app session, so
+unsaved form inputs and in-memory session state reset. This also works for each
+app in a local fleet. Remote development does not inject browser refresh.
+
+Browser refresh uses a small script in the app's HTML and a local revision
+endpoint. Apps that prohibit same-origin connections in their Content Security
+Policy, serve compressed HTML despite the proxy's request, or do not have an
+injectable HTML shell still require manual refresh.
+
 Requests use the production-shaped `/app/<slug>/` route with prefix stripping,
 forwarding headers, WebSocket support, and cookie handling. The root URL
 redirects to the app route.

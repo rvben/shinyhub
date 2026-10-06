@@ -276,6 +276,35 @@ http.server.HTTPServer(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever(
 	}()
 	url := fmt.Sprintf("http://127.0.0.1:%d/app/reload-test/", port)
 	waitForBody(t, url, "v1", 5*time.Second)
+	revisionURL := url + "__shinyhub_dev_revision"
+	readRevision := func() string {
+		t.Helper()
+		resp, err := http.Get(revisionURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil || resp.StatusCode != http.StatusOK {
+			t.Fatalf("revision: status=%d err=%v", resp.StatusCode, err)
+		}
+		return string(body)
+	}
+	waitForRevision := time.Now().Add(2 * time.Second)
+	for {
+		resp, err := http.Get(revisionURL)
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				break
+			}
+		}
+		if time.Now().After(waitForRevision) {
+			t.Fatal("revision endpoint never became ready")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	firstRevision := readRevision()
 
 	if err := os.WriteFile(filepath.Join(source, "version.txt"), []byte("bad\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -287,11 +316,22 @@ http.server.HTTPServer(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever(
 	default:
 	}
 	waitForBody(t, url, "v1", 2*time.Second)
+	if readRevision() != firstRevision {
+		t.Fatal("failed save advanced browser revision")
+	}
 
 	if err := os.WriteFile(filepath.Join(source, "version.txt"), []byte("v2\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	waitForBody(t, url, "v2", 6*time.Second)
+	deadline := time.Now().Add(2 * time.Second)
+	for readRevision() == firstRevision {
+		if time.Now().After(deadline) {
+			t.Fatal("successful save did not advance browser revision")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
 	cancel()
 	select {
 	case err := <-done:

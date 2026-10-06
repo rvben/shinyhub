@@ -319,6 +319,9 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 		return err
 	}
 	defer lp.close()
+	if !o.NoReload && !o.Check {
+		lp.enableBrowserRefresh()
+	}
 	proxyErrCh := make(chan error, 1)
 
 	changeCh := make(chan struct{}, 1)
@@ -379,6 +382,7 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 	if err := pollReady(ctx, publicReadyURL, current.plan.Timeout, current.plan.ReadyStatus); err != nil {
 		return fmt.Errorf("local proxy readiness: %w", err)
 	}
+	lp.activateBrowserRevision()
 	fmt.Fprintf(stdout, "Ready\n  App: %s\n", lp.URL())
 	if o.Check {
 		return nil
@@ -390,7 +394,7 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 	if o.NoReload {
 		return waitForExit(ctx, current, proxyErrCh)
 	}
-	fmt.Fprintln(stdout, "  Watching: source changes (Ctrl-C to stop)")
+	fmt.Fprintln(stdout, "  Watching: source changes; browser refresh on healthy reload (Ctrl-C to stop)")
 	currentWorkspace := w
 	stagingWorkspace := w.alternate()
 
@@ -461,6 +465,7 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 				fmt.Fprintf(stderr, "Reload failed through the local proxy; current app is still serving: %v\n", err)
 				continue
 			}
+			lp.activateBrowserRevision()
 			old := current
 			current = candidate
 			currentWorkspace, stagingWorkspace = stagingWorkspace, currentWorkspace

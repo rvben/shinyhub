@@ -374,6 +374,12 @@ func hasNoneSource(directive string) bool {
 // body. Tying it to the overlay alone would leave the switcher or favicon
 // silently uninjectable whenever an operator turned the overlay off.
 func (p *Proxy) relaxEncodingForInjection(req *http.Request) {
+	if p.devReload.Load() != nil {
+		// A refreshed document must load the newly activated assets, even when
+		// their URLs and coarse Last-Modified timestamps have not changed.
+		req.Header.Del("If-None-Match")
+		req.Header.Del("If-Modified-Since")
+	}
 	if !p.injectsPageHTML() || !isPageLoad(req) {
 		return
 	}
@@ -382,7 +388,7 @@ func (p *Proxy) relaxEncodingForInjection(req *http.Request) {
 
 // injectsPageHTML reports whether any page-level enhancement is enabled.
 func (p *Proxy) injectsPageHTML() bool {
-	return p.browserSessions.Load() != nil || p.announcementsEnabled.Load() || p.statusOverlay.Load() || p.appNav.Load() != nil || p.appFavicon.Load() || p.supportSessions.Load()
+	return p.devReload.Load() != nil || p.browserSessions.Load() != nil || p.announcementsEnabled.Load() || p.statusOverlay.Load() || p.appNav.Load() != nil || p.appFavicon.Load() || p.supportSessions.Load()
 }
 
 // decorateAppPage gives one of ShinyHub's own app pages its contextual favicon
@@ -442,6 +448,9 @@ func (p *Proxy) pageScriptsFor(r *http.Request, slug string, deploymentID int64)
 		return nil
 	}
 	var scripts []pageScript
+	if settings := p.devReload.Load(); settings != nil {
+		scripts = append(scripts, devReloadPageScript(settings))
+	}
 	if session := p.browserPageScript(r, slug); session != nil {
 		scripts = append(scripts, *session)
 	}
@@ -822,5 +831,5 @@ func (p *Proxy) modifyResponseFor(slug string, deploymentIDs ...int64) func(*htt
 			}
 			return p.appPageTitle(slug)
 		},
-	))
+	), p.devReloadResponse)
 }

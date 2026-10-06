@@ -91,7 +91,8 @@ single-app operation so a failed command cannot leave a partial fleet.
 
 Both modes perform an initial start, watch the local source, coalesce save
 bursts, preserve the last healthy app after a failed change, and stop cleanly
-with Ctrl-C. Use --open to launch the app after its first healthy start.
+with Ctrl-C. Locally, open browser tabs refresh after each healthy reload.
+Use --open to launch the app after its first healthy start.
 Remote mode supports --output ndjson for a machine-readable event stream.
 
 Examples:
