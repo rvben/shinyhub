@@ -167,6 +167,16 @@ func (g *GopsutilSampler) refreshScan() error {
 // and then overwrites the previous CPU times stored on the *Process, so two
 // samples racing on the same replica would corrupt each other's baseline.
 func (g *GopsutilSampler) Sample(handle RunHandle) (Stats, error) {
+	return g.sample(handle, true)
+}
+
+// SampleBasic reads CPU and RSS without walking Linux page tables for PSS/USS.
+// Use it for lightweight observers that do not display memory attribution.
+func (g *GopsutilSampler) SampleBasic(handle RunHandle) (Stats, error) {
+	return g.sample(handle, false)
+}
+
+func (g *GopsutilSampler) sample(handle RunHandle, attributionEnabled bool) (Stats, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
@@ -237,16 +247,18 @@ func (g *GopsutilSampler) Sample(handle RunHandle) (Stats, error) {
 		}
 
 		rss += mem.RSS
-		if attribution, err := readMemoryAttribution(pid); err == nil {
-			pss += attribution.PSS
-			uss += attribution.USS
-			swapPSS += attribution.SwapPSS
-			attributedMembers++
-		} else {
-			// smaps_rollup is supplementary observability. Permissions, kernel
-			// support, or a process exiting mid-sample must not make the existing
-			// CPU/RSS sample fail.
-			attributionPartial = true
+		if attributionEnabled {
+			if attribution, err := readMemoryAttribution(pid); err == nil {
+				pss += attribution.PSS
+				uss += attribution.USS
+				swapPSS += attribution.SwapPSS
+				attributedMembers++
+			} else {
+				// smaps_rollup is supplementary observability. Permissions, kernel
+				// support, or a process exiting mid-sample must not make the existing
+				// CPU/RSS sample fail.
+				attributionPartial = true
+			}
 		}
 		if primed {
 			cpu += pct

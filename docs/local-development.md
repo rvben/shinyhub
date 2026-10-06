@@ -112,6 +112,76 @@ Requests use the production-shaped `/app/<slug>/` route with prefix stripping,
 forwarding headers, WebSocket support, and cookie handling. The root URL
 redirects to the app route.
 
+## Terminal development view
+
+On an interactive terminal, local `dev` opens a compact TUI automatically. It
+shows the healthy version still serving, the latest save's progress or failure,
+the app URL, and the last successful reload. The log selector includes every
+app, **All apps**, and **ShinyHub**, even for a single-app session. Narrow
+terminals show one view at a time.
+
+- **↑ / ↓** selects an app or session log view.
+- **a** jumps to **All apps**; **s** jumps to **ShinyHub**.
+- **o** opens the selected app in your browser.
+- **r** retries the selected app through the normal readiness-checked loop.
+- **m** toggles the resource inspector; **PgUp / PgDn** scrolls its details.
+- **Tab** switches between runtime output and the latest change's logs.
+- **PgUp / PgDn** scrolls logs; scrolling back pauses following.
+- **f / End** resumes following; **Space** toggles following.
+- **/** filters logs; **Esc** clears the filter; **?** shows extra shortcuts.
+- **q / Ctrl-C** stops all apps and restores the terminal.
+
+A failed candidate stays visible while the healthy app keeps serving. Fix the
+source and save to recover. Runtime and startup output are kept separate, and
+log retention is bounded per app and per session view. Selecting a failed app
+opens its latest change; selecting a healthy app opens its runtime output.
+
+**All apps** merges runtime, startup, and lifecycle output in receipt order,
+labelled with the app and attempt. **ShinyHub** shows workspace preparation,
+dependency steps, readiness, reload failures, and session diagnostics without
+app stdout/stderr. Both support the same filtering, scrolling, and following;
+filters also match app names. Open and retry apply when an app is selected.
+
+The terminal's own colors are used; `NO_COLOR` and `--no-color` disable color
+without removing state labels.
+
+The TUI samples local host CPU utilization, available RAM, and free space on the
+source directory's filesystem every two seconds. A compact strip appears when
+there is room; **m** opens the full resource inspector in any supported terminal
+size. App CPU and RSS cover each app's process group, including children. The
+serving attempt stays separate from a candidate starting during reload, and
+exited processes are removed immediately. Dependency preparation processes are
+not attributed to an app; their impact is included in host utilization.
+
+Host CPU uses 100% for the whole machine; app CPU uses 100% for one busy core.
+RSS counts shared pages in each process, so adding RSS values does not give
+physical RAM consumption. A first CPU sample has no rate yet and displays `—`;
+failed measurements also display unavailable rather than zero. Readings older
+than six seconds are marked stale. Sampling runs outside the UI loop, preserves
+log filtering and scroll position, and is disabled for plain and NDJSON output.
+
+Redirecting any standard stream, running in CI, or using `TERM=dumb` retains
+plain output. You can also choose a presentation explicitly:
+
+```bash
+shinyhub dev . --tui                  # require an interactive terminal
+shinyhub dev . --tui=false            # stream plain logs
+shinyhub dev . --output table         # stream plain logs
+shinyhub dev . --output ndjson        # lifecycle and log events for agents
+shinyhub dev . 2>&1 | tee dev.log      # record a plain development session
+```
+
+Local NDJSON includes `type`, `app`, `at`, and `attempt`. Phase events identify
+`preparing`, `reloading`, `starting`, `ready`, `failed`, `superseded`, and
+`stopped`. A `ready` event includes the public `url` and healthy `generation`;
+failed attempts never advance the generation. Log events carry `source` (`app`
+or `reload`), `stream` (`stdout` or `stderr`), and `message`. Each candidate has
+its own attempt number so consumers can distinguish startup output from the
+app currently serving. Process events (`type: "process"`) report `phase: "started"`
+or `"exited"`, `pid`, and `attempt`, allowing consumers to track app process
+lifetimes. Stop the process with SIGINT or SIGTERM when finished.
+Remote development retains its existing streaming interface.
+
 ## Local data producers
 
 Local development defaults to leaving schedules idle. Fleet-local settings can

@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -161,7 +162,11 @@ func executeLocalRun(cmd *cobra.Command, dir, slug string, f *localRunFlags, con
 	// SIGINT/SIGTERM here to tear down the child cleanly.
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := localrun.Run(ctx, opts, cmd.OutOrStdout(), cmd.ErrOrStderr()); err != nil {
+	stdout, stderr := cmd.OutOrStdout(), cmd.ErrOrStderr()
+	if opts.OnEvent != nil {
+		stdout, stderr = io.Discard, io.Discard
+	}
+	if err := localrun.Run(ctx, opts, stdout, stderr); err != nil {
 		kind := KindInternal
 		var validationErr *localrun.ValidationError
 		if errors.As(err, &validationErr) {

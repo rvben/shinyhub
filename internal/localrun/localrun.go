@@ -27,6 +27,11 @@ import (
 
 // Options configures a local foreground run.
 type Options struct {
+	// OnEvent receives structured lifecycle and subprocess log events.
+	OnEvent func(Event)
+	// Reload queues a manual, readiness-checked retry using the same save loop.
+	Reload <-chan struct{}
+
 	// ScheduleName executes one manifest schedule without starting the app.
 	ScheduleName string
 	// Seed runs enabled deploy-trigger schedules once before the initial boot.
@@ -138,10 +143,25 @@ func (w *synchronizedWriter) Write(p []byte) (int, error) {
 // Run boots the app bundle and blocks until the context is cancelled (or, in
 // --check mode, until the first healthy poll or crash). It streams all app
 // output to stdout/stderr and returns a non-nil error on any failure.
-func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
+func Run(ctx context.Context, o Options, stdout, stderr io.Writer) (runErr error) {
+	stdout, stderr = synchronizedWriterPair(stdout, stderr)
+	events := &runEvents{app: o.Slug, callback: o.OnEvent}
+	if events.app == "" {
+		events.app = normalizeLocalSlug(filepath.Base(o.BundleDir))
+	}
+	events.attempt.Store(1)
+	stdout, stderr = events.writer(stdout, "reload", "stdout", 0), events.writer(stderr, "reload", "stderr", 0)
+	defer func() {
+		flushEventWriter(stdout)
+		flushEventWriter(stderr)
+		message := ""
+		if runErr != nil {
+			message = runErr.Error()
+		}
+		events.emit(Event{Type: "phase", Phase: "stopped", Attempt: events.attempt.Load(), Message: message})
+	}()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel() // stop watchers even when initial preparation or a producer fails
-	stdout, stderr = synchronizedWriterPair(stdout, stderr)
 	seedMode, err := normalizeSeedMode(o.SeedMode)
 	if err != nil {
 		return &ValidationError{Err: err}
@@ -180,6 +200,8 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 	if !slugpkg.Valid(slug) {
 		return validationErrorf("invalid slug %q: must be %s", slug, slugpkg.HumanRule)
 	}
+	events.app = slug
+	events.phase("preparing", "Preparing workspace")
 	userEnv, err := validateUserEnv(o.Env)
 	if err != nil {
 		return &ValidationError{Err: err}
@@ -304,7 +326,7 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 	}
 
 	runInitialSchedules := func() error {
-		plan, err := prepareCandidate(ctx, w, slug, 1, userEnv, o.NoSync, depsChanged, stdout)
+		plan, err := prepareCandidate(ctx, w, slug, 1, userEnv, o.NoSync, depsChanged, stdout, events)
 		if err != nil {
 			return err
 		}
@@ -325,6 +347,24 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 	proxyErrCh := make(chan error, 1)
 
 	changeCh := make(chan struct{}, 1)
+	if o.Reload != nil && !o.NoReload {
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case _, ok := <-o.Reload:
+					if !ok {
+						return
+					}
+					select {
+					case changeCh <- struct{}{}:
+					default:
+					}
+				}
+			}
+		}()
+	}
 	if !o.NoReload {
 		watchReady := make(chan struct{})
 		inputWatchPaths := bundleInputWatchPaths(manifestRoot, o.BundleInputs)
@@ -357,7 +397,7 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 		depsChanged = false
 	}
 
-	current, err := startCandidate(ctx, w, slug, userEnv, o.NoSync, depsChanged, stdout, stderr)
+	current, err := startCandidate(ctx, w, slug, userEnv, o.NoSync, depsChanged, stdout, stderr, events)
 	if err != nil {
 		// exec.CommandContext refuses to start once ctx is cancelled, so a
 		// Ctrl-C that lands before the first start is a requested shutdown,
@@ -383,6 +423,7 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 		return fmt.Errorf("local proxy readiness: %w", err)
 	}
 	lp.activateBrowserRevision()
+	events.emit(Event{Type: "phase", Phase: "ready", Attempt: events.attempt.Load(), Generation: lp.revision.Load(), URL: lp.URL(), Message: "Watching for changes"})
 	fmt.Fprintf(stdout, "Ready\n  App: %s\n", lp.URL())
 	if o.Check {
 		return nil
@@ -416,9 +457,12 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 			}
 			return errors.New("app exited unexpectedly")
 		case <-changeCh:
+			events.attempt.Add(1)
+			events.phase("reloading", "Preparing latest change")
 			fmt.Fprintln(stdout, "Change detected; staging a healthy reload…")
 			stagedInputs, resolveErr := resolveInputSnapshots(manifestRoot, sourceDir, o.BundleInputs)
 			if resolveErr != nil {
+				events.phase("failed", resolveErr.Error())
 				fmt.Fprintf(stderr, "Reload failed; current app is still serving: resolve bundle inputs: %v\n", resolveErr)
 				continue
 			}
@@ -430,11 +474,13 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 			}
 			depsChanged, syncErr := stagingWorkspace.syncSourceWithInputs(sourceDir, stagedInputs)
 			if syncErr != nil {
+				events.phase("failed", syncErr.Error())
 				fmt.Fprintf(stderr, "Reload failed; current app is still serving: %v\n", syncErr)
 				continue
 			}
-			candidate, startErr := startCandidate(ctx, stagingWorkspace, slug, userEnv, o.NoSync, depsChanged, stdout, stderr)
+			candidate, startErr := startCandidate(ctx, stagingWorkspace, slug, userEnv, o.NoSync, depsChanged, stdout, stderr, events)
 			if startErr != nil {
+				events.phase("failed", startErr.Error())
 				fmt.Fprintf(stderr, "Reload failed; current app is still serving: %v\n", startErr)
 				continue
 			}
@@ -442,6 +488,7 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 			readyErr := waitUntilReady(ctx, candidate, changeCh)
 			if errors.Is(readyErr, errReloadSuperseded) {
 				stopChild(candidate.cmd, candidate.exitCh, stderr)
+				events.phase("superseded", "A newer save replaced this candidate")
 				fmt.Fprintln(stdout, "Newer change detected; replacing the staged candidate…")
 				select {
 				case changeCh <- struct{}{}:
@@ -451,21 +498,25 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) error {
 			}
 			if readyErr != nil {
 				stopChild(candidate.cmd, candidate.exitCh, stderr)
+				events.phase("failed", readyErr.Error())
 				fmt.Fprintf(stderr, "Reload failed; current app is still serving: %v\n", readyErr)
 				continue
 			}
 			if err := lp.routeTo(candidate.port); err != nil {
 				stopChild(candidate.cmd, candidate.exitCh, stderr)
+				events.phase("failed", err.Error())
 				fmt.Fprintf(stderr, "Reload failed; current app is still serving: %v\n", err)
 				continue
 			}
 			if err := pollReady(ctx, joinReadyURL(lp.URL(), candidate.plan.ReadyPath), 5*time.Second, candidate.plan.ReadyStatus); err != nil {
 				_ = lp.routeTo(current.port)
 				stopChild(candidate.cmd, candidate.exitCh, stderr)
+				events.phase("failed", err.Error())
 				fmt.Fprintf(stderr, "Reload failed through the local proxy; current app is still serving: %v\n", err)
 				continue
 			}
 			lp.activateBrowserRevision()
+			events.emit(Event{Type: "phase", Phase: "ready", Attempt: events.attempt.Load(), Generation: lp.revision.Load(), URL: lp.URL(), Message: "Watching for changes"})
 			old := current
 			current = candidate
 			currentWorkspace, stagingWorkspace = stagingWorkspace, currentWorkspace
@@ -515,7 +566,7 @@ func resolveInputSnapshots(manifestRoot, sourceDir string, specs []bundle.FileIn
 
 var errReloadSuperseded = errors.New("reload superseded by a newer change")
 
-func prepareCandidate(ctx context.Context, w *workspace, slug string, port int, userEnv []string, noSync, depsChanged bool, stdout io.Writer) (*deploy.LaunchPlan, error) {
+func prepareCandidate(ctx context.Context, w *workspace, slug string, port int, userEnv []string, noSync, depsChanged bool, stdout io.Writer, observers ...*runEvents) (*deploy.LaunchPlan, error) {
 	baseOpts := deploy.LaunchOptions{
 		AppPath: "/app/" + slug,
 		Port:    port, Workers: 1, BindHost: "127.0.0.1", Reload: false,
@@ -538,6 +589,9 @@ func prepareCandidate(ctx context.Context, w *workspace, slug string, port int, 
 			return nil, fmt.Errorf("resolve dependency preparation: %w", err)
 		}
 		for _, step := range plan.DepPrep {
+			if len(observers) > 0 {
+				observers[0].phase("preparing", step.Label)
+			}
 			fmt.Fprintf(stdout, "==> %s\n", step.Label)
 			if err := step.Run(ctx, w.BundleDir); err != nil {
 				return nil, fmt.Errorf("dependency preparation (%s): %w", step.Label, err)
@@ -556,9 +610,9 @@ func prepareCandidate(ctx context.Context, w *workspace, slug string, port int, 
 	return plan, nil
 }
 
-func startCandidate(ctx context.Context, w *workspace, slug string, userEnv []string, noSync, depsChanged bool, stdout, stderr io.Writer) (*childProcess, error) {
+func startCandidate(ctx context.Context, w *workspace, slug string, userEnv []string, noSync, depsChanged bool, stdout, stderr io.Writer, events *runEvents) (*childProcess, error) {
 	port := deploy.AllocatePort()
-	plan, err := prepareCandidate(ctx, w, slug, port, userEnv, noSync, depsChanged, stdout)
+	plan, err := prepareCandidate(ctx, w, slug, port, userEnv, noSync, depsChanged, stdout, events)
 	if err != nil {
 		return nil, err
 	}
@@ -591,13 +645,33 @@ func startCandidate(ctx context.Context, w *workspace, slug string, userEnv []st
 		c.ExtraFiles = []*os.File{w.dataLock, w.workspaceLock}
 	}
 	c.WaitDelay = time.Second
-	c.Stdout = stdout
-	c.Stderr = stderr
+	events.phase("starting", "Waiting for readiness")
+	appOut, appErr := events.writer(stdout, "app", "stdout", events.attempt.Load()), events.writer(stderr, "app", "stderr", events.attempt.Load())
+	// App bytes go to the original stream, not the runner-diagnostic wrapper.
+	if ew, ok := stdout.(*eventLogWriter); ok {
+		appOut = events.writer(ew.out, "app", "stdout", events.attempt.Load())
+	}
+	if ew, ok := stderr.(*eventLogWriter); ok {
+		appErr = events.writer(ew.out, "app", "stderr", events.attempt.Load())
+	}
+	c.Stdout = appOut
+	c.Stderr = appErr
 	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := c.Start(); err != nil {
 		return nil, fmt.Errorf("start %s: %w", slug, err)
 	}
-	return &childProcess{cmd: c, exitCh: watchExit(c), port: port, plan: plan}, nil
+	attempt := events.attempt.Load()
+	events.emit(Event{Type: "process", Source: "app", Phase: "started", Attempt: attempt, PID: c.Process.Pid})
+	exitCh := make(chan error, 1)
+	go func() {
+		err := c.Wait()
+		events.emit(Event{Type: "process", Source: "app", Phase: "exited", Attempt: attempt, PID: c.Process.Pid})
+		flushEventWriter(appOut)
+		flushEventWriter(appErr)
+		exitCh <- err
+		close(exitCh)
+	}()
+	return &childProcess{cmd: c, exitCh: exitCh, port: port, plan: plan}, nil
 }
 
 // watchExit reaps c in the background and reports its exit over the returned

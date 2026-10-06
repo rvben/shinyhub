@@ -18,6 +18,8 @@ import (
 // interactive development loop. The lower-level run and deploy commands keep
 // their specialist preflight, Git, and one-shot deployment options.
 type devFlags struct {
+	tui        bool
+	session    *devSession
 	remote     string
 	slug       string
 	open       bool
@@ -46,13 +48,13 @@ type devFlags struct {
 }
 
 var (
-	devLocalOnlyFlags  = []string{"seed", "port", "no-sync", "env", "env-file", "data-dir", "state-dir", "fresh"}
+	devLocalOnlyFlags  = []string{"seed", "port", "no-sync", "env", "env-file", "data-dir", "state-dir", "fresh", "tui"}
 	devRemoteOnlyFlags = []string{
 		"create", "ephemeral", "ttl", "visibility", "watch-delay",
 		"allow-repeated-hooks", "wait-timeout", "wait-for-server",
 	}
-	devServerGlobalFlags = []string{"config", "output", "quiet", "no-color"}
-	devCommonFlags       = []string{"all", "app", "file", "help", "open", "remote", "slug", "standalone"}
+	devServerGlobalFlags = []string{"config", "quiet"}
+	devCommonFlags       = []string{"all", "app", "file", "help", "open", "remote", "slug", "standalone", "output", "no-color"}
 )
 
 func init() {
@@ -93,6 +95,8 @@ Both modes perform an initial start, watch the local source, coalesce save
 bursts, preserve the last healthy app after a failed change, and stop cleanly
 with Ctrl-C. Locally, open browser tabs refresh after each healthy reload.
 Use --open to launch the app after its first healthy start.
+Interactive local terminals use a development TUI. Use --tui=false to stream
+plain logs, or --output ndjson for app-attributed lifecycle and log events.
 Remote mode supports --output ndjson for a machine-readable event stream.
 
 Examples:
@@ -132,6 +136,7 @@ Remote flags:
 	cmd.Flags().BoolVar(&f.all, "all", false, "Develop every app declared by the fleet; fail if any source cannot be watched")
 	cmd.Flags().BoolVar(&f.standalone, "standalone", false, "Ignore an enclosing fleet and treat the directory as one app")
 
+	cmd.Flags().BoolVar(&f.tui, "tui", false, "Interactive local development view (automatic on terminals; --tui=false streams logs)")
 	cmd.Flags().IntVarP(&f.port, "port", "p", 0, "TCP port for the local proxy (0 = auto-allocate)")
 	configureSeedFlag(cmd, &f.seed)
 	cmd.Flags().BoolVar(&f.noSync, "no-sync", false, "Skip dependency preparation (uv sync / renv restore)")
@@ -192,17 +197,14 @@ func runDev(cmd *cobra.Command, args []string, f *devFlags) error {
 		return validationErr("--slug cannot override a fleet app's manifest identity", "select the app with --app <slug>, or add --standalone to develop an independent target")
 	}
 	if remote == "" {
-		return runLocalDev(cmd, args, f, scope)
+		return runLocalDevPresentation(cmd, args, f, scope)
 	}
 	return runRemoteDev(cmd, args, f, remote, scope)
 }
 
 func runLocalDev(cmd *cobra.Command, args []string, f *devFlags, scope *devScope) error {
-	if changed := changedDevFlags(cmd, devRemoteOnlyFlags); len(changed) > 0 {
-		return validationErr(strings.Join(changed, ", ")+" require remote development", "add --remote <host> or remove the remote-only flags")
-	}
-	if changed := changedDevFlags(cmd, devServerGlobalFlags); len(changed) > 0 {
-		return validationErr(strings.Join(changed, ", ")+" apply only to remote development", "add --remote <host> or remove the server option")
+	if err := validateLocalDevFlags(cmd); err != nil {
+		return err
 	}
 	if scope.fleet() {
 		return runLocalFleetDev(cmd, f, scope)
@@ -220,7 +222,7 @@ func runLocalDev(cmd *cobra.Command, args []string, f *devFlags, scope *devScope
 		dataDir: f.dataDir, stateDir: f.stateDir, fresh: f.fresh,
 		slug: slug, open: f.open,
 	}
-	return executeLocalRun(cmd, dir, slug, local, nil)
+	return executeLocalRun(cmd, dir, slug, local, func(options *localrun.Options) { f.session.configure(slug, options) })
 }
 
 func runLocalFleetDev(cmd *cobra.Command, f *devFlags, scope *devScope) error {
@@ -277,6 +279,7 @@ func runLocalFleetDev(cmd *cobra.Command, f *devFlags, scope *devScope) error {
 			err := executeLocalRun(child, target.Dir, target.Slug, &local, func(options *localrun.Options) {
 				options.ManifestPath = target.Manifest
 				options.BundleInputs = target.BundleInputs
+				f.session.configure(target.Slug, options)
 			})
 			results <- result{slug: target.Slug, err: err}
 		}()
