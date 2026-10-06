@@ -73,8 +73,8 @@ func resolveDevPresentation(cmd *cobra.Command, f *devFlags) (devPresentation, e
 }
 
 type devSession struct {
-	emit    func(localrun.Event)
-	retries map[string]chan struct{}
+	emit     func(localrun.Event)
+	controls map[string]chan localrun.Control
 }
 
 func (s *devSession) configure(slug string, options *localrun.Options) {
@@ -82,7 +82,7 @@ func (s *devSession) configure(slug string, options *localrun.Options) {
 		return
 	}
 	options.OnEvent = s.emit
-	options.Reload = s.retries[slug]
+	options.Controls = s.controls[slug]
 }
 
 // The UI owns only presentation and controls. The same runner and cancellation
@@ -121,9 +121,11 @@ func runLocalDevPresentation(cmd *cobra.Command, args []string, f *devFlags, sco
 	if err := validateLocalDevFlags(cmd); err != nil {
 		return err
 	}
-	session := &devSession{retries: make(map[string]chan struct{}, len(slugs))}
+	session := &devSession{controls: make(map[string]chan localrun.Control, len(slugs))}
 	for _, slug := range slugs {
-		session.retries[slug] = make(chan struct{}, 1)
+		if mode == devTUI {
+			session.controls[slug] = make(chan localrun.Control, 8)
+		}
 	}
 	copyFlags := *f
 	copyFlags.session = session
@@ -166,7 +168,7 @@ func runLocalDevPresentation(cmd *cobra.Command, args []string, f *devFlags, sco
 	diagnostics := &devDiagnosticWriter{emit: session.emit}
 	child.SetErr(diagnostics)
 	done := make(chan error, 1)
-	model := newDevModel(slugs, events, done, session.retries, cancel, stylerFor(cmd.OutOrStdout()))
+	model := newDevModel(slugs, events, done, session.controls, cancel, stylerFor(cmd.OutOrStdout()))
 	model.resourceUpdates = resourceUpdates
 	program := tea.NewProgram(model, tea.WithInput(cmd.InOrStdin()), tea.WithOutput(cmd.OutOrStdout()))
 	go func() {

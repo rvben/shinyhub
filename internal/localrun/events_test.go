@@ -47,7 +47,7 @@ http.server.HTTPServer(("127.0.0.1",int(os.environ["PORT"])), http.server.Simple
 			case err := <-done:
 				t.Fatalf("runner stopped before readiness: %v", err)
 			case <-ctx.Done():
-				t.Fatal("readiness timed out")
+				t.Fatalf("readiness timed out: %+v", collected)
 			}
 		}
 	}

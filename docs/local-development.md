@@ -123,13 +123,25 @@ terminals show one view at a time.
 - **↑ / ↓** selects an app or session log view.
 - **a** jumps to **All apps**; **s** jumps to **ShinyHub**.
 - **o** opens the selected app in your browser.
-- **r** retries the selected app through the normal readiness-checked loop.
+- **r** restarts the selected app through the readiness-checked loop. A healthy
+  instance keeps serving until its replacement is ready, including when the
+  source has not changed. Failed restarts preserve the healthy instance.
+- **x** stops the selected app and any pending startup, including their process
+  groups. Automatic reloads are suspended for that app; other apps keep running.
+- **u** resumes a stopped app from the latest source. Its local URL and app data
+  are preserved. A failed resume stays recoverable by fixing and saving or **r**.
 - **m** toggles the resource inspector; **PgUp / PgDn** scrolls its details.
 - **Tab** switches between runtime output and the latest change's logs.
 - **PgUp / PgDn** scrolls logs; scrolling back pauses following.
 - **f / End** resumes following; **Space** toggles following.
 - **/** filters logs; **Esc** clears the filter; **?** shows extra shortcuts.
-- **q / Ctrl-C** stops all apps and restores the terminal.
+- **q / Ctrl-C** quits the session, stops all apps, and restores the terminal.
+
+An intentionally stopped app stays stopped when files change; **r** does not
+implicitly resume it. Its local URL returns HTTP 503 while it is not running.
+The session retains its workspace and data locks until you quit. Restart and
+resume do not rerun completed startup seed schedules. If an app crashes, the
+TUI keeps the failure visible and its controls available for recovery.
 
 A failed candidate stays visible while the healthy app keeps serving. Fix the
 source and save to recover. Runtime and startup output are kept separate, and
@@ -140,7 +152,8 @@ opens its latest change; selecting a healthy app opens its runtime output.
 labelled with the app and attempt. **ShinyHub** shows workspace preparation,
 dependency steps, readiness, reload failures, and session diagnostics without
 app stdout/stderr. Both support the same filtering, scrolling, and following;
-filters also match app names. Open and retry apply when an app is selected.
+filters also match app names. Open, restart, stop, and resume apply when an app is
+selected; aggregate views cannot control every app accidentally.
 
 The terminal's own colors are used; `NO_COLOR` and `--no-color` disable color
 without removing state labels.

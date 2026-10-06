@@ -24,6 +24,7 @@ type localProxy struct {
 	revision       atomic.Int64
 	session        string
 	browserRefresh bool
+	unavailable    atomic.Bool
 }
 
 func newLocalProxy(port int, slug string) (*localProxy, error) {
@@ -68,6 +69,10 @@ func newLocalProxy(port int, slug string) (*localProxy, error) {
 			}
 			if r.URL.Path == "/" {
 				http.Redirect(w, r, "/app/"+slug+"/", http.StatusTemporaryRedirect)
+				return
+			}
+			if lp.unavailable.Load() {
+				http.Error(w, "App is not running. Resume it in ShinyHub dev.", http.StatusServiceUnavailable)
 				return
 			}
 			if r.URL.Path == appnav.DataURL(slug) {

@@ -50,6 +50,7 @@ type devAppView struct {
 	logs                                      []localrun.Event
 	logBytes                                  int
 	stopped                                   bool
+	suspended                                 bool
 	processes                                 map[int64]int
 }
 type devDoneMsg struct{ err error }
@@ -66,7 +67,7 @@ type devModel struct {
 	events                             <-chan localrun.Event
 	done                               <-chan error
 	finished                           chan error
-	retries                            map[string]chan struct{}
+	controls                           map[string]chan localrun.Control
 	cancel                             context.CancelFunc
 	ended                              bool
 	actionError                        string
@@ -77,8 +78,8 @@ type devModel struct {
 	resourceOffset                     int
 }
 
-func newDevModel(slugs []string, events <-chan localrun.Event, done <-chan error, retries map[string]chan struct{}, cancel context.CancelFunc, style styler) *devModel {
-	m := &devModel{width: 100, height: 28, clock: time.Now(), latest: true, following: true, events: events, done: done, finished: make(chan error, 1), retries: retries, cancel: cancel, style: style}
+func newDevModel(slugs []string, events <-chan localrun.Event, done <-chan error, controls map[string]chan localrun.Control, cancel context.CancelFunc, style styler) *devModel {
+	m := &devModel{width: 100, height: 28, clock: time.Now(), latest: true, following: true, events: events, done: done, finished: make(chan error, 1), controls: controls, cancel: cancel, style: style}
 	for _, slug := range slugs {
 		m.apps = append(m.apps, devAppView{slug: slug, phase: "preparing", activity: "Preparing workspace"})
 	}
@@ -189,6 +190,7 @@ func (m *devModel) apply(event localrun.Event) {
 			app.failure = ""
 			app.lastReady = event.At
 			app.stopped = false
+			app.suspended = false
 			if i == m.selected {
 				m.latest = false
 				m.offset = 0
@@ -203,9 +205,15 @@ func (m *devModel) apply(event localrun.Event) {
 			}
 		case "stopped":
 			app.stopped = true
-			if event.Message != "" {
-				app.failure = devSafeText(event.Message)
-			}
+			app.suspended = true
+			app.failure = ""
+		case "stopping":
+			app.stopped = true
+		case "resuming":
+			app.suspended = false
+		case "exited":
+			app.stopped = true
+			app.failure = devSafeText(event.Message)
 		}
 		return
 	}
@@ -364,17 +372,30 @@ func (m *devModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					return nil
 				}
 			}
-		case "r":
+		case "r", "x", "u":
 			if m.selected < 0 {
-				m.actionError = "Select an app with ↑/↓ to retry"
+				m.actionError = "Select an app with ↑/↓ to control it"
+				break
+			}
+			app := m.apps[m.selected]
+			control := map[string]localrun.Control{"r": localrun.Restart, "x": localrun.Stop, "u": localrun.Resume}[key]
+			if key == "r" && app.suspended {
+				m.actionError = "App is stopped; press u to resume the latest source"
+				break
+			}
+			if key == "u" && !app.suspended {
+				m.actionError = "App is not stopped; press r to restart"
 				break
 			}
 			if !m.ended {
 				select {
-				case m.retries[m.apps[m.selected].slug] <- struct{}{}:
+				case m.controls[app.slug] <- control:
+					m.actionError = ""
 				default:
+					m.actionError = "App controls are busy; try again shortly"
 				}
-				m.actionError = ""
+			} else {
+				m.actionError = "Session ended; start shinyhub dev again"
 			}
 		}
 	}
@@ -413,7 +434,7 @@ func devRight(text string, width int) string {
 	return strings.Repeat(" ", max(0, width-ansi.StringWidth(text))) + text
 }
 func devFooter(s styler, text string) string {
-	keys := map[string]bool{"↑/↓": true, "a": true, "s": true, "m": true, "Tab": true, "/": true, "o": true, "r": true, "q": true, "?": true, "f": true, "PgUp/PgDn": true, "PgUp": true, "Enter": true, "Esc": true, "Ctrl-C": true, "^C": true}
+	keys := map[string]bool{"↑/↓": true, "a": true, "s": true, "m": true, "Tab": true, "/": true, "o": true, "r": true, "x": true, "u": true, "q": true, "?": true, "f": true, "PgUp/PgDn": true, "PgUp": true, "Enter": true, "Esc": true, "Ctrl-C": true, "^C": true}
 	var out strings.Builder
 	// Keep authored spacing while giving the actual keys a distinct weight.
 	for _, part := range strings.SplitAfter(text, " ") {
@@ -524,10 +545,16 @@ func (m *devModel) paneLayout(paneWidth, h int) ([]string, string, []string, int
 	if m.selected >= 0 {
 		pane = append(pane, title)
 		serving := "No healthy version yet"
+		if app.stopped {
+			serving = "Not serving"
+		}
 		if app.generation > 0 {
 			serving = fmt.Sprintf("Serving v%d", app.generation)
 			if app.stopped {
-				serving = fmt.Sprintf("Stopped · last healthy v%d", app.generation)
+				serving = fmt.Sprintf("Not serving · last healthy v%d", app.generation)
+				if app.suspended {
+					serving = fmt.Sprintf("Stopped · last healthy v%d", app.generation)
+				}
 			}
 		}
 		if app.generation > 0 && !app.stopped {
@@ -538,11 +565,13 @@ func (m *devModel) paneLayout(paneWidth, h int) ([]string, string, []string, int
 		latest := ""
 		switch app.phase {
 		case "ready":
-			latest = "Latest save ready"
+			latest = "Latest change ready"
 		case "failed":
-			latest = s.red("Latest save failed")
+			latest = s.red("Latest change failed")
 		case "stopped":
-			latest = "Session stopped"
+			latest = "Reloads suspended · u to resume"
+		case "exited":
+			latest = s.red("App exited")
 		default:
 			latest = s.yellow(app.activity)
 		}
@@ -557,6 +586,12 @@ func (m *devModel) paneLayout(paneWidth, h int) ([]string, string, []string, int
 		success := "Browser refresh after healthy reloads"
 		if !app.lastReady.IsZero() {
 			success = "Last ready " + app.lastReady.Local().Format("15:04:05") + "   ·   Browser refresh on"
+		}
+		if app.stopped {
+			success = "Browser refresh after the next healthy start"
+			if !app.lastReady.IsZero() {
+				success = "Last ready " + app.lastReady.Local().Format("15:04:05")
+			}
 		}
 		if h >= 20 && !m.showResources {
 			pane = append(pane, s.dim(success))
@@ -579,9 +614,9 @@ func (m *devModel) paneLayout(paneWidth, h int) ([]string, string, []string, int
 			for _, line := range failure[:min(failureLines, len(failure))] {
 				pane = append(pane, s.red(line))
 			}
-			recovery := "Fix the source and save, or press r to retry."
+			recovery := "Fix the source and save, or press r to restart."
 			if paneWidth < 50 {
-				recovery = "Fix and save, or r to retry."
+				recovery = "Fix and save, or r to restart."
 			}
 			pane = append(pane, s.dim(recovery))
 			if h >= 20 {
@@ -612,7 +647,7 @@ func (m *devModel) paneLayout(paneWidth, h int) ([]string, string, []string, int
 			status = s.green(status)
 		}
 		if failed > 0 {
-			status += "  ·  " + s.red(fmt.Sprintf("%d latest saves failed", failed))
+			status += "  ·  " + s.red(fmt.Sprintf("%d latest changes failed", failed))
 		}
 		pane = append(pane, status)
 		if h >= 20 {
@@ -751,10 +786,18 @@ func (m *devModel) View() tea.View {
 					status = s.green("serving")
 				}
 				if item.phase == "failed" {
-					status = s.red("save failed")
+					status = s.red("failed")
 				}
 				if item.stopped {
-					status = "stopped"
+					status = "starting"
+					if item.phase == "stopping" {
+						status = "stopping"
+					}
+					if item.suspended {
+						status = "stopped"
+					} else if item.failure != "" {
+						status = s.red("failed")
+					}
 				}
 			}
 			marker := "  "
@@ -793,17 +836,20 @@ func (m *devModel) View() tea.View {
 		}
 	}
 	lines = append(lines, "")
-	footer := "↑/↓ views   a all   s hub   m metrics   Tab logs   / filter   o open   r retry   q stop"
+	footer := "↑/↓ views  m metrics  Tab logs  / filter  o open  r restart  x stop  u resume  q quit"
 	if inner < 100 {
-		footer = "a all  s hub  m metrics  / filter  ? help  q stop"
+		footer = "a all  s hub  m metrics  ? controls  q quit"
 	}
 	if inner < 60 {
-		footer = "a all  s hub  m stats  ? help  q stop"
+		footer = "a all  s hub  m stats  ? help  q quit"
 	}
 	if m.showResources {
-		footer = "m logs · PgUp/PgDn scroll · ↑/↓ views · q stop"
+		footer = "m logs · PgUp/PgDn scroll · r restart · x stop · u resume · q quit"
 		if inner < 60 {
-			footer = "m logs  PgUp/PgDn scroll  q stop"
+			footer = "m logs  PgUp/PgDn scroll  ? help  q quit"
+			if inner < 42 {
+				footer = "m logs  PgUp/PgDn scroll  q quit"
+			}
 		}
 	}
 	if m.searching {
@@ -813,13 +859,25 @@ func (m *devModel) View() tea.View {
 		}
 	}
 	if m.help {
-		footer = "↑/↓ views · o open · r retry · PgUp/PgDn scroll · f follow · q stop"
+		footer = "r restart · x stop · u resume · a all · s hub · o open · PgUp/PgDn scroll · f follow · q quit"
 		if inner < 60 {
-			footer = "PgUp scroll · f follow · q stop"
+			footer = "r restart  x stop  u resume  q quit"
 		}
 	}
 	if m.ended {
-		footer = "Session ended. Press q to return to the shell."
+		footer = "Session ended · q quit"
+	}
+	if ansi.StringWidth(footer) > inner {
+		switch {
+		case m.help:
+			footer = "r restart  x stop  u resume  q quit"
+		case m.searching:
+			footer = "^C stop · Enter apply · Esc clear"
+		case m.showResources:
+			footer = "m logs  PgUp/PgDn scroll  q quit"
+		default:
+			footer = "a all  s hub  m stats  ? help  q quit"
+		}
 	}
 	lines = append(lines, "  "+devFit(devFooter(s, footer), inner))
 	v := tea.NewView(strings.Join(lines, "\n"))

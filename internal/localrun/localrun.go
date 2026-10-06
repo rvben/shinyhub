@@ -31,6 +31,8 @@ type Options struct {
 	OnEvent func(Event)
 	// Reload queues a manual, readiness-checked retry using the same save loop.
 	Reload <-chan struct{}
+	// Controls operates one watched app without ending its development session.
+	Controls <-chan Control
 
 	// ScheduleName executes one manifest schedule without starting the app.
 	ScheduleName string
@@ -325,15 +327,15 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) (runErr error
 		}
 	}
 
-	runInitialSchedules := func() error {
-		plan, err := prepareCandidate(ctx, w, slug, 1, userEnv, o.NoSync, depsChanged, stdout, events)
+	runInitialSchedules := func(runCtx context.Context) error {
+		plan, err := prepareCandidate(runCtx, w, slug, 1, userEnv, o.NoSync, depsChanged, stdout, events)
 		if err != nil {
 			return err
 		}
-		return runSchedules(ctx, w, slug, userEnv, plan, o.ScheduleName, seedMode, stdout, stderr)
+		return runSchedules(runCtx, w, slug, userEnv, plan, o.ScheduleName, seedMode, stdout, stderr)
 	}
 	if o.ScheduleName != "" {
-		return runInitialSchedules()
+		return runInitialSchedules(ctx)
 	}
 
 	lp, err := newLocalProxy(o.Port, slug)
@@ -385,10 +387,22 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) (runErr error
 		}
 	}
 
+	if !o.NoReload && !o.Check {
+		// The asynchronous loop snapshots again. Persist changed dependency
+		// inputs so that a second sync or cancelled launch cannot hide them.
+		if depsChanged && !o.NoSync {
+			if err := w.markDependenciesDirty(); err != nil {
+				return err
+			}
+		}
+		return runDevelopmentLoop(ctx, o, w, lp, changeCh, proxyErrCh, events, stdout, stderr,
+			developmentSource{dir: sourceDir, manifestRoot: manifestRoot, slug: slug, env: userEnv, lockWarning: lockWarning},
+			seedMode != "never", runInitialSchedules)
+	}
 	if seedMode != "never" {
 		// Watch before preparing or producing data so edits during a long initial
 		// producer are queued for the normal staged reload loop.
-		if err := runInitialSchedules(); err != nil {
+		if err := runInitialSchedules(ctx); err != nil {
 			return err
 		}
 		if err := syscall.Flock(int(dataLock.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
@@ -432,98 +446,7 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) (runErr error
 		openBrowser(lp.URL())
 	}
 
-	if o.NoReload {
-		return waitForExit(ctx, current, proxyErrCh)
-	}
-	fmt.Fprintln(stdout, "  Watching: source changes; browser refresh on healthy reload (Ctrl-C to stop)")
-	currentWorkspace := w
-	stagingWorkspace := w.alternate()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case err := <-proxyErrCh:
-			return err
-		case exitErr := <-current.exitCh:
-			// exec.CommandContext kills the child when ctx is cancelled. The
-			// process exit and ctx.Done become ready concurrently, so select may
-			// observe the killed child first. A requested shutdown is still clean.
-			if ctx.Err() != nil {
-				return nil
-			}
-			if exitErr != nil {
-				return fmt.Errorf("app exited: %w", exitErr)
-			}
-			return errors.New("app exited unexpectedly")
-		case <-changeCh:
-			events.attempt.Add(1)
-			events.phase("reloading", "Preparing latest change")
-			fmt.Fprintln(stdout, "Change detected; staging a healthy reload…")
-			stagedInputs, resolveErr := resolveInputSnapshots(manifestRoot, sourceDir, o.BundleInputs)
-			if resolveErr != nil {
-				events.phase("failed", resolveErr.Error())
-				fmt.Fprintf(stderr, "Reload failed; current app is still serving: resolve bundle inputs: %v\n", resolveErr)
-				continue
-			}
-			if o.CheckBundle != nil {
-				if warning := bundleLockWarning(o.CheckBundle(sourceDir, stagedInputs)); warning != lockWarning {
-					fmt.Fprint(stderr, warning)
-					lockWarning = warning
-				}
-			}
-			depsChanged, syncErr := stagingWorkspace.syncSourceWithInputs(sourceDir, stagedInputs)
-			if syncErr != nil {
-				events.phase("failed", syncErr.Error())
-				fmt.Fprintf(stderr, "Reload failed; current app is still serving: %v\n", syncErr)
-				continue
-			}
-			candidate, startErr := startCandidate(ctx, stagingWorkspace, slug, userEnv, o.NoSync, depsChanged, stdout, stderr, events)
-			if startErr != nil {
-				events.phase("failed", startErr.Error())
-				fmt.Fprintf(stderr, "Reload failed; current app is still serving: %v\n", startErr)
-				continue
-			}
-
-			readyErr := waitUntilReady(ctx, candidate, changeCh)
-			if errors.Is(readyErr, errReloadSuperseded) {
-				stopChild(candidate.cmd, candidate.exitCh, stderr)
-				events.phase("superseded", "A newer save replaced this candidate")
-				fmt.Fprintln(stdout, "Newer change detected; replacing the staged candidate…")
-				select {
-				case changeCh <- struct{}{}:
-				default:
-				}
-				continue
-			}
-			if readyErr != nil {
-				stopChild(candidate.cmd, candidate.exitCh, stderr)
-				events.phase("failed", readyErr.Error())
-				fmt.Fprintf(stderr, "Reload failed; current app is still serving: %v\n", readyErr)
-				continue
-			}
-			if err := lp.routeTo(candidate.port); err != nil {
-				stopChild(candidate.cmd, candidate.exitCh, stderr)
-				events.phase("failed", err.Error())
-				fmt.Fprintf(stderr, "Reload failed; current app is still serving: %v\n", err)
-				continue
-			}
-			if err := pollReady(ctx, joinReadyURL(lp.URL(), candidate.plan.ReadyPath), 5*time.Second, candidate.plan.ReadyStatus); err != nil {
-				_ = lp.routeTo(current.port)
-				stopChild(candidate.cmd, candidate.exitCh, stderr)
-				events.phase("failed", err.Error())
-				fmt.Fprintf(stderr, "Reload failed through the local proxy; current app is still serving: %v\n", err)
-				continue
-			}
-			lp.activateBrowserRevision()
-			events.emit(Event{Type: "phase", Phase: "ready", Attempt: events.attempt.Load(), Generation: lp.revision.Load(), URL: lp.URL(), Message: "Watching for changes"})
-			old := current
-			current = candidate
-			currentWorkspace, stagingWorkspace = stagingWorkspace, currentWorkspace
-			stopChild(old.cmd, old.exitCh, stderr)
-			fmt.Fprintln(stdout, "Reload ready; traffic switched.")
-		}
-	}
+	return waitForExit(ctx, current, proxyErrCh)
 }
 
 // bundleLockWarning renders a CheckBundle verdict as the warning line a

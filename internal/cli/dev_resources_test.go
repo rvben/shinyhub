@@ -118,7 +118,7 @@ func TestDevResourceLayoutsAndTogglePreserveLogs(t *testing.T) {
 						t.Fatalf("width exceeds %d: %s", m.width, line)
 					}
 				}
-				if !strings.Contains(view, "q stop") {
+				if !strings.Contains(view, "q quit") {
 					t.Fatalf("quit hidden at %v: %s", size, view)
 				}
 			}

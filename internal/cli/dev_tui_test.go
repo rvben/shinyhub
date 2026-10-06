@@ -13,7 +13,7 @@ import (
 )
 
 func testDevModel() *devModel {
-	return newDevModel([]string{"sales", "ops"}, nil, nil, map[string]chan struct{}{"sales": make(chan struct{}, 1), "ops": make(chan struct{}, 1)}, func() {}, styler{})
+	return newDevModel([]string{"sales", "ops"}, nil, nil, map[string]chan localrun.Control{"sales": make(chan localrun.Control, 8), "ops": make(chan localrun.Control, 8)}, func() {}, styler{})
 }
 func TestDevViewKeepsServingSeparateFromFailedSave(t *testing.T) {
 	m := testDevModel()
@@ -22,13 +22,13 @@ func TestDevViewKeepsServingSeparateFromFailedSave(t *testing.T) {
 	m.apply(localrun.Event{Type: "log", App: "sales", Source: "app", Stream: "stderr", Attempt: 2, Message: "SyntaxError: expected ':'"})
 	m.apply(localrun.Event{Type: "phase", App: "sales", Phase: "failed", Attempt: 2, Message: "app exited during startup (exit 1)"})
 	view := m.View().Content
-	for _, want := range []string{"Serving v1", "Latest save failed", "SyntaxError", "r to retry", "sales", "ops"} {
+	for _, want := range []string{"Serving v1", "Latest change failed", "SyntaxError", "r to restart", "sales", "ops"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("missing %q:\n%s", want, view)
 		}
 	}
 	m.apply(localrun.Event{Type: "phase", App: "sales", Phase: "ready", Attempt: 3, Generation: 2, URL: "http://localhost/app/sales/", At: time.Now()})
-	if strings.Contains(m.View().Content, "Latest save failed") || m.apps[0].failure != "" {
+	if strings.Contains(m.View().Content, "Latest change failed") || m.apps[0].failure != "" {
 		t.Fatal("recovery left failure visible")
 	}
 }
@@ -36,8 +36,11 @@ func TestDevControlsRetrySelectedAppAndPauseLogFollowing(t *testing.T) {
 	m := testDevModel()
 	m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	m.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
-	if len(m.retries["ops"]) != 1 || len(m.retries["sales"]) != 0 {
+	if len(m.controls["ops"]) != 1 || len(m.controls["sales"]) != 0 {
 		t.Fatal("retry targeted wrong app")
+	}
+	if control := <-m.controls["ops"]; control != localrun.Restart {
+		t.Fatalf("r queued %s", control)
 	}
 	m.apply(localrun.Event{Type: "phase", App: "ops", Phase: "ready", Attempt: 1, Generation: 1})
 	for i := 0; i < 40; i++ {
@@ -55,6 +58,81 @@ func TestDevControlsRetrySelectedAppAndPauseLogFollowing(t *testing.T) {
 	m.Update(tea.KeyPressMsg{Code: 'f', Text: "f"})
 	if !m.following || m.offset != 0 {
 		t.Fatal("follow did not return to tail")
+	}
+}
+
+func TestDevControlsStopResumeAndStoppedState(t *testing.T) {
+	m := testDevModel()
+	m.apply(localrun.Event{Type: "phase", App: "sales", Phase: "ready", Attempt: 1, Generation: 1})
+	m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	if control := <-m.controls["sales"]; control != localrun.Stop || len(m.controls["ops"]) != 0 {
+		t.Fatalf("stop targeted wrong app or operation: %s", control)
+	}
+	m.apply(localrun.Event{Type: "phase", App: "sales", Phase: "stopped", Attempt: 1, Message: "App stopped; automatic reloads suspended"})
+	if !m.apps[0].suspended || !m.apps[0].stopped || m.apps[0].failure != "" {
+		t.Fatal("intentional stop was treated as a failure")
+	}
+	view := m.View().Content
+	for _, want := range []string{"Stopped", "suspended", "u to resume"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("missing stopped guidance %q: %s", want, view)
+		}
+	}
+	m.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
+	if len(m.controls["sales"]) != 0 || !strings.Contains(m.actionError, "u to resume") {
+		t.Fatal("restart implicitly resumed stopped app")
+	}
+	m.Update(tea.KeyPressMsg{Code: 'u', Text: "u"})
+	if control := <-m.controls["sales"]; control != localrun.Resume {
+		t.Fatalf("resume queued %s", control)
+	}
+	m.apply(localrun.Event{Type: "phase", App: "sales", Phase: "resuming", Attempt: 2})
+	if m.apps[0].suspended || !m.apps[0].stopped {
+		t.Fatal("resume showed a serving app before readiness")
+	}
+	m.apply(localrun.Event{Type: "phase", App: "sales", Phase: "failed", Attempt: 2, Message: "syntax error"})
+	if m.apps[0].suspended || !m.apps[0].stopped || m.apps[0].failure == "" {
+		t.Fatal("failed resume lost recovery state")
+	}
+	view = m.View().Content
+	if strings.Contains(view, "Stopped ·") || strings.Contains(view, "Browser refresh on") || !strings.Contains(view, "Not serving") {
+		t.Fatalf("failed resume misleadingly looked suspended or serving: %s", view)
+	}
+	m.apply(localrun.Event{Type: "phase", App: "sales", Phase: "ready", Attempt: 3, Generation: 2})
+	if m.apps[0].stopped || m.apps[0].suspended {
+		t.Fatal("successful resume left stopped state")
+	}
+}
+
+func TestDevAppControlsDoNotActWhileSearchingOrOnSessionViews(t *testing.T) {
+	m := testDevModel()
+	for _, selected := range []int{devAllApps, devShinyHub} {
+		m.selected = selected
+		for _, key := range []rune{'r', 'x', 'u'} {
+			m.Update(tea.KeyPressMsg{Code: key, Text: string(key)})
+		}
+	}
+	m.selected, m.searching = 0, true
+	for _, key := range []rune{'r', 'x', 'u'} {
+		m.Update(tea.KeyPressMsg{Code: key, Text: string(key)})
+	}
+	if len(m.controls["sales"]) != 0 || len(m.controls["ops"]) != 0 || m.filter != "rxu" {
+		t.Fatal("filter input or session scope triggered app controls")
+	}
+}
+
+func TestDevQuitHintRemainsVisibleAtIntermediateWidths(t *testing.T) {
+	m := testDevModel()
+	for _, width := range []int{42, 60, 64, 80, 94, 100, 128} {
+		m.width, m.height = width, 24
+		for _, mode := range []string{"logs", "help", "resources"} {
+			m.help, m.showResources = mode == "help", mode == "resources"
+			lines := strings.Split(m.View().Content, "\n")
+			footer := lines[len(lines)-1]
+			if !strings.Contains(footer, "q quit") {
+				t.Fatalf("quit hidden at width %d in %s: %s", width, mode, footer)
+			}
+		}
 	}
 }
 func TestDevLayoutBoundsAndTerminalInjection(t *testing.T) {
@@ -137,7 +215,7 @@ func TestDevSessionViewsRouteLogsAndKeepAppActionsScoped(t *testing.T) {
 	}
 	m.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
 	m.Update(tea.KeyPressMsg{Code: 'o', Text: "o"})
-	if len(m.retries["sales"]) != 0 || len(m.retries["ops"]) != 0 {
+	if len(m.controls["sales"]) != 0 || len(m.controls["ops"]) != 0 {
 		t.Fatal("session view retried an app")
 	}
 	if !strings.Contains(m.actionError, "Select an app") {
@@ -197,7 +275,7 @@ func TestDevSessionViewsBoundedPausedAndResponsive(t *testing.T) {
 					t.Fatal("session view exceeds terminal width")
 				}
 			}
-			if !strings.Contains(view, "q stop") {
+			if !strings.Contains(view, "q quit") {
 				t.Fatal("stop control missing")
 			}
 		}
