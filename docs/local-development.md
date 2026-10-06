@@ -118,7 +118,11 @@ On an interactive terminal, local `dev` opens a compact TUI automatically. It
 shows the healthy version still serving, the latest save's progress or failure,
 the app URL, and the last successful reload. The log selector includes every
 app, **All apps**, and **ShinyHub**, even for a single-app session. Narrow
-terminals show one view at a time.
+terminals show one view at a time. Below 42 columns or 14 rows, a simpler layout
+keeps the selected view, serving state, output, and quit shortcut visible as
+space allows. **?** opens scrollable help with **PgUp / PgDn** and **Home / End**;
+app controls and the resource inspector remain available. Resizing restores the
+full layout automatically.
 
 - **↑ / ↓** selects an app or session log view.
 - **a** jumps to **All apps**; **s** jumps to **ShinyHub**.

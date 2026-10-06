@@ -76,6 +76,7 @@ type devModel struct {
 	clock                              time.Time
 	showResources                      bool
 	resourceOffset                     int
+	helpOffset                         int
 }
 
 func newDevModel(slugs []string, events <-chan localrun.Event, done <-chan error, controls map[string]chan localrun.Control, cancel context.CancelFunc, style styler) *devModel {
@@ -284,16 +285,35 @@ func (m *devModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.following = true
 			return m, nil
 		}
+		if m.help && m.compact() {
+			_, _, _, _, viewport := m.paneLayout(m.logWidth(), m.height)
+			maxOffset := max(0, len(m.compactHelpLines(m.logWidth()))-viewport)
+			m.helpOffset = min(m.helpOffset, maxOffset)
+			switch key {
+			case "pgup":
+				m.helpOffset = max(0, m.helpOffset-max(1, viewport))
+				return m, nil
+			case "pgdown":
+				m.helpOffset = min(maxOffset, m.helpOffset+max(1, viewport))
+				return m, nil
+			case "home":
+				m.helpOffset = 0
+				return m, nil
+			case "end":
+				m.helpOffset = maxOffset
+				return m, nil
+			}
+		}
 		if m.showResources {
 			_, _, _, _, viewport := m.paneLayout(m.logWidth(), m.height)
 			maxOffset := max(0, len(m.resourceDisplayLines(m.logWidth()))-viewport)
 			m.resourceOffset = min(m.resourceOffset, maxOffset)
 			switch key {
 			case "pgup":
-				m.resourceOffset = max(0, m.resourceOffset-max(1, m.height/2))
+				m.resourceOffset = max(0, m.resourceOffset-max(1, min(viewport, m.height/2)))
 				return m, nil
 			case "pgdown":
-				m.resourceOffset = min(maxOffset, m.resourceOffset+max(1, m.height/2))
+				m.resourceOffset = min(maxOffset, m.resourceOffset+max(1, min(viewport, m.height/2)))
 				return m, nil
 			case "home":
 				m.resourceOffset = 0
@@ -305,6 +325,7 @@ func (m *devModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch key {
 		case "m":
+			m.help = false
 			m.showResources = !m.showResources
 			m.resourceOffset = 0
 		case "up", "k", "left":
@@ -324,7 +345,7 @@ func (m *devModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.selected = devShinyHub
 			m.resetLogs()
 		case "tab":
-			if m.showResources || m.selected < 0 {
+			if m.showResources || (m.help && m.compact()) || m.selected < 0 {
 				break
 			}
 			m.latest = !m.latest
@@ -332,25 +353,28 @@ func (m *devModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.following = true
 		case "pgup":
 			m.following = false
-			m.offset += max(1, m.height/2)
+			_, _, _, _, viewport := m.paneLayout(m.logWidth(), m.height)
+			m.offset += max(1, min(viewport, m.height/2))
 		case "pgdown":
-			m.offset = max(0, m.offset-max(1, m.height/2))
+			_, _, _, _, viewport := m.paneLayout(m.logWidth(), m.height)
+			m.offset = max(0, m.offset-max(1, min(viewport, m.height/2)))
 			m.following = m.offset == 0
 		case "home":
 			m.following = false
 			m.offset = len(m.logLines(m.logWidth()))
 		case "end", "f":
-			if m.showResources {
+			if m.showResources || (m.help && m.compact()) {
 				break
 			}
 			m.following = true
 			m.offset = 0
 		case "space":
-			if m.showResources {
+			if m.showResources || (m.help && m.compact()) {
 				break
 			}
 			m.following = !m.following
 		case "/":
+			m.help = false
 			m.showResources = false
 			m.searching = true
 		case "esc":
@@ -359,6 +383,7 @@ func (m *devModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.actionError = ""
 		case "?":
 			m.help = !m.help
+			m.helpOffset = 0
 		case "o":
 			if m.selected < 0 {
 				m.actionError = "Select an app with ↑/↓ to open its URL"
@@ -434,7 +459,7 @@ func devRight(text string, width int) string {
 	return strings.Repeat(" ", max(0, width-ansi.StringWidth(text))) + text
 }
 func devFooter(s styler, text string) string {
-	keys := map[string]bool{"↑/↓": true, "a": true, "s": true, "m": true, "Tab": true, "/": true, "o": true, "r": true, "x": true, "u": true, "q": true, "?": true, "f": true, "PgUp/PgDn": true, "PgUp": true, "Enter": true, "Esc": true, "Ctrl-C": true, "^C": true}
+	keys := map[string]bool{"↑/↓": true, "↑↓": true, "a": true, "s": true, "m": true, "Tab": true, "/": true, "o": true, "r": true, "x": true, "u": true, "q": true, "?": true, "f": true, "PgUp/PgDn": true, "PgUp": true, "Enter": true, "Esc": true, "Ctrl-C": true, "^C": true}
 	var out strings.Builder
 	// Keep authored spacing while giving the actual keys a distinct weight.
 	for _, part := range strings.SplitAfter(text, " ") {
@@ -458,6 +483,9 @@ func devFit(text string, width int) string {
 	return text + strings.Repeat(" ", max(0, width-ansi.StringWidth(text)))
 }
 func (m *devModel) logWidth() int {
+	if m.compact() {
+		return max(1, m.width-2*m.compactPadding())
+	}
 	width := m.width - 4
 	if m.width >= 94 {
 		width -= 29
@@ -535,6 +563,9 @@ func (m *devModel) eventLogLines(event localrun.Event, app devAppView, width int
 // paneLayout is shared by rendering and navigation so wrapped resource pages
 // have exactly the same viewport bounds as the screen the user sees.
 func (m *devModel) paneLayout(paneWidth, h int) ([]string, string, []string, int, int) {
+	if m.compact() {
+		return m.compactPaneLayout(paneWidth, h)
+	}
 	var app devAppView
 	if m.selected >= 0 {
 		app = m.apps[m.selected]
@@ -710,10 +741,8 @@ func (m *devModel) View() tea.View {
 	if len(m.apps) == 0 {
 		return tea.NewView("No local apps selected")
 	}
-	if w < 42 || h < 14 {
-		v := tea.NewView("ShinyHub dev\n\nEnlarge the terminal to at least 42 × 14.\nApps keep running. Press q to stop.")
-		v.AltScreen = true
-		return v
+	if m.compact() {
+		return m.compactView()
 	}
 	s := m.style
 	inner := w - 4

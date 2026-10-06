@@ -208,6 +208,9 @@ func (m *devModel) resourceDetailLines(width int) []string {
 	s, r := m.style, m.resources
 	section := func(name string) string { return devStrong(s, name) }
 	metric := func(label, value, detail string) string {
+		if width < 28 {
+			return s.dim(label+" ") + devStrong(s, value)
+		}
 		labelWidth, valueWidth := 10, 11
 		if width < 55 {
 			labelWidth, valueWidth = 9, max(11, width-13)
@@ -249,7 +252,9 @@ func (m *devModel) resourceDetailLines(width int) []string {
 	}
 	lines = append(lines, metric(ramLabel, available, ramDetail), metric(diskLabel, free, diskDetail), "", section("Applications"), "")
 	roleWidth := min(24, max(11, width-25))
-	lines = append(lines, s.dim("  "+devFit("Process group", roleWidth)+" "+devRight("CPU", 8)+" "+devRight("RSS", 10)))
+	if width >= 38 {
+		lines = append(lines, s.dim("  "+devFit("Process group", roleWidth)+" "+devRight("CPU", 8)+" "+devRight("RSS", 10)))
+	}
 	for i, app := range m.apps {
 		if m.selected >= 0 && i != m.selected {
 			continue
@@ -273,7 +278,10 @@ func (m *devModel) resourceDetailLines(width int) []string {
 					}
 				}
 			}
-			label := devFit(fmt.Sprintf("%s #%d", role, attempt), roleWidth)
+			label := fmt.Sprintf("%s #%d", role, attempt)
+			if width >= 38 {
+				label = devFit(label, roleWidth)
+			}
 			switch role {
 			case "Serving":
 				label = s.green(label)
@@ -282,7 +290,11 @@ func (m *devModel) resourceDetailLines(width int) []string {
 			default:
 				label = s.dim(label)
 			}
-			lines = append(lines, "  "+label+" "+devStrong(s, devRight(cpuText, 8))+" "+devStrong(s, devRight(rss, 10)))
+			if width < 38 {
+				lines = append(lines, label, s.dim("CPU ")+devStrong(s, cpuText)+s.dim(" · RSS ")+devStrong(s, rss))
+			} else {
+				lines = append(lines, "  "+label+" "+devStrong(s, devRight(cpuText, 8))+" "+devStrong(s, devRight(rss, 10)))
+			}
 			if note != "" {
 				lines = append(lines, s.dim("  "+note))
 			}

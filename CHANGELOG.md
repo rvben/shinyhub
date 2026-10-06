@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **dev**: keep the terminal development view usable in narrow and short terminal splits instead of requiring at least 42 columns and 14 rows. Compact layouts retain app state, logs, controls, scrollable help, and resource details, and adapt when resized.
+
 ## [0.20.1](https://github.com/rvben/shinyhub/compare/v0.20.0...v0.20.1) - 2026-10-06
 
 ### Added
