@@ -745,9 +745,10 @@ func stopChild(cmd *exec.Cmd, exitCh <-chan error, stderr io.Writer) {
 	}
 
 	// Signal the entire process group.
-	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); errors.Is(err, syscall.ESRCH) {
-		return
-	}
+	// CommandContext may already have killed and reaped the leader. Even when
+	// its group is gone, wait for the observer to finish emitting exit/log
+	// events before Run publishes its final stopped event.
+	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
 
 	select {
 	case <-exitCh:
@@ -756,11 +757,9 @@ func stopChild(cmd *exec.Cmd, exitCh <-chan error, stderr io.Writer) {
 		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
 			slog.Warn("SIGKILL failed", "err", err)
 		}
-		// Non-blocking drain: if the process was already reaped, don't hang.
-		select {
-		case <-exitCh:
-		default:
-		}
+		// WaitDelay bounds inherited output pipes; exitCh also acknowledges
+		// that the final process and log events have been delivered.
+		<-exitCh
 	}
 }
 

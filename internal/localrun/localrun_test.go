@@ -14,6 +14,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/bundle"
@@ -600,6 +601,37 @@ time.sleep(60)
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Errorf("grandchild (pid %d) survived stopChild", grandchildPID)
+}
+
+func TestStopChild_WaitsForExitObserverAfterProcessGroupDisappears(t *testing.T) {
+	cmd := exec.Command("true")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	// The process is gone, but its exit observer has not delivered its events.
+	synctest.Test(t, func(t *testing.T) {
+		exitCh := make(chan error)
+		done := make(chan struct{})
+		go func() {
+			stopChild(cmd, exitCh, io.Discard)
+			close(done)
+		}()
+		// Wait until shutdown has actually reached its blocking receive.
+		synctest.Wait()
+		select {
+		case <-done:
+			t.Fatal("shutdown returned before the exit observer finished")
+		default:
+		}
+		close(exitCh)
+		synctest.Wait()
+		select {
+		case <-done:
+		default:
+			t.Fatal("shutdown did not finish after exit delivery")
+		}
+	})
 }
 
 func waitForPIDFile(t *testing.T, path string) int {
