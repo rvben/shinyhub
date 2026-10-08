@@ -5630,11 +5630,10 @@ fieldset.settings-block { min-width: 0; }
 /* Persistent summary stays compact; diagnostic detail is operator-controlled. */
 .app-detail-capacity { --cpu-alert-ink: var(--red); margin-top: 1.15rem; border-block: 1px solid var(--line); background: var(--surface); }
 :root[data-theme="light"] .app-detail-capacity { --cpu-alert-ink: color-mix(in srgb, var(--red) 80%, var(--text)); }
-.capacity-freshness { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem 1rem; padding-top: 0.65rem; color: var(--text-soft); font-size: var(--fs-label); }
+.capacity-freshness { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem 1rem; padding: 0.65rem 1.2rem 0; color: var(--text-soft); font-size: var(--fs-label); }
 .capacity-freshness:has(#app-detail-metrics-status[hidden]):has(#app-detail-metrics-updated[hidden]) { display: none; }
 .app-detail-stats { display: grid; grid-template-columns: minmax(0, 1.8fr) repeat(3, minmax(0, 1fr)); margin: 0; }
 .app-detail-stats .stat { min-width: 0; margin: 0; padding: 1rem 1.2rem; }
-.app-detail-stats .stat:first-child { padding-inline-start: 0; }
 .app-detail-stats .stat + .stat { border-inline-start: 1px solid var(--line); }
 .replica-desired { margin: 0.35rem 0 0; color: var(--text-soft); font-size: var(--fs-label); font-variant-numeric: tabular-nums; }
 .replica-desired[hidden] { display: none; }
@@ -5648,11 +5647,11 @@ fieldset.settings-block { min-width: 0; }
 .app-detail-capacity[data-metrics-state="loading"] .app-detail-metrics-status { color: var(--text-soft); }
 .capacity-details { border-top: 1px solid var(--line); }
 .capacity-details[hidden] { display: none; }
-.capacity-details summary { min-height: 44px; padding: 0.75rem 0; cursor: pointer; color: var(--text-soft); font-size: var(--fs-body); }
+.capacity-details summary { min-height: 44px; padding: 0.75rem 1.2rem; cursor: pointer; color: var(--text-soft); font-size: var(--fs-body); }
 .capacity-details summary:hover { color: var(--text); }
 .capacity-details summary:focus-visible { outline: 2px solid var(--cyan-bright); outline-offset: 3px; }
 #app-detail-capacity-signal { margin-inline-start: 0.5rem; color: var(--yellow); font-size: var(--fs-label); }
-.capacity-diagnostics { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 1rem 2rem; padding: 0.25rem 0 1rem; }
+.capacity-diagnostics { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 1rem 2rem; padding: 0.25rem 1.2rem 1rem; }
 .capacity-diagnostics .autoscale-visual { margin: 0; padding: 0; border-top: 0; }
 .capacity-diagnostics .cpu-heat[hidden] + .autoscale-visual { grid-column: 1 / -1; }
 .cpu-heat-guide { margin: 0.45rem 0; color: var(--text-soft); font-size: var(--fs-label); line-height: 1.5; }
@@ -6579,7 +6578,10 @@ fieldset.settings-block { min-width: 0; }
   .app-detail-actions > .btn-primary { flex: 1 1 auto; }
   .app-detail-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .app-detail-stats .stat { padding: 0.8rem 0.9rem; }
-  .app-detail-stats .stat:nth-child(odd) { padding-inline-start: 0; border-inline-start: 0; }
+  .capacity-freshness,
+  .capacity-details summary,
+  .capacity-diagnostics { padding-inline: 0.9rem; }
+  .app-detail-stats .stat:nth-child(odd) { border-inline-start: 0; }
   .app-detail-stats .stat:nth-child(n+3) { border-top: 1px solid var(--line); }
   .cpu-heat-cells { grid-template-columns: repeat(auto-fit, minmax(3rem, 1fr)); }
   .overview-grid {
