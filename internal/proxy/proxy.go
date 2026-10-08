@@ -27,6 +27,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/rvben/shinyhub/internal/admission"
+	"github.com/rvben/shinyhub/internal/approute"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/proxytrust"
@@ -3201,6 +3202,23 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			FallbackReason: rec.fallbackReason,
 		})
 	}()
+
+	// App HTML uses relative asset URLs, which require a trailing slash on
+	// the document URL. Only canonicalize confirmed app roots; misses and
+	// failed existence lookups retain their normal response below.
+	if r.URL.Path == "/app/"+slug {
+		p.mu.RLock()
+		known := p.pools[slug] != nil
+		pred := p.slugExists
+		p.mu.RUnlock()
+		if !known && pred != nil {
+			exists, err := pred(slug)
+			known = err == nil && exists
+		}
+		if known && approute.RedirectRoot(rec, r, slug) {
+			return
+		}
+	}
 
 	// Hold the route-table read lock from the pool fetch through the
 	// activeConns bump. BeginHibernate takes the write lock and inspects

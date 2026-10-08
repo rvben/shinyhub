@@ -9,6 +9,19 @@ import (
 	"github.com/rvben/shinyhub/internal/appnav"
 )
 
+func TestLocalProxyCanonicalizesAppRootBeforeBackendStarts(t *testing.T) {
+	lp, err := newLocalProxy(0, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lp.close()
+	rr := httptest.NewRecorder()
+	lp.server.Handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/app/demo?_inputs_&x=%2f", nil))
+	if rr.Code != http.StatusPermanentRedirect || rr.Header().Get("Location") != "/app/demo/?_inputs_&x=%2f" {
+		t.Fatalf("local app root: status=%d Location=%q", rr.Code, rr.Header().Get("Location"))
+	}
+}
+
 func TestLocalProxyEnablesAppChromeWithCurrentAppNavigation(t *testing.T) {
 	lp, err := newLocalProxy(0, "bookmark-demo")
 	if err != nil {

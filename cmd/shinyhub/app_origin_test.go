@@ -66,6 +66,53 @@ func (f *fakeAppLaunchStore) AbortSupportSession(id, _ string) error {
 	return nil
 }
 
+func TestAppOriginCanonicalizesKnownRootsOnBothHosts(t *testing.T) {
+	store := dbtest.New(t)
+	if err := store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, err := store.GetUserByUsername("owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID, Access: "public"}); err != nil {
+		t.Fatal(err)
+	}
+	origin, _ := url.Parse("https://apps.example.com")
+	app := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/app/demo/" {
+			t.Errorf("app handler received noncanonical root %q", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	wrap := access.Middleware(store, "test-secret", nil, store.LookupContextUser)
+	handler := appOriginDispatch(origin, nil, store, "test-secret",
+		wrap(appOriginRedirectHandler(store, origin, nil)), wrap(app))
+	for _, host := range []string{"hub.example.com", "apps.example.com"} {
+		t.Run(host, func(t *testing.T) {
+			for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPost} {
+				rec := httptest.NewRecorder()
+				handler.ServeHTTP(rec, httptest.NewRequest(method, "https://"+host+"/app/demo?_inputs_&x=%2f", nil))
+				if rec.Code != http.StatusPermanentRedirect || rec.Header().Get("Location") != "/app/demo/?_inputs_&x=%2f" {
+					t.Fatalf("%s bare root: status=%d Location=%q", method, rec.Code, rec.Header().Get("Location"))
+				}
+			}
+		})
+	}
+	// Following canonicalization on the control host still switches origins,
+	// and the canonical app-origin landing does not redirect again.
+	control := httptest.NewRecorder()
+	handler.ServeHTTP(control, httptest.NewRequest(http.MethodGet, "https://hub.example.com/app/demo/?tab=one", nil))
+	if control.Code != http.StatusSeeOther || control.Header().Get("Location") != "https://apps.example.com/app/demo/?tab=one" {
+		t.Fatalf("control landing: status=%d Location=%q", control.Code, control.Header().Get("Location"))
+	}
+	landing := httptest.NewRecorder()
+	handler.ServeHTTP(landing, httptest.NewRequest(http.MethodGet, control.Header().Get("Location"), nil))
+	if landing.Code != http.StatusNoContent || landing.Header().Get("Location") != "" {
+		t.Fatalf("app landing: status=%d Location=%q", landing.Code, landing.Header().Get("Location"))
+	}
+}
+
 func TestAppOriginLaunchExchangesOneTimeCodeForHostOnlySession(t *testing.T) {
 	appOrigin, _ := url.Parse("https://apps.example.com")
 	user := &auth.ContextUser{ID: 42, Username: "alice", Role: "developer"}

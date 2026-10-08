@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/rvben/shinyhub/internal/appnav"
+	"github.com/rvben/shinyhub/internal/approute"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/favicon"
@@ -73,6 +74,13 @@ func Middleware(st store, jwtSecret string, revoked auth.RevocationChecker, user
 					return
 				}
 				http.Error(w, "internal server error", http.StatusInternalServerError)
+				return
+			}
+
+			// Canonicalize before resolving sessions: app-scoped cookies only
+			// travel to /app/<slug>/, and empty-state pages may bypass the proxy.
+			// This redirect grants no access; the slash request is checked below.
+			if approute.RedirectRoot(w, r, slug) {
 				return
 			}
 
