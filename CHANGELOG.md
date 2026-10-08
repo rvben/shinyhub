@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **routing**: keep backend-local redirects on the app mount and preserve escaped asset paths when app slugs or mount separators are encoded. Preserve app query bytes through app-origin launches and forward-auth cookie confirmation.
+- **auth**: return GitHub, Google, and OIDC logins to the requested app or dashboard route, preserving query and fragment state. Bind validated return paths to the provider-specific, one-time OAuth state.
 - **routing**: redirect known bare app roots (`/app/<slug>`) to their trailing-slash form with HTTP 308, preserving the method and query string so relative app assets load correctly. Canonicalization runs before app-session checks and empty-state pages, including support sessions, separate app origins, and local development.
 
 ## [0.20.2](https://github.com/rvben/shinyhub/compare/v0.20.1...v0.20.2) - 2026-10-08

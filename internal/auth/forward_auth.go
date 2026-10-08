@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/rvben/shinyhub/internal/favicon"
+	"github.com/rvben/shinyhub/internal/rawquery"
 )
 
 // ErrUserNotFound is returned by ForwardAuthUserStore.GetForwardAuthUser when no
@@ -127,10 +128,8 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 			resume := r.URL.Path == ForwardAuthResumePath && r.Method == http.MethodPost
 			if ForwardAuthSignedOut(r, trustedProxies) && !resume && r.URL.Path != AppLogoutPath && !launch {
 				if onAppHost && r.URL.Query().Get(ForwardAuthCookieCheckParam) != "" {
-					query := r.URL.Query()
-					query.Del(ForwardAuthCookieCheckParam)
 					clean := *r.URL
-					clean.RawQuery = query.Encode()
+					clean.RawQuery = rawquery.Delete(r.URL.RawQuery, ForwardAuthCookieCheckParam)
 					w.Header().Set("Cache-Control", "no-store")
 					http.Redirect(w, r, clean.RequestURI(), http.StatusSeeOther)
 					return
@@ -323,10 +322,8 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 				}
 				ctx = WithTokenInfo(ctx, ti)
 				if onAppHost && r.URL.Query().Get(ForwardAuthCookieCheckParam) != "" {
-					query := r.URL.Query()
-					query.Del(ForwardAuthCookieCheckParam)
 					clean := *r.URL
-					clean.RawQuery = query.Encode()
+					clean.RawQuery = rawquery.Delete(r.URL.RawQuery, ForwardAuthCookieCheckParam)
 					w.Header().Set("Cache-Control", "no-store")
 					http.Redirect(w, r, clean.RequestURI(), http.StatusSeeOther)
 					return

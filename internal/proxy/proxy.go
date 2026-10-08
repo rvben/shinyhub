@@ -1897,7 +1897,6 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base h
 func (p *Proxy) newReplicaBackend(pool *backendPool, slug string, index int, target *url.URL, targetURL string, base http.RoundTripper, deploymentID, ownerAppID int64) *replicaBackend {
 	rp := httputil.NewSingleHostReverseProxy(target)
 	slugCopy := slug
-	targetPath := strings.TrimRight(target.Path, "/")
 	// Capture pre-response upstream failures (connection refused, timeout)
 	// onto the statusRecorder so the trace span surfaces span.Error.
 	//
@@ -1932,7 +1931,7 @@ func (p *Proxy) newReplicaBackend(pool *backendPool, slug string, index int, tar
 	// cookie namespaces so a deployer-controlled app cannot set the platform's
 	// session/sticky/elastic-client-id cookies in a visitor's browser, then
 	// (when enabled) add the status overlay to HTML page loads.
-	rp.ModifyResponse = p.modifyResponseFor(slugCopy, deploymentID)
+	rp.ModifyResponse = chainModifyResponse(rewriteAppRedirect(slugCopy, target), p.modifyResponseFor(slugCopy, deploymentID))
 	rp.Director = func(req *http.Request) {
 		// Populate standard forwarding headers so backend apps (uvicorn with
 		// --proxy-headers, R Shiny httpuv, Dash, custom FastAPI, etc.) can
@@ -1971,19 +1970,7 @@ func (p *Proxy) newReplicaBackend(pool *backendPool, slug string, index int, tar
 
 		req.URL.Scheme = target.Scheme
 		req.URL.Host = target.Host
-		prefix := "/app/" + slugCopy
-		appRelative := strings.TrimPrefix(req.URL.Path, prefix)
-		if appRelative == "" {
-			appRelative = "/"
-		}
-		req.URL.Path = singleJoiningSlash(targetPath, appRelative)
-		if req.URL.RawPath != "" {
-			rawRelative := strings.TrimPrefix(req.URL.RawPath, prefix)
-			if rawRelative == "" {
-				rawRelative = "/"
-			}
-			req.URL.RawPath = singleJoiningSlash(targetPath, rawRelative)
-		}
+		appRelativeURL(req.URL, slugCopy, target)
 		req.Host = target.Host
 	}
 	return &replicaBackend{index: index, ownerAppID: ownerAppID, targetURL: targetURL, deploymentID: deploymentID, rp: rp}
@@ -2393,7 +2380,6 @@ func (p *Proxy) registerElasticWorker(slug string, slotID int, targetURL string,
 	}
 
 	slugCopy := slug
-	targetPath := strings.TrimRight(target.Path, "/")
 
 	rp := httputil.NewSingleHostReverseProxy(target)
 	rp.ErrorHandler = func(w http.ResponseWriter, req *http.Request, err error) {
@@ -2408,7 +2394,7 @@ func (p *Proxy) registerElasticWorker(slug string, slotID int, targetURL string,
 	// cookie namespaces so a deployer-controlled app cannot set the platform's
 	// session/sticky/elastic-client-id cookies in a visitor's browser, then
 	// (when enabled) add the status overlay to HTML page loads.
-	rp.ModifyResponse = p.modifyResponseFor(slugCopy, deploymentID)
+	rp.ModifyResponse = chainModifyResponse(rewriteAppRedirect(slugCopy, target), p.modifyResponseFor(slugCopy, deploymentID))
 	rp.Director = func(req *http.Request) {
 		scheme := "http"
 		if req.TLS != nil {
@@ -2426,19 +2412,7 @@ func (p *Proxy) registerElasticWorker(slug string, slotID int, targetURL string,
 
 		req.URL.Scheme = target.Scheme
 		req.URL.Host = target.Host
-		prefix := "/app/" + slugCopy
-		appRelative := strings.TrimPrefix(req.URL.Path, prefix)
-		if appRelative == "" {
-			appRelative = "/"
-		}
-		req.URL.Path = singleJoiningSlash(targetPath, appRelative)
-		if req.URL.RawPath != "" {
-			rawRelative := strings.TrimPrefix(req.URL.RawPath, prefix)
-			if rawRelative == "" {
-				rawRelative = "/"
-			}
-			req.URL.RawPath = singleJoiningSlash(targetPath, rawRelative)
-		}
+		appRelativeURL(req.URL, slugCopy, target)
 		req.Host = target.Host
 	}
 

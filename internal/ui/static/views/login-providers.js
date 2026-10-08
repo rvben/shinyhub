@@ -85,6 +85,12 @@ export function applyLoginProviders(doc, providers) {
   } else if (oidcBtn) {
     oidcBtn.hidden = true;
   }
+  // Carry the app return destination through the provider's server-side state.
+  const next = new URLSearchParams(doc.defaultView?.location.search || '').get('next');
+  for (const provider of ['github', 'google', 'oidc']) {
+    const link = doc.querySelector(`.${provider}-login`);
+    if (link) link.href = `/api/auth/${provider}/login` + (next ? '?next=' + encodeURIComponent(next) : '');
+  }
   return v;
 }
 

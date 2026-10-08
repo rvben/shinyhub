@@ -3963,7 +3963,13 @@ func (s *Store) ProvisionOAuthUser(p ProvisionOAuthUserParams) (*User, bool, err
 // --- OAuth State (CSRF nonce) ---
 
 func (s *Store) CreateOAuthState(state, provider string) error {
-	_, err := s.db.Exec(`INSERT INTO oauth_states (state, provider) VALUES (?, ?)`, state, provider)
+	return s.CreateOAuthStateWithReturnPath(state, provider, "")
+}
+
+// CreateOAuthStateWithReturnPath binds the login destination to the server-side
+// nonce instead of trusting a callback query parameter or a separate cookie.
+func (s *Store) CreateOAuthStateWithReturnPath(state, provider, returnPath string) error {
+	_, err := s.db.Exec(`INSERT INTO oauth_states (state, provider, return_path) VALUES (?, ?, ?)`, state, provider, returnPath)
 	if err != nil {
 		return fmt.Errorf("create oauth state: %w", err)
 	}
@@ -3977,17 +3983,20 @@ func (s *Store) CreateOAuthState(state, provider string) error {
 // provider's callback. Also sweeps all expired states to prevent unbounded
 // table growth.
 func (s *Store) ConsumeOAuthState(state, provider string) error {
+	_, err := s.ConsumeOAuthStateWithReturnPath(state, provider)
+	return err
+}
+
+// ConsumeOAuthStateWithReturnPath atomically consumes the nonce and destination.
+func (s *Store) ConsumeOAuthStateWithReturnPath(state, provider string) (string, error) {
 	// Sweep stale nonces — ignore errors; this is best-effort cleanup.
 	s.db.Exec(`DELETE FROM oauth_states WHERE created_at < ` + s.d.nowMinusSeconds(600)) //nolint:errcheck
-	res, err := s.db.Exec(`DELETE FROM oauth_states WHERE state = ? AND provider = ?`, state, provider)
+	var returnPath string
+	err := s.db.QueryRow(`DELETE FROM oauth_states WHERE state = ? AND provider = ? AND created_at >= `+s.d.nowMinusSeconds(600)+` RETURNING return_path`, state, provider).Scan(&returnPath)
 	if err != nil {
-		return fmt.Errorf("consume oauth state: %w", err)
+		return "", fmt.Errorf("consume oauth state: %w", err)
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return fmt.Errorf("oauth state not found or already used")
-	}
-	return nil
+	return returnPath, nil
 }
 
 // --- App-origin launch codes ---

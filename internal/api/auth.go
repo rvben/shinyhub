@@ -1234,16 +1234,26 @@ func (s *Server) sameOriginPost(r *http.Request) bool {
 // validation (relative path starting with a single `/`, no `//` protocol-
 // relative form, no `\` Windows separator, not the bare `/` or `/login`).
 func safeNextPath(raw string) string {
-	if raw == "" {
+	if raw == "" || !strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "//") || strings.ContainsAny(raw, "\\") {
 		return ""
 	}
-	if !strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "//") || strings.Contains(raw, "\\") {
-		return ""
+	for _, ch := range raw {
+		if ch <= 0x20 || ch == 0x7f {
+			return ""
+		}
 	}
-	if raw == "/" || raw == "/login" {
+	u, err := url.Parse(raw)
+	if err != nil || u.IsAbs() || u.Host != "" || raw == "/" || u.Path == "/login" || strings.HasPrefix(u.Path, "//") || strings.ContainsAny(u.Path, "\\") {
 		return ""
 	}
 	return raw
+}
+
+func oauthReturnPath(raw string) string {
+	if next := safeNextPath(raw); next != "" {
+		return next
+	}
+	return "/"
 }
 
 // generateAPIKey creates a cryptographically random 32-byte token and returns

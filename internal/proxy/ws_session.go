@@ -6,12 +6,13 @@ import (
 	"encoding/hex"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/rvben/shinyhub/internal/rawquery"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -88,17 +89,7 @@ func wsConnectionID(raw string) string {
 // Remove only ShinyHub's query component. Re-encoding the other components
 // could change an app's signed or otherwise byte-sensitive WebSocket URL.
 func stripWSConnectionID(raw string) string {
-	parts := strings.Split(raw, "&")
-	keep := parts[:0]
-	for _, part := range parts {
-		key, _, _ := strings.Cut(part, "=")
-		decoded, err := url.QueryUnescape(key)
-		if err == nil && decoded == "shinyhub_cid" {
-			continue
-		}
-		keep = append(keep, part)
-	}
-	return strings.Join(keep, "&")
+	return rawquery.Delete(raw, "shinyhub_cid")
 }
 
 func newWSConnectionID() string {

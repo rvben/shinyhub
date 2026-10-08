@@ -43,7 +43,7 @@ func (s *Server) handleGitHubLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	state := hex.EncodeToString(stateBytes)
 
-	if err := s.store.CreateOAuthState(state, providerGitHub); err != nil {
+	if err := s.store.CreateOAuthStateWithReturnPath(state, providerGitHub, safeNextPath(r.URL.Query().Get("next"))); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
@@ -74,7 +74,8 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid or expired state")
 		return
 	}
-	if err := s.store.ConsumeOAuthState(state, providerGitHub); err != nil {
+	returnPath, err := s.store.ConsumeOAuthStateWithReturnPath(state, providerGitHub)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid or expired state")
 		return
 	}
@@ -146,7 +147,7 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 		ResourceID: user.Username, IPAddress: s.ClientIP(r),
 		Detail: db.AuditDetail(map[string]any{"grant": grantSessionCookie, "provider": providerGitHub}),
 	})
-	http.Redirect(w, r, "/", http.StatusFound)
+	http.Redirect(w, r, oauthReturnPath(returnPath), http.StatusFound)
 }
 
 // handleGoogleLogin redirects the browser to Google's OAuth2 authorization page.
@@ -163,7 +164,7 @@ func (s *Server) handleGoogleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	state := hex.EncodeToString(stateBytes)
 
-	if err := s.store.CreateOAuthState(state, providerGoogle); err != nil {
+	if err := s.store.CreateOAuthStateWithReturnPath(state, providerGoogle, safeNextPath(r.URL.Query().Get("next"))); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
@@ -191,7 +192,8 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid or expired state")
 		return
 	}
-	if err := s.store.ConsumeOAuthState(state, providerGoogle); err != nil {
+	returnPath, err := s.store.ConsumeOAuthStateWithReturnPath(state, providerGoogle)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid or expired state")
 		return
 	}
@@ -269,5 +271,5 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 		ResourceID: user.Username, IPAddress: s.ClientIP(r),
 		Detail: db.AuditDetail(map[string]any{"grant": grantSessionCookie, "provider": providerGoogle}),
 	})
-	http.Redirect(w, r, "/", http.StatusFound)
+	http.Redirect(w, r, oauthReturnPath(returnPath), http.StatusFound)
 }

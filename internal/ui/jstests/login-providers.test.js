@@ -20,6 +20,25 @@ function loginDoc() {
   </div>`, { url: 'https://dashboard.example/apps/demo/overview?tab=health#status' }).window.document;
 }
 
+test('all native SSO links carry app return intent and remove stale intent', () => {
+  const doc = loginDoc();
+  const next = '/app/demo/?_inputs_&q=a%20b&x=%2f#plot';
+  doc.defaultView.history.replaceState(null, '', '/login?next=' + encodeURIComponent(next));
+  const providers = { github: true, google: true, oidc: { enabled: true } };
+  applyLoginProviders(doc, providers);
+  for (const provider of ['github', 'google', 'oidc']) {
+    const href = new URL(doc.querySelector(`.${provider}-login`).href);
+    assert.equal(href.pathname, `/api/auth/${provider}/login`);
+    assert.equal(href.searchParams.get('next'), next);
+  }
+  doc.defaultView.history.replaceState(null, '', '/login');
+  applyLoginProviders(doc, providers);
+  for (const provider of ['github', 'google', 'oidc']) {
+    assert.equal(new URL(doc.querySelector(`.${provider}-login`).href).search, '');
+  }
+  doc.defaultView.close();
+});
+
 // --- providerVisibility (pure) ---
 
 test('no providers configured: nothing shown', () => {

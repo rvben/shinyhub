@@ -12,6 +12,7 @@ import (
 
 	"github.com/rvben/shinyhub/internal/originhost"
 	"github.com/rvben/shinyhub/internal/proxytrust"
+	"github.com/rvben/shinyhub/internal/rawquery"
 )
 
 const (
@@ -248,9 +249,7 @@ var forwardFrameTemplate = template.Must(template.New("frame-session").Parse(`<!
 
 func forwardFrameUnavailable(w http.ResponseWriter, r *http.Request) {
 	target := *r.URL
-	query := target.Query()
-	query.Del(ForwardAuthCookieCheckParam)
-	target.RawQuery = query.Encode()
+	target.RawQuery = rawquery.Delete(target.RawQuery, ForwardAuthCookieCheckParam)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")

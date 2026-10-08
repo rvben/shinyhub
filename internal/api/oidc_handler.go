@@ -88,7 +88,7 @@ func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 	state := hex.EncodeToString(stateBytes)
 	nonce := deriveOIDCNonce(s.cfg.Auth.Secret, state)
 
-	if err := s.store.CreateOAuthState(state, providerOIDC); err != nil {
+	if err := s.store.CreateOAuthStateWithReturnPath(state, providerOIDC, safeNextPath(r.URL.Query().Get("next"))); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
@@ -117,7 +117,8 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid or expired state")
 		return
 	}
-	if err := s.store.ConsumeOAuthState(state, providerOIDC); err != nil {
+	returnPath, err := s.store.ConsumeOAuthStateWithReturnPath(state, providerOIDC)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid or expired state")
 		return
 	}
@@ -219,7 +220,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		ResourceID: user.Username, IPAddress: s.ClientIP(r),
 		Detail: db.AuditDetail(map[string]any{"grant": grantSessionCookie, "provider": providerOIDC}),
 	})
-	http.Redirect(w, r, "/", http.StatusFound)
+	http.Redirect(w, r, oauthReturnPath(returnPath), http.StatusFound)
 }
 
 // deriveOIDCUsername returns a stable, URL-safe username derived from the

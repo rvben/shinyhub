@@ -17,6 +17,7 @@ import (
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/originhost"
 	"github.com/rvben/shinyhub/internal/proxytrust"
+	"github.com/rvben/shinyhub/internal/rawquery"
 	"github.com/rvben/shinyhub/internal/supportui"
 )
 
@@ -100,8 +101,8 @@ func appOriginRedirectHandler(store appLaunchStore, appOrigin *url.URL, trusted 
 		target := *appOrigin
 		target.Path = r.URL.Path
 		target.RawPath = r.URL.RawPath
-		query := r.URL.Query()
-		query.Del(appLaunchQueryParam)
+		target.ForceQuery = r.URL.ForceQuery
+		query := rawquery.Delete(r.URL.RawQuery, appLaunchQueryParam)
 
 		// Public apps may be launched anonymously. When a signed-in user opens a
 		// public app we still exchange their identity so optional identity headers
@@ -112,9 +113,9 @@ func appOriginRedirectHandler(store appLaunchStore, appOrigin *url.URL, trusted 
 				http.Error(w, "could not create app session", http.StatusInternalServerError)
 				return
 			}
-			query.Set(appLaunchQueryParam, rawCode)
+			query = rawquery.Set(query, appLaunchQueryParam, rawCode)
 		}
-		target.RawQuery = query.Encode()
+		target.RawQuery = query
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		http.Redirect(w, r, target.String(), http.StatusSeeOther)
@@ -229,13 +230,12 @@ func consumeAppLaunchWithSharedHost(w http.ResponseWriter, r *http.Request, stor
 	} else {
 		auth.SetSessionCookieUntil(w, r, token, tokenInfo.ExpiresAt, trustedNets)
 	}
-	query := r.URL.Query()
-	query.Del(appLaunchQueryParam)
+	query := rawquery.Delete(r.URL.RawQuery, appLaunchQueryParam)
 	if original != nil && original.ForwardAuthFamily && len(policies) > 0 && policies[0].ForwardAuth.Enabled {
-		query.Set(auth.ForwardAuthCookieCheckParam, "1")
+		query = rawquery.Set(query, auth.ForwardAuthCookieCheckParam, "1")
 	}
 	clean := *r.URL
-	clean.RawQuery = query.Encode()
+	clean.RawQuery = query
 	clean.Fragment = ""
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
