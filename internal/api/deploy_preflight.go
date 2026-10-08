@@ -11,6 +11,7 @@ import (
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
+	"github.com/rvben/shinyhub/internal/schedulespec"
 )
 
 // deployPreflightRequest describes a deploy that has not happened yet: the
@@ -176,6 +177,21 @@ func (s *Server) deployPreflight(app *db.App, req deployPreflightRequest) (deplo
 		if err := s.checkColocatedShared(app.ID, s.tiersForApp(app)); err != nil {
 			return err.Error(), nil
 		}
+		if app.ID != 0 {
+			repair, err := s.store.AppDeploymentCompatibilityQuarantined(app.ID)
+			if err != nil {
+				return "", err
+			}
+			if repair {
+				canRepair, err := s.targetHasRepairProducer(app.ID, manifest)
+				if err != nil {
+					return "", err
+				}
+				if !canRepair {
+					return deploymentRepairNoProducerMessage, nil
+				}
+			}
+		}
 		return "", nil
 	}
 	msg, err := deployProblem()
@@ -195,6 +211,35 @@ func (s *Server) deployPreflight(app *db.App, req deployPreflightRequest) (deplo
 	reply.Valid = len(reply.Problems) == 0
 	reply.Isolation = deploy.ResolveWorkerIsolation(projected.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation)
 	return reply, nil
+}
+
+// targetHasRepairProducer mirrors the declaration overlay in
+// planPrestartSchedules without creating placeholder rows or scheduling work.
+// Schedules omitted by a manifest retain their stored declarations.
+func (s *Server) targetHasRepairProducer(appID int64, manifest *deploy.Manifest) (bool, error) {
+	schedules, err := s.store.ListSchedulesByApp(appID)
+	if err != nil {
+		return false, err
+	}
+	byName := make(map[string]*db.Schedule, len(schedules))
+	for _, schedule := range schedules {
+		byName[schedule.Name] = schedule
+	}
+	if manifest != nil {
+		for _, spec := range manifest.Schedules {
+			candidate, err := projectedManifestSchedule(appID, byName[spec.Name], spec)
+			if err != nil {
+				return false, err
+			}
+			byName[spec.Name] = candidate
+		}
+	}
+	for _, schedule := range byName {
+		if schedule.Enabled && schedule.DeployTrigger != schedulespec.DeployTriggerNever {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // projectManifestSettings overlays the [app] settings a deploy would persist

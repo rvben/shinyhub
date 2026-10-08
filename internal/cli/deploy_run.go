@@ -465,7 +465,11 @@ func verifyExistingWarmGateWithWait(cfg *cliConfig, slug, bundleDir string, res 
 	return fmt.Errorf("%s: %s", prefix, strings.Join(failures, "; "))
 }
 
-type appCompatibilityQuarantineError struct{ detail string }
+type appCompatibilityQuarantineError struct {
+	detail        string
+	repairCommand string
+	repairAdvice  string
+}
 
 func (e *appCompatibilityQuarantineError) Error() string { return e.detail }
 
@@ -504,6 +508,13 @@ func requireAppCompatibilityClearContext(ctx context.Context, cfg *cliConfig, sl
 	var state struct {
 		CompatibilityQuarantined *bool `json:"compatibility_quarantined"`
 		ProducerRepairRequired   *bool `json:"producer_repair_required"`
+		App                      struct {
+			DeploymentRepairRequired *bool      `json:"deployment_repair_required"`
+			LastDeploymentStatus     string     `json:"last_deployment_status"`
+			CurrentVersion           string     `json:"current_version"`
+			LastDeployedAt           *time.Time `json:"last_deployed_at"`
+			LastError                string     `json:"last_error"`
+		} `json:"app"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&state); err != nil {
 		return fmt.Errorf("verify app compatibility: decode response: %w", err)
@@ -514,8 +525,28 @@ func requireAppCompatibilityClearContext(ctx context.Context, cfg *cliConfig, sl
 	switch {
 	case *state.ProducerRepairRequired:
 		return &appCompatibilityQuarantineError{detail: "app compatibility quarantine requires a successful producer repair before consumers can start"}
+	case *state.CompatibilityQuarantined && state.App.DeploymentRepairRequired != nil && *state.App.DeploymentRepairRequired:
+		if state.App.LastDeploymentStatus == "pending" {
+			return &appCompatibilityQuarantineError{detail: fmt.Sprintf("app compatibility is quarantined while deployment %q is pending; wait for it to finish, or investigate an interrupted deployment before retrying", state.App.CurrentVersion)}
+		}
+		command := "shinyhub deploy '<source-dir>' --slug " + shellQuote(slug)
+		detail := fmt.Sprintf("app compatibility requires a corrective deployment after deployment %q (%s)", state.App.CurrentVersion, state.App.LastDeploymentStatus)
+		if state.App.LastDeployedAt != nil {
+			detail += " at " + state.App.LastDeployedAt.UTC().Format(time.RFC3339)
+		}
+		if state.App.LastError != "" {
+			detail += ": " + state.App.LastError
+		}
+		detail += "; successful producers alone do not clear the deployment barrier. Redeploy the desired bundle with " + command + " (replace <source-dir> and include any fleet bundle files); if stopping the working version is acceptable and required, add --allow-downtime"
+		return &appCompatibilityQuarantineError{detail: detail, repairCommand: command}
 	case *state.CompatibilityQuarantined:
-		return &appCompatibilityQuarantineError{detail: "app compatibility is quarantined by an incomplete producer barrier; consumers cannot start"}
+		detail := "app compatibility is quarantined; consumers cannot start. Check active data producers and deployment history to identify the unresolved compatibility fence"
+		advice := ""
+		if state.App.DeploymentRepairRequired == nil && state.App.LastDeploymentStatus == "failed" {
+			detail += "; this server does not report deployment repair state. If the failed deployment entered its producer barrier, manually redeploy the desired bundle with shinyhub deploy '<source-dir>' --slug " + shellQuote(slug) + " (include any fleet bundle files); re-running an unchanged apply alone cannot perform that repair"
+			advice = "The server cannot identify the compatibility fence for " + slug + ". Inspect deployment and producer failures; a failed deployment that entered its producer barrier requires a manual corrective deployment before reapplying. Upgrade the server to enable automatic deployment recovery."
+		}
+		return &appCompatibilityQuarantineError{detail: detail, repairAdvice: advice}
 	default:
 		return nil
 	}

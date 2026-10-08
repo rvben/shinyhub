@@ -211,6 +211,7 @@ type serverCaps struct {
 	DeployPreflight           bool `json:"deploy_preflight"`
 	StaleUVLockRefusal        bool `json:"stale_uv_lock_refusal"`
 	RedeployOutcome           bool `json:"redeploy_outcome"`
+	DeploymentRepairState     bool `json:"deployment_repair_state"`
 }
 
 // fetchServerCaps reads GET /api/server-info (unauthenticated) and returns just

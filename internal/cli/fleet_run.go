@@ -254,7 +254,10 @@ func recordAppFleetState(cfg *cliConfig, slug, status, digest string, declared [
 // value as "no assertion"). ifManagedBy != nil sets X-Shinyhub-If-Managed-By
 // even when the pointed-to string is empty: header presence activates the
 // server check and an empty value asserts the app is currently unmanaged.
-func setPrecondition(req *http.Request, ifDigest *string, ifManagedBy *string) {
+func setPrecondition(req *http.Request, ifDigest *string, ifManagedBy *string, ifRevision ...*string) {
+	if len(ifRevision) > 0 && ifRevision[0] != nil {
+		req.Header.Set("X-Shinyhub-If-Resource-Revision", *ifRevision[0])
+	}
 	if ifDigest != nil {
 		req.Header.Set("X-Shinyhub-If-Content-Digest", *ifDigest)
 	}

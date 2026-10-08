@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -429,6 +430,17 @@ func applyRecoveryGuidance(results []applyResult) (commands, notes []string, ful
 		// counts as fully guided only when nothing on it is left undiagnosed;
 		// a single coverable gate among others must not vouch for the rest.
 		addressed, unresolved := false, false
+		var quarantine *appCompatibilityQuarantineError
+		if errors.As(r.err, &quarantine) {
+			if quarantine.repairCommand != "" {
+				commands = append(commands, quarantine.repairCommand)
+				notes = append(notes, "A corrective deployment is required for "+r.slug+"; producer success alone cannot repair the failed deployment. Replace <source-dir> with the desired bundle source, include any fleet bundle files, and choose --allow-downtime only if interruption is acceptable. Re-apply after repair succeeds.")
+				addressed = true
+			} else if quarantine.repairAdvice != "" {
+				notes = append(notes, quarantine.repairAdvice)
+				unresolved = true
+			}
+		}
 		if isDowntimeDeferral(r) {
 			deferred = append(deferred, r.slug)
 			addressed = true
@@ -636,6 +648,7 @@ type applyJSONApp struct {
 	Slug                 string                   `json:"slug"`
 	AppURL               string                   `json:"app_url"`
 	Action               string                   `json:"action"`
+	RecoveryReason       string                   `json:"recovery_reason,omitempty"`
 	Owned                bool                     `json:"owned"`
 	Digest               jsonDigest               `json:"digest"`
 	ConfigDrift          []jsonDriftItem          `json:"config_drift"`
@@ -727,10 +740,11 @@ func writeFleetApplyJSONWithContext(out io.Writer, ctx applyReportContext, m *fl
 		}
 		aj := applyJSONApp{
 			Slug: d.Slug, AppURL: host + "/app/" + d.Slug + "/", Action: string(d.Action), Owned: d.Owned,
-			Digest:        jsonDigest{Local: d.LocalDigest, Server: d.ServerDigest},
-			ConfigDrift:   drift,
-			Unmanaged:     unmanaged,
-			AdoptRequired: d.AdoptRequired, AdoptFrom: d.AdoptFrom, PruneEligible: d.PruneEligible,
+			RecoveryReason: d.RecoveryReason,
+			Digest:         jsonDigest{Local: d.LocalDigest, Server: d.ServerDigest},
+			ConfigDrift:    drift,
+			Unmanaged:      unmanaged,
+			AdoptRequired:  d.AdoptRequired, AdoptFrom: d.AdoptFrom, PruneEligible: d.PruneEligible,
 		}
 		if r, ok := bySlug[d.Slug]; ok {
 			aj.Result = resultToJSON(r)

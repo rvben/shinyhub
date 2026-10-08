@@ -51,6 +51,9 @@ type ObservedApp struct {
 	WorkerWarmSpares             *int
 	WorkerMaxSessionLifetimeSecs *int
 	ContentDigest                string
+	DeploymentRepairRequired     *bool
+	LastDeploymentStatus         string
+	DesiredStatus                string
 	ManagedBy                    *string
 
 	// Autoscale is the server's stored policy, or nil when not observed (as in
@@ -117,16 +120,23 @@ type AppDiff struct {
 	ConfigDrift   []ConfigDriftItem
 	Unmanaged     []UnmanagedConfigItem
 	AdoptRequired bool
+	// RecoveryReason explains a deploy of matching content. Source updates
+	// already redeploy, so only an otherwise matching bundle needs this reason.
+	RecoveryReason string
+	// RecoveryWarnings are also plan warnings, but only these advisories carry
+	// into apply results. Settings-redeploy warnings are re-evaluated live.
+	RecoveryWarnings []string
 	// AdoptFrom is the current owner marker ("fleet:<id>") when this adopt
 	// would transfer the app away from a DIFFERENT fleet. Empty for a
 	// genuinely unmanaged app (no prior owner) and for non-adopt actions.
 	AdoptFrom     string
 	PruneEligible bool
 	// Warnings are observations about the app's live state that the plan
-	// reports alongside its action. Diff never sets them; the caller attaches
-	// them from what the server reported.
+	// reports alongside its action, including recovery that needs manual action.
 	Warnings []string
 }
+
+const RecoveryFailed = "recover-failed"
 
 // Diff computes the reconcile plan. localDigests maps slug -> the client-side
 // content digest (""/missing => treat as a forced source change so a
@@ -162,6 +172,20 @@ func Diff(m *Manifest, localDigests map[string]string, observed []ObservedApp) [
 		// without creating a redundant deployment.
 		d.ConfigDrift = configDrift(app, o)
 		d.Unmanaged = unmanagedConfig(app, o)
+		matchingSource := d.LocalDigest != "" && d.LocalDigest == o.ContentDigest
+		if matchingSource {
+			switch {
+			case o.DeploymentRepairRequired == nil && (o.LastDeploymentStatus == "failed" || o.DesiredStatus == "failed"):
+				d.RecoveryWarnings = append(d.RecoveryWarnings, "deployment repair state is unavailable; upgrade the server or manually redeploy the desired bundle with shinyhub deploy '<source-dir>' --slug "+app.Slug+" (include any fleet bundle files)")
+			case o.DeploymentRepairRequired != nil && *o.DeploymentRepairRequired && o.LastDeploymentStatus != "pending":
+				if o.DesiredStatus == "stopped" {
+					d.RecoveryWarnings = append(d.RecoveryWarnings, "deployment repair is required, but the app is deliberately stopped; manually redeploy the desired bundle to repair its data without starting consumers")
+				} else {
+					d.RecoveryReason = RecoveryFailed
+				}
+			}
+		}
+		d.Warnings = append(d.Warnings, d.RecoveryWarnings...)
 		if !owned {
 			d.Action = ActionAdopt
 			d.AdoptRequired = true
@@ -174,7 +198,7 @@ func Diff(m *Manifest, localDigests map[string]string, observed []ObservedApp) [
 			continue
 		}
 
-		srcChanged := d.LocalDigest == "" || o.ContentDigest == "" || d.LocalDigest != o.ContentDigest
+		srcChanged := d.LocalDigest == "" || o.ContentDigest == "" || d.LocalDigest != o.ContentDigest || d.RecoveryReason != ""
 		cfgChanged := len(d.ConfigDrift) > 0
 
 		switch {

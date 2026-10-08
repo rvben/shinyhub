@@ -230,7 +230,7 @@ func TestVerifyExistingWarmGateRejectsDeploymentBarrierWithoutProducer(t *testin
 		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/demo/schedules":
 			_, _ = io.WriteString(w, `[]`)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/demo":
-			_, _ = io.WriteString(w, `{"compatibility_quarantined":true,"producer_repair_required":false}`)
+			_, _ = io.WriteString(w, `{"compatibility_quarantined":true,"producer_repair_required":false,"app":{"deployment_repair_required":true,"last_deployment_status":"failed","current_version":"failed-version"}}`)
 		default:
 			http.NotFound(w, r)
 		}
@@ -239,7 +239,7 @@ func TestVerifyExistingWarmGateRejectsDeploymentBarrierWithoutProducer(t *testin
 
 	res := applyResult{}
 	err := verifyExistingWarmGate(&cliConfig{Host: srv.URL, Token: "test"}, "demo", "", &res)
-	if err == nil || !strings.Contains(err.Error(), "incomplete producer barrier") {
+	if err == nil || !strings.Contains(err.Error(), "corrective deployment") {
 		t.Fatalf("error = %v, want deployment barrier quarantine", err)
 	}
 }

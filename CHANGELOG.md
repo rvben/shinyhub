@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **fleet**: redeploy matching source when a failed deployment leaves an unresolved compatibility barrier, republishing the target producers before starting consumers. Plans explain corrective deployment, guard concurrent repairs, and reject targets without a repair-capable producer before upload. Deliberately stopped apps retain manual recovery; older servers report recovery guidance.
 - **dev**: keep the terminal development view usable in narrow and short terminal splits instead of requiring at least 42 columns and 14 rows. Compact layouts retain app state, logs, controls, scrollable help, and resource details, and adapt when resized.
 
 ## [0.20.1](https://github.com/rvben/shinyhub/compare/v0.20.0...v0.20.1) - 2026-10-06

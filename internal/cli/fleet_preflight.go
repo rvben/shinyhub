@@ -189,6 +189,18 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 	observedBySlug := make(map[string]fleet.ObservedApp, len(apps))
 	for _, a := range apps {
 		oa := observedFromApp(a)
+		if caps.DeploymentRepairState {
+			if a.DeploymentRepairRequired == nil {
+				runCleanups()
+				return nil, reportAppsFetchError(cfg, errOut, &protocolError{op: "decode deployment repair state", err: fmt.Errorf("app %q omitted deployment_repair_required", a.Slug)})
+			}
+			if !caps.FleetPreconditions {
+				// Recovery must fence a same-digest success with a revision.
+				oa.DeploymentRepairRequired = nil
+			}
+		} else {
+			oa.DeploymentRepairRequired = nil
+		}
 		observed = append(observed, oa)
 		observedBySlug[a.Slug] = oa
 	}
@@ -282,6 +294,9 @@ func observedFromApp(a db.App) fleet.ObservedApp {
 		WorkerWarmSpares:             intPtr(a.WorkerWarmSpares),
 		WorkerMaxSessionLifetimeSecs: intPtr(a.WorkerMaxSessionLifetimeSecs),
 		ContentDigest:                a.ContentDigest,
+		DeploymentRepairRequired:     a.DeploymentRepairRequired,
+		LastDeploymentStatus:         a.LastDeploymentStatus,
+		DesiredStatus:                persistedAppStatus(a),
 		ManagedBy:                    a.ManagedBy,
 		// A live GET /api/apps observation is always populated (never nil),
 		// so an on-server off policy stays distinct from "not observed".
@@ -293,6 +308,13 @@ func observedFromApp(a db.App) fleet.ObservedApp {
 		},
 		Redeploy: redeployStateOf(&a),
 	}
+}
+
+func persistedAppStatus(a db.App) string {
+	if a.DesiredStatus != "" {
+		return a.DesiredStatus
+	}
+	return a.Status
 }
 
 func intPtr(v int) *int           { return &v }

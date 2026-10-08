@@ -119,8 +119,15 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
+	repairByApp, err := s.store.DeploymentRepairRequiredForApps(appIDs)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load deployment repair state")
+		return
+	}
 	disp := s.loadProjectDisplay()
 	for _, a := range apps {
+		repair := repairByApp[a.ID]
+		a.DeploymentRepairRequired = &repair
 		s.decorateApp(a)
 		if u.IsServiceAccount() {
 			a.CanManage = canManageApp(u, a)
@@ -596,6 +603,12 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load app compatibility state")
 		return
 	}
+	deploymentRepairRequired, repairErr := s.store.AppDeploymentCompatibilityQuarantined(app.ID)
+	if repairErr != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load deployment repair state")
+		return
+	}
+	app.DeploymentRepairRequired = &deploymentRepairRequired
 
 	envelope := map[string]any{
 		"app":                                 app,

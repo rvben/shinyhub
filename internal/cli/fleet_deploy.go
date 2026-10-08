@@ -127,7 +127,7 @@ func deployAppBundleFromSpecWithDowntime(cfg *cliConfig, slug string, spec bundl
 	decorateFleetRequest(req, runID)
 	preconditioned := len(preconditions) >= 2 && (preconditions[0] != nil || preconditions[1] != nil)
 	if preconditioned {
-		setPrecondition(req, preconditions[0], preconditions[1])
+		setPrecondition(req, preconditions[0], preconditions[1], preconditions[2:]...)
 	}
 	// Deploy can take several minutes on first run (uv downloads packages).
 	// Use the untimed client to match the SSE logs command.

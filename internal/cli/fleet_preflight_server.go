@@ -104,6 +104,13 @@ func preflightsDeploy(action fleet.Action) bool {
 	return false
 }
 
+// ownershipOnlyAdopt must match rehearsal and execution: no bundle is uploaded
+// when adoption only transfers an already matching, settled declaration.
+func ownershipOnlyAdopt(d fleet.AppDiff, preconditions bool) bool {
+	return d.Action == fleet.ActionAdopt && preconditions && d.LocalDigest != "" &&
+		d.LocalDigest == d.ServerDigest && len(d.ConfigDrift) == 0 && d.RecoveryReason == ""
+}
+
 // fleetServerPreflight rehearses every deploy the diff implies against the
 // server before anything is changed. Each app that would be created, adopted,
 // or redeployed is checked with the validators the deploy handler itself runs,
@@ -142,7 +149,7 @@ func fleetServerPreflight(cfg *cliConfig, caps serverCaps, m *fleet.Manifest, di
 	}
 	var problems []fleetServerPreflightProblem
 	for _, d := range diff {
-		if !preflightsDeploy(d.Action) {
+		if !preflightsDeploy(d.Action) || ownershipOnlyAdopt(d, caps.FleetPreconditions) {
 			continue
 		}
 		entry, ok := entries[d.Slug]

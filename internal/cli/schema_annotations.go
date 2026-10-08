@@ -943,6 +943,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 
 	"fleet init": {Mutating: mut},
 	"fleet apply": {Mutating: mut, Cardinality: "bounded", OutputFields: []fieldSpec{
+		{Name: "recovery_reason", Type: "string", Desc: "recover-failed when matching content requires corrective deployment to repair an unresolved deployment compatibility barrier"},
 		{Name: "failure_kind", Type: "string", Desc: "stable failed-app classification: deploy kinds plus warm_wait_timeout, warm_state_unavailable, warm_deploy_run_failed, warm_bundle_not_ready, warm_restart_failed, schedule_stale, schedule_producer_mismatch, and schedule_state_unavailable"},
 		{Name: "attempt_details", Type: "array", Desc: "one entry per failed deploy attempt {attempt int, failure_kind string, error string}; present whenever any attempt failed, including a deploy that succeeded on retry"},
 		{Name: "warm_gate", Type: "array", Desc: "deploy-trigger policies not proven for the current bundle"},
@@ -955,7 +956,9 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "run_recording_error", Type: "string", Desc: "present when convergence finished but the immutable server-side run result could not be persisted; exit code is non-zero"},
 	}, Notes: "Per-app results carry failure_kind and failed-attempt details. --wait-for-warm asks the server to reconcile each persisted deploy-trigger policy after every non-delete action, including unchanged apps, then waits for the exact obligation and fails closed when provenance is unavailable. --restart-after-warm cycles replicas only after this producer-level postcondition passes. --verify-schedules itself dispatches no run but is a postcondition of the mutating fleet apply command; use fleet verify for a wholly read-only audit. --verify-health extends serving-health checks to unchanged apps; intentionally stopped apps remain excluded. --concurrency bounds parallel deploys, and every changed app is health-waited within --health-timeout."},
 	"fleet validate": {Mutating: ro},
-	"fleet plan":     {Mutating: ro},
+	"fleet plan": {Mutating: ro, OutputFields: []fieldSpec{
+		{Name: "recovery_reason", Type: "string", Desc: "recover-failed when matching content requires corrective deployment to repair an unresolved deployment compatibility barrier"},
+	}},
 	"fleet dev": {Mutating: ro, Streaming: true,
 		ArgTypes: map[string]string{"--file": "path", "--data-dir": "path", "--env-file": "path", "--state-dir": "path"},
 		OutputFields: []fieldSpec{

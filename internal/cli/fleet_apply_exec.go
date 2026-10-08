@@ -40,9 +40,10 @@ type convergeOpts struct {
 	concurrency              int // max apps converged in parallel; <=1 means serial
 	fleetID                  string
 	runID                    string
-	fleetState               bool // server persists per-app declaration/convergence state
-	fleetStateChangeTracking bool // server distinguishes a no-op check from a desired-state change
-	redeployOutcome          bool // server reports the outcome of each settings redeploy
+	fleetState               bool   // server persists per-app declaration/convergence state
+	fleetStateChangeTracking bool   // server distinguishes a no-op check from a desired-state change
+	redeployOutcome          bool   // server reports the outcome of each settings redeploy
+	recoveryRevision         string // fresh resource fence for a matching-bundle repair
 }
 
 const (
@@ -166,12 +167,21 @@ func declaredProject(c fleet.Config) string {
 // re-check health and digest readback; they never upload the bundle again.
 func deployWithRetry(cfg *cliConfig, slug string, spec bundleBuildSpec, visibility, project string, opt convergeOpts, out io.Writer, expectedDigest, expectedManagedBy string) (promoted string, attempts int, committed bool, deployRuns []deployRunRef, failed []attemptOutcome, err error) {
 	total := 1 + opt.retries
+	if opt.recoveryRevision != "" {
+		// A failed attempt changes the revision. Recovery never retries that
+		// stale observation; the next apply must plan from authoritative state.
+		total = 1
+	}
 	ifDigest, ifManagedBy := precondPtrs(opt, expectedDigest, expectedManagedBy)
+	var ifRevision *string
+	if opt.recoveryRevision != "" {
+		ifRevision = &opt.recoveryRevision
+	}
 	for attempts = 1; attempts <= total; attempts++ {
 		var c bool
 		var ff []deployRunRef
 		var kind deployfail.Kind
-		promoted, c, ff, kind, err = deployAppBundleFromSpecWithDowntime(cfg, slug, spec, visibility, project, out, opt.runID, opt.healthTimeout, opt.allowDowntime, ifDigest, ifManagedBy)
+		promoted, c, ff, kind, err = deployAppBundleFromSpecWithDowntime(cfg, slug, spec, visibility, project, out, opt.runID, opt.healthTimeout, opt.allowDowntime, ifDigest, ifManagedBy, ifRevision)
 		committed = committed || c
 		// Keep the deploy-triggered run refs from whichever attempt actually fired them.
 		// A later retry of an already-created schedule returns none (the gate is
@@ -437,12 +447,12 @@ func adoptBundleWentLive(cfg *cliConfig, slug, preDeployDigest string) bool {
 // and could clear or overwrite a new owner that took the app between the
 // reservation and the deploy failure, so it is skipped: the documented
 // degraded race is accepted rather than risking a clobber.
-func releaseAdoptReservation(cfg *cliConfig, slug string, prior *string, marker string, opt convergeOpts) {
+func releaseAdoptReservation(cfg *cliConfig, slug string, prior *string, marker string, opt convergeOpts) error {
 	if !opt.preconditions {
-		return
+		return fmt.Errorf("ownership reservation cannot be safely released without server preconditions")
 	}
 	m := marker
-	_ = patchManagedBy(cfg, slug, prior, nil, &m, opt.runID)
+	return patchManagedBy(cfg, slug, prior, nil, &m, opt.runID)
 }
 
 // convergeApp reconciles one app. It is total over fleet.Action; an
@@ -456,6 +466,10 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 	defer func() { finishProgress(result) }()
 	start := time.Now()
 	res := applyResult{slug: d.Slug, action: d.Action, mutation: mutationNone}
+	res.warnings = append(res.warnings, d.RecoveryWarnings...)
+	if d.RecoveryReason != "" {
+		res.note = d.RecoveryReason + ": republishing target producers and redeploying consumers"
+	}
 	stateAlreadyRecorded := false
 	declaredState := fleet.DeclaredState(entry)
 	done := func(s applyStatus) applyResult {
@@ -587,6 +601,58 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 		}
 		return done(status)
 	}
+	var recoveryBefore *fleetRecoverySnapshot
+	prepareRecovery := func() (bool, error) {
+		if !opt.preconditions {
+			return false, fmt.Errorf("corrective deployment requires server resource preconditions; upgrade the server")
+		}
+		state, err := readFleetRecoverySnapshot(cfg, d.Slug, opt.healthTimeout)
+		if err != nil {
+			return false, err
+		}
+		if recoveryConverged(state, d, entry, marker) {
+			res.note = "deployment repaired concurrently; desired bundle and settings already match"
+			return true, nil
+		}
+		if !recoveryStillNeeded(state, d, entry, marker) {
+			return false, recoveryStateConflict(d.Slug)
+		}
+		recoveryBefore = state
+		opt.recoveryRevision = state.Revision
+		return false, nil
+	}
+	concurrentRecovery := func(err error, status applyStatus, attempts int) (applyResult, bool) {
+		if recoveryBefore == nil || !isConflictError(err) {
+			return applyResult{}, false
+		}
+		state, readErr := readFleetRecoverySnapshot(cfg, d.Slug, opt.healthTimeout)
+		if readErr != nil || !recoveryConverged(state, d, entry, marker) {
+			return applyResult{}, false
+		}
+		res.note = "deployment repaired concurrently; desired bundle and settings already match"
+		return finish(status, attempts), true
+	}
+	recoveryFailureMutation := func(err error) applyMutationState {
+		if isConflictError(err) || (len(res.attemptsDetail) > 0 && res.attemptsDetail[len(res.attemptsDetail)-1].Kind == deployfail.DowntimeRequired) {
+			return mutationNone
+		}
+		state, readErr := readFleetRecoverySnapshot(cfg, d.Slug, opt.healthTimeout)
+		if readErr == nil && state.App.ReleaseNumber > recoveryBefore.App.ReleaseNumber {
+			return mutationPartial
+		}
+		// Even a non-promoted correction may have published data. A lost
+		// response cannot prove that the deployment left the app untouched.
+		return mutationUnknown
+	}
+	if d.RecoveryReason != "" && d.Action != fleet.ActionAdopt {
+		already, err := prepareRecovery()
+		if err != nil {
+			return fail(err, 0)
+		}
+		if already {
+			return finish(statusUnchanged, 0)
+		}
+	}
 
 	switch d.Action {
 	case fleet.ActionUnchanged:
@@ -598,6 +664,9 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 	case fleet.ActionAdopt:
 		if !opt.adopt {
 			res.note = "present, not owned by this fleet; re-run with --adopt"
+			if d.RecoveryReason != "" {
+				res.note += "; a corrective bundle deployment is also required"
+			}
 			return done(statusSkipped)
 		}
 		// Reserve ownership FIRST with a precondition asserting the managed_by
@@ -629,7 +698,7 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 		// this atomic with respect to the preflight observation, so no release or
 		// health check is needed and no redundant deployment is manufactured. Older
 		// servers without preconditions retain the conservative redeploy path.
-		if opt.preconditions && d.LocalDigest != "" && d.LocalDigest == d.ServerDigest && len(d.ConfigDrift) == 0 {
+		if ownershipOnlyAdopt(d, opt.preconditions) {
 			// This path returns without the apply's health gate, so the
 			// backlog check runs its own instead of deferring to it.
 			backlogOpt := opt
@@ -642,6 +711,20 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 			res.attempts = 1
 			res.note = "ownership adopted; source and declared config already matched"
 			return done(statusAdopted)
+		}
+		if d.RecoveryReason != "" {
+			already, err := prepareRecovery()
+			if err != nil {
+				res.mutation = mutationNone
+				if releaseErr := releaseAdoptReservation(cfg, d.Slug, obs.ManagedBy, marker, opt); releaseErr != nil {
+					res.mutation = mutationUnknown
+					err = errors.Join(err, fmt.Errorf("restore adoption reservation: %w", releaseErr))
+				}
+				return fail(err, 1)
+			}
+			if already {
+				return finish(statusAdopted, 1)
+			}
 		}
 		// Redeploy (idempotent if identical). If it fails without the new
 		// bundle going live, RELEASE the reservation - restore managed_by to
@@ -657,16 +740,39 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 		)
 		res.attemptsDetail = failed
 		if err != nil {
+			if recovered, ok := concurrentRecovery(err, statusAdopted, attempts); ok {
+				return recovered
+			}
+			// A refused conditional upload cannot have promoted our bundle.
+			// Another actor's release must not be credited to this adoption.
+			if recoveryBefore != nil && (isConflictError(err) || len(failed) > 0 && failed[len(failed)-1].Kind == deployfail.DowntimeRequired) {
+				state := mutationNone
+				if releaseErr := releaseAdoptReservation(cfg, d.Slug, obs.ManagedBy, marker, opt); releaseErr != nil {
+					state = mutationUnknown
+					err = errors.Join(err, fmt.Errorf("restore adoption reservation: %w", releaseErr))
+				}
+				return failDeploy(err, attempts, state)
+			}
 			wentLive := committed
+			promotionUnknown := false
 			var outcome *fleetDeployOutcomeError
 			if errors.As(err, &outcome) && outcome.mutation == mutationPartial {
 				wentLive = true
 			}
 			if !wentLive {
-				wentLive = adoptBundleWentLive(cfg, d.Slug, d.ServerDigest)
+				if recoveryBefore != nil {
+					state, readErr := readFleetRecoverySnapshot(cfg, d.Slug, opt.healthTimeout)
+					promotionUnknown = readErr != nil
+					wentLive = readErr == nil && state.App.ReleaseNumber > recoveryBefore.App.ReleaseNumber
+				} else {
+					wentLive = adoptBundleWentLive(cfg, d.Slug, d.ServerDigest)
+				}
 			}
-			if !wentLive {
+			if !wentLive && !promotionUnknown {
 				releaseAdoptReservation(cfg, d.Slug, obs.ManagedBy, marker, opt)
+			}
+			if promotionUnknown {
+				res.note = "corrective promotion could not be confirmed; ownership reservation retained"
 			}
 			state := mutationUnknown
 			if wentLive {
@@ -757,9 +863,14 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 		res.attempts = attempts
 		res.attemptsDetail = failed
 		if err != nil {
+			if recovered, ok := concurrentRecovery(err, statusUnchanged, attempts); ok {
+				return recovered
+			}
 			state := mutationNone
 			if committed {
 				state = mutationPartial
+			} else if recoveryBefore != nil {
+				state = recoveryFailureMutation(err)
 			}
 			return failDeploy(err, attempts, state)
 		}
@@ -806,9 +917,14 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 		res.attempts = attempts
 		res.attemptsDetail = failed
 		if err != nil {
+			if recovered, ok := concurrentRecovery(err, statusUnchanged, attempts); ok {
+				return recovered
+			}
 			state := mutationNone
 			if committed {
 				state = mutationPartial
+			} else if recoveryBefore != nil {
+				state = recoveryFailureMutation(err)
 			}
 			return failDeploy(err, attempts, state)
 		}

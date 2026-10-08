@@ -1071,6 +1071,10 @@ type App struct {
 	// lets a consumer tell a failed-only deploy from a never-deployed app, which
 	// deploy_count (incremented on success only) cannot.
 	LastDeploymentStatus string `json:"last_deployment_status,omitempty"`
+	// DeploymentRepairRequired is authoritative deployment compatibility state
+	// populated by the API list/detail handlers. nil means it was not observed.
+	// Unlike compatibility_quarantined, it excludes schedule-writer uncertainty.
+	DeploymentRepairRequired *bool `json:"deployment_repair_required,omitempty"`
 	// Deploying is true while a deployment or rollback for this app is
 	// actively executing on this instance (pending deployment row + the
 	// per-slug deploy lock held). Computed by the API layer per request,
@@ -2785,12 +2789,7 @@ func (s *Store) AppDeploymentCompatibilityQuarantined(appID int64) (bool, error)
 	err := s.db.QueryRow(`
 		SELECT CASE WHEN EXISTS (
 			SELECT 1 FROM deployments failed
-			WHERE failed.app_id = ? AND failed.status IN ('pending', 'failed')
-			  AND (failed.producer_barrier_entered = 1 OR failed.prior_schedule_snapshot_recorded = 0)
-			  AND failed.id > COALESCE((
-				SELECT MAX(ok.id) FROM deployments ok
-				WHERE ok.app_id = failed.app_id AND ok.status = 'succeeded'
-			  ), 0)
+			WHERE failed.app_id = ? AND `+deploymentRepairConditionSQL+`
 		) THEN 1 ELSE 0 END`, appID).Scan(&quarantined)
 	if err != nil {
 		return false, fmt.Errorf("check app %d deployment compatibility quarantine: %w", appID, err)
@@ -2834,12 +2833,7 @@ func (s *Store) appCompatibilityQuarantinedExceptRun(appID, runID int64) (bool, 
 	err := s.db.QueryRow(`
 		SELECT CASE WHEN EXISTS (
 			SELECT 1 FROM deployments failed
-			WHERE failed.app_id = ? AND failed.status IN ('pending', 'failed')
-			  AND (failed.producer_barrier_entered = 1 OR failed.prior_schedule_snapshot_recorded = 0)
-			  AND failed.id > COALESCE((
-				SELECT MAX(ok.id) FROM deployments ok
-				WHERE ok.app_id = failed.app_id AND ok.status = 'succeeded'
-			  ), 0)
+			WHERE failed.app_id = ? AND `+deploymentRepairConditionSQL+`
 		) OR EXISTS (
 			SELECT 1 FROM schedule_runs r
 			JOIN app_schedules sc ON sc.id = r.schedule_id
@@ -2913,12 +2907,7 @@ func (s *Store) EnforceCompatibilityQuarantines() error {
 		UPDATE apps SET status = 'failed', last_error = ?, crashed_at = 0, updated_at = CURRENT_TIMESTAMP
 		WHERE apps.status <> 'stopped' AND (EXISTS (
 			SELECT 1 FROM deployments failed
-			WHERE failed.app_id = apps.id AND failed.status IN ('pending', 'failed')
-			  AND (failed.producer_barrier_entered = 1 OR failed.prior_schedule_snapshot_recorded = 0)
-			  AND failed.id > COALESCE((
-				SELECT MAX(ok.id) FROM deployments ok
-				WHERE ok.app_id = apps.id AND ok.status = 'succeeded'
-			  ), 0)
+			WHERE failed.app_id = apps.id AND `+deploymentRepairConditionSQL+`
 		) OR EXISTS (
 			SELECT 1 FROM schedule_runs r
 			JOIN app_schedules sc ON sc.id = r.schedule_id

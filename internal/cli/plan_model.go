@@ -326,7 +326,7 @@ func fleetAppPlanResource(app fleet.AppDiff, fleetID string) planResource {
 	action := canonicalFleetAction(app.Action)
 	resource := planResource{Kind: "app", Name: app.Slug, Action: action, Changes: []planChange{}, Impacts: []planImpact{}, Notes: []string{}}
 
-	if app.Action == fleet.ActionUpdateSource || app.Action == fleet.ActionUpdateSourceConfig {
+	if (app.Action == fleet.ActionUpdateSource || app.Action == fleet.ActionUpdateSourceConfig) && app.RecoveryReason == "" {
 		current := value(planValueDigest, app.ServerDigest)
 		if app.ServerDigest == "" {
 			current = value(planValueAbsent, "(none)")
@@ -374,6 +374,9 @@ func fleetAppPlanResource(app fleet.AppDiff, fleetID string) planResource {
 	}
 	if app.Action == fleet.ActionUnchanged {
 		resource.Notes = append(resource.Notes, "unchanged")
+	}
+	if app.RecoveryReason != "" {
+		resource.Notes = append(resource.Notes, app.RecoveryReason+": republish target producers and redeploy consumers; may require --allow-downtime")
 	}
 	for _, unmanaged := range app.Unmanaged {
 		resource.Notes = append(resource.Notes, fmt.Sprintf("unmanaged: %s=%s (default %s)", unmanaged.Key, unmanaged.Server, unmanaged.Default))

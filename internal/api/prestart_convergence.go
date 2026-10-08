@@ -22,6 +22,8 @@ type prestartSchedulePlan struct {
 	deploymentRepairComplete bool
 }
 
+const deploymentRepairNoProducerMessage = "repair-blocked-no-producer: the app has an unresolved failed producer barrier, but this target declares no enabled deploy-triggered producer that can prove compatible data; enable a target producer that repairs the data before redeploying"
+
 // planPrestartSchedules projects manifest declarations without changing an
 // existing schedule row. New producer schedules receive disabled placeholders
 // solely to obtain stable IDs/FKs; they cannot fire until the normal manifest
@@ -201,7 +203,7 @@ func (s *Server) convergePrestartAndFenceConsumer(
 		if len(plan.producers) == 0 {
 			if plan.deploymentRepairRequired && !plan.deploymentRepairComplete {
 				releaseConsumer()
-				return nil, errors.New("the app has an unresolved failed producer barrier, but this target declares no enabled deploy-triggered producer that can prove compatible data")
+				return nil, errors.New(deploymentRepairNoProducerMessage)
 			}
 			quarantined, err := s.store.AppDataCompatibilityQuarantined(app.ID)
 			if err != nil {

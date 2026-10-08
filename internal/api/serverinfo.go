@@ -66,6 +66,9 @@ type serverCapabilities struct {
 	// last_redeploy, so a client that changed the pool shape can wait for the
 	// settings redeploy it launched and learn whether it completed.
 	RedeployOutcome bool `json:"redeploy_outcome"`
+	// DeploymentRepairState: list/detail expose deployment_repair_required,
+	// and deploy-preflight checks that a target can repair its producer barrier.
+	DeploymentRepairState bool `json:"deployment_repair_state"`
 }
 
 // handleServerInfo advertises server capability flags so a fleet-aware CLI
@@ -96,6 +99,7 @@ func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 			DeployPreflight:           true,
 			StaleUVLockRefusal:        true,
 			RedeployOutcome:           true,
+			DeploymentRepairState:     true,
 		},
 		Runtimes: detectRuntimes(),
 	})

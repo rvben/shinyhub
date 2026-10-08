@@ -416,12 +416,32 @@ settings redeploy did not apply. Against an older server, apply warns that the
 change was not verified to reach the running pool.
 
 Adopting an existing app does not create a deployment when its non-empty
-content digest and every declared setting already match. On servers that
+content digest and every declared setting already match and no corrective
+deployment is required. On servers that
 support fleet preconditions, apply transfers ownership with one conditional
 metadata update that asserts both the observed digest and prior owner. A source
 or declared-config difference still follows the normal convergence path. Older
 servers without precondition support conservatively redeploy during adoption
 rather than trusting a stale observation.
+
+On servers advertising `deployment_repair_state`, a failed deployment that
+entered a producer compatibility barrier requires a corrective deployment even
+when the desired source matches `content_digest`, which records the last
+successful bundle. Plan reports `recover-failed` and apply republishes the
+target producers before starting consumers. The target must retain or declare
+an enabled deploy-triggered producer; otherwise read-only preflight refuses it
+with `repair-blocked-no-producer`. Recovery uses a fresh resource revision to
+avoid duplicating another operator's same-bundle repair. A refused stop-first
+deployment still requires an explicit `--allow-downtime` decision.
+
+Pending deployments, running or failed schedule writers, and zero running
+replicas alone do not trigger this recovery. A deliberately stopped app is
+reported for manual repair rather than automatically republishing its data.
+Normal source changes and adoptions with config drift retain their existing
+deployment behavior. Older servers report a manual-recovery advisory for
+matching content with a failed attempt; upgrade the server for automatic
+recovery. A manual corrective deployment must include any shared fleet bundle
+inputs as well as the app source.
 
 | Flag | Effect |
 |---|---|
