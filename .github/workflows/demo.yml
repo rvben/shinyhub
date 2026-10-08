@@ -87,9 +87,9 @@ jobs:
       - name: Test the demo configuration
         run: go test ./deploy/cloudflare-demo
 
-      - name: Test application startup readiness
+      - name: Test application startup readiness and error alerts
         working-directory: deploy/cloudflare-demo
-        run: python3 -m unittest test_startup_readiness.py
+        run: python3 -m unittest test_startup_readiness.py test_worker_errors_alert.py
 
       - name: Test the demo Worker
         run: make test-worker

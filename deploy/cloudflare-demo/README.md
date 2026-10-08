@@ -24,6 +24,23 @@ the Worker source and entrypoint hash alongside the image digest for a rollout.
 Command changes apply on the next cold start; rolling back the Worker restores
 the previous startup configuration.
 
+Port readiness waits up to 90 seconds by default, including automatic starts
+through the SDK's request proxy. This accommodates fleet bootstrap before Caddy
+opens port 8080; request cancellation and explicit timeout overrides still apply.
+The fleet readiness gate and startup failure alerts remain in place.
+
+For Worker-only fixes, use `wrangler deploy --containers-rollout none` to retain
+the deployed container image and allocation settings. Verify a genuine cold
+start after the container sleeps, then check `/healthz` and all seven public
+apps. `/__demo/status` reads lifecycle state without waking the container or
+extending its idle deadline; use it when waiting for a natural sleep cycle.
+
+The WebSocket smoke checks require both a successful upgrade and a clean close
+handshake. An error after opening, an abnormal close, or a missing close reply
+fails the check. Correlate close-time transport exceptions with the client
+result when investigating alerts; a successful client handshake alone does not
+establish that Cloudflare's server-side logs are clean.
+
 Memory and disk bill for the whole time the container is awake, so the Worker
 decides at the edge what is allowed to reach it (`src/edge-policy.ts`). It
 serves `robots.txt` itself, and on the app origin it answers with a static 404

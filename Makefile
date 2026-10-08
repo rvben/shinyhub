@@ -94,9 +94,9 @@ test-js:
 # decides what reaches the demo container, and a request that reaches a sleeping
 # container wakes it, so its admission policy is a cost boundary and is tested
 # rather than only deployed. Node runs the TypeScript directly (type stripping,
-# unflagged since 22.18) and the tests import only node: builtins, so there is
-# no install step. The glob is left unquoted for the shell to expand, as in
-# test-js.
+# unflagged since 22.18). Install deploy/cloudflare-demo dependencies with npm ci
+# first: startup regressions exercise the actual Containers SDK. The glob is
+# left unquoted for the shell to expand, as in test-js.
 test-worker:
 	@command -v node >/dev/null 2>&1 || { echo "node not found (Node 22.18+ required for Worker tests)"; exit 1; }
 	@node -e 'const [maj,min]=process.versions.node.split(".").map(Number); if (maj<22 || (maj===22 && min<18)) { console.error(`Node ${process.versions.node} cannot run TypeScript tests directly (22.18+ required)`); process.exit(1); }'
