@@ -129,6 +129,19 @@ events from stdout/stderr and the Worker:
 - `demo_wake_failed`: the SDK failed to start the container, including failures
   that happen before the entrypoint can run. It records the request attempt's
   elapsed time and a bounded reason without request URLs, cookies, or tokens.
+- `demo_upstream_failed`: a proxied application or viewer-session request
+  returned HTTP 5xx. It records only the operation and status, without request
+  paths, query strings, cookies, or response bodies.
+
+The Worker errors alert uses `worker-errors-alert.sql`. Deploy the explicit
+upstream failure logging before applying that query. It excludes automatic
+`cf-worker-event` HTTP 503 summaries: sleeping and readiness polling deliberately
+return 503, which Cloudflare labels as errors even when execution succeeds.
+Real upstream 503s remain covered by `demo_upstream_failed`; exceptions, startup
+and allocation failures, error/fatal logs, and other HTTP 5xx summaries remain
+covered. Keep the threshold at one record and the evaluation/execution windows
+at ten minutes. Do not exclude all error-level 503 records, since exception logs
+can carry that status too.
 
 Search Cloudflare Logs for these event names to inspect successful boot
 durations and failed attempts. Events are emitted at startup transitions, not

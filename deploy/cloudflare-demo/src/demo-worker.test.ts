@@ -107,6 +107,40 @@ test("failed proxy responses invalidate the warm memo so a later navigation can 
   await Promise.all(f.work); assert.equal(f.counts.start, 1);
 });
 
+test("intentional asleep and readiness 503s do not log upstream failures", async (t) => {
+  const errors = t.mock.method(console, "error", () => {});
+  const f = fixture();
+  assert.equal((await f.fetch(new Request("https://" + control + "/api/about"))).status, 503);
+  assert.equal((await f.fetch(new Request("https://" + control + "/__demo/ready"))).status, 503);
+  f.setStatus("starting");
+  f.setResponse(() => new Response(null, { status: 503 }));
+  assert.equal((await f.fetch(new Request("https://" + control + "/__demo/ready"))).status, 503);
+  assert.equal(errors.mock.callCount(), 0);
+});
+
+test("real upstream 5xxs log bounded errors without request data", async (t) => {
+  const errors = t.mock.method(console, "error", () => {});
+  for (const status of [500, 502, 503]) {
+    const f = fixture("healthy");
+    f.setResponse(() => new Response("private upstream body", { status }));
+    const response = await f.fetch(new Request("https://" + apps + "/app/identity-demo/?token=private", {
+      headers: { cookie: "session=private" },
+    }));
+    assert.equal(response.status, status);
+    assert.equal(await response.text(), "private upstream body");
+    assert.deepEqual(errors.mock.calls.at(-1)!.arguments, [
+      { event: "demo_upstream_failed", operation: "proxy", status },
+    ]);
+  }
+  const login = fixture("healthy");
+  login.setResponse(() => new Response(null, { status: 503 }));
+  assert.equal((await login.fetch(new Request("https://" + control + "/__demo/session", { method: "POST" }))).status, 303);
+  assert.deepEqual(errors.mock.calls.at(-1)!.arguments, [
+    { event: "demo_upstream_failed", operation: "viewer_session", status: 503 },
+  ]);
+  assert.equal(errors.mock.callCount(), 4);
+});
+
 test("native readiness polling checks live health without proxying or trusting the warm memo", async () => {
   const f = fixture("healthy", true);
   const probe = () => f.fetch(new Request("https://" + control + "/__demo/ready"));

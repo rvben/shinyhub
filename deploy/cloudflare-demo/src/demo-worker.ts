@@ -41,6 +41,15 @@ export interface DemoWorkerOptions<Env> {
 const DEMO_VIEWER_USERNAME = "demo-viewer";
 const DEMO_VIEWER_PASSWORD = "explore-shinyhub-demo";
 
+// Automatic invocation logs label even intentional sleep/readiness 503s as
+// errors. The alert excludes those 503 summaries; report real upstream 5xxs
+// separately so an unavailable application still alerts. Keep request data out.
+function reportUpstreamFailure(response: Response, operation: "proxy" | "viewer_session"): void {
+  if (response.status >= 500) {
+    console.error({ event: "demo_upstream_failed", operation, status: response.status });
+  }
+}
+
 function demoAsset(body: string, contentType: string): Response {
   return new Response(body, {
     headers: {
@@ -249,6 +258,7 @@ export function createDemoWorker<Env>(options: DemoWorkerOptions<Env>): Exported
             }),
           },
         ));
+        reportUpstreamFailure(loginResponse, "viewer_session");
         // The end of the cold path. A visitor who followed a link to an app now
         // has the session that link needed, so this is where the page they asked
         // for finally gets served rather than the dashboard.
@@ -272,6 +282,7 @@ export function createDemoWorker<Env>(options: DemoWorkerOptions<Env>): Exported
       }
 
       const upstream = await container.fetch(new Request(request, { headers, signal: request.signal }));
+      reportUpstreamFailure(upstream, "proxy");
       if (upstream.status >= 500) lastHealthyAt = null;
 
       // A WebSocket upgrade response cannot be reconstructed: the Workers
