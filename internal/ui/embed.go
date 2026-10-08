@@ -5,6 +5,7 @@ import (
 	"embed"
 	"encoding/hex"
 	"fmt"
+	"github.com/rvben/shinyhub/internal/config"
 	"io"
 	"io/fs"
 	"net/http"
@@ -142,7 +143,7 @@ func Handler() http.Handler {
 // for any path within the dashboard's own route space that does not match a
 // known route; /api/* and /app/* are registered as their own, more specific
 // mux patterns and never reach it.
-func NotFoundHandler() http.Handler {
+func NotFoundHandler(environments ...*config.EnvironmentConfig) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		file, err := Static().Open("not-found.html")
 		if err != nil {
@@ -153,6 +154,13 @@ func NotFoundHandler() http.Handler {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusNotFound)
+		if len(environments) > 0 && environments[0] != nil {
+			page, err := io.ReadAll(file)
+			if err == nil && r.Method != http.MethodHead {
+				_, _ = w.Write(DecorateEnvironment(page, environments[0], r.URL))
+			}
+			return
+		}
 		_, _ = io.Copy(w, file)
 	})
 }

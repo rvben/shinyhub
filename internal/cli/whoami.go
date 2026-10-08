@@ -81,6 +81,10 @@ question that matters when a server is down - use ` + "`shinyhub hosts`" + `.`,
 			"can_create_apps": me.CanCreateApps,
 			"credential":      credential,
 		}
+		if me.EnvironmentLabel != "" {
+			lines = append(lines, "Environment: "+me.EnvironmentLabel)
+			result["environment_label"] = me.EnvironmentLabel
+		}
 		addAppScope(result, me)
 		return renderAction(cmd, "ok", result, strings.Join(lines, "\n"))
 	}

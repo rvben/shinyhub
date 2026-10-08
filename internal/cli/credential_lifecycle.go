@@ -35,7 +35,8 @@ type credentialLifecycle struct {
 
 func decodeRemoteIdentity(body []byte) (remoteIdentity, error) {
 	var payload struct {
-		User struct {
+		EnvironmentLabel string `json:"environment_label"`
+		User             struct {
 			Username string `json:"username"`
 			Role     string `json:"role"`
 		} `json:"user"`
@@ -50,7 +51,8 @@ func decodeRemoteIdentity(body []byte) (remoteIdentity, error) {
 		return remoteIdentity{}, fmt.Errorf("authentication response did not identify a user")
 	}
 	identity := remoteIdentity{
-		Username: payload.User.Username, Role: payload.User.Role,
+		EnvironmentLabel: payload.EnvironmentLabel,
+		Username:         payload.User.Username, Role: payload.User.Role,
 		AppScope: append([]string(nil), payload.AppScope...), Credential: payload.Credential,
 	}
 	if payload.CanCreateApps != nil {

@@ -1,0 +1,54 @@
+[
+  {
+    "current": "/app/finops/?account=one%20two&account=three&__shinyhub_launch=secret#report",
+    "target": "/app/finops/?account=one%20two&account=three#report"
+  },
+  {
+    "current": "/app/finops/report%20one?x=%2F&%5F%5Fshinyhub_cookie_check=1",
+    "target": "/app/finops/report%20one?x=%2F"
+  },
+  {
+    "current": "/app/finops/.shinyhub/support-session/stop?x=1",
+    "target": "/app/finops/"
+  },
+  {
+    "current": "/app/finops/%2Eshinyhub/ready",
+    "target": "/app/finops/"
+  },
+  {
+    "current": "/apps/finops/logs?logout=1#secret",
+    "target": "/apps/finops/logs"
+  },
+  {
+    "current": "/projects/demo?x=1",
+    "target": "/projects/demo"
+  },
+  {
+    "current": "/home?logout=1",
+    "target": "/home"
+  },
+  {
+    "current": "/login?next=https://other.example/app/a/",
+    "target": "/"
+  },
+  {
+    "current": "/api/auth/callback?code=secret&state=state",
+    "target": "/"
+  },
+  {
+    "current": "/app/.shinyhub/favicon.ico",
+    "target": "/"
+  },
+  {
+    "current": "/unknown?x=1",
+    "target": "/"
+  },
+  {
+    "current": "//other.example/app/finops/",
+    "target": "/"
+  },
+  {
+    "current": "/app/finops/?a=1&&__shinyhub_launch=secret&b=2&&#chart",
+    "target": "/app/finops/?a=1&&b=2&&#chart"
+  }
+]

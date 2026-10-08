@@ -69,6 +69,9 @@ func footerSchemeOK(u string) bool {
 // resolved-asset allow-list and landing-file path. It is a no-op when no
 // branding field is set.
 func validateBranding(b *BrandingConfig) error {
+	if err := validateEnvironment(b.Environment); err != nil {
+		return err
+	}
 	switch b.RootBehavior {
 	case "", "auto", "landing":
 	default:

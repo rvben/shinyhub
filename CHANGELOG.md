@@ -6,7 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **branding**: mark configured environments with a persistent strip independent of announcements, prefixed browser titles, generated environment favicons, and a production link that preserves app state while removing platform launch parameters. Identity is also exposed in `whoami` and fleet plan/apply output; the unset configuration keeps existing presentation.
+
 ### Fixed
+
+- **apps**: show a browser recovery page with a catalog link for unknown app slugs, including on isolated app origins. API and monitoring requests retain the existing JSON 404 response.
 
 - **routing**: keep backend-local redirects on the app mount and preserve escaped asset paths when app slugs or mount separators are encoded. Preserve app query bytes through app-origin launches and forward-auth cookie confirmation.
 - **auth**: return GitHub, Google, and OIDC logins to the requested app or dashboard route, preserving query and fragment state. Bind validated return paths to the provider-specific, one-time OAuth state.

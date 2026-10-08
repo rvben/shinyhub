@@ -151,6 +151,9 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 		return renderFleetPlan(cmd, synthetic, "shinyhub fleet apply --dry-run", pf.manifest, pf.host, pf.caps, pf.diff, pf.projectDiff)
 	}
 
+	if pf.caps.EnvironmentLabel != "" && !quietFlag {
+		fmt.Fprintf(errOut, "Target: %s (%s)\n", pf.caps.EnvironmentLabel, pf.host)
+	}
 	if f.refreshStale && !pf.caps.ScheduleRefreshStale {
 		return validationErr("server does not support --refresh-stale", "upgrade the server to support safe stale schedule refresh admission")
 	}

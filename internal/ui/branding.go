@@ -14,17 +14,21 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/rvben/shinyhub/internal/appnav"
 	"github.com/rvben/shinyhub/internal/config"
+	"github.com/rvben/shinyhub/internal/envui"
+	"github.com/rvben/shinyhub/internal/favicon"
 )
 
 // Public is the small, documented branding object exposed inline in the SPA
 // shell and at GET /.shinyhub/branding.json. URLs are browser-ready.
 type Public struct {
-	SiteTitle    string              `json:"site_title,omitempty"`
-	Logo         string              `json:"logo,omitempty"`
-	Favicon      string              `json:"favicon,omitempty"`
-	PrimaryColor string              `json:"primary_color,omitempty"`
-	FooterLinks  []config.FooterLink `json:"footer_links,omitempty"`
+	Environment  *config.EnvironmentConfig `json:"environment,omitempty"`
+	SiteTitle    string                    `json:"site_title,omitempty"`
+	Logo         string                    `json:"logo,omitempty"`
+	Favicon      string                    `json:"favicon,omitempty"`
+	PrimaryColor string                    `json:"primary_color,omitempty"`
+	FooterLinks  []config.FooterLink       `json:"footer_links,omitempty"`
 }
 
 func assetURL(ref string, resolved map[string]string) string {
@@ -44,13 +48,18 @@ func assetURL(ref string, resolved map[string]string) string {
 // PublicBranding builds the browser-ready object. resolved is the
 // basename->path allow-list (nil when only URLs/scalars are used).
 func PublicBranding(b config.BrandingConfig, resolved map[string]string) Public {
-	return Public{
+	p := Public{
+		Environment:  b.Environment,
 		SiteTitle:    b.SiteTitle,
 		Logo:         assetURL(b.Logo, resolved),
 		Favicon:      assetURL(b.Favicon, resolved),
 		PrimaryColor: b.Theme.PrimaryColor,
 		FooterLinks:  b.FooterLinks,
 	}
+	if b.Environment != nil {
+		p.Favicon = envui.IconURL(b.Environment)
+	}
+	return p
 }
 
 // ImageSources returns the CSP img-src origins needed for p's images to load:
@@ -179,6 +188,9 @@ func CSPInlineSources(p Public) (scriptSources, styleSources []string, err error
 		return nil, nil, err
 	}
 	scriptSources = append(scriptSources, cspHashSource(script))
+	if p.Environment != nil {
+		scriptSources = append(scriptSources, envui.CSPHash)
+	}
 	if style, ok := brandingInlineStyle(p); ok {
 		styleSources = []string{cspHashSource(style)}
 	}
@@ -201,11 +213,15 @@ func RenderIndex(raw []byte, p Public) ([]byte, error) {
 	// A configured favicon replaces the complete stock set so two icon families
 	// never compete. Other branding keeps the ShinyHub favicon as its fallback.
 	if p.Favicon != "" {
-		out = stockIconRe.ReplaceAll(out, nil)
+		if p.Environment != nil {
+			out, _ = favicon.ReplaceIcons(out, p.Favicon)
+		} else {
+			out = stockIconRe.ReplaceAll(out, nil)
+		}
 	}
 
 	var head bytes.Buffer
-	if p.Favicon != "" {
+	if p.Favicon != "" && p.Environment == nil {
 		fmt.Fprintf(&head, "<link rel=\"icon\" href=\"%s\">\n", html.EscapeString(p.Favicon))
 	}
 	if style, ok := brandingInlineStyle(p); ok {
@@ -214,6 +230,11 @@ func RenderIndex(raw []byte, p Public) ([]byte, error) {
 	fmt.Fprintf(&head, "<script>%s</script>\n", script)
 
 	out = headRe.ReplaceAllLiteral(out, append(head.Bytes(), []byte("</head>")...))
+	if p.Environment != nil {
+		out, _ = favicon.PrefixTitle(out, p.Environment.Prefix(), "ShinyHub")
+		snippet := envui.Snippet(p.Environment, nil, true)
+		out, _ = appnav.SpliceIntoBody(out, snippet)
+	}
 	return out, nil
 }
 

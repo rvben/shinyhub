@@ -61,7 +61,7 @@ func runContractCLI(t *testing.T, host, token string, args ...string) string {
 // prints the raw server envelope verbatim, so a missing key means the server
 // stopped emitting the field the schema promises - the CI-invisible rename class.
 func TestSchema_OutputFieldsAgainstLiveServer(t *testing.T) {
-	host, token := bootContractServer(t)
+	host, token := bootContractServer(t, &config.EnvironmentConfig{Label: "Acceptance"})
 
 	// itemAt says where each command's item object lives in the JSON output:
 	//   "items"    - list envelope; the item shape is items[0]
@@ -213,7 +213,7 @@ func (r *recordingT) Helper()               {}
 // api.New router with a real manager+proxy) fronted by httptest, registers an
 // admin-role deploy token so every read endpoint (including admin-only users) is
 // reachable, and seeds a fixture per read command so no list comes back empty.
-func bootContractServer(t *testing.T) (host, token string) {
+func bootContractServer(t *testing.T, environments ...*config.EnvironmentConfig) (host, token string) {
 	t.Helper()
 	store := dbtest.New(t)
 	appsDir := t.TempDir()
@@ -221,6 +221,9 @@ func bootContractServer(t *testing.T) (host, token string) {
 	cfg := &config.Config{
 		Auth:    config.AuthConfig{Secret: "test-secret", DeployTokenRole: "admin"},
 		Storage: config.StorageConfig{AppsDir: appsDir, AppDataDir: dataDir},
+	}
+	if len(environments) > 0 {
+		cfg.Branding.Environment = environments[0]
 	}
 	mgr := process.NewManager(appsDir, process.NewNativeRuntime())
 	prx := proxy.New()

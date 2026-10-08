@@ -1491,6 +1491,8 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// authored itself. The proxy only injects the fallback into HTML pages that
 	// do not already declare rel=icon.
 	prx.SetAppFavicon(true)
+	prx.SetEnvironment(cfg.Branding.Environment)
+	prx.SetDashboardURL(appNavHomeURL(cfg))
 	// Compress WebSocket messages for backends that do not, which is every R
 	// Shiny app: httpuv never negotiates permessage-deflate.
 	prx.SetWebSocketCompression(cfg.Server.WebSocketCompressionEnabled())
@@ -2888,7 +2890,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// are, so they carry the same switcher. Nothing but the switcher varies:
 	// Support recovery stays available independently of the optional app switcher.
 	navOpts := []access.Option{access.WithSupportDashboard(strings.TrimRight(cfg.Server.BaseURL, "/") + "/users")}
-	navOpts = append(navOpts, access.WithAnnouncements())
+	navOpts = append(navOpts, access.WithAnnouncements(), access.WithEnvironment(cfg.Branding.Environment))
 	if cfg.Server.AppNavEnabled() {
 		navOpts = append(navOpts, access.WithAppNav(appNavHomeURL(cfg)))
 	}
@@ -2940,7 +2942,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// as a more-specific pattern than /app/ so it never reaches the app backend.
 	platformFavicon := ui.FaviconHandler(cfg.Branding)
 	appIconHandler := access.Middleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup)(
-		appFaviconHandler(store, platformFavicon),
+		appFaviconHandler(store, platformFavicon, cfg.Branding.Environment != nil),
 	)
 	mux.Handle("GET /app/{slug}"+favicon.AppSuffix, appIconHandler)
 	// The switcher's own data, served from under /app/ because that is the only
@@ -3429,7 +3431,7 @@ func registerBrandingRoutes(mux *http.ServeMux, cfg *config.Config, srv *api.Ser
 		if gzipEligible {
 			key := ""
 			if !devStatic {
-				key = fmt.Sprintf("shell:branded=%t:authed=%t", brandingActive, authed)
+				key = fmt.Sprintf("shell:branding=%#v:authed=%t", pub, authed)
 			}
 			ui.ServeHTML(w, r, out, key)
 			return
@@ -3442,7 +3444,7 @@ func registerBrandingRoutes(mux *http.ServeMux, cfg *config.Config, srv *api.Ser
 	// Go's plain-text default) for any path in the dashboard's route space
 	// that matches nothing. /api/ and /app/ are registered as their own,
 	// more specific mux patterns elsewhere and never reach it.
-	notFound := ui.NotFoundHandler()
+	notFound := ui.NotFoundHandler(cfg.Branding.Environment)
 
 	// SPA routes: /apps/<slug>..., /users, /audit-log, /login. The handler
 	// 404s anything outside the IsUIPath allowlist, so legitimate unknowns

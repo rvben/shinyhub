@@ -19,7 +19,23 @@ import (
 // identity without leaving browser tabs blank.
 func FaviconHandler(b config.BrandingConfig) http.Handler {
 	resolved := b.ResolvedAssets()
+	var environmentPNG []byte
+	if b.Environment != nil {
+		stock, err := fs.ReadFile(Static(), "brand/favicon-64.png")
+		if err == nil {
+			r, g, blue := b.Environment.RGB()
+			environmentPNG, _ = favicon.EnvironmentPNG(stock, r, g, blue)
+		}
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if b.Environment != nil {
+			if len(environmentPNG) == 0 {
+				http.Error(w, "environment icon unavailable", http.StatusInternalServerError)
+				return
+			}
+			favicon.Write(w, r, "image/png", environmentPNG)
+			return
+		}
 		if b.Favicon != "" {
 			low := strings.ToLower(b.Favicon)
 			if strings.HasPrefix(low, "http://") || strings.HasPrefix(low, "https://") {

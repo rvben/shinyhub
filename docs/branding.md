@@ -160,3 +160,85 @@ platform HTML. Only trusted operators should author it; it is not sandboxed.
 
 Some reverse proxies block dot-prefixed paths. Ensure requests to `/.shinyhub/`
 pass through to ShinyHub unmodified.
+
+## Environment identity
+
+Mark a sandbox, development, or acceptance instance in its deployment configuration:
+
+```yaml
+branding:
+  environment:
+    label: Acceptance
+    color: "#f5b301"
+    message: Test environment. Data may be incomplete or out of date.
+    production_url: https://dashboards.example.com
+```
+
+The optional block creates a persistent, non-dismissible strip independent of announcements,
+prefixes browser titles with `[Acceptance]`, and replaces ordinary tab favicons with the
+ShinyHub mark on an environment-colored tile. App identity stays in the title. The label
+is also returned by `shinyhub whoami`, including its JSON output, and shown as the target
+in fleet plan/apply output. Older servers and unmarked instances omit the label.
+
+Omitting the block preserves existing presentation; absence is not proof that an instance
+is production. A supplied block requires a label of 1–32 characters, without control
+characters; repeated whitespace is normalized to a single space. `color` accepts a three- or six-digit CSS hex color and defaults to `#f5b301`.
+Text automatically uses black or white for contrast. `message` is optional plain text,
+at most 200 characters on a single line. No message is added when omitted.
+`production_url` is optional and must be an absolute HTTP(S) origin, without credentials,
+query, fragment, or subpath. Without it, the strip has no production link.
+
+Deployment templates can use `SHINYHUB_BRANDING_ENVIRONMENT_LABEL`,
+`SHINYHUB_BRANDING_ENVIRONMENT_COLOR`, `SHINYHUB_BRANDING_ENVIRONMENT_MESSAGE`, and
+`SHINYHUB_BRANDING_ENVIRONMENT_PRODUCTION_URL`. Non-empty environment overrides require a label. Empty environment variables are ignored. Changes take effect after restart. There is no announcement
+record, admin token, reconcile task, or polling request.
+
+### Production navigation
+
+“Open in production” uses a normal link and does not rely on a referrer:
+
+- Hosted app routes retain their path, app query parameters, and fragment. Reserved
+  `__shinyhub_*` authentication/launch parameters are removed without re-encoding the
+  remaining app query values. Query and fragment values must be suitable for use on
+  the production app.
+- App-local `/.shinyhub/` endpoints link to that app's root instead.
+- Recognized hub and console routes retain their path, with query and fragment removed.
+- Login, authentication callbacks, API routes, and unknown routes link to production home.
+
+The link updates from the live URL when used, including app bookmark state changed through
+browser history APIs. It sends no referrer and preserves normal keyboard and middle-click
+behavior. Production authentication and app access rules still apply. It neither transfers
+the current session nor checks production's app inventory. A missing app shows a browser
+404 with a catalog link rather than silently redirecting to home.
+
+### Coverage and limitations
+
+The strip covers the ShinyHub hub and sign-in shell, platform-owned app lifecycle and
+access pages, and supported top-level hosted app HTML. A support-session safety rail stays
+above it; announcements remain independently visible beneath it. The strip wraps on narrow
+screens and stays in print. The environment favicon intentionally overrides configured and
+app-authored ordinary `rel=icon` entries when same-origin images are allowed; touch and mask
+icons are unchanged. Existing bookmarks and history entries are not retroactively renamed.
+
+Hosted app injection retains the existing bounded HTML/CSP rules. Unsupported responses,
+oversized or force-compressed bodies, embedded iframes, and restrictive policies can omit
+some or all treatment. When the body can be rewritten but the script is refused, its initial
+title still receives the prefix. An app that forbids same-origin images keeps its own icons.
+Open app tabs need a reload after enabling or changing the configuration. App-authored
+fixed headers at `top: 0` may sit beneath the strip; apps can use
+`--shinyhub-environment-height` to offset them.
+
+External identity-provider pages and custom operator-authored landing HTML are not rewritten.
+Landing templates can read the public `environment` object at `/.shinyhub/branding.json`
+and render their own label, using DOM `textContent` for its plain-text values:
+
+```js
+const { environment } = await fetch('/.shinyhub/branding.json').then(r => r.json());
+if (environment) {
+  const label = document.createElement('p');
+  label.textContent = environment.label;
+  document.body.prepend(label);
+}
+```
+
+An environment label communicates identity; it does not restrict access or certify data freshness.

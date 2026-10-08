@@ -1,40 +1,7 @@
 package ui
 
-import (
-	"regexp"
+import "github.com/rvben/shinyhub/internal/hubroute"
 
-	slugpkg "github.com/rvben/shinyhub/internal/slug"
-)
-
-// appDetailPath matches /apps/<slug> and /apps/<slug>/<tab>. <slug> follows
-// the canonical slug rule (see internal/slug). <tab> is an optional lowercase
-// identifier; unknown tab names are still served - the client router treats
-// unknown tabs as Overview.
-var appDetailPath = regexp.MustCompile(`^/apps/` + slugpkg.Pattern + `(/[a-z-]+)?/?$`)
-
-// projectDetailPath serves the client-rendered project overview on direct
-// loads and refreshes. Project slugs use the same canonical slug grammar as
-// apps, so malformed paths still receive a real 404 from the server.
-var projectDetailPath = regexp.MustCompile(`^/projects/` + slugpkg.Pattern + `/?$`)
-
-// ExactUIRoutes is the single source of truth for the client-side SPA routes
-// that are matched by an EXACT path (as opposed to the /apps/<slug> pattern).
-// Both IsUIPath (the shell-fallback guard) and the server's mux registrations
-// derive from this list so the two cannot drift - a route present in one but not
-// the other silently 404s on deep links/reloads. To add an SPA page, add it here.
-// /identity is the page that covers people, roles and service accounts; /users
-// is kept as a working alias for old bookmarks and links (see app.js's router).
-func ExactUIRoutes() []string {
-	return []string{"/login", "/home", "/launchpad", "/apps", "/identity", "/users", "/workers", "/announcements", "/audit-log", "/tokens"}
-}
-
-// IsUIPath reports whether path is a client-side-rendered SPA route that
-// should be served the index.html shell.
-func IsUIPath(path string) bool {
-	for _, r := range ExactUIRoutes() {
-		if path == r {
-			return true
-		}
-	}
-	return appDetailPath.MatchString(path) || projectDetailPath.MatchString(path)
-}
+// ExactUIRoutes and IsUIPath share the route contract with environment links.
+func ExactUIRoutes() []string   { return hubroute.ExactUIRoutes() }
+func IsUIPath(path string) bool { return hubroute.IsUIPath(path) }

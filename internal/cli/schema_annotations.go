@@ -191,6 +191,7 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "username", Type: "string"},
 		{Name: "role", Type: "string"},
 		{Name: "host", Type: "string", Desc: "Server URL the credentials target"},
+		{Name: "environment_label", Type: "string", Desc: "Configured environment label; omitted for unmarked or older servers"},
 		{Name: "can_create_apps", Type: "boolean", Desc: "Whether this identity's role may deploy a new app; app_scope may restrict the allowed slugs"},
 		{Name: "app_scope", Type: "array", Desc: "App slugs this credential is restricted to; empty when unrestricted or not reported by an older server"},
 		{Name: "credential", Type: "object", Desc: "Credential type, name, creation/last-use/expiry timestamps, lifecycle status, and seconds remaining"},

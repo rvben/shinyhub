@@ -95,7 +95,9 @@ export function createRouter(opts = {}) {
 
   function applyTitle() {
     const brandTitle = (window.__SHINYHUB_BRANDING__ && window.__SHINYHUB_BRANDING__.site_title) || 'ShinyHub';
-    document.title = (current && current.title) ? current.title + ' · ' + brandTitle : brandTitle;
+    const environment = window.__SHINYHUB_BRANDING__?.environment;
+    const prefix = environment ? `[${environment.label}] ` : '';
+    document.title = prefix + ((current && current.title) ? current.title + ' · ' + brandTitle : brandTitle);
   }
 
   // The navigation resolves to the view that is already mounted, and that view

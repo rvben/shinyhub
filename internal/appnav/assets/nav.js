@@ -348,8 +348,8 @@
       "  border-color: var(--sh-signal); box-shadow: 0 10px 30px -16px rgba(0,0,0,0.8);" +
       "}",
     ".root.dismissed .bar { display: none; }",
-    ".root[data-position='top-center'] .bar { top: calc(12px + var(--shinyhub-announcement-height, 0px)); left: 50%; transform: translateX(-50%); }",
-    ".root[data-position='top-right'] .bar { top: calc(12px + var(--shinyhub-announcement-height, 0px)); right: 12px; }",
+    ".root[data-position='top-center'] .bar { top: calc(12px + var(--shinyhub-announcement-height, 0px) + var(--shinyhub-environment-height, 0px)); left: 50%; transform: translateX(-50%); }",
+    ".root[data-position='top-right'] .bar { top: calc(12px + var(--shinyhub-announcement-height, 0px) + var(--shinyhub-environment-height, 0px)); right: 12px; }",
     ".root[data-position='left-center'] .bar { top: 50%; left: 12px; transform: translateY(-50%); }",
     ".root[data-position='right-center'] .bar { top: 50%; right: 12px; transform: translateY(-50%); }",
     ".root[data-position='left-center'] .bar, .root[data-position='right-center'] .bar {" +
@@ -466,7 +466,7 @@
     ".chat-trigger[aria-expanded='true'], .chat-trigger:hover { background: var(--sh-hover); }",
     ".root[data-position='left-center'] .chat-trigger, .root[data-position='right-center'] .chat-trigger { width: 38px; height: 38px; border-right: 0; border-bottom: 1px solid var(--sh-line); }",
     ".root[data-position='left-center'] .chat-label, .root[data-position='right-center'] .chat-label { display: none; }",
-    ".chat-panel { position: absolute; top: calc(60px + var(--shinyhub-announcement-height, 0px)); right: 12px; bottom: 12px; width: min(var(--sh-chat-width, 440px), calc(100vw - 24px)); box-sizing: border-box; display: none; flex-direction: column; overflow: hidden; pointer-events: auto; color: var(--sh-text); background: var(--sh-surface); border: 1px solid var(--sh-line-strong); border-radius: var(--sh-r-lg); box-shadow: 0 32px 80px rgba(0,0,0,0.7); }",
+    ".chat-panel { position: absolute; top: calc(60px + var(--shinyhub-announcement-height, 0px) + var(--shinyhub-environment-height, 0px)); right: 12px; bottom: 12px; width: min(var(--sh-chat-width, 440px), calc(100vw - 24px)); box-sizing: border-box; display: none; flex-direction: column; overflow: hidden; pointer-events: auto; color: var(--sh-text); background: var(--sh-surface); border: 1px solid var(--sh-line-strong); border-radius: var(--sh-r-lg); box-shadow: 0 32px 80px rgba(0,0,0,0.7); }",
     ".root.chat-native.chat-open .chat-panel { display: flex; }",
     ".chat-panel [hidden] { display: none !important; }",
     ".chat-panel-head { display: flex; flex: none; align-items: center; gap: 10px; min-height: 48px; padding: 0 8px 0 16px; border-bottom: 1px solid var(--sh-line-strong); }",
@@ -503,8 +503,8 @@
       "  opacity: 0; visibility: hidden; transform: translateY(-8px) scale(0.98);" +
       "  transform-origin: top center; transition: opacity 150ms ease, transform 180ms cubic-bezier(0.22,1,0.36,1), visibility 0s linear 180ms;" +
       "}",
-    ".root[data-position='top-center'] .panel { top: calc(60px + var(--shinyhub-announcement-height, 0px)); left: 50%; transform-origin: top center; }",
-    ".root[data-position='top-right'] .panel { top: calc(60px + var(--shinyhub-announcement-height, 0px)); right: 12px; transform-origin: top right; }",
+    ".root[data-position='top-center'] .panel { top: calc(60px + var(--shinyhub-announcement-height, 0px) + var(--shinyhub-environment-height, 0px)); left: 50%; transform-origin: top center; }",
+    ".root[data-position='top-right'] .panel { top: calc(60px + var(--shinyhub-announcement-height, 0px) + var(--shinyhub-environment-height, 0px)); right: 12px; transform-origin: top right; }",
     ".root[data-position='left-center'] .panel { top: 50%; left: 60px; transform-origin: left center; }",
     ".root[data-position='right-center'] .panel { top: 50%; right: 60px; transform-origin: right center; }",
     ".root.open[data-position='top-center'] .panel { transform: translateX(-50%) translateY(0) scale(1); }",

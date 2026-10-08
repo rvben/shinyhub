@@ -38,6 +38,7 @@ type connectFlags struct {
 const defaultConnectTimeout = 5 * time.Minute
 
 type remoteIdentity struct {
+	EnvironmentLabel   string
 	Username           string
 	Role               string
 	CanCreateApps      bool

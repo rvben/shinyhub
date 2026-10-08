@@ -482,6 +482,8 @@ type Proxy struct {
 	statusOverlay        atomic.Bool
 	announcementsEnabled atomic.Bool
 	browserSessions      atomic.Pointer[browserSessionSettings]
+	environment          atomic.Pointer[config.EnvironmentConfig]
+	dashboardURL         atomic.Pointer[string]
 
 	// supportSessions enables the non-optional safety banner for requests that
 	// carry an app-scoped support identity. The request context decides whether
@@ -1259,6 +1261,20 @@ type appNavSettings struct {
 	homeURL string
 }
 
+// SetEnvironment enables optional deployment identity for app documents.
+// Copy the immutable startup value so callers cannot mutate live settings.
+func (p *Proxy) SetEnvironment(e *config.EnvironmentConfig) {
+	if e == nil {
+		p.environment.Store(nil)
+		return
+	}
+	copy := *e
+	p.environment.Store(&copy)
+}
+
+// SetDashboardURL supplies recovery links even when the app switcher is disabled.
+func (p *Proxy) SetDashboardURL(home string) { p.dashboardURL.Store(&home) }
+
 // SetAppNav turns the injected app switcher on or off, and sets where its "All
 // apps" link points. It takes effect on the next response from every backend,
 // including ones already registered.
@@ -1348,6 +1364,14 @@ func renderAppDownPage(state, slug, reason string) string {
 ` + body + `
 <a class="btn" href="/apps/` + esc(slug) + `">Open in dashboard</a>
 </div></body></html>`
+}
+
+func renderUnknownAppPage(home string) string {
+	return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>App not found · ShinyHub</title><link rel="icon" href="/app/.shinyhub/favicon.ico"><style>
+ body{margin:0;min-height:100vh;background:#030510;color:#e8eeff;font:16px/1.5 system-ui,sans-serif;display:grid;place-items:center}
+ main{max-width:40rem;padding:32px}h1{font-size:1.5rem;margin:0 0 12px}p{color:#a8b4d4;margin:0 0 24px}a{display:inline-flex;align-items:center;min-height:44px;color:#7dd3fc;text-underline-offset:4px}a:focus-visible{outline:2px solid currentColor;outline-offset:4px}
+ @media(prefers-color-scheme:light){body{background:#f4f7fc;color:#16203a}p{color:#45526e}a{color:#075985}}
+ </style></head><body><main><h1>App not found</h1><p>This app is not available on this instance. Browse the catalog to find your dashboard.</p><a href="` + html.EscapeString(home) + `">Browse apps</a></main></body></html>`
 }
 
 // SetAppStatusLookup registers a callback that reports an app's lifecycle status
@@ -3748,6 +3772,21 @@ type unknownAppBody struct {
 // status line only.
 func (p *Proxy) writeUnknownApp(w http.ResponseWriter, r *http.Request, slug string) {
 	p.recordReject(w, slug, ReasonUnknownSlug, false)
+	if (r.Method == http.MethodGet || r.Method == http.MethodHead) && isPageLoad(r) {
+		home := "/"
+		if configured := p.dashboardURL.Load(); configured != nil {
+			home = *configured
+		}
+		page := renderUnknownAppPage(home)
+		page = p.decorateAppPage(page, slug, r, true)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusNotFound)
+		if r.Method != http.MethodHead {
+			_, _ = w.Write([]byte(page))
+		}
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusNotFound)

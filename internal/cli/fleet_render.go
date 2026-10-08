@@ -164,7 +164,9 @@ func applySuggestion(file string, c planCounts) (cmd, desc string) {
 
 func renderFleetPlan(cmd *cobra.Command, f *fleetPlanFlags, cmdLabel string, m *fleet.Manifest, host string, caps serverCaps, diff []fleet.AppDiff, projects []fleet.ProjectDiff) error {
 	out := cmd.OutOrStdout()
-	_ = caps // threaded for fleet apply; the plan command is read-only and does not consume it
+	if caps.EnvironmentLabel != "" && !quietFlag {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Target: %s (%s)\n", caps.EnvironmentLabel, host)
+	}
 
 	if f.jsonOutput {
 		code, reason := planExitInfo(f, diff, projects)

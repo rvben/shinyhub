@@ -208,9 +208,10 @@ func newSessionUser(u *db.User) *sessionUserResponse {
 }
 
 type sessionResponse struct {
-	User          *sessionUserResponse `json:"user"`
-	CanCreateApps bool                 `json:"can_create_apps"`
-	CanManageApps bool                 `json:"can_manage_apps"`
+	EnvironmentLabel string               `json:"environment_label,omitempty"`
+	User             *sessionUserResponse `json:"user"`
+	CanCreateApps    bool                 `json:"can_create_apps"`
+	CanManageApps    bool                 `json:"can_manage_apps"`
 	// AppScope is non-empty when this credential may act only on the named app
 	// slugs. CanCreateApps remains the role capability within that scope; callers
 	// must not interpret it as permission to create an arbitrary slug.
@@ -425,6 +426,7 @@ func (s *Server) handleSessionLogin(w http.ResponseWriter, r *http.Request) {
 	})
 	ctxUser := user.ContextUser()
 	writeJSON(w, http.StatusOK, sessionResponse{
+		EnvironmentLabel:       s.cfg.Branding.Environment.LabelValue(),
 		Session:                session,
 		User:                   newSessionUser(user),
 		CanCreateApps:          canCreateApps(ctxUser),
@@ -538,6 +540,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		su.Role = u.Role
 	}
 	writeJSON(w, http.StatusOK, sessionResponse{
+		EnvironmentLabel:       s.cfg.Branding.Environment.LabelValue(),
 		Session:                session,
 		User:                   su,
 		CanCreateApps:          canCreateApps(u),
@@ -695,6 +698,7 @@ func (s *Server) handlePatchMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, sessionResponse{
+		EnvironmentLabel:       s.cfg.Branding.Environment.LabelValue(),
 		User:                   newSessionUser(fresh),
 		CanCreateApps:          canCreateApps(u),
 		CanManageApps:          s.canUseAppsManagement(u),

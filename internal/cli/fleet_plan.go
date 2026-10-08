@@ -194,24 +194,25 @@ func reportAppsFetchError(cfg *cliConfig, errOut io.Writer, err error) error {
 }
 
 type serverCaps struct {
-	RuntimeCapabilities       bool `json:"runtime_capabilities"`
-	TrustedPublishing         bool `json:"trusted_publishing"`
-	FleetPreconditions        bool `json:"fleet_preconditions"`
-	ContentDigest             bool `json:"content_digest"`
-	CLIConnect                bool `json:"cli_connect"`
-	CLIConnectDeviceCode      bool `json:"cli_connect_device_code"`
-	DeployEvents              bool `json:"deploy_events"`
-	PlanApply                 bool `json:"plan_apply"`
-	FleetProvenance           bool `json:"fleet_provenance"`
-	FleetState                bool `json:"fleet_state"`
-	FleetStateChangeTracking  bool `json:"fleet_state_change_tracking"`
-	FleetRunLifecycle         bool `json:"fleet_run_lifecycle"`
-	ScheduleDeployConvergence bool `json:"schedule_deploy_convergence"`
-	ScheduleRefreshStale      bool `json:"schedule_refresh_stale"`
-	DeployPreflight           bool `json:"deploy_preflight"`
-	StaleUVLockRefusal        bool `json:"stale_uv_lock_refusal"`
-	RedeployOutcome           bool `json:"redeploy_outcome"`
-	DeploymentRepairState     bool `json:"deployment_repair_state"`
+	EnvironmentLabel          string `json:"-"`
+	RuntimeCapabilities       bool   `json:"runtime_capabilities"`
+	TrustedPublishing         bool   `json:"trusted_publishing"`
+	FleetPreconditions        bool   `json:"fleet_preconditions"`
+	ContentDigest             bool   `json:"content_digest"`
+	CLIConnect                bool   `json:"cli_connect"`
+	CLIConnectDeviceCode      bool   `json:"cli_connect_device_code"`
+	DeployEvents              bool   `json:"deploy_events"`
+	PlanApply                 bool   `json:"plan_apply"`
+	FleetProvenance           bool   `json:"fleet_provenance"`
+	FleetState                bool   `json:"fleet_state"`
+	FleetStateChangeTracking  bool   `json:"fleet_state_change_tracking"`
+	FleetRunLifecycle         bool   `json:"fleet_run_lifecycle"`
+	ScheduleDeployConvergence bool   `json:"schedule_deploy_convergence"`
+	ScheduleRefreshStale      bool   `json:"schedule_refresh_stale"`
+	DeployPreflight           bool   `json:"deploy_preflight"`
+	StaleUVLockRefusal        bool   `json:"stale_uv_lock_refusal"`
+	RedeployOutcome           bool   `json:"redeploy_outcome"`
+	DeploymentRepairState     bool   `json:"deployment_repair_state"`
 }
 
 // fetchServerCaps reads GET /api/server-info (unauthenticated) and returns just
@@ -224,7 +225,9 @@ func fetchServerCaps(cfg *cliConfig) serverCaps {
 	if err != nil {
 		return serverCaps{}
 	}
-	return info.Capabilities
+	caps := info.Capabilities
+	caps.EnvironmentLabel = info.EnvironmentLabel
+	return caps
 }
 
 // intPtrIfPositive maps a non-pointer API int to *int, treating 0 as "unset"

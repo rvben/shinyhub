@@ -12,6 +12,7 @@ import (
 
 // serverInfoResponse is the JSON shape returned by GET /api/server-info.
 type serverInfoResponse struct {
+	EnvironmentLabel string `json:"environment_label,omitempty"`
 	// Version is the running shinyhub binary version. A fleet-aware CLI reads it
 	// to distinguish a healthy shinyhub from a half-provisioned host (a front
 	// proxy answering before the binary is up) and to enforce version
@@ -77,9 +78,10 @@ type serverCapabilities struct {
 // one field that requires a signed-in caller.
 func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, serverInfoResponse{
-		Version:         s.version,
-		Commit:          s.commitForCaller(r),
-		ProtocolVersion: protocol.CurrentVersion,
+		EnvironmentLabel: s.cfg.Branding.Environment.LabelValue(),
+		Version:          s.version,
+		Commit:           s.commitForCaller(r),
+		ProtocolVersion:  protocol.CurrentVersion,
 		Capabilities: serverCapabilities{
 			RuntimeCapabilities:       true,
 			TrustedPublishing:         len(s.cfg.Auth.TrustedPublishers) > 0,

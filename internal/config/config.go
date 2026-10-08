@@ -327,11 +327,12 @@ type MaintenanceConfig struct {
 // BrandingConfig customises the ShinyHub front door. Every field is optional;
 // the zero value behaves as if no branding is configured.
 type BrandingConfig struct {
-	SiteTitle   string `yaml:"site_title"`
-	AssetsDir   string `yaml:"assets_dir"`
-	Logo        string `yaml:"logo"`
-	Favicon     string `yaml:"favicon"`
-	LandingPage string `yaml:"landing_page"`
+	Environment *EnvironmentConfig `yaml:"environment"`
+	SiteTitle   string             `yaml:"site_title"`
+	AssetsDir   string             `yaml:"assets_dir"`
+	Logo        string             `yaml:"logo"`
+	Favicon     string             `yaml:"favicon"`
+	LandingPage string             `yaml:"landing_page"`
 	// RootBehavior controls who sees the landing page at GET /:
 	//   "" / "auto" - anonymous visitors see the landing page; a signed-in
 	//                 ShinyHub user is sent to the SPA home (Overview/Launchpad).
@@ -366,7 +367,7 @@ type FooterLink struct {
 func (b BrandingConfig) IsActive() bool {
 	return b.SiteTitle != "" || b.AssetsDir != "" || b.Logo != "" ||
 		b.Favicon != "" || b.LandingPage != "" || b.Theme.PrimaryColor != "" ||
-		len(b.FooterLinks) != 0
+		len(b.FooterLinks) != 0 || b.Environment != nil
 }
 
 // LandingFile returns the resolved absolute path of the operator landing
@@ -3642,6 +3643,19 @@ func applyEnv(cfg *Config) error {
 	if v := os.Getenv("SHINYHUB_SCHEDULER_TIMEZONE"); v != "" {
 		cfg.Scheduler.DefaultTimezone = v
 	}
+	setEnvironment := func(value string, assign func(*EnvironmentConfig, string)) {
+		if value == "" {
+			return
+		}
+		if cfg.Branding.Environment == nil {
+			cfg.Branding.Environment = &EnvironmentConfig{}
+		}
+		assign(cfg.Branding.Environment, value)
+	}
+	setEnvironment(os.Getenv("SHINYHUB_BRANDING_ENVIRONMENT_LABEL"), func(e *EnvironmentConfig, v string) { e.Label = v })
+	setEnvironment(os.Getenv("SHINYHUB_BRANDING_ENVIRONMENT_COLOR"), func(e *EnvironmentConfig, v string) { e.Color = v })
+	setEnvironment(os.Getenv("SHINYHUB_BRANDING_ENVIRONMENT_MESSAGE"), func(e *EnvironmentConfig, v string) { e.Message = v })
+	setEnvironment(os.Getenv("SHINYHUB_BRANDING_ENVIRONMENT_PRODUCTION_URL"), func(e *EnvironmentConfig, v string) { e.ProductionURL = v })
 	if v := os.Getenv("SHINYHUB_BRANDING_SITE_TITLE"); v != "" {
 		cfg.Branding.SiteTitle = v
 	}

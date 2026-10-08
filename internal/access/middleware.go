@@ -303,7 +303,9 @@ func writeAccessDenied(w http.ResponseWriter, r *http.Request, status int, headl
 			} else {
 				page = []byte(supportui.BlockedPage(slug, support.ActorUsername, user.Username, support.ExpiresAt))
 			}
-			_, _ = w.Write(page)
+			// Keep environment identity, but do not expose cross-app navigation.
+			identity := options{environment: cfg.environment, announcements: cfg.announcements}
+			_, _ = w.Write(identity.withAppNav(page, slug, ""))
 			return
 		}
 		// Keep the display name empty here: this caller was not authorized to

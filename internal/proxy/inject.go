@@ -14,6 +14,8 @@ import (
 	"github.com/rvben/shinyhub/internal/announcementui"
 	"github.com/rvben/shinyhub/internal/appnav"
 	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/config"
+	"github.com/rvben/shinyhub/internal/envui"
 	"github.com/rvben/shinyhub/internal/favicon"
 	"github.com/rvben/shinyhub/internal/supportui"
 	xhtml "golang.org/x/net/html"
@@ -72,11 +74,12 @@ func overlaySnippet(slug string) string {
 // what keeps a script from being injected without its hash, which would leave a
 // CSP-enforcing app with a blocked script and a console error.
 type pageScript struct {
-	snippet  string
-	render   func() string // optional markup is materialized only after admission
-	cspHash  string
-	required bool
-	fallback string
+	snippet     string
+	render      func() string // optional markup is materialized only after admission
+	cspHash     string
+	required    bool
+	fallback    string
+	environment *config.EnvironmentConfig
 }
 
 // overlayPageScript is the status overlay as an injectable script.
@@ -388,7 +391,7 @@ func (p *Proxy) relaxEncodingForInjection(req *http.Request) {
 
 // injectsPageHTML reports whether any page-level enhancement is enabled.
 func (p *Proxy) injectsPageHTML() bool {
-	return p.devReload.Load() != nil || p.browserSessions.Load() != nil || p.announcementsEnabled.Load() || p.statusOverlay.Load() || p.appNav.Load() != nil || p.appFavicon.Load() || p.supportSessions.Load()
+	return p.environment.Load() != nil || p.devReload.Load() != nil || p.browserSessions.Load() != nil || p.announcementsEnabled.Load() || p.statusOverlay.Load() || p.appNav.Load() != nil || p.appFavicon.Load() || p.supportSessions.Load()
 }
 
 // decorateAppPage gives one of ShinyHub's own app pages its contextual favicon
@@ -403,13 +406,20 @@ func (p *Proxy) injectsPageHTML() bool {
 //
 // The status overlay is deliberately not added to these pages. They carry their
 // own reload logic, which is the same job.
-func (p *Proxy) decorateAppPage(page, slug string, r *http.Request) string {
+func (p *Proxy) decorateAppPage(page, slug string, r *http.Request, platformIdentity ...bool) string {
 	out := []byte(page)
-	if p.appFavicon.Load() {
+	if p.appFavicon.Load() && !(len(platformIdentity) > 0 && platformIdentity[0]) {
 		out, _ = favicon.Ensure(out, favicon.AppURL(slug))
 		out, _ = favicon.SetTitle(out, p.appPageTitle(slug))
 	}
+	if e := p.environment.Load(); e != nil {
+		out, _ = favicon.PrefixTitle(out, e.Prefix(), p.appPageTitle(slug))
+		out, _ = favicon.ReplaceIcons(out, envui.IconURL(e))
+	}
 	var snippets strings.Builder
+	if e := p.environment.Load(); e != nil {
+		snippets.WriteString(envui.Snippet(e, r.URL, true))
+	}
 	if session := p.browserPageScript(r, slug); session != nil {
 		snippets.WriteString(session.snippet)
 	}
@@ -448,6 +458,9 @@ func (p *Proxy) pageScriptsFor(r *http.Request, slug string, deploymentID int64)
 		return nil
 	}
 	var scripts []pageScript
+	if e := p.environment.Load(); e != nil {
+		scripts = append(scripts, pageScript{environment: e, cspHash: envui.CSPHash})
+	}
 	if settings := p.devReload.Load(); settings != nil {
 		scripts = append(scripts, devReloadPageScript(settings))
 	}
@@ -531,12 +544,16 @@ func injectPageScripts(scripts func(*http.Request) []pageScript) func(*http.Resp
 // always wins. Script CSP changes and favicon insertion are independent: an app
 // that refuses ShinyHub's scripts can still receive its favicon when its image
 // policy permits same-origin resources.
-func injectPageHTML(scripts func(*http.Request) []pageScript, faviconHref, titleFallback func() string) func(*http.Response) error {
+func injectPageHTML(scripts func(*http.Request) []pageScript, faviconHref, titleFallback func() string, environments ...func() *config.EnvironmentConfig) func(*http.Response) error {
 	return func(resp *http.Response) error {
 		if resp == nil || resp.Request == nil {
 			return nil
 		}
 		wanted := scripts(resp.Request)
+		var environment *config.EnvironmentConfig
+		if len(environments) > 0 {
+			environment = environments[0]()
+		}
 		if !injectableResponse(resp) {
 			replaceWithRequiredFallback(resp, wanted)
 			return nil
@@ -549,7 +566,7 @@ func injectPageHTML(scripts func(*http.Request) []pageScript, faviconHref, title
 		if titleFallback != nil {
 			title = titleFallback()
 		}
-		if len(wanted) == 0 && href == "" && title == "" {
+		if len(wanted) == 0 && href == "" && title == "" && environment == nil {
 			return nil
 		}
 
@@ -584,8 +601,27 @@ func injectPageHTML(scripts func(*http.Request) []pageScript, faviconHref, title
 			resp.Body = io.NopCloser(bytes.NewReader(buf))
 		}
 
-		if !cspAllowsSelfImage(resp.Header.Get("Content-Security-Policy")) {
+		iconAllowed := cspAllowsSelfImage(resp.Header.Get("Content-Security-Policy"))
+		if environment != nil {
+			iconAllowed = !containsMetaCSP(buf)
+			for _, policy := range resp.Header.Values("Content-Security-Policy") {
+				if strings.Contains(policy, ",") || !cspAllowsSelfImage(policy) {
+					iconAllowed = false
+				}
+			}
+		}
+		if !iconAllowed {
 			href = ""
+		}
+		identityChanged := false
+		if environment != nil {
+			var changed bool
+			buf, changed = favicon.PrefixTitle(buf, environment.Prefix(), title)
+			identityChanged = identityChanged || changed
+			if iconAllowed {
+				buf, changed = favicon.ReplaceIcons(buf, envui.IconURL(environment))
+				identityChanged = identityChanged || changed
+			}
 		}
 		headMarkup := favicon.FallbackMarkup(buf, href, title)
 		var bodyMarkup []string
@@ -606,6 +642,9 @@ func injectPageHTML(scripts func(*http.Request) []pageScript, faviconHref, title
 				if lastHTMLTag(buf, "</body>") >= 0 {
 					for _, script := range wanted {
 						markup := script.snippet
+						if script.environment != nil {
+							markup = envui.Snippet(script.environment, resp.Request.URL, iconAllowed)
+						}
 						if script.render != nil {
 							markup = script.render()
 						}
@@ -632,7 +671,7 @@ func injectPageHTML(scripts func(*http.Request) []pageScript, faviconHref, title
 		}
 
 		out, changed := splicePageMarkup(buf, headMarkup, bodyMarkup...)
-		if !changed {
+		if !changed && !identityChanged {
 			restore()
 			return nil
 		}
@@ -831,5 +870,6 @@ func (p *Proxy) modifyResponseFor(slug string, deploymentIDs ...int64) func(*htt
 			}
 			return p.appPageTitle(slug)
 		},
+		p.environment.Load,
 	), p.devReloadResponse)
 }

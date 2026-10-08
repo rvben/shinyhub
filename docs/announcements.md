@@ -28,6 +28,9 @@ When multiple notices are active, Critical comes first, then Warning, then Infor
 
 Successful mutations and their audit records commit together. Only platform-wide administrators may manage notices. App-scoped administrator credentials cannot do so. An unrestricted administrator service credential can use the API for automation.
 
+For persistent instance identity, use [branding.environment](branding.md#environment-identity).
+Its strip has a separate slot and is never hidden by announcement ordering.
+
 ## Delivery behavior and limitations
 
 Visible, connected pages refresh approximately every 30 seconds and at publication boundaries, with a refresh on returning to a tab. Publication, editing, and withdrawal normally reach an already-open page within 45 seconds. Background tabs refresh when they become visible. Requests have a timeout and bounded retry backoff; a failed read keeps the last known notice until its scheduled expiry.

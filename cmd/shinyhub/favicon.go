@@ -17,7 +17,7 @@ type appFaviconStore interface {
 // middleware wraps this handler in production, so private app metadata remains
 // private. Emoji wins over an uploaded image, matching every in-product avatar;
 // an iconless app inherits the effective platform favicon.
-func appFaviconHandler(st appFaviconStore, platform http.Handler) http.Handler {
+func appFaviconHandler(st appFaviconStore, platform http.Handler, environment ...bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		slug := r.PathValue("slug")
 		app, err := st.GetAppBySlug(slug)
@@ -27,6 +27,11 @@ func appFaviconHandler(st appFaviconStore, platform http.Handler) http.Handler {
 				return
 			}
 			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+
+		if len(environment) > 0 && environment[0] {
+			platform.ServeHTTP(w, r)
 			return
 		}
 

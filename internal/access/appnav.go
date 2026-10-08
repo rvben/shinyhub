@@ -3,6 +3,10 @@ package access
 import (
 	"github.com/rvben/shinyhub/internal/announcementui"
 	"github.com/rvben/shinyhub/internal/appnav"
+	"github.com/rvben/shinyhub/internal/config"
+	"github.com/rvben/shinyhub/internal/envui"
+	"github.com/rvben/shinyhub/internal/favicon"
+	"net/url"
 )
 
 // Option adjusts optional middleware behaviour. Options are variadic so a
@@ -18,6 +22,7 @@ type options struct {
 	// there is no state where the switcher is on with a home link nobody set.
 	nav           *navSettings
 	announcements bool
+	environment   *config.EnvironmentConfig
 }
 
 type navSettings struct{ homeURL string }
@@ -51,10 +56,15 @@ func newOptions(opts []Option) options {
 // put it. Declining leaves the page byte for byte as it was: the switcher is an
 // addition to these pages, never a precondition for serving them.
 func (o options) withAppNav(page []byte, slug, name string) []byte {
-	if slug == "" || (o.nav == nil && !o.announcements) {
+	if slug == "" || (o.nav == nil && !o.announcements && o.environment == nil) {
 		return page
 	}
 	snippet := ""
+	if o.environment != nil {
+		page, _ = favicon.PrefixTitle(page, o.environment.Prefix(), "ShinyHub")
+		page, _ = favicon.ReplaceIcons(page, envui.IconURL(o.environment))
+		snippet += envui.Snippet(o.environment, &url.URL{Path: "/app/" + slug + "/"}, true)
+	}
 	if o.announcements {
 		snippet += announcementui.Snippet(slug)
 	}
@@ -76,3 +86,8 @@ func WithSupportDashboard(dashboardURL string) Option {
 
 // WithAnnouncements includes optional public notices on platform-owned app pages.
 func WithAnnouncements() Option { return func(o *options) { o.announcements = true } }
+
+// WithEnvironment labels ShinyHub-owned access and never-deployed pages.
+func WithEnvironment(e *config.EnvironmentConfig) Option {
+	return func(o *options) { o.environment = e }
+}

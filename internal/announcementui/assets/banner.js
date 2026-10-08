@@ -106,13 +106,16 @@
     if (consoleTarget) { const target = document.querySelector(consoleTarget); if(target) {target.hidden=host.hidden;if(host.parentNode!==target) target.append(host);} return; }
     const html = document.documentElement;
     const support = document.getElementById('shinyhub-support-session');
-    if (support?.parentNode===html) {
-      if (support.nextElementSibling!==host) support.after(host);
+    const environment = document.getElementById('shinyhub-environment');
+    const preceding = environment?.parentNode === html ? environment : support;
+    if (preceding?.parentNode===html) {
+      if (preceding.nextElementSibling!==host) preceding.after(host);
     } else if(host.parentNode!==html || host.nextSibling!==document.body) html.insertBefore(host,document.body || null);
-    const supportHeight = support?.getBoundingClientRect().height || 0;
+    const supportHeight = (support?.getBoundingClientRect().height || 0) + (environment?.getBoundingClientRect().height || 0);
     host.style.cssText = `display:${host.hidden?'none':'block'}!important;position:sticky!important;top:${supportHeight}px!important;z-index:2147483646!important;width:100%!important;isolation:isolate!important;`;
     html.style.setProperty('--shinyhub-announcement-height',`${host.hidden ? 0 : host.getBoundingClientRect().height}px`);
   }
+  window.addEventListener('shinyhub:environment-resize', place);
   function render() {
     const active = eligible(); const next = JSON.stringify(active);
     if(next===signature) {place();return;}
