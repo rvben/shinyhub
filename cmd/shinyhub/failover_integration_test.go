@@ -80,9 +80,10 @@ func TestFailover_StandbyTakesOverAndRoutes(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// The DB stores the lease expiry in whole seconds, so a sub-second TTL is
-	// clamped to 1s; use a whole-second TTL so the local and DB deadlines agree.
+	// clamped to 1s. Leave room for second-boundary truncation so B cannot
+	// acquire between A becoming ready and its first scheduled renewal.
 	const (
-		ttl        = 1 * time.Second
+		ttl        = 3 * time.Second
 		renewEvery = 100 * time.Millisecond
 	)
 
