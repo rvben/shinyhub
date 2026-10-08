@@ -3787,7 +3787,7 @@ func resolveClientIP(resolver func(*http.Request) string, r *http.Request) strin
 // app backend, nor accepted from one via Set-Cookie.
 func isInternalCookie(name string) bool {
 	switch name {
-	case auth.SessionCookieName, auth.SupportSessionCookieName, auth.SupportSessionGuardCookieName, auth.CSRFCookieName, auth.OAuthStateCookieName:
+	case auth.ForwardAuthSignedOutCookie, auth.SecureForwardAuthSignedOutCookie, auth.ForwardAuthSessionCookie, auth.SecureForwardAuthSessionCookie, auth.LogoutHandoffCookie, auth.SecureLogoutHandoffCookie, auth.SessionCookieName, auth.SupportSessionCookieName, auth.SupportSessionGuardCookieName, auth.CSRFCookieName, auth.OAuthStateCookieName:
 		return true
 	}
 	return strings.HasPrefix(name, cookiePrefix) || strings.HasPrefix(name, clientCookiePrefix)

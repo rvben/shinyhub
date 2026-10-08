@@ -914,6 +914,8 @@ func (s *Server) buildRouter() chi.Router {
 	// (so there's no CSRF token cookie yet). The handler does its own Origin/Referer
 	// same-origin check; see handleSessionHandoff for the reasoning.
 	r.Post("/api/auth/handoff", s.handleSessionHandoff)
+	r.Post(auth.ForwardAuthResumePath, s.handleForwardAuthResume)
+	r.Get(auth.ForwardAuthLogoutPath, s.handleForwardAuthLogout)
 	r.With(s.rateLimitByIP(s.oauthLimiter)).Get("/api/auth/github/login", s.handleGitHubLogin)
 	r.With(s.rateLimitByIP(s.oauthLimiter)).Get("/api/auth/github/callback", s.handleGitHubCallback)
 	r.With(s.rateLimitByIP(s.oauthLimiter)).Get("/api/auth/google/login", s.handleGoogleLogin)
@@ -943,8 +945,8 @@ func (s *Server) buildRouter() chi.Router {
 		// just discard its own session cookie.
 		r.Post("/api/auth/logout", s.handleLogout)
 		// "Sign out everywhere", the self-service half of the admin-only
-		// /api/users/{id}/revoke-sessions. Logout ends the one credential that
-		// called it; this ends them all.
+		// /api/users/{id}/revoke-sessions. Logout ends presented session families;
+		// this ends every session belonging to the account.
 		r.Post("/api/auth/revoke-sessions", s.handleRevokeOwnSessions)
 		r.Get("/api/auth/me", s.handleMe)
 		// Verifies the caller's current password before accepting a change, so

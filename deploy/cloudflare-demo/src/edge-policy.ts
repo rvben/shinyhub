@@ -98,7 +98,7 @@ export const robotsBody = "User-agent: *\nDisallow: /\n";
 // a 404 the edge can produce for free. TestDemoWorkerAppOriginMatchesServer
 // pins the two lists together.
 const APP_ORIGIN_PREFIXES = ["/app/"];
-const APP_ORIGIN_EXACT = new Set(["/healthz", "/readyz", "/favicon.ico"]);
+const APP_ORIGIN_EXACT = new Set(["/healthz", "/readyz", "/api/app/logout", "/favicon.ico"]);
 
 // Reports whether the app origin serves pathname.
 export function appOriginAdmits(pathname: string): boolean {

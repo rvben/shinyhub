@@ -99,7 +99,7 @@ func TestBrowserSessionRealBrowser(t *testing.T) {
 			if isolated {
 				appURL = front.URL
 				origin, _ := url.Parse(appURL)
-				appHandler = appOriginDispatch(origin, nil, store, cfg.Auth.Secret, middleware(appOriginRedirectHandler(store, origin)), appHandler, cfg.Auth)
+				appHandler = appOriginDispatch(origin, nil, store, cfg.Auth.Secret, middleware(appOriginRedirectHandler(store, origin, nil)), appHandler, cfg.Auth)
 			}
 			mux.Handle("/app/", appHandler)
 			mux.Handle("GET /app/{slug}/.shinyhub/session.json", middleware(http.HandlerFunc(srv.HandleAppSession)))

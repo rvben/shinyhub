@@ -43,18 +43,22 @@ func (s *Server) handleGetProviders(w http.ResponseWriter, r *http.Request) {
 		// Local reports whether the built-in username/password form is usable.
 		// False for an SSO-only deployment (auth.local_login: false); the login
 		// screen hides the password form when false.
-		Local       bool     `json:"local"`
-		ForwardAuth bool     `json:"forward_auth"`
-		GitHub      bool     `json:"github"`
-		Google      bool     `json:"google"`
-		OIDC        oidcInfo `json:"oidc"`
+		Local             bool     `json:"local"`
+		ForwardAuth       bool     `json:"forward_auth"`
+		ForwardAuthResume bool     `json:"forward_auth_resume"`
+		ForwardAuthLogout bool     `json:"forward_auth_logout"`
+		GitHub            bool     `json:"github"`
+		Google            bool     `json:"google"`
+		OIDC              oidcInfo `json:"oidc"`
 	}
 
 	resp := response{
-		Local:       s.cfg.Auth.LocalLoginEnabled(),
-		ForwardAuth: s.cfg.Auth.ForwardAuth.Enabled,
-		GitHub:      s.github != nil,
-		Google:      s.googleOAuth != nil,
+		Local:             s.cfg.Auth.LocalLoginEnabled(),
+		ForwardAuth:       s.cfg.Auth.ForwardAuth.Enabled,
+		ForwardAuthResume: s.cfg.Auth.ForwardAuth.Enabled,
+		ForwardAuthLogout: s.cfg.Auth.ForwardAuth.Enabled && (s.cfg.Auth.ForwardAuth.LogoutURL != "" || s.cfg.Server.AppOrigin != ""),
+		GitHub:            s.github != nil,
+		Google:            s.googleOAuth != nil,
 		OIDC: oidcInfo{
 			Enabled: s.oidcProvider != nil,
 		},

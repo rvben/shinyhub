@@ -94,8 +94,9 @@ func (s *Server) handleCreateSupportSession(w http.ResponseWriter, r *http.Reque
 	// qualify.
 	token := auth.TokenInfoFromContext(r.Context())
 	credential := auth.CredentialInfoFromContext(r.Context())
-	if (token == nil && (credential != nil || !s.cfg.Auth.ForwardAuth.Enabled)) ||
-		(token != nil && (token.AuthTime.IsZero() || time.Since(token.AuthTime) > supportSessionRecentAuthWindow)) {
+	forwardFresh := auth.ForwardAuthFromContext(r.Context()) && credential == nil
+	if !forwardFresh && ((token == nil && (credential != nil || !s.cfg.Auth.ForwardAuth.Enabled)) ||
+		(token != nil && (token.AuthTime.IsZero() || time.Since(token.AuthTime) > supportSessionRecentAuthWindow))) {
 		writeJSON(w, http.StatusForbidden, map[string]string{
 			"error": "Recent authentication is required. Sign in again, then retry.",
 			"code":  "recent_authentication_required",

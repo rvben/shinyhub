@@ -8,6 +8,7 @@ import { createNewPersonController } from '/static/views/new-person.js';
 import { createSupportSessionAction } from '/static/views/support-session-settings.js';
 import { createRouter } from '/static/router.js';
 import { startAuthenticatedRouter } from '/static/auth-navigation.js';
+import { logoutTarget, reconnectForwardAuth } from '/static/views/logout-navigation.js';
 import { createMetricsController } from '/static/metrics-controller.js';
 import { mountAppsGrid } from '/static/views/apps-grid.js';
 import { mountProjectDetail } from '/static/views/project-detail.js';
@@ -2722,7 +2723,8 @@ document.addEventListener('DOMContentLoaded', () => {
       const resp = await api('/api/auth/logout', { method: 'POST' });
       if (!resp.ok && resp.status !== 401) throw new Error(`HTTP ${resp.status}`);
       suppressUnloadGuard = true;
-      window.location.assign('/identity');
+      sessionController.end();
+      window.location.assign(logoutTarget(loginProviders, '/identity'));
     } catch {
       consumeSupportDraft(sessionStorage);
       supportReauth.disabled = false;
@@ -5993,11 +5995,18 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch { /* clipboard blocked; user can select text manually */ }
   });
 
-  document.querySelector('.login-recovery')?.addEventListener('click', () => {
-    // Reload even when the current URL contains a fragment: a same-URL link
-    // can become an in-page jump and never reach the authentication gateway.
-    suppressUnloadGuard = true;
-    window.location.reload();
+  document.querySelector('.login-recovery')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const destination = await reconnectForwardAuth(api, loginProviders);
+      suppressUnloadGuard = true;
+      if (destination === 'upstream') window.location.assign('/login');
+      else window.location.reload();
+    } catch (error) {
+      setError(loginError, error.message);
+      button.disabled = false;
+    }
   });
 
   loginForm.addEventListener('submit', async (event) => {
@@ -6102,7 +6111,7 @@ document.addEventListener('DOMContentLoaded', () => {
       // shell falls through to the login view - so a full navigation does the
       // right thing in both cases without the client knowing the branding config.
       suppressUnloadGuard = true;
-      window.location.assign('/');
+      window.location.assign(logoutTarget(loginProviders));
       return;
     }
     flashToast(`Logout failed (${resp.status})`, 'error');
@@ -6170,11 +6179,13 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  let loginProviders = null;
   async function loadProviders() {
     try {
       const resp = await api('/api/auth/providers');
       if (!resp.ok) return;
       const data = await resp.json();
+      loginProviders = data;
       // Reveal only the SSO buttons the server reports configured; the GitHub and
       // Google buttons start hidden in index.html, so a failed fetch or a
       // native-only server never shows a dead button (see login-providers.js).
@@ -6692,7 +6703,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Persist any /#deploy=<slug> hash before the auth check so the slug
     // survives the login redirect in case the user is not authenticated.
     persistDeployHash();
-    loadProviders();
+    await loadProviders();
     setError(loginError, '');
 
     let response;

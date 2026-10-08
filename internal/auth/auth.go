@@ -32,8 +32,9 @@ var (
 type RevocationChecker func(jti string) (bool, error)
 
 type Claims struct {
-	UserID int64  `json:"uid"`
-	Role   string `json:"role"`
+	Purpose string `json:"purpose,omitempty"`
+	UserID  int64  `json:"uid"`
+	Role    string `json:"role"`
 	// AuthTime is the original login time. Unlike IssuedAt/ExpiresAt it is NOT
 	// reset by a sliding renewal, so it bounds the absolute session lifetime.
 	AuthTime *jwt.NumericDate `json:"auth_time,omitempty"`
@@ -175,7 +176,7 @@ func issueUserJWTAt(u *ContextUser, secret string, authTime, expiresAt time.Time
 	return issueUserJWTAtWithID(u, secret, authTime, expiresAt, "")
 }
 
-func issueUserJWTAtWithID(u *ContextUser, secret string, authTime, expiresAt time.Time, jti string) (string, *TokenInfo, error) {
+func issueUserJWTAtWithID(u *ContextUser, secret string, authTime, expiresAt time.Time, jti string, purpose ...string) (string, *TokenInfo, error) {
 	if !expiresAt.After(time.Now()) {
 		return "", nil, ErrSupportSessionInvalid
 	}
@@ -200,6 +201,9 @@ func issueUserJWTAtWithID(u *ContextUser, secret string, authTime, expiresAt tim
 			NotBefore: jwt.NewNumericDate(now),
 		},
 	}
+	if len(purpose) > 0 {
+		claims.Purpose = purpose[0]
+	}
 	if support := u.SupportSession; support != nil {
 		claims.SupportSessionID = support.ID
 		claims.SupportAppID = support.AppID
@@ -220,6 +224,10 @@ func issueUserJWTAtWithID(u *ContextUser, secret string, authTime, expiresAt tim
 // the jti against the revocation list. Returns ErrTokenRevoked when the token
 // is on the list so callers can distinguish signature failures from logout.
 func ValidateJWT(tokenStr, secret string, revoked RevocationChecker) (*Claims, error) {
+	return validateJWT(tokenStr, secret, revoked, "")
+}
+
+func validateJWT(tokenStr, secret string, revoked RevocationChecker, purpose string) (*Claims, error) {
 	token, err := jwt.ParseWithClaims(tokenStr, &Claims{}, func(t *jwt.Token) (any, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
@@ -230,7 +238,7 @@ func ValidateJWT(tokenStr, secret string, revoked RevocationChecker) (*Claims, e
 		return nil, err
 	}
 	claims, ok := token.Claims.(*Claims)
-	if !ok || !token.Valid {
+	if !ok || !token.Valid || claims.Purpose != purpose {
 		return nil, fmt.Errorf("invalid token")
 	}
 	if revoked != nil {

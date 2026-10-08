@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **auth**: keep browser logout effective behind forward-auth, atomically revoke every presented session family, preserve account switching across app origins, and support configured upstream GET/POST logout. Family-less app pages establish a session through the control host; simultaneous document loads can retain older connection families until expiry (use sign out everywhere for complete account-wide termination).
 - **fleet**: redeploy matching source when a failed deployment leaves an unresolved compatibility barrier, republishing the target producers before starting consumers. Plans explain corrective deployment, guard concurrent repairs, and reject targets without a repair-capable producer before upload. Deliberately stopped apps retain manual recovery; older servers report recovery guidance.
 - **dev**: keep the terminal development view usable in narrow and short terminal splits instead of requiring at least 42 columns and 14 rows. Compact layouts retain app state, logs, controls, scrollable help, and resource details, and adapt when resized.
 

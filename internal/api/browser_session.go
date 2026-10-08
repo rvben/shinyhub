@@ -24,7 +24,7 @@ func (s *Server) HandleAppSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var session *browserSessionResponse
-	if ti := auth.TokenInfoFromContext(r.Context()); ti != nil {
+	if ti := auth.TokenInfoFromContext(r.Context()); ti != nil && !auth.ForwardAuthFromContext(r.Context()) {
 		var err error
 		session, err = s.setBrowserSession(w, r, u, ti.AuthTime, ti.JTI)
 		if errors.Is(err, auth.ErrSessionExpired) {

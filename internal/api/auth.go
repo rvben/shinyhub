@@ -437,43 +437,9 @@ func (s *Server) handleSessionLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	u := auth.UserFromContext(r.Context())
-	if u != nil {
-		// Revoke the caller's own JWT so it cannot be reused for the remainder
-		// of its signed lifetime. Only JWT-authenticated requests populate
-		// TokenInfo; API-key callers have no jti to revoke.
-		tokenRevoked := false
-		revocationFailed := false
-		if t := auth.TokenInfoFromContext(r.Context()); t != nil && t.JTI != "" {
-			// A browser JWT can also be presented as Bearer. Retain revocation
-			// through the session deadline regardless of its request transport.
-			expiresAt := s.browserSessionRevocationExpiry(t.AuthTime, t.ExpiresAt)
-			if err := s.store.RevokeToken(t.JTI, u.ID, expiresAt); err != nil {
-				slog.Warn("revoke token on logout", "user", u.Username, "err", err)
-				revocationFailed = true
-			} else {
-				tokenRevoked = true
-			}
-		}
-		s.logAuditEvent(r, db.AuditEventParams{
-			UserID:       &u.ID,
-			Action:       "logout",
-			ResourceType: "user",
-			ResourceID:   u.Username,
-			// A logout that revoked nothing leaves a working credential behind:
-			// either the caller authenticated with an API key, which logout does
-			// not touch, or the revocation failed. Both are worth being able to
-			// see afterwards, and neither is visible from the action alone.
-			Detail:    db.AuditDetail(map[string]any{"token_revoked": tokenRevoked}),
-			IPAddress: s.ClientIP(r),
-		})
-		if revocationFailed {
-			writeError(w, http.StatusServiceUnavailable, "could not end session; try again")
-			return
-		}
+	if ok, _ := s.endBrowserSession(w, r, "logout"); ok {
+		w.WriteHeader(http.StatusNoContent)
 	}
-	auth.ClearSessionCookie(w, r, s.cfg.TrustedProxyNets)
-	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleRevokeOwnSessions ends every session and bearer token for the calling
@@ -522,6 +488,10 @@ func (s *Server) handleRevokeOwnSessions(w http.ResponseWriter, r *http.Request)
 	// The caller's own cookie is now dead too, so clear it rather than leave the
 	// browser presenting a credential the server will reject on every request.
 	auth.ClearSessionCookie(w, r, s.cfg.TrustedProxyNets)
+	if auth.ForwardAuthFromContext(r.Context()) && auth.TokenInfoFromContext(r.Context()) != nil {
+		auth.ClearForwardAuthSessionCookie(w, r, s.cfg.TrustedProxyNets)
+		auth.SetForwardAuthSignedOut(w, r, s.cfg.TrustedProxyNets)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -535,7 +505,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	var session *browserSessionResponse
 	// A forward-auth identity can coexist with a stale cookie. Only a JWT
 	// authenticated from that cookie is eligible for browser renewal.
-	if r.Header.Get("Authorization") == "" {
+	if r.Header.Get("Authorization") == "" && !auth.ForwardAuthFromContext(r.Context()) {
 		if ti := auth.TokenInfoFromContext(r.Context()); ti != nil {
 			if _, err := r.Cookie(auth.SessionCookieName); err == nil {
 				var err error
@@ -1208,55 +1178,14 @@ func (s *Server) handleSessionHandoff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Revoke a valid session before clearing it. A failed write must not report
-	// a successful handoff while leaving a renewable credential behind. Invalid,
-	// expired, or missing cookies can safely be cleared without revocation.
-	if c, err := r.Cookie(auth.SessionCookieName); err == nil && c.Value != "" {
-		// Verify signature and expiry independently of the database. A failed
-		// revocation lookup must not be mistaken for an invalid cookie and
-		// silently turn a storage outage into a successful logout redirect.
-		if claims, err := auth.ValidateJWT(c.Value, s.cfg.Auth.Secret, nil); err == nil {
-			_, lookupErr := s.store.GetUserByID(claims.UserID)
-			if lookupErr != nil && !errors.Is(lookupErr, db.ErrNotFound) {
-				writeError(w, http.StatusServiceUnavailable, "could not end session; try again")
-				return
-			}
-			// A deleted account cannot authenticate. It needs no revocation
-			// row, whose foreign key would prevent saving it anyway.
-			if lookupErr == nil {
-				expiry := time.Time{}
-				if claims.ExpiresAt != nil {
-					expiry = claims.ExpiresAt.Time
-				}
-				var authTime time.Time
-				if claims.AuthTime != nil {
-					authTime = claims.AuthTime.Time
-				}
-				expiry = s.browserSessionRevocationExpiry(authTime, expiry)
-				if err := s.store.RevokeToken(claims.ID, claims.UserID, expiry); err != nil {
-					slog.Warn("revoke token on handoff", "user", claims.Subject, "err", err)
-					writeError(w, http.StatusServiceUnavailable, "could not end session; try again")
-					return
-				}
-				s.logAuditEvent(r, db.AuditEventParams{
-					UserID:       &claims.UserID,
-					Action:       "logout_handoff",
-					ResourceType: "user",
-					ResourceID:   claims.Subject,
-					// The token id is what ties this event to the session that was
-					// revoked, so a reader tracing a specific session can follow it
-					// from issue to revocation rather than seeing only that some
-					// session of this user ended.
-					Detail: auditDetailJSON(map[string]any{
-						"token_id": claims.ID,
-					}),
-					IPAddress: s.ClientIP(r),
-				})
-			}
-		}
+	ok, appHandoff := s.endBrowserSession(w, r, "logout_handoff")
+	if !ok {
+		return
 	}
-
-	auth.ClearSessionCookie(w, r, s.cfg.TrustedProxyNets)
+	if s.cfg.Auth.ForwardAuth.Enabled && (s.cfg.Auth.ForwardAuth.LogoutURL != "" || appHandoff) {
+		http.Redirect(w, r, auth.ForwardAuthLogoutPath, http.StatusSeeOther)
+		return
+	}
 
 	target := "/login"
 	if next := safeNextPath(r.FormValue("next")); next != "" {

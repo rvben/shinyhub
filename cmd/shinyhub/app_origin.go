@@ -85,7 +85,7 @@ func appOriginDispatch(
 	})
 }
 
-func appOriginRedirectHandler(store appLaunchStore, appOrigin *url.URL) http.Handler {
+func appOriginRedirectHandler(store appLaunchStore, appOrigin *url.URL, trusted []*net.IPNet) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			http.Error(w, "app traffic must use the configured app origin", http.StatusMisdirectedRequest)
@@ -108,7 +108,7 @@ func appOriginRedirectHandler(store appLaunchStore, appOrigin *url.URL) http.Han
 		// keep working on the isolated origin.
 		if user := auth.UserFromContext(r.Context()); user != nil {
 			rawCode, codeHash, err := newAppLaunchCode()
-			if err != nil || store.CreateAppLaunchCodeWithSession(codeHash, user.ID, slug, auth.TokenInfoFromContext(r.Context()), user.TokenEpoch) != nil {
+			if err != nil || store.CreateAppLaunchCodeWithSession(codeHash, user.ID, slug, appLaunchSession(r, trusted), user.TokenEpoch) != nil {
 				http.Error(w, "could not create app session", http.StatusInternalServerError)
 				return
 			}
@@ -161,6 +161,10 @@ func consumeAppLaunchWithSharedHost(w http.ResponseWriter, r *http.Request, stor
 		http.Error(w, "support launch required", http.StatusForbidden)
 		return
 	}
+	if user.SupportSession == nil && (original == nil || original.JTI == "") && auth.ForwardAuthSignedOut(r, trustedNets) {
+		http.Error(w, "launch requires a current browser session", http.StatusUnauthorized)
+		return
+	}
 	var token string
 	var tokenInfo *auth.TokenInfo
 	if user.SupportSession != nil {
@@ -188,6 +192,25 @@ func consumeAppLaunchWithSharedHost(w http.ResponseWriter, r *http.Request, stor
 		http.Error(w, "could not create app session", http.StatusInternalServerError)
 		return
 	}
+	if user.SupportSession == nil && original != nil {
+		if original.ForwardAuthSuppressed {
+			auth.SetForwardAuthSignedOut(w, r, trustedNets)
+		}
+		if original.ForwardAuthFamily {
+			forwarded := auth.UserFromContext(r.Context())
+			if auth.ForwardAuthFromContext(r.Context()) && forwarded != nil && forwarded.ID == user.ID {
+				auth.ClearForwardAuthSignedOut(w, r, trustedNets)
+			}
+			if len(policies) > 0 && policies[0].ForwardAuth.Enabled {
+				tracking, _, trackErr := auth.IssueForwardAuthSession(user, jwtSecret, tokenInfo.AuthTime, policies[0].BrowserSessionMaxAge(), tokenInfo.JTI)
+				if trackErr != nil {
+					http.Error(w, "could not create app session", http.StatusServiceUnavailable)
+					return
+				}
+				auth.SetForwardAuthSessionCookie(w, r, tracking, trustedNets)
+			}
+		}
+	}
 	if support := user.SupportSession; support != nil {
 		if support.AppSlug != slug || store.ActivateSupportSession(support.ID, tokenInfo.JTI, tokenInfo.ExpiresAt) != nil {
 			_ = store.AbortSupportSession(support.ID, "activation_failed")
@@ -208,6 +231,9 @@ func consumeAppLaunchWithSharedHost(w http.ResponseWriter, r *http.Request, stor
 	}
 	query := r.URL.Query()
 	query.Del(appLaunchQueryParam)
+	if original != nil && original.ForwardAuthFamily && len(policies) > 0 && policies[0].ForwardAuth.Enabled {
+		query.Set(auth.ForwardAuthCookieCheckParam, "1")
+	}
 	clean := *r.URL
 	clean.RawQuery = query.Encode()
 	clean.Fragment = ""
@@ -281,4 +307,29 @@ func sameHost(a, b string) bool {
 	canonicalA, errA := originhost.Authority(a)
 	canonicalB, errB := originhost.Authority(b)
 	return errA == nil && errB == nil && canonicalA == canonicalB
+}
+
+func appLaunchSession(r *http.Request, trusted []*net.IPNet) *auth.TokenInfo {
+	ti := auth.TokenInfoFromContext(r.Context())
+	if ti == nil {
+		return nil
+	}
+	session := *ti
+	session.ForwardAuthFamily = auth.ForwardAuthFromContext(r.Context())
+	session.ForwardAuthSuppressed = auth.ForwardAuthSignedOut(r, trusted)
+	return &session
+}
+
+// Intercept launches before specific app routes, so adding a launch query can
+// never bypass family checks on favicons, navigation or session endpoints.
+func appOriginLaunchDispatch(next http.Handler, origin *url.URL, store appLaunchStore, secret string, trusted []*net.IPNet, policy config.AuthConfig) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if sameHost(proxytrust.Host(r, trusted), origin.Host) {
+			if code := r.URL.Query().Get(appLaunchQueryParam); code != "" {
+				consumeAppLaunchWithSharedHost(w, r, store, secret, trusted, code, false, policy)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }

@@ -346,3 +346,97 @@ group mappings, including revoking group-derived roles when memberships change.
 service enforces a body limit on the `forward_auth` subrequest make sure it
 allows a `HEAD`-style pass-through for the `/api/apps/{slug}/deploy` path, or
 set a generous limit on the auth service route.
+
+## Browser logout and reconnect
+
+ShinyHub logout revokes all native browser and bearer JWTs presented by the
+request, including its forward-auth browser family. It sets an HttpOnly,
+host-only logout marker, so Caddy's still-valid identity cannot immediately sign
+the browser back in. Refreshing stays logged out. **Reconnect to dashboard** is
+an explicit POST that resumes the upstream identity. Signing in with a native
+account keeps the marker, so the proxy's previous account cannot override it.
+Other browsers and API keys are unaffected.
+
+For an isolated `server.app_origin`, logout first takes the browser through a
+short-lived, one-use handoff to `/api/app/logout` on that origin. It revokes the
+app cookie, including an older independent app session, and blocks upstream
+fallback there. The handoff belongs to the users signed out by the original
+logout; it cannot end another user's session. App launches carry the selected
+native or forward-auth mode to the app origin. New forward-auth app sessions
+share the dashboard's revocation family, including pending launches and live
+connections checked by ShinyHub. Complete the browser redirect chain to finish
+cleanup on both origins. A failed cleanup can be retried while its code remains
+valid (two minutes).
+
+ShinyHub cannot invalidate your custom authentication service's session by
+clearing its own cookie. To end that session too, configure its browser logout
+endpoint:
+
+```yaml
+auth:
+  forward_auth:
+    # Keep your existing enabled/header/shared_secret settings.
+    logout_url: https://auth.example.com/logout
+    logout_method: GET  # or POST
+```
+
+The environment overrides are `SHINYHUB_FORWARD_AUTH_LOGOUT_URL` and
+`SHINYHUB_FORWARD_AUTH_LOGOUT_METHOD`. A same-origin path such as `/sso/logout`
+is also accepted; Caddy must route that path to the authentication service.
+The POST option submits an empty browser form; configure any required public
+parameters in the URL, or provide a service-side bridge for a protocol requiring
+its own CSRF token or additional fields. No ShinyHub credential is sent upstream.
+The custom service decides its signed-out destination and whether an IdP session
+also ends. ShinyHub does not claim that an upstream logout succeeded.
+
+In the gated Caddy setup documented here, keep `forward_auth` on both hosts,
+including the reconnect endpoint and `/api/app/logout`. The app cleanup happens
+before upstream logout, while that identity is still available. Do not exempt
+reconnect: it needs validated identity headers. If the edge needs a new login,
+Reconnect performs a full navigation to `/login`; the logout marker stays set
+and the user can press Reconnect after the edge signs them in. GET requests do
+not resume a session.
+
+A gated edge may show its own sign-in page after upstream logout. Native login
+behind it works while an edge session exists, or through a separately secured
+direct origin. Optional anonymous access requires a custom edge that forwards
+identity when present and allows anonymous requests through consistently;
+Caddy path exclusions alone do not provide that behavior. Exempting app logout
+from edge authentication leaves no identity to match when the app cookie is also
+absent, so that topology cannot guarantee both-origin cleanup.
+
+On upgrade, existing stateless forward-auth connections cannot acquire a
+revocation family retroactively. Use **Sign out everywhere** for affected users
+if those already-open sessions must end immediately; new sessions use the
+browser family. Logout markers and family cookies last for the browser session,
+are reserved from app backends, and use `__Host-` cookie names on HTTPS.
+Forward-auth WebSockets also respect the configured absolute browser session
+age (12 hours by default); connections close when that deadline is reached.
+Fresh families are established by control-host document or same-site frame navigation, or explicit
+Reconnect. A direct app-origin page load without a family redirects through the
+control host and returns with a bound app launch. WebSocket reconnects and API
+fetches cannot create independent families; after expiry, reopen the app page
+or reconnect from the dashboard. Browsers without Fetch Metadata use their
+HTML Accept header for document navigation, including plain-HTTP deployments.
+
+If several control-host document navigations start simultaneously without a
+family cookie, they can still create different families. Logout revokes the
+families presented by the browser; a connection opened under an overwritten
+family may remain until its deadline. Use **Sign out everywhere** when all such
+connections must end. Initial dashboard navigation before opening multiple app
+tabs avoids this startup race. Restored tabs should be reopened after logout.
+
+Edges that inject their own Authorization header still get browser tracking
+when document navigation, Fetch Metadata, or a tracking cookie identifies the
+browser. Bearer-only CLI requests keep their existing logout behavior.
+
+Same-site iframes retain forward-auth session setup. Cross-site frames with
+blocked Lax cookies receive a terminal page linking to the app in a new tab;
+they never fall back to stateless browser authentication. Legacy clients retain normal link navigation. A bound app launch confirms
+cookie persistence before retrying, so a client that blocks app cookies cannot
+enter a control-host/app-host redirect loop.
+
+Forward-auth service clients without browser metadata or cookies retain their
+API access. App traffic requires a browser session family or a native ShinyHub
+credential. Per-browser logout does not revoke the edge credentials of service
+clients; those credentials remain the custom authentication service's responsibility.

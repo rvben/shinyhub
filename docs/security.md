@@ -166,7 +166,7 @@ Three actions end a signed-in session, and they differ in scope on purpose.
 
 | Action | Scope | Who |
 | --- | --- | --- |
-| `POST /api/auth/logout` | The one credential that made the call | Anyone |
+| `POST /api/auth/logout` | Presented native session/bearer JWTs and the browser forward-auth family; API keys remain active | Anyone |
 | `POST /api/auth/revoke-sessions` | Every session and bearer token for your own account | Anyone |
 | `POST /api/users/{id}/revoke-sessions` | Every session and bearer token for another account | Admin |
 

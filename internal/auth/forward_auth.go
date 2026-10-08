@@ -1,14 +1,17 @@
 package auth
 
 import (
+	"context"
 	"crypto/subtle"
 	"errors"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/textproto"
+	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/favicon"
 )
@@ -26,8 +29,14 @@ var ErrReservedIdentity = errors.New("forward auth: identity is reserved")
 // ForwardAuthConfig mirrors config.ForwardAuthConfig. Duplicated here so the auth
 // package has no import cycle on config.
 type ForwardAuthConfig struct {
-	Enabled    bool
-	UserHeader string
+	// Tracking uses the platform secret; the cookie alone never grants identity.
+	AppOriginHost string
+	DashboardURL  string
+	SessionSecret string
+	SessionMaxAge time.Duration
+	Revoked       RevocationChecker
+	Enabled       bool
+	UserHeader    string
 	// SharedSecret is a second factor for the proxy-to-ShinyHub trust channel.
 	// Production config validation requires it when forward-auth is enabled.
 	SharedSecret string
@@ -113,6 +122,22 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 			delForwardAuthHeader(r, cfg.NameHeader)
 			delForwardAuthHeader(r, cfg.EmailHeader)
 
+			onAppHost := forwardAppHost(r, cfg, trustedProxies)
+			launch := onAppHost && r.URL.Query().Get("__shinyhub_launch") != ""
+			resume := r.URL.Path == ForwardAuthResumePath && r.Method == http.MethodPost
+			if ForwardAuthSignedOut(r, trustedProxies) && !resume && r.URL.Path != AppLogoutPath && !launch {
+				if onAppHost && r.URL.Query().Get(ForwardAuthCookieCheckParam) != "" {
+					query := r.URL.Query()
+					query.Del(ForwardAuthCookieCheckParam)
+					clean := *r.URL
+					clean.RawQuery = query.Encode()
+					w.Header().Set("Cache-Control", "no-store")
+					http.Redirect(w, r, clean.RequestURI(), http.StatusSeeOther)
+					return
+				}
+				next.ServeHTTP(w, r)
+				return
+			}
 			if !peerInTrustedProxies(r.RemoteAddr, trustedProxies) {
 				// If the request carries the user header that would authenticate a
 				// user, the operator most likely forgot to add this peer to
@@ -166,6 +191,10 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 				return
 			}
 
+			if resume && !IsDashboardPost(r, trustedProxies) {
+				http.Error(w, "reconnect must originate from the dashboard", http.StatusForbidden)
+				return
+			}
 			user, err := store.GetForwardAuthUser(username)
 			if errors.Is(err, ErrUserNotFound) {
 				user, err = store.CreateForwardAuthUser(username, cfg.DefaultRole)
@@ -230,7 +259,79 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 				user.Email = emailHdr
 			}
 
-			ctx := WithUser(r.Context(), user)
+			if cfg.SessionSecret != "" && forwardFrameBlocked(r) {
+				forwardFrameUnavailable(w, r)
+				return
+			}
+			ctx := context.WithValue(WithUser(r.Context(), user), forwardAuthContextKey{}, true)
+			skipFamily := r.URL.Path == ForwardAuthResumePath || r.URL.Path == AppLogoutPath || launch
+			_, cookieErr := r.Cookie(SessionCookieName)
+			_, trackingErr := ForwardAuthSessionCookieFromRequest(r, trustedProxies)
+			browser := cookieErr == nil || trackingErr == nil || r.Header.Get("Sec-Fetch-Site") != "" || forwardPageLoad(r) || r.Header.Get("Origin") != "" || r.Header.Get("Referer") != "" || r.URL.Path == "/app" || strings.HasPrefix(r.URL.Path, "/app/")
+			if cfg.SessionSecret != "" && !skipFamily && browser {
+				ti, accepted, err := forwardBrowserFamily(w, r, user, cfg, trustedProxies)
+				if errors.Is(err, errForwardFamilyMissing) {
+					if onAppHost && r.URL.Query().Get(ForwardAuthCookieCheckParam) != "" {
+						forwardFrameUnavailable(w, r)
+						return
+					}
+					if onAppHost && forwardPageLoad(r) {
+						base, parseErr := url.Parse(cfg.DashboardURL)
+						if parseErr == nil && base.Host != "" && (base.Scheme == "https" || base.Scheme == "http") {
+							base.Path, base.RawPath, base.RawQuery, base.Fragment = r.URL.Path, r.URL.RawPath, r.URL.RawQuery, ""
+							w.Header().Set("Cache-Control", "no-store")
+							http.Redirect(w, r, base.String(), http.StatusSeeOther)
+							return
+						}
+					}
+					http.Error(w, "browser session required; open the dashboard to reconnect", http.StatusUnauthorized)
+					return
+				}
+				if err != nil {
+					http.Error(w, "could not verify browser session; try again", http.StatusServiceUnavailable)
+					return
+				}
+				if !accepted {
+					// A revoked family suppresses upstream identity without blocking
+					// the login shell. Remove all request credentials so an old
+					// cookie or bearer cannot become a fallback identity.
+					ClearSessionCookie(w, r, trustedProxies)
+					ClearForwardAuthSessionCookie(w, r, trustedProxies)
+					SetForwardAuthSignedOut(w, r, trustedProxies)
+					anonymous := WithTokenInfo(WithUser(r.Context(), nil), nil)
+					anonymous = context.WithValue(anonymous, forwardAuthContextKey{}, false)
+					anonymous = context.WithValue(anonymous, credentialContextKey, (*CredentialInfo)(nil))
+					clean := r.Clone(anonymous)
+					clean.Header.Del("Authorization")
+					clean.Header.Del("Cookie")
+					for _, cookie := range r.Cookies() {
+						if cookie.Name != SessionCookieName && cookie.Name != ForwardAuthSessionCookie && cookie.Name != SecureForwardAuthSessionCookie {
+							clean.AddCookie(cookie)
+						}
+					}
+					if onAppHost && forwardPageLoad(r) {
+						base, parseErr := url.Parse(cfg.DashboardURL)
+						if parseErr == nil && base.Host != "" && (base.Scheme == "https" || base.Scheme == "http") {
+							base.Path, base.RawPath, base.Fragment = "/login", "", ""
+							base.RawQuery = url.Values{"next": {r.URL.RequestURI()}}.Encode()
+							http.Redirect(w, clean, base.String(), http.StatusSeeOther)
+							return
+						}
+					}
+					next.ServeHTTP(w, clean)
+					return
+				}
+				ctx = WithTokenInfo(ctx, ti)
+				if onAppHost && r.URL.Query().Get(ForwardAuthCookieCheckParam) != "" {
+					query := r.URL.Query()
+					query.Del(ForwardAuthCookieCheckParam)
+					clean := *r.URL
+					clean.RawQuery = query.Encode()
+					w.Header().Set("Cache-Control", "no-store")
+					http.Redirect(w, r, clean.RequestURI(), http.StatusSeeOther)
+					return
+				}
+			}
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

@@ -661,3 +661,15 @@ for the runner image, security boundary, lifecycle, and real-provider tests.
 For client commands such as `deploy`, `apps`, and `fleet`, `SHINYHUB_CONFIG`
 selects the local credentials file, not the server YAML. Automation can avoid a
 credentials file by setting `SHINYHUB_HOST` and `SHINYHUB_TOKEN`.
+
+### Forward-auth browser logout
+
+`auth.forward_auth.logout_url` optionally names the custom auth service's
+browser logout endpoint (an HTTP(S) URL or same-origin path).
+`auth.forward_auth.logout_method` is `GET` by default, or `POST` for an empty
+browser form submission. The environment overrides are
+`SHINYHUB_FORWARD_AUTH_LOGOUT_URL` and `SHINYHUB_FORWARD_AUTH_LOGOUT_METHOD`.
+See [Caddy browser logout and reconnect](reverse-proxy/caddy.md#browser-logout-and-reconnect)
+for proxy routing, separate app-origin cleanup, and protocol requirements.
+Without this URL ShinyHub still stays logged out until explicit reconnect;
+it does not end the upstream authentication service's session.

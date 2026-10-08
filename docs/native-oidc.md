@@ -223,10 +223,12 @@ sessions do not become renewable browser sessions. Forward-auth sessions are
 governed by the upstream proxy and identity provider.
 
 **Logout** (`POST /api/auth/logout`) ends the ShinyHub session: it revokes the
-session token by its JTI (so the cookie cannot be replayed) and clears the cookie.
+presented native session and bearer JWTs by JTI (so they cannot be replayed) and clears the cookie.
 Renewals retain that session's JTI, and browser-session revocations are kept
 through the absolute deadline. A concurrent renewal therefore cannot revive a
-session after logout. A new login creates a new session identity.
+session after logout. A new login creates a new session identity. With forward-auth enabled, browser
+logout also blocks automatic upstream reauthentication until an explicit
+reconnect; see [proxy logout](reverse-proxy/caddy.md#browser-logout-and-reconnect).
 If revocation cannot be saved, logout returns a retryable error and keeps the
 cookie available for a retry instead of reporting that the session ended.
 

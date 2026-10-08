@@ -4006,15 +4006,22 @@ func (s *Store) CreateAppLaunchCodeWithSession(codeHash string, userID int64, ap
 	s.db.Exec(`DELETE FROM app_launch_codes WHERE created_at < ` + s.d.nowMinusSeconds(120)) //nolint:errcheck
 	var authTime int64
 	var jti string
+	var family, suppressed int
 	if session != nil {
+		if session.ForwardAuthFamily {
+			family = 1
+		}
+		if session.ForwardAuthSuppressed {
+			suppressed = 1
+		}
 		jti = session.JTI
 		if !session.AuthTime.IsZero() {
 			authTime = session.AuthTime.Unix()
 		}
 	}
 	_, err := s.db.Exec(
-		`INSERT INTO app_launch_codes (code_hash, user_id, app_slug, auth_time, session_jti, session_epoch) VALUES (?, ?, ?, ?, ?, ?)`,
-		codeHash, userID, appSlug, authTime, jti, epoch,
+		`INSERT INTO app_launch_codes (code_hash, user_id, app_slug, auth_time, session_jti, session_epoch, forward_auth_family, forward_auth_suppressed) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		codeHash, userID, appSlug, authTime, jti, epoch, family, suppressed,
 	)
 	if err != nil {
 		return fmt.Errorf("create app launch code: %w", err)
@@ -4036,13 +4043,14 @@ func (s *Store) ConsumeAppLaunchCodeWithSession(codeHash, appSlug string) (*auth
 	row := s.db.QueryRow(
 		`DELETE FROM app_launch_codes
 		 WHERE code_hash = ? AND app_slug = ? AND created_at >= `+s.d.nowMinusSeconds(60)+`
-		 RETURNING user_id, auth_time, session_jti, session_epoch`,
+		 RETURNING user_id, auth_time, session_jti, session_epoch, forward_auth_family, forward_auth_suppressed`,
 		codeHash, appSlug,
 	)
 	var userID int64
 	var authTime, epoch int64
+	var family, suppressed int
 	var jti string
-	if err := row.Scan(&userID, &authTime, &jti, &epoch); err != nil {
+	if err := row.Scan(&userID, &authTime, &jti, &epoch, &family, &suppressed); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			u, err := s.consumeSupportLaunch(codeHash, appSlug)
 			return u, nil, err
@@ -4063,7 +4071,7 @@ func (s *Store) ConsumeAppLaunchCodeWithSession(codeHash, appSlug string) (*auth
 	if revoked || u.TokenEpoch != epoch {
 		return nil, nil, ErrNotFound
 	}
-	ti := &auth.TokenInfo{JTI: jti}
+	ti := &auth.TokenInfo{JTI: jti, ForwardAuthFamily: family != 0, ForwardAuthSuppressed: suppressed != 0}
 	if authTime != 0 {
 		ti.AuthTime = time.Unix(authTime, 0)
 	}

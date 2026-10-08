@@ -22,7 +22,7 @@ func Prefixes() []string {
 
 // ExactPaths are the paths the app origin serves by exact match.
 func ExactPaths() []string {
-	return []string{"/healthz", "/readyz", favicon.RootURL}
+	return []string{"/healthz", "/readyz", "/api/app/logout", favicon.RootURL}
 }
 
 // Admits reports whether the app origin serves path. Everything else belongs to

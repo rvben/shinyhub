@@ -1,12 +1,18 @@
 package proxy
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 )
 
 func cookieMap(raw string) map[string]string {
@@ -300,5 +306,73 @@ func TestNewBackendTransport_HasResponseHeaderTimeout(t *testing.T) {
 	// Must be a distinct instance so we never mutate the process-wide default.
 	if tr == http.DefaultTransport {
 		t.Error("newBackendTransport returned the shared http.DefaultTransport; must be a clone")
+	}
+}
+
+func TestForwardLogoutCookiesReservedInBothDirections(t *testing.T) {
+	for _, name := range []string{auth.ForwardAuthSignedOutCookie, auth.SecureForwardAuthSignedOutCookie, auth.ForwardAuthSessionCookie, auth.SecureForwardAuthSessionCookie, auth.LogoutHandoffCookie, auth.SecureLogoutHandoffCookie} {
+		request := httptest.NewRequest("GET", "http://example.com/", nil)
+		request.AddCookie(&http.Cookie{Name: name, Value: "private"})
+		stripInternalCookies(request)
+		if request.Header.Get("Cookie") != "" {
+			t.Fatalf("forwarded %s to backend", name)
+		}
+		response := &http.Response{Header: http.Header{}}
+		response.Header.Add("Set-Cookie", name+"=forged; Path=/")
+		if err := filterReservedSetCookies(response); err != nil {
+			t.Fatal(err)
+		}
+		if len(response.Header.Values("Set-Cookie")) != 0 {
+			t.Fatalf("backend controls %s", name)
+		}
+	}
+}
+
+func TestForwardFamilyPreservesProxiedAssetCache(t *testing.T) {
+	store := dbtest.New(t)
+	if err := store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: "unused", Role: "viewer"}); err != nil {
+		t.Fatal(err)
+	}
+	user, err := store.GetUserByUsername("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracking, _, err := auth.IssueForwardAuthSession(user.ContextUser(), "secret", time.Now().Add(-time.Hour), 12*time.Hour, "asset-family")
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Cookie") != "" || r.Header.Get("Remote-User") != "" {
+			t.Error("internal credentials reached backend")
+		}
+		w.Header().Set("Cache-Control", "public, max-age=600")
+		_, _ = w.Write([]byte("asset"))
+	}))
+	defer backend.Close()
+	target, _ := url.Parse(backend.URL)
+	reverse := httputil.NewSingleHostReverseProxy(target)
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if auth.UserFromContext(r.Context()) == nil || auth.TokenInfoFromContext(r.Context()) == nil {
+			t.Fatal("missing forwarded principal")
+		}
+		stripInternalCookies(r)
+		reverse.ServeHTTP(w, r)
+	})
+	_, trusted, _ := net.ParseCIDR("127.0.0.0/8")
+	h := auth.ForwardAuthMiddleware(store, auth.ForwardAuthConfig{Enabled: true, UserHeader: "Remote-User", SessionSecret: "secret", SessionMaxAge: 12 * time.Hour, Revoked: store.IsTokenRevoked}, []*net.IPNet{trusted})(next)
+	r := httptest.NewRequest("GET", "https://hub.example/app/demo/asset.js", nil)
+	r.RemoteAddr = "127.0.0.1:4"
+	r.Header.Set("Remote-User", "alice")
+	r.AddCookie(&http.Cookie{Name: auth.SecureForwardAuthSessionCookie, Value: tracking})
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != 200 || w.Body.String() != "asset" {
+		t.Fatalf("proxy response: %d %s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Values("Cache-Control"); len(got) != 1 || got[0] != "public, max-age=600" {
+		t.Fatalf("cache policy changed: %v", got)
+	}
+	if w.Header().Get("Set-Cookie") != "" {
+		t.Fatal("cached asset response sets a cookie")
 	}
 }

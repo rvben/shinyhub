@@ -909,8 +909,10 @@ func (c *Config) HasSSOLoginPath() bool {
 // middleware trusts UserHeader (and optional EmailHeader / GroupsHeader) on
 // requests whose direct peer IP is in Config.TrustedProxyNets.
 type ForwardAuthConfig struct {
-	Enabled    bool   `yaml:"enabled"`
-	UserHeader string `yaml:"user_header"`
+	LogoutURL    string `yaml:"logout_url"`
+	LogoutMethod string `yaml:"logout_method"`
+	Enabled      bool   `yaml:"enabled"`
+	UserHeader   string `yaml:"user_header"`
 	// SharedSecret authenticates the proxy itself in addition to its source IP.
 	// This prevents a locally run app from forging identity headers when it can
 	// reach a listener whose loopback/network CIDR is trusted.
@@ -1915,6 +1917,9 @@ func loadRaw(path string) (*Config, error) {
 	default:
 		return nil, fmt.Errorf("auth.oauth_default_role: %q is not allowed; must be one of viewer, developer, operator", cfg.Auth.OAuthDefaultRole)
 	}
+	if err := validateForwardAuthLogout(&cfg.Auth.ForwardAuth); err != nil {
+		return nil, err
+	}
 	if cfg.Auth.ForwardAuth.Enabled {
 		if cfg.Auth.ForwardAuth.UserHeader == "" {
 			cfg.Auth.ForwardAuth.UserHeader = "X-Forwarded-User"
@@ -2911,6 +2916,12 @@ func applyEnv(cfg *Config) error {
 			return fmt.Errorf("SHINYHUB_SUPPORT_SESSIONS_TRUSTED_APPS: %w", err)
 		}
 		cfg.Auth.SupportSessionsTrustedApps = b
+	}
+	if v := os.Getenv("SHINYHUB_FORWARD_AUTH_LOGOUT_URL"); v != "" {
+		cfg.Auth.ForwardAuth.LogoutURL = v
+	}
+	if v := os.Getenv("SHINYHUB_FORWARD_AUTH_LOGOUT_METHOD"); v != "" {
+		cfg.Auth.ForwardAuth.LogoutMethod = v
 	}
 	if v := os.Getenv("SHINYHUB_FORWARD_AUTH_ENABLED"); v != "" {
 		b, err := parseBoolEnv(v)

@@ -111,8 +111,10 @@ func (u *ContextUser) AppInScope(slug string) bool {
 // API-key authenticated requests leave it unset. Handlers use this to revoke
 // the caller's own token on logout.
 type TokenInfo struct {
-	JTI       string
-	ExpiresAt time.Time
+	ForwardAuthFamily     bool
+	ForwardAuthSuppressed bool
+	JTI                   string
+	ExpiresAt             time.Time
 	// AuthTime is the original login time (auth_time claim), zero for a legacy
 	// token. It bounds the absolute session lifetime across sliding renewals.
 	AuthTime time.Time

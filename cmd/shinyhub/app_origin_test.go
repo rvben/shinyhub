@@ -4,6 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/access"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
@@ -67,7 +70,7 @@ func TestAppOriginLaunchExchangesOneTimeCodeForHostOnlySession(t *testing.T) {
 	appOrigin, _ := url.Parse("https://apps.example.com")
 	user := &auth.ContextUser{ID: 42, Username: "alice", Role: "developer"}
 	store := &fakeAppLaunchStore{user: user}
-	control := appOriginRedirectHandler(store, appOrigin)
+	control := appOriginRedirectHandler(store, appOrigin, nil)
 	proxyHits := 0
 	app := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		proxyHits++
@@ -151,7 +154,7 @@ func TestAppOriginLaunchPreservesConfiguredBrowserLifetime(t *testing.T) {
 	appOrigin, _ := url.Parse("https://apps.example.com")
 	u := &auth.ContextUser{ID: 42, Username: "browser", Role: "viewer"}
 	store := &fakeAppLaunchStore{user: u}
-	handler := appOriginDispatch(appOrigin, nil, store, "secret", appOriginRedirectHandler(store, appOrigin), http.NotFoundHandler(), config.AuthConfig{SessionTTL: &ttl, SessionMaxAge: &maxAge})
+	handler := appOriginDispatch(appOrigin, nil, store, "secret", appOriginRedirectHandler(store, appOrigin, nil), http.NotFoundHandler(), config.AuthConfig{SessionTTL: &ttl, SessionMaxAge: &maxAge})
 	req := httptest.NewRequest("GET", "https://hub.example.com/app/sales/", nil)
 	ctx := auth.WithUser(req.Context(), u)
 	ctx = auth.WithTokenInfo(ctx, &auth.TokenInfo{JTI: "original-family", AuthTime: original})
@@ -340,4 +343,302 @@ func TestTrustedAppSupportRejectsOrdinaryLaunchWithoutChangingAdminCookie(t *tes
 	if rec.Code != http.StatusForbidden || len(rec.Result().Cookies()) != 0 {
 		t.Fatalf("ordinary launch status=%d cookies=%v", rec.Code, rec.Result().Cookies())
 	}
+}
+
+func TestForwardLaunchPreservesFamilyAndAuthenticationMode(t *testing.T) {
+	store := dbtest.New(t)
+	if err := store.CreateUser(db.CreateUserParams{Username: "alice", PasswordHash: "unused", Role: "viewer"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateUser(db.CreateUserParams{Username: "bob", PasswordHash: "unused", Role: "viewer"}); err != nil {
+		t.Fatal(err)
+	}
+	alice, _ := store.GetUserByUsername("alice")
+	bob, _ := store.GetUserByUsername("bob")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "demo", OwnerID: alice.ID}); err != nil {
+		t.Fatal(err)
+	}
+	_, network, _ := net.ParseCIDR("127.0.0.0/8")
+	trusted := []*net.IPNet{network}
+	origin, _ := url.Parse("https://apps.example")
+	policy := config.AuthConfig{Secret: "secret", ForwardAuth: config.ForwardAuthConfig{Enabled: true}}
+	for _, tc := range []struct {
+		name               string
+		family, suppressed bool
+		upstream           string
+		wantClear, wantSet bool
+	}{{"native account switch", false, true, "alice", false, true}, {"explicit reconnect", true, false, "alice", true, false}, {"mismatched forwarded launch", true, false, "bob", false, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			code := tc.name
+			sum := sha256.Sum256([]byte(code))
+			hash := hex.EncodeToString(sum[:])
+			ti := &auth.TokenInfo{JTI: tc.name, AuthTime: time.Now().Add(-2 * time.Hour).Truncate(time.Second), ForwardAuthFamily: tc.family, ForwardAuthSuppressed: tc.suppressed}
+			user := alice
+			if !tc.family {
+				user = bob
+			}
+			if err := store.CreateAppLaunchCodeWithSession(hash, user.ID, "demo", ti, user.TokenEpoch); err != nil {
+				t.Fatal(err)
+			}
+			hits := 0
+			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits++; w.WriteHeader(200) })
+			h := appOriginLaunchDispatch(next, origin, store, "secret", trusted, policy)
+			h = auth.ForwardAuthMiddleware(store, auth.ForwardAuthConfig{Enabled: true, UserHeader: "Remote-User", DefaultRole: "viewer", SessionSecret: "secret", SessionMaxAge: 12 * time.Hour, Revoked: store.IsTokenRevoked, AppOriginHost: origin.Host, DashboardURL: "https://hub.example"}, trusted)(h)
+			r := httptest.NewRequest("GET", origin.String()+"/app/demo/.shinyhub/nav.json?__shinyhub_launch="+url.QueryEscape(code), nil)
+			r.RemoteAddr = "127.0.0.1:4"
+			r.Header.Set("Remote-User", tc.upstream)
+			r.AddCookie(&http.Cookie{Name: auth.SecureForwardAuthSignedOutCookie, Value: "1"})
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != 303 || hits != 0 {
+				t.Fatalf("launch bypassed consumption: %d hits=%d", w.Code, hits)
+			}
+			set, clear := false, false
+			trackingCount := 0
+			for _, c := range w.Result().Cookies() {
+				switch c.Name {
+				case auth.SecureForwardAuthSignedOutCookie:
+					set = set || c.MaxAge >= 0
+					clear = clear || c.MaxAge < 0
+				case auth.SessionCookieName:
+					claims, err := auth.ValidateJWT(c.Value, "secret", nil)
+					if err != nil || claims.ID != ti.JTI || claims.UserID != user.ID {
+						t.Fatalf("unbound app JWT %+v %v", claims, err)
+					}
+				case auth.SecureForwardAuthSessionCookie:
+					trackingCount++
+					claims, err := auth.ValidateForwardAuthSession(c.Value, "secret")
+					if err != nil || claims.ID != ti.JTI {
+						t.Fatalf("unbound tracking %+v %v", claims, err)
+					}
+				}
+			}
+			if set != tc.wantSet || clear != tc.wantClear {
+				t.Fatalf("mode set=%v clear=%v", set, clear)
+			}
+			if tc.family && trackingCount != 1 {
+				t.Fatalf("stray or missing forward family cookies: %d", trackingCount)
+			}
+		})
+	}
+}
+
+func TestForwardLaunchRecordsModeFromRealControlRequest(t *testing.T) {
+	store := dbtest.New(t)
+	for _, name := range []string{"alice", "bob"} {
+		if err := store.CreateUser(db.CreateUserParams{Username: name, PasswordHash: "unused", Role: "viewer"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	alice, _ := store.GetUserByUsername("alice")
+	bob, _ := store.GetUserByUsername("bob")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "demo", OwnerID: alice.ID, Access: "public"}); err != nil {
+		t.Fatal(err)
+	}
+	_, network, _ := net.ParseCIDR("127.0.0.0/8")
+	trusted := []*net.IPNet{network}
+	origin, _ := url.Parse("https://apps.example")
+	cfg := auth.ForwardAuthConfig{Enabled: true, UserHeader: "Remote-User", SessionSecret: "secret", SessionMaxAge: 12 * time.Hour, Revoked: store.IsTokenRevoked, AppOriginHost: origin.Host, DashboardURL: "https://hub.example"}
+	policy := config.AuthConfig{Secret: "secret", ForwardAuth: config.ForwardAuthConfig{Enabled: true}}
+	for _, suppressed := range []bool{true, false} {
+		t.Run(fmt.Sprint(suppressed), func(t *testing.T) {
+			user := alice
+			var cookie *http.Cookie
+			var ti *auth.TokenInfo
+			var err error
+			if suppressed {
+				user = bob
+				token, info, issueErr := auth.IssueBrowserSession(user.ContextUser(), "secret", time.Now(), time.Hour, 12*time.Hour)
+				ti, err = info, issueErr
+				cookie = &http.Cookie{Name: auth.SessionCookieName, Value: token}
+			} else {
+				token, info, issueErr := auth.IssueForwardAuthSession(user.ContextUser(), "secret", time.Now(), 12*time.Hour, "")
+				ti, err = info, issueErr
+				cookie = &http.Cookie{Name: auth.SecureForwardAuthSessionCookie, Value: token}
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			control := access.Middleware(store, "secret", store.IsTokenRevoked, store.LookupContextUser)(appOriginRedirectHandler(store, origin, trusted))
+			h := auth.ForwardAuthMiddleware(store, cfg, trusted)(control)
+			r := httptest.NewRequest("GET", "https://hub.example/app/demo/", nil)
+			r.RemoteAddr = "127.0.0.1:4"
+			r.Header.Set("Remote-User", "alice")
+			r.AddCookie(cookie)
+			if suppressed {
+				r.AddCookie(&http.Cookie{Name: auth.SecureForwardAuthSignedOutCookie, Value: "1"})
+			}
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != 303 {
+				t.Fatalf("control: %d %s", w.Code, w.Body.String())
+			}
+			target, _ := url.Parse(w.Header().Get("Location"))
+			raw := target.Query().Get(appLaunchQueryParam)
+			sum := sha256.Sum256([]byte(raw))
+			hash := hex.EncodeToString(sum[:])
+			var uid int64
+			var family, suppress int
+			var jti string
+			if err := store.DB().QueryRow("SELECT user_id,forward_auth_family,forward_auth_suppressed,session_jti FROM app_launch_codes WHERE code_hash=?", hash).Scan(&uid, &family, &suppress, &jti); err != nil {
+				t.Fatal(err)
+			}
+			wantFamily, wantSuppress := 1, 0
+			if suppressed {
+				wantFamily, wantSuppress = 0, 1
+			}
+			if uid != user.ID || family != wantFamily || suppress != wantSuppress || jti != ti.JTI {
+				t.Fatalf("recorded uid=%d family=%d suppressed=%d jti=%s", uid, family, suppress, jti)
+			}
+			consume := auth.ForwardAuthMiddleware(store, cfg, trusted)(appOriginLaunchDispatch(http.NotFoundHandler(), origin, store, "secret", trusted, policy))
+			launch := httptest.NewRequest("GET", target.String(), nil)
+			launch.RemoteAddr = "127.0.0.1:4"
+			launch.Header.Set("Remote-User", "alice")
+			launch.AddCookie(&http.Cookie{Name: auth.SecureForwardAuthSignedOutCookie, Value: "1"})
+			out := httptest.NewRecorder()
+			consume.ServeHTTP(out, launch)
+			if out.Code != 303 {
+				t.Fatalf("consume: %d %s", out.Code, out.Body.String())
+			}
+			sawMarker := false
+			for _, c := range out.Result().Cookies() {
+				if c.Name == auth.SecureForwardAuthSignedOutCookie {
+					sawMarker = true
+					if (c.MaxAge >= 0) != suppressed {
+						t.Fatalf("wrong marker %+v", c)
+					}
+				}
+			}
+			if !sawMarker {
+				t.Fatal("missing mode change")
+			}
+		})
+	}
+}
+
+func TestForwardAppOriginDirectLinkAndIdentitySwitch(t *testing.T) {
+	store := dbtest.New(t)
+	for _, name := range []string{"alice", "bob"} {
+		if err := store.CreateUser(db.CreateUserParams{Username: name, PasswordHash: "unused", Role: "viewer"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	alice, _ := store.GetUserByUsername("alice")
+	bob, _ := store.GetUserByUsername("bob")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "demo", OwnerID: bob.ID, Access: "private"}); err != nil {
+		t.Fatal(err)
+	}
+	_, network, _ := net.ParseCIDR("127.0.0.0/8")
+	trusted := []*net.IPNet{network}
+	origin, _ := url.Parse("https://apps.example.com")
+	cfg := auth.ForwardAuthConfig{Enabled: true, UserHeader: "Remote-User", SessionSecret: "secret", Revoked: store.IsTokenRevoked, AppOriginHost: origin.Host, DashboardURL: "https://hub.example.com"}
+	policy := config.AuthConfig{Secret: "secret", ForwardAuth: config.ForwardAuthConfig{Enabled: true}}
+	hits := 0
+	app := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if u := auth.UserFromContext(r.Context()); u != nil && u.ID == alice.ID {
+			t.Fatal("edge Bob authenticated as Alice")
+		}
+		w.WriteHeader(200)
+	})
+	control := access.Middleware(store, "secret", store.IsTokenRevoked, store.LookupContextUser)(appOriginRedirectHandler(store, origin, trusted))
+	h := auth.ForwardAuthMiddleware(store, cfg, trusted)(appOriginLaunchDispatch(appOriginDispatch(origin, trusted, store, "secret", control, access.Middleware(store, "secret", store.IsTokenRevoked, store.LookupContextUser)(app), policy), origin, store, "secret", trusted, policy))
+	native, _, _ := auth.IssueBrowserSession(alice.ContextUser(), "secret", time.Now(), time.Hour, 12*time.Hour)
+	tracking, _, _ := auth.IssueForwardAuthSession(alice.ContextUser(), "secret", time.Now(), 12*time.Hour, "")
+	request := func(target string, page bool, cookies []*http.Cookie) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("GET", target, nil)
+		r.RemoteAddr = "127.0.0.1:4"
+		r.Header.Set("Remote-User", "bob")
+		if page {
+			r.Header.Set("Accept", "text/html")
+		}
+		for _, c := range cookies {
+			r.AddCookie(c)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	old := []*http.Cookie{{Name: auth.SessionCookieName, Value: native}, {Name: auth.SecureForwardAuthSessionCookie, Value: tracking}}
+	blocked := request("https://apps.example.com/app/demo/.shinyhub/session.json", false, old)
+	if blocked.Code != 401 || hits != 0 || len(blocked.Result().Cookies()) != 0 {
+		t.Fatalf("foreign fallback: %d hits=%d", blocked.Code, hits)
+	}
+	direct := request("https://apps.example.com/app/demo/?tab=one", true, old)
+	if direct.Code != 303 || direct.Header().Get("Location") != "https://hub.example.com/app/demo/?tab=one" {
+		t.Fatalf("direct link dead end: %d %s", direct.Code, direct.Header().Get("Location"))
+	}
+	dashboard := request(direct.Header().Get("Location"), true, nil)
+	if dashboard.Code != 303 {
+		t.Fatalf("control auth: %d %s", dashboard.Code, dashboard.Body.String())
+	}
+	launch := request(dashboard.Header().Get("Location"), true, old)
+	if launch.Code != 303 {
+		t.Fatalf("launch: %d %s", launch.Code, launch.Body.String())
+	}
+	var claims *auth.Claims
+	for _, c := range launch.Result().Cookies() {
+		if c.Name == auth.SessionCookieName {
+			claims, _ = auth.ValidateJWT(c.Value, "secret", nil)
+		}
+	}
+	if claims == nil || claims.UserID != bob.ID {
+		t.Fatalf("wrong launched identity: %+v", claims)
+	}
+	if err := store.RevokeToken(claims.ID, claims.UserID, claims.ExpiresAt.Time); err != nil {
+		t.Fatal(err)
+	}
+	revoked := request("https://apps.example.com/app/demo/", true, launch.Result().Cookies())
+	if revoked.Code != 303 || !strings.HasPrefix(revoked.Header().Get("Location"), "https://hub.example.com/login?next=") {
+		t.Fatalf("revoked app dead end: %d %s", revoked.Code, revoked.Header().Get("Location"))
+	}
+	marker := false
+	for _, cookie := range revoked.Result().Cookies() {
+		if cookie.Name == auth.SecureForwardAuthSignedOutCookie && cookie.MaxAge >= 0 {
+			marker = true
+		}
+	}
+	if !marker {
+		t.Fatal("revoked app family did not suppress upstream")
+	}
+	frame := func(target string, cookies []*http.Cookie) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("GET", target, nil)
+		r.RemoteAddr = "127.0.0.1:4"
+		r.Header.Set("Remote-User", "bob")
+		r.Header.Set("Accept", "text/html")
+		r.Header.Set("Sec-Fetch-Dest", "iframe")
+		r.Header.Set("Sec-Fetch-Mode", "navigate")
+		r.Header.Set("Sec-Fetch-Site", "same-site")
+		for _, cookie := range cookies {
+			r.AddCookie(cookie)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	iframe := frame("https://apps.example.com/app/demo/", nil)
+	if iframe.Code != 303 {
+		t.Fatalf("iframe app redirect: %d", iframe.Code)
+	}
+	iframeControl := frame(iframe.Header().Get("Location"), nil)
+	if iframeControl.Code != 303 {
+		t.Fatalf("iframe control launch: %d", iframeControl.Code)
+	}
+	iframeLaunch := frame(iframeControl.Header().Get("Location"), nil)
+	if iframeLaunch.Code != 303 {
+		t.Fatalf("iframe bound consume: %d", iframeLaunch.Code)
+	}
+	checked := frame(origin.String()+iframeLaunch.Header().Get("Location"), iframeLaunch.Result().Cookies())
+	if checked.Code != 303 || checked.Header().Get("Location") != "/app/demo/" {
+		t.Fatalf("iframe cookie confirmation: %d %s", checked.Code, checked.Header().Get("Location"))
+	}
+	liveFrame := frame(origin.String()+checked.Header().Get("Location"), iframeLaunch.Result().Cookies())
+	if liveFrame.Code != 200 || hits != 1 {
+		t.Fatalf("iframe failed to load: %d hits=%d", liveFrame.Code, hits)
+	}
+	blockedCookies := frame(origin.String()+iframeLaunch.Header().Get("Location"), nil)
+	if blockedCookies.Code != 401 || blockedCookies.Header().Get("Location") != "" || len(blockedCookies.Result().Cookies()) != 0 {
+		t.Fatalf("cookie-blocked iframe loops: %d %v", blockedCookies.Code, blockedCookies.Header())
+	}
+
 }

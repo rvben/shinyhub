@@ -64,6 +64,7 @@ import (
 	"github.com/rvben/shinyhub/internal/oauth"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
+	"github.com/rvben/shinyhub/internal/proxytrust"
 	"github.com/rvben/shinyhub/internal/safego"
 	"github.com/rvben/shinyhub/internal/sandbox"
 	scalewayruntime "github.com/rvben/shinyhub/internal/scaleway"
@@ -2904,7 +2905,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	}
 	if cfg.Server.AppOrigin != "" {
 		parsedAppOrigin, _ = url.Parse(cfg.Server.AppOrigin) // validated by config.Load
-		redirect := appOriginRedirectHandler(store, parsedAppOrigin)
+		redirect := appOriginRedirectHandler(store, parsedAppOrigin, cfg.TrustedProxyNets)
 		redirectEmptyState := access.NeverDeployedMiddleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup, cfg.TrustedProxyNets, navOpts...)(redirect)
 		controlAppHandler := access.Middleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup, navOpts...)(redirectEmptyState)
 		appHandler = appOriginDispatch(parsedAppOrigin, cfg.TrustedProxyNets, store, cfg.Auth.Secret, controlAppHandler, appHandler, cfg.Auth)
@@ -2916,6 +2917,15 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// App-local renewal is always available, including on the isolated app
 	// origin and when the optional app switcher is disabled. Access middleware
 	// revalidates the browser identity and app permissions on every request.
+	if parsedAppOrigin != nil {
+		mux.HandleFunc("GET "+auth.AppLogoutPath, func(w http.ResponseWriter, r *http.Request) {
+			if !sameHost(proxytrust.Host(r, cfg.TrustedProxyNets), parsedAppOrigin.Host) {
+				http.NotFound(w, r)
+				return
+			}
+			srv.HandleAppLogout(w, r)
+		})
+	}
 	appSessionHandler := access.Middleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup)(http.HandlerFunc(srv.HandleAppSession))
 	mux.Handle("GET /app/{slug}/.shinyhub/session.json", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
@@ -2989,8 +2999,12 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	registerBrandingRoutes(mux, cfg, srv, store, appUserLookup)
 
 	var rootHandler http.Handler = mux
+	if parsedAppOrigin != nil {
+		rootHandler = appOriginLaunchDispatch(rootHandler, parsedAppOrigin, store, cfg.Auth.Secret, cfg.TrustedProxyNets, cfg.Auth)
+	}
 	if cfg.Auth.ForwardAuth.Enabled {
 		faCfg := auth.ForwardAuthConfig{
+			DashboardURL: cfg.Server.BaseURL, SessionSecret: cfg.Auth.Secret, SessionMaxAge: cfg.Auth.BrowserSessionMaxAge(), Revoked: store.IsTokenRevoked,
 			Enabled:             true,
 			UserHeader:          cfg.Auth.ForwardAuth.UserHeader,
 			SharedSecret:        cfg.Auth.ForwardAuth.SharedSecret,
@@ -3002,7 +3016,10 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 			GroupRoleMappings:   api.AuthMappings(cfg.Auth.GroupRoleMappings),
 			RequireGroupsHeader: cfg.Auth.ForwardAuth.RequireGroupsHeader,
 		}
-		rootHandler = auth.ForwardAuthMiddleware(store, faCfg, cfg.TrustedProxyNets)(mux)
+		if parsedAppOrigin != nil {
+			faCfg.AppOriginHost = parsedAppOrigin.Host
+		}
+		rootHandler = auth.ForwardAuthMiddleware(store, faCfg, cfg.TrustedProxyNets)(rootHandler)
 	}
 	rootHandler = appOriginBoundary(rootHandler, parsedAppOrigin, cfg.TrustedProxyNets)
 	if cfg.Server.CompressionEnabled() {
