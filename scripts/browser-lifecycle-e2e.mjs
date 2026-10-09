@@ -155,8 +155,12 @@ try {
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'User-Agent': 'shinyhub-lifecycle-test' },
       body: data === undefined ? undefined : JSON.stringify(data),
     });
-    assert.equal(response.status, status, `${method} ${path}`);
-    return response.status === 204 ? undefined : response.json();
+    const body = response.status === 204 ? undefined : await response.json();
+    if (response.status !== status) {
+      throw Object.assign(new Error(`${method} ${path}: ${response.status} ${JSON.stringify(body)}`),
+        { status: response.status, body });
+    }
+    return body;
   };
   const api = (path, data) => request(data === undefined ? 'GET' : 'POST', '/api/apps/browser' + path, data);
   const app = join(state, 'input');
@@ -248,7 +252,18 @@ try {
     assert.ok(socket, 'the app opened a WebSocket before restart');
     const connectionID = new URL(socket.url()).searchParams.get('shinyhub_cid');
     assert.match(connectionID, /^[0-9a-f]{24}$/, 'the browser tagged the Shiny upgrade');
-    await api('/restart', {});
+    // Closing the old page starts asynchronous generation retirement.
+    // Retry only its explicit drain conflict; other failures remain fatal.
+    await poll(async () => {
+      try {
+        await api('/restart', {});
+        return true;
+      } catch (error) {
+        if (error.status === 409 && error.body?.error ===
+          'restart browser: previous generation is still draining; retry after retirement completes') return false;
+        throw error;
+      }
+    }, 'previous generation retires and restart succeeds');
     await fresh.getByRole('link', { name: 'Start a new app session in a new tab', exact: true }).waitFor();
     await poll(async () => (await fresh.locator('#shinyhub-status-connection-id').textContent().catch(() => ''))
       === `Connection ID: ${connectionID}`, 'the interruption overlay shows its WebSocket ID');

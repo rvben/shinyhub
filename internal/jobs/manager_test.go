@@ -2165,6 +2165,7 @@ func TestManager_Run_PrunesReleasedNamespacesWhenItEnds(t *testing.T) {
 func TestManager_RequiredProducerAdmissionDoesNotBlockDispatcher(t *testing.T) {
 	st := newFakeStore(makeSchedule("concurrent", 30), makeApp())
 	m := newTestManager(t, &fakeRuntime{}, st)
+	defer m.Stop(context.Background())
 	release := m.AcquireProducerGates([]int64{st.schedule.ID})
 	obligation := &db.ScheduleDeployObligation{ID: 1, ScheduleID: st.schedule.ID, DeploymentID: st.deployments[0].ID, ProducerCommandJSON: st.schedule.CommandJSON}
 	// The first dispatcher reserves admission and waits asynchronously for the

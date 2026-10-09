@@ -328,7 +328,9 @@ func TestAnnouncementsPublishAmbiguousOutcome(t *testing.T) {
 			oldClient := httpClient
 			httpClient = &apiClient{&http.Client{Timeout: 100 * time.Millisecond}}
 			t.Cleanup(func() { httpClient = oldClient })
-			_, reqs := setupCLITestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+			handlerDone := make(chan struct{})
+			srv, reqs := setupCLITestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+				defer close(handlerDone)
 				switch mode {
 				case "disconnect":
 					conn, _, err := w.(http.Hijacker).Hijack()
@@ -354,6 +356,14 @@ func TestAnnouncementsPublishAmbiguousOutcome(t *testing.T) {
 				}
 			})
 			_, err := execCLI(t, "announcements", "publish", "--title", "Release", "--message", "Save work", "--ttl", "60m", "-o", "json")
+			// Transport failures can return before the handler has finished.
+			// Join it before inspecting the captured requests.
+			srv.Close()
+			select {
+			case <-handlerDone:
+			case <-time.After(time.Second):
+				t.Fatal("publication handler did not finish")
+			}
 			assertAnnouncementUnknown(t, err, "publication")
 			if len(*reqs) != 1 || (*reqs)[0].Method != "POST" {
 				t.Fatalf("requests: %+v", *reqs)
