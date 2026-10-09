@@ -1081,7 +1081,13 @@ func (w *Watcher) retryRecoveryUnreadyStop(e PendingStopEntry) {
 // would either do nothing (no manager entries for a multiplex slug) or write
 // rows that do not correspond to anything real. See hibernateElasticPool.
 func (w *Watcher) hibernatePool(app *db.App) bool {
-	resolvedIso := deploy.ResolveWorkerIsolation(app.WorkerIsolation, w.cfg.DefaultWorkerIsolation)
+	if p, ok := w.prx.(interface{ HasDrainingGeneration(string) bool }); ok && p.HasDrainingGeneration(app.Slug) {
+		return false
+	}
+	resolvedIso := w.servingIsolation(app)
+	if resolvedIso == "unknown" {
+		return false
+	}
 	if isElasticIsolation(resolvedIso) {
 		return w.hibernateElasticPool(app)
 	}
@@ -1254,11 +1260,17 @@ func (w *Watcher) SleepNow(slug string) error {
 	if w.activationOwnsRuntime(app, "sleep") {
 		return fmt.Errorf("scheduled data activation owns serving runtime state")
 	}
-	resolvedIso := deploy.ResolveWorkerIsolation(app.WorkerIsolation, w.cfg.DefaultWorkerIsolation)
+	resolvedIso := w.servingIsolation(app)
+	if resolvedIso == "unknown" {
+		return fmt.Errorf("serving isolation unavailable")
+	}
 	if isElasticIsolation(resolvedIso) {
 		return ErrElasticNotSleepable
 	}
 
+	if p, ok := w.prx.(interface{ HasDrainingGeneration(string) bool }); ok && p.HasDrainingGeneration(slug) {
+		return fmt.Errorf("generation is draining")
+	}
 	w.prx.Deregister(slug)
 
 	if !w.hibernatePool(app) {
@@ -1317,12 +1329,15 @@ func (w *Watcher) RestoreWarm(ctx context.Context) {
 		// warm restore entirely; the app stays hibernated and wakes on access.
 		// Resolve once so the guard and SetPoolMode use the same effective mode
 		// (fleet default applies when the per-app field is empty).
-		resolvedIso := deploy.ResolveWorkerIsolation(app.WorkerIsolation, w.cfg.DefaultWorkerIsolation)
-		if isElasticIsolation(resolvedIso) {
-			continue
-		}
+		resolvedIso := w.servingIsolation(app)
 		release, ok := w.tryAppLease(app.Slug)
 		if !ok {
+			continue
+		}
+		var isolationErr error
+		resolvedIso, isolationErr = w.prepareColdIsolation(app)
+		if isolationErr != nil || isElasticIsolation(resolvedIso) {
+			release()
 			continue
 		}
 		if quarantined, qerr := w.store.AppCompatibilityQuarantined(app.ID); qerr != nil || quarantined {
@@ -1753,7 +1768,7 @@ func (w *Watcher) runOnce() {
 		switch info.Status {
 		case process.StatusCrashed:
 			handled[key] = true
-			w.handleCrashed(info.Slug, info.Index)
+			w.handleCrashedGeneration(info.Slug, info.Index, info.DeploymentID)
 		case process.StatusRunning:
 			if !idleChecked[info.Slug] {
 				idleChecked[info.Slug] = true
@@ -1850,6 +1865,13 @@ func (w *Watcher) runOnce() {
 func (w *Watcher) reconcileReplicas(apps []*db.App, repMap map[int64][]*db.Replica, handled map[replicaKey]bool) {
 	for _, app := range apps {
 		for _, r := range repMap[app.ID] {
+			depID := int64(0)
+			if r.DeploymentID != nil {
+				depID = *r.DeploymentID
+			}
+			if !w.servingFixedReplica(app, depID) {
+				continue
+			}
 			key := replicaKey{app.Slug, r.Index}
 			if r.Index >= app.Replicas || handled[key] || w.isPendingStop(key) {
 				continue
@@ -1870,6 +1892,69 @@ func (w *Watcher) reconcileReplicas(apps []*db.App, repMap map[int64][]*db.Repli
 	}
 }
 
+// servingIsolation fails closed on policy-read errors. The fallback exists
+// only for narrow test stores that predate generation policy persistence.
+func (w *Watcher) prepareColdIsolation(app *db.App) (string, error) {
+	store, ok := w.store.(coldIsolationStore)
+	manager, mok := w.mgr.(*process.Manager)
+	prx, pok := w.prx.(*proxy.Proxy)
+	if ok && mok && pok {
+		return PrepareColdWorkerIsolation(store, manager, prx, app, w.cfg.DefaultWorkerIsolation)
+	}
+	mode := w.servingIsolation(app)
+	if mode == "unknown" {
+		return "", fmt.Errorf("serving isolation unavailable")
+	}
+	return mode, nil
+}
+
+func (w *Watcher) servingIsolation(app *db.App) string {
+	if reader, ok := w.store.(db.ServingWorkerIsolationReader); ok {
+		mode, err := db.ResolveServingWorkerIsolation(reader, app, w.cfg.DefaultWorkerIsolation)
+		if err != nil {
+			slog.Error("watcher: serving isolation unavailable", "slug", app.Slug, "err", err)
+			return "unknown"
+		}
+		return mode
+	}
+	return deploy.ResolveWorkerIsolation(app.WorkerIsolation, w.cfg.DefaultWorkerIsolation)
+}
+
+func (w *Watcher) servingFixedReplica(app *db.App, deploymentID int64) bool {
+	if w.servingIsolation(app) != "multiplex" {
+		return false
+	}
+	current, err := w.store.GetServingDeployment(app.ID)
+	if err != nil {
+		_, realPolicy := w.store.(db.ServingWorkerIsolationReader)
+		return !realPolicy && deploymentID == 0 && errors.Is(err, db.ErrNotFound)
+	}
+	if deploymentID > 0 {
+		return current.ID == deploymentID
+	}
+	if p, ok := w.prx.(interface{ HasDrainingGeneration(string) bool }); ok && p.HasDrainingGeneration(app.Slug) {
+		return false
+	}
+	return true
+}
+
+func (w *Watcher) servingFixedSlot(app *db.App, index int) bool {
+	rows, err := w.store.ListReplicas(app.ID)
+	if err != nil {
+		return false
+	}
+	for _, row := range rows {
+		if row.Index == index {
+			depID := int64(0)
+			if row.DeploymentID != nil {
+				depID = *row.DeploymentID
+			}
+			return w.servingFixedReplica(app, depID)
+		}
+	}
+	return w.servingFixedReplica(app, 0)
+}
+
 // crashLoopWindow bounds how far apart crashes can be and still count toward the
 // crash-loop budget. A replica that stays up longer than this between crashes is
 // treated as recovered, so an occasional crash never accumulates to "crashed".
@@ -1885,20 +1970,21 @@ const crashLoopWindow = 2 * time.Minute
 // the flapping app and surfaces it as crashed with the log-tail reason. Pure
 // boot failures (the replica never starts) are handled by restartSlot's budget +
 // reconcileAppStatus instead.
-func (w *Watcher) handleCrashed(slug string, index int) {
+func (w *Watcher) handleCrashed(slug string, index int) { w.handleCrashedGeneration(slug, index, 0) }
+func (w *Watcher) handleCrashedGeneration(slug string, index int, deploymentID int64) {
 	release, ok := w.tryAppLease(slug)
 	if !ok {
 		return
 	}
 	defer release()
 	app, err := w.store.GetAppBySlug(slug)
-	if err != nil || w.activationOwnsRuntime(app, "crash handling") {
+	if err != nil || !w.servingFixedReplica(app, deploymentID) || w.activationOwnsRuntime(app, "crash handling") {
 		return
 	}
 	if w.tryAppOperation != nil {
 		trackedCrashed := false
 		for _, info := range w.mgr.All() {
-			if info.Slug == slug && info.Index == index && info.Status == process.StatusCrashed {
+			if info.Slug == slug && info.Index == index && info.Status == process.StatusCrashed && (deploymentID == 0 || info.DeploymentID == deploymentID) {
 				trackedCrashed = true
 				break
 			}
@@ -1912,7 +1998,7 @@ func (w *Watcher) handleCrashed(slug string, index int) {
 
 func (w *Watcher) handleCrashedLocked(slug string, index int) {
 	app, err := w.store.GetAppBySlug(slug)
-	if err != nil {
+	if err != nil || !w.servingFixedSlot(app, index) {
 		return
 	}
 	// The deterministic exit verdict, when available, is the crash cause and
@@ -1966,6 +2052,11 @@ func (w *Watcher) handleCrashedLocked(slug string, index int) {
 	w.mu.Unlock()
 
 	if count > w.cfg.RestartMaxAttempts {
+		// A retained outgoing generation still owns routes and workers. Do
+		// not tear down the whole slug while its retirement owner is active.
+		if p, ok := w.prx.(interface{ HasDrainingGeneration(string) bool }); ok && p.HasDrainingGeneration(slug) {
+			return
+		}
 		w.prx.Deregister(slug)
 		if serr := w.mgr.Stop(slug); serr != nil {
 			slog.Warn("watcher: stop crash-looping app failed", "slug", slug, "err", serr)
@@ -2009,6 +2100,9 @@ func (w *Watcher) restartSlot(app *db.App, index int, fromLost bool) {
 }
 
 func (w *Watcher) restartSlotLocked(app *db.App, index int, fromLost bool) {
+	if !w.servingFixedSlot(app, index) {
+		return
+	}
 	k := replicaKey{app.Slug, index}
 
 	w.mu.Lock()
@@ -2195,7 +2289,7 @@ func (w *Watcher) reconcileAppStatus(app *db.App, reps []*db.Replica) {
 	// multiplex replica-count rule below would mechanically mark every grouped
 	// or per-session app degraded. Worker spawn failures are surfaced by the
 	// elastic admission path; replica rows are not a health signal here.
-	if isElasticIsolation(deploy.ResolveWorkerIsolation(app.WorkerIsolation, w.cfg.DefaultWorkerIsolation)) {
+	if w.servingIsolation(app) != "multiplex" {
 		// Preserve a real deploy/restore failure. The special case below only
 		// repairs the false replica-derived degradation of a successfully deployed
 		// demand-driven app; it must not erase an independent failure signal.
@@ -2346,7 +2440,7 @@ func (w *Watcher) reviveIfHealable(app *db.App) {
 	// replica rows). Reviving from it would flip a terminal crashed state to
 	// reconcilable with no healing event behind it and hand reconcileReplicas
 	// a row that boots a durable replica the app must not have.
-	if isElasticIsolation(deploy.ResolveWorkerIsolation(app.WorkerIsolation, w.cfg.DefaultWorkerIsolation)) {
+	if w.servingIsolation(app) != "multiplex" {
 		return
 	}
 	// A durable schedule activation survives a crash as repairing and reclaims
@@ -2456,11 +2550,14 @@ func (w *Watcher) reviveIfHealable(app *db.App) {
 // pools from the DB replica table (the pool syncer); these writes derive from
 // the same rows and are idempotent, so the two writers agree.
 func (w *Watcher) restoreProxyPool(app *db.App) {
+	if w.servingIsolation(app) != "multiplex" {
+		return
+	}
 	w.prx.SetPoolAppID(app.Slug, app.ID)
 	w.prx.SetPoolSize(app.Slug, app.Replicas)
 	w.prx.SetPoolCap(app.Slug, deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, w.cfg.DefaultMaxSessionsPerReplica))
 	w.prx.SetPoolIdentityHeaders(app.Slug, deploy.ResolveIdentityHeaders(app.IdentityHeaders, w.cfg.IdentityHeadersGlobal))
-	resolvedIso := deploy.ResolveWorkerIsolation(app.WorkerIsolation, w.cfg.DefaultWorkerIsolation)
+	resolvedIso := w.servingIsolation(app)
 	w.prx.SetPoolMode(app.Slug, config.WorkerIsolationMode(resolvedIso), app.WorkerGroupedSize, app.WorkerMaxWorkers)
 	w.prx.SetPoolWarmSpares(app.Slug, app.WorkerWarmSpares)
 	for _, info := range w.mgr.All() {
@@ -2557,7 +2654,7 @@ func (w *Watcher) allReplicasExhausted(slug string, replicas int) bool {
 // handleIdleClustered for the exact predicate and ordering.
 func (w *Watcher) handleIdle(slug string, runningCount int) {
 	app, err := w.store.GetAppBySlug(slug)
-	if err != nil {
+	if err != nil || w.servingIsolation(app) == "unknown" {
 		return
 	}
 
@@ -2613,7 +2710,7 @@ func (w *Watcher) handleIdle(slug string, runningCount int) {
 	if err != nil || !isUpStatus(app.Status) {
 		return
 	}
-	if w.activationOwnsRuntime(app, "hibernate") {
+	if w.servingIsolation(app) == "unknown" || w.activationOwnsRuntime(app, "hibernate") {
 		return
 	}
 	lastActivity = w.prx.LastSeen(slug)
@@ -2745,7 +2842,7 @@ func (w *Watcher) handleIdleClustered(app *db.App, timeout time.Duration, runnin
 		return
 	}
 	app = fresh
-	if w.activationOwnsRuntime(app, "clustered hibernate") {
+	if w.servingIsolation(app) == "unknown" || w.activationOwnsRuntime(app, "clustered hibernate") {
 		return
 	}
 	lastActivity = w.prx.LastSeen(slug)
@@ -2818,6 +2915,12 @@ func (w *Watcher) handleWarmExpand(apps []*db.App, repMap map[int64][]*db.Replic
 	}
 
 	for _, app := range apps {
+		if w.servingIsolation(app) != "multiplex" {
+			continue
+		}
+		if p, ok := w.prx.(interface{ HasDrainingGeneration(string) bool }); ok && p.HasDrainingGeneration(app.Slug) {
+			continue
+		}
 		reps := repMap[app.ID]
 
 		// Compute the shrink moment as the newest updated_at among warm-parked rows.
@@ -3069,13 +3172,18 @@ func (w *Watcher) driveWakingApp(parent context.Context, slug, trigger string) <
 			return
 		}
 
+		resolvedIso, isolationErr := w.prepareColdIsolation(app)
+		if isolationErr != nil {
+			opErr = isolationErr
+			return
+		}
 		w.prx.SetPoolAppID(slug, app.ID)
 		w.prx.SetPoolSize(slug, app.Replicas)
 		w.prx.SetPoolCap(slug, deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, w.cfg.DefaultMaxSessionsPerReplica))
 		w.prx.SetPoolIdentityHeaders(slug, deploy.ResolveIdentityHeaders(app.IdentityHeaders, w.cfg.IdentityHeadersGlobal))
 		// Resolve once so SetPoolMode and the elastic boot-skip guard both use the
 		// same effective isolation (fleet default applies when per-app field is empty).
-		resolvedIso := deploy.ResolveWorkerIsolation(app.WorkerIsolation, w.cfg.DefaultWorkerIsolation)
+		// resolvedIso was verified before configuring routing.
 		// SetPoolMode propagates the isolation strategy so the proxy routes with
 		// the correct algorithm when the first post-wake request arrives.
 		w.prx.SetPoolMode(slug,

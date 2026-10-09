@@ -33,9 +33,6 @@ func (s *Server) stopGenerationForCleanup(slug string, deploymentID int64) (resu
 	if loadErr != nil {
 		return errors.Join(err, loadErr)
 	}
-	if deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation) != "grouped" {
-		return err
-	}
 	rows, readErr := s.store.ListDeploymentReplicas(app.ID)
 	if readErr != nil {
 		return readErr
@@ -45,7 +42,7 @@ func (s *Server) stopGenerationForCleanup(slug string, deploymentID int64) (resu
 			continue
 		}
 		if row.Provider != "" && row.Provider != "native" {
-			return fmt.Errorf("cannot confirm grouped provider %q stopped", row.Provider)
+			return fmt.Errorf("cannot confirm generation provider %q stopped", row.Provider)
 		}
 		if row.PID != nil && *row.PID > 0 {
 			if row.ProcessStartIdentity > 0 {
@@ -55,7 +52,7 @@ func (s *Server) stopGenerationForCleanup(slug string, deploymentID int64) (resu
 				}
 			}
 			if !errors.Is(syscall.Kill(*row.PID, 0), syscall.ESRCH) || !errors.Is(syscall.Kill(-*row.PID, 0), syscall.ESRCH) {
-				return fmt.Errorf("grouped worker %d termination is unconfirmed", row.Index)
+				return fmt.Errorf("generation worker %d termination is unconfirmed", row.Index)
 			}
 		}
 	}
@@ -82,7 +79,7 @@ func (s *Server) groupedHandoffRuntimeReason(app *db.App) string {
 	if runtimeMode != "" && runtimeMode != "native" {
 		return "grouped parallel handoff supports native workers only"
 	}
-	for _, worker := range s.manager.AllForSlug(app.Slug) {
+	for _, worker := range s.manager.AllGenerationsForSlug(app.Slug) {
 		if worker == nil || worker.Status == process.StatusStopped || worker.Status == process.StatusCrashed {
 			continue
 		}
@@ -94,7 +91,7 @@ func (s *Server) groupedHandoffRuntimeReason(app *db.App) string {
 }
 
 func (s *Server) persistGroupedGeneration(app *db.App, deployment *db.Deployment) error {
-	for _, worker := range s.manager.AllForSlug(app.Slug) {
+	for _, worker := range s.manager.AllGenerationsForSlug(app.Slug) {
 		if worker == nil || worker.DeploymentID != deployment.ID {
 			continue
 		}
@@ -170,6 +167,7 @@ func (s *Server) manifestHandoffReasons(app *db.App, previous *db.Deployment, ma
 		"hibernate_timeout_minutes": true, "min_warm_replicas": true,
 		"max_sessions_per_replica": true, "autoscale": true,
 		"memory_limit_mb": true, "cpu_quota_percent": true, "render_seconds": true,
+		"worker": true,
 	}
 	before, after := reflect.ValueOf(old.App), reflect.ValueOf(manifest.App)
 	for i := 0; i < after.NumField(); i++ {
@@ -192,10 +190,13 @@ func (s *Server) manifestHandoffReasons(app *db.App, previous *db.Deployment, ma
 		reasons = append(reasons, "app.replicas: reconciliation changes the live pool layout")
 	}
 	if w := m.Worker; w != nil {
-		if !unchangedOptional(w.Isolation, deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation)) ||
-			!unchangedOptional(w.GroupedSize, app.WorkerGroupedSize) || !unchangedOptional(w.MaxWorkers, app.WorkerMaxWorkers) ||
-			!unchangedOptional(w.WarmSpares, app.WorkerWarmSpares) || !unchangedOptional(w.MaxSessionLifetimeSecs, app.WorkerMaxSessionLifetimeSecs) {
-			reasons = append(reasons, "app.worker: reconciliation changes live worker policy")
+		current, isolationErr := s.servingIsolation(app)
+		target := deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation)
+		if w.Isolation != nil {
+			target = *w.Isolation
+		}
+		if isolationErr != nil || !supportedHandoffIsolation(current) || !supportedHandoffIsolation(target) {
+			reasons = append(reasons, "app.worker: parallel handoff supports grouped and multiplex worker policy only")
 		}
 	}
 	if !reflect.DeepEqual(old.Access, manifest.Access) {
@@ -238,6 +239,23 @@ func (s *Server) manifestHandoffReason(app *db.App, previous *db.Deployment, man
 // settings to the serving pool while the candidate is still being prepared.
 func projectHandoffApp(app *db.App, m deploy.AppSettings) *db.App {
 	projected := *app
+	if w := m.Worker; w != nil {
+		if w.Isolation != nil {
+			projected.WorkerIsolation = *w.Isolation
+		}
+		if w.GroupedSize != nil {
+			projected.WorkerGroupedSize = *w.GroupedSize
+		}
+		if w.MaxWorkers != nil {
+			projected.WorkerMaxWorkers = *w.MaxWorkers
+		}
+		if w.WarmSpares != nil {
+			projected.WorkerWarmSpares = *w.WarmSpares
+		}
+		if w.MaxSessionLifetimeSecs != nil {
+			projected.WorkerMaxSessionLifetimeSecs = *w.MaxSessionLifetimeSecs
+		}
+	}
 	if m.HibernateResetToDefault {
 		projected.HibernateTimeoutMinutes = nil
 	}

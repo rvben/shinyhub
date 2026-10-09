@@ -455,7 +455,11 @@ func (s *Server) resizeAppLocked(slug string) (outcome, reason string, err error
 		return "", "", err
 	}
 	// Replica count is inert in elastic modes, whose workers are demand-driven.
-	if deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation) != "multiplex" {
+	serving, policyErr := s.servingIsolation(app)
+	if policyErr != nil {
+		return "", "", policyErr
+	}
+	if serving != "multiplex" {
 		return db.RedeployCompleted, "", nil
 	}
 	rows, err := s.store.ListReplicas(app.ID)

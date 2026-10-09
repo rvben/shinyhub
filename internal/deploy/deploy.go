@@ -527,6 +527,10 @@ type Params struct {
 	GenerationScoped bool
 	// GroupedHandoff stages one healthy worker in the existing monotonic slot space.
 	GroupedHandoff bool
+	// GroupedSlotFloor fences sparse grouped slots from all old runtime identities.
+	GroupedSlotFloor int
+	// RecordRuntimePolicy durably binds the resolved isolation before boot.
+	RecordRuntimePolicy func() error
 	// Preparation selects how the deploy-time preparation phase behaves. The
 	// zero value (PrepareRequired) is normal promotion. Callers bringing an
 	// already-promoted bundle back up set an activation mode so recovery neither
@@ -1273,6 +1277,11 @@ func resolveAutoInstrument(p Params, m *Manifest) bool {
 // Partial failure (some replicas healthy, some not) is accepted and logged.
 // All-fail returns an error.
 func Run(p Params) (res *PoolResult, err error) {
+	if p.RecordRuntimePolicy != nil {
+		if err := p.RecordRuntimePolicy(); err != nil {
+			return nil, fmt.Errorf("record generation worker isolation: %w", err)
+		}
+	}
 	asn, err := p.assignments()
 	if err != nil {
 		return nil, fmt.Errorf("expand placement: %w", err)
@@ -1304,17 +1313,17 @@ func Run(p Params) (res *PoolResult, err error) {
 	}
 
 	p.Proxy.SetPoolAppID(p.Slug, p.AppID)
-	if p.GroupedHandoff {
-		slot, err := p.Proxy.StageGroupedGeneration(p.Slug, p.DeploymentID)
+	resolvedMode := config.WorkerIsolationMode(ResolveWorkerIsolation(p.WorkerIsolation, p.DefaultWorkerIsolation))
+	if p.GenerationScoped {
+		policy := proxy.GenerationPolicy{Mode: resolvedMode, GroupedSize: p.WorkerGroupedSize, MaxWorkers: p.WorkerMaxWorkers, WarmSpares: p.WorkerWarmSpares}
+		slot, err := p.Proxy.StageGenerationWithPolicy(p.Slug, p.DeploymentID, total, policy, p.GroupedSlotFloor)
 		if err != nil {
 			return nil, err
 		}
-		asn = []process.TierAssignment{{Index: slot, Tier: p.effectiveDefaultTier()}}
-		total = 1
-		p.annotate(attribute.Int("shinyhub.deploy.replicas", total))
-	} else if p.GenerationScoped {
-		if err := p.Proxy.StageGeneration(p.Slug, p.DeploymentID, total); err != nil {
-			return nil, err
+		if p.GroupedHandoff {
+			asn = []process.TierAssignment{{Index: slot, Tier: p.effectiveDefaultTier()}}
+			total = 1
+			p.annotate(attribute.Int("shinyhub.deploy.replicas", total))
 		}
 	} else {
 		p.Proxy.SetPoolSize(p.Slug, total)
@@ -1325,9 +1334,10 @@ func Run(p Params) (res *PoolResult, err error) {
 	}
 	// SetPoolMode propagates the worker-isolation strategy so the proxy can
 	// apply the correct routing algorithm for this pool's sessions.
-	resolvedMode := config.WorkerIsolationMode(ResolveWorkerIsolation(p.WorkerIsolation, p.DefaultWorkerIsolation))
-	p.Proxy.SetPoolMode(p.Slug, resolvedMode, p.WorkerGroupedSize, p.WorkerMaxWorkers)
-	p.Proxy.SetPoolWarmSpares(p.Slug, p.WorkerWarmSpares)
+	if !p.GenerationScoped {
+		p.Proxy.SetPoolMode(p.Slug, resolvedMode, p.WorkerGroupedSize, p.WorkerMaxWorkers)
+		p.Proxy.SetPoolWarmSpares(p.Slug, p.WorkerWarmSpares)
+	}
 
 	// Host-side dep prep and post-deploy hooks are pool-wide: run them once if
 	// any assigned tier prepares deps on the host.
@@ -1909,6 +1919,11 @@ func observeStartupRSS(sampler process.Sampler, manager *process.Manager, slug s
 // must already be set to at least index+1 before calling this function.
 // Used by the watchdog's per-replica crash-restart path.
 func RunReplica(p Params, index int) (*Result, error) {
+	if p.RecordRuntimePolicy != nil {
+		if err := p.RecordRuntimePolicy(); err != nil {
+			return nil, fmt.Errorf("record generation worker isolation: %w", err)
+		}
+	}
 	tier := p.tierForIndex(index)
 	baseCmd, appType, autoInstrument, hc, timeout, err := resolveBootParams(p, p.hostPreparesDeps(tier))
 	if err != nil {
@@ -1943,6 +1958,11 @@ const resumeProbeTimeout = 15 * time.Second
 // (ErrRuntimeNotSnapshotter / ErrReplicaNotSuspended / ErrReplicaNotFound) when
 // the slot cannot be resumed, so the caller falls back to RunReplica.
 func ResumeReplica(p Params, index int) (res *Result, err error) {
+	if p.RecordRuntimePolicy != nil {
+		if err := p.RecordRuntimePolicy(); err != nil {
+			return nil, fmt.Errorf("validate generation worker isolation: %w", err)
+		}
+	}
 	p, end := p.startPhase("deploy.replica",
 		attribute.Int("shinyhub.replica", index),
 		attribute.Bool("shinyhub.deploy.resume", true))

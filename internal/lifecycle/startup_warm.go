@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/rvben/shinyhub/internal/db"
-	"github.com/rvben/shinyhub/internal/deploy"
 )
 
 // RestoreWarmFloors restores the serving floor of apps that were up before
@@ -26,7 +25,7 @@ func (w *Watcher) RestoreWarmFloors(ctx context.Context, previouslyRunning []*db
 			if ctx.Err() != nil || w.isOwner != nil && !w.isOwner() {
 				return
 			}
-			if !isUpStatus(prior.Status) || prior.MinWarmReplicas < 1 || isElasticIsolation(deploy.ResolveWorkerIsolation(prior.WorkerIsolation, w.cfg.DefaultWorkerIsolation)) {
+			if !isUpStatus(prior.Status) || prior.MinWarmReplicas < 1 {
 				continue
 			}
 			release, ok := w.tryAppLease(prior.Slug)
@@ -42,7 +41,8 @@ func (w *Watcher) RestoreWarmFloors(ctx context.Context, previouslyRunning []*db
 				release()
 				continue
 			}
-			if app.Status != "hibernated" || app.MinWarmReplicas < 1 || isElasticIsolation(deploy.ResolveWorkerIsolation(app.WorkerIsolation, w.cfg.DefaultWorkerIsolation)) {
+			mode, policyErr := w.prepareColdIsolation(app)
+			if policyErr != nil || app.Status != "hibernated" || app.MinWarmReplicas < 1 || isElasticIsolation(mode) {
 				release()
 				continue
 			}

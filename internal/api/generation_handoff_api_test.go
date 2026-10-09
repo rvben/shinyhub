@@ -202,8 +202,8 @@ func TestDeploy_CandidateDiesBeforeCutoverKeepsHealthyRoute(t *testing.T) {
 		t.Fatalf("traffic after candidate failure = %d %q, want old version %q", status, body, oldDeployment.Version)
 	}
 	rows, err := store.ListDeploymentReplicas(app.ID)
-	if err != nil || len(rows) != 1 || rows[0].DeploymentID == old.DeploymentID {
-		t.Fatalf("candidate cleanup identity = %+v, err=%v; want only unconfirmed candidate retained", rows, err)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("candidate cleanup identity = %+v, err=%v; want confirmed stopped candidate removed", rows, err)
 	}
 	if status := latestGenerationDeploymentStatus(t, store, app.ID); status != db.DeploymentFailed {
 		t.Fatalf("newest deployment status = %q, want failed", status)

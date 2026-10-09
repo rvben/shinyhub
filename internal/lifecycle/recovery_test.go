@@ -219,8 +219,8 @@ func TestRecoverProcesses_GenerationCrashBeforePromotePreservesActiveProjection(
 		t.Fatalf("active projection deployment = %v, want %d", replicas[0].DeploymentID, active.ID)
 	}
 	generationRows, err := store.ListDeploymentReplicas(app.ID)
-	if err != nil || len(generationRows) != 1 || generationRows[0].DeploymentID != candidate.ID {
-		t.Fatalf("unrouted-authority cleanup ledger = %+v, err=%v; want candidate retained", generationRows, err)
+	if err != nil || len(generationRows) != 0 {
+		t.Fatalf("PID-less candidate cleanup ledger = %+v, err=%v; want empty even without adopted authority", generationRows, err)
 	}
 }
 
@@ -265,8 +265,8 @@ func TestRecoverProcesses_GenerationCrashAfterPromotePublishesCandidateProjectio
 		t.Fatalf("candidate projection version = %q, want %q", replicas[0].AppVersion, candidate.Version)
 	}
 	generationRows, err := store.ListDeploymentReplicas(app.ID)
-	if err != nil || len(generationRows) != 1 || generationRows[0].DeploymentID != old.ID {
-		t.Fatalf("unrouted-authority cleanup ledger = %+v, err=%v; want old generation retained", generationRows, err)
+	if err != nil || len(generationRows) != 0 {
+		t.Fatalf("PID-less old generation cleanup ledger = %+v, err=%v; want empty even without adopted authority", generationRows, err)
 	}
 }
 

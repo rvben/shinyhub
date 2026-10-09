@@ -34,6 +34,13 @@ func (s *Server) WarmShrink(slug string, floor int, grace time.Duration) (bool, 
 	if err := s.guardActivationLifecycle(app.ID, "warm shrink "+slug); err != nil {
 		return false, err
 	}
+	app, err = s.servingRuntimeApp(app)
+	if err != nil {
+		return false, err
+	}
+	if app.WorkerIsolation != "multiplex" {
+		return false, nil
+	}
 	// Honour a concurrent stop/delete that won the lock first: a torn-down app
 	// must not have its replica rows mutated.
 	if app.Status != "running" && app.Status != "degraded" {
@@ -299,6 +306,13 @@ func (s *Server) WarmExpand(slug string) (bool, error) {
 	}
 	if err := s.guardActivationLifecycle(app.ID, "warm expand "+slug); err != nil {
 		return false, err
+	}
+	app, err = s.servingRuntimeApp(app)
+	if err != nil {
+		return false, err
+	}
+	if app.WorkerIsolation != "multiplex" {
+		return false, nil
 	}
 	if err := s.guardCompatibilityQuarantine(app.ID, "warm expand "+slug); err != nil {
 		return false, err

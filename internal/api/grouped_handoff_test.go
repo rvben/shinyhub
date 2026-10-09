@@ -171,11 +171,12 @@ max_workers = 2
 			rec := httptest.NewRecorder()
 			srv.Router().ServeHTTP(rec, req)
 			want := http.StatusOK
-			if drift {
-				want = http.StatusConflict
-			}
 			if rec.Code != want {
 				t.Fatalf("manifest deploy: %d %s", rec.Code, rec.Body.String())
+			}
+			live, err := store.GetAppBySlug(app.Slug)
+			if err != nil || live.WorkerGroupedSize != 4 {
+				t.Fatalf("declared worker policy not reconciled at cutover: %+v err=%v", live, err)
 			}
 		})
 	}

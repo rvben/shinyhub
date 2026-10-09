@@ -197,6 +197,11 @@ func (s *Server) validateManifestActivationTopology(app *db.App, manifest *deplo
 //
 // Returns wrapped DB errors on storage failure (handler → 500 + degraded).
 func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy.AppSettings) error {
+	if m.Worker != nil || m.Replicas != nil {
+		if err := s.guardGenerationDrain(app.Slug); err != nil {
+			return err
+		}
+	}
 	usagePolicyChanged := (app.UsageIdentityMode == nil) != (m.UsageIdentityMode == nil) ||
 		(app.UsageIdentityMode != nil && m.UsageIdentityMode != nil && *app.UsageIdentityMode != *m.UsageIdentityMode)
 	if usagePolicyChanged && s.usagePolicy == nil {

@@ -151,7 +151,7 @@ producers itself; the recovery lists the `shinyhub schedule run <slug>
 <schedule>` commands to run first, and only for schedules that are plainly
 overdue rather than already refreshing.
 
-### Grouped worker handoff
+### Worker isolation and generation handoff
 
 Code updates to an app using `grouped` isolation can deploy without stopping
 its existing workers. ShinyHub prepares the replacement bundle and health-checks
@@ -161,16 +161,32 @@ latest** action gives that browser a new binding without moving other clients.
 No additional flag is needed, and `--allow-downtime` still permits a fallback
 rather than forcing one.
 
-This path supports matching `grouped` isolation on the default native tier of
-a single server. Metadata, resource limits, pool policy, and schedule declarations
+This path also supports switching between `grouped` and `multiplex` isolation
+on the default native tier of a single server. The candidate starts with its
+target policy; each generation retains its own recorded isolation. Metadata,
+resource limits, worker policy, and schedule declarations
 can be staged and published with the replacement when no producer needs to run.
-Isolation changes, hooks, deploy-time shared producers, and unsupported placement
+Hooks, deploy-time shared producers, other isolation modes, and unsupported placement
 still require stop-first deployment. The refusal names the reason. A consecutive
 deploy waits for the previous drain and cleanup within a bounded deadline.
 
 The server reserves memory for the candidate and configured warm spares, using
 explicit limits or observed worker startup peaks. A candidate that fails
 readiness leaves the old version and its configuration serving.
+
+An outgoing multiplex generation retains already-open HTTP streams and
+WebSockets; subsequent requests use the new generation. An outgoing grouped
+generation also retains its existing client bindings through reconnect grace.
+New clients always use the target mode. Structural settings changes, scaling,
+and unrelated rolling activations defer until the previous drain completes.
+
+After a hub restart, recorded isolation determines how living processes are
+interpreted even if the fleet default changed. Grouped client bindings live
+in hub memory and cannot be recovered after a restart; their workers are
+confirmed stopped before fresh demand-driven workers start. A verified cold
+start with no old process, route, or cleanup identity may adopt newly desired
+isolation for the same bundle. Suspended apps resume with their recorded
+isolation; a saved isolation change takes effect after a cold replacement.
 
 Old workers count as draining and do not accept new clients or consume the new
 generation's `max_workers` allowance. They retain memory until their clients

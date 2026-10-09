@@ -106,6 +106,11 @@ func (s *Server) Roll(ctx context.Context, a *db.ScheduleActivation) (runErr err
 			return activation.ErrSuperseded
 		}
 	}
+	servingApp, policyErr := s.servingRuntimeApp(app)
+	if policyErr != nil {
+		return policyErr
+	}
+	app = servingApp
 	if err := s.validateScheduleActivationForApp(app, "roll"); err != nil {
 		return fmt.Errorf("%w: %v", activation.ErrUnsupported, err)
 	}
@@ -153,7 +158,16 @@ func (s *Server) Roll(ctx context.Context, a *db.ScheduleActivation) (runErr err
 		}
 	}
 
-	if deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation) == "grouped" {
+	if s.proxy.HasDrainingGeneration(app.Slug) {
+		linked, linkErr := s.store.ActivationDeploymentID(a.ID)
+		if linkErr != nil {
+			return linkErr
+		}
+		if app.WorkerIsolation != "grouped" || linked != current.ID {
+			return &activation.RetryableError{Reason: "previous generation is still draining", RetryAfter: 5 * time.Second}
+		}
+	}
+	if app.WorkerIsolation == "grouped" {
 		publication, err := s.store.GetAppDataPublication(app.ID)
 		if err != nil && !errors.Is(err, db.ErrNotFound) {
 			return err

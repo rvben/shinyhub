@@ -52,6 +52,11 @@ func publishHandoffSettingsTx(tx writeTx, id int64, revert bool) error {
 		name          string
 		before, after any
 	}{
+		{"worker_isolation", snapshot.Before.WorkerIsolation, snapshot.After.WorkerIsolation},
+		{"worker_grouped_size", snapshot.Before.WorkerGroupedSize, snapshot.After.WorkerGroupedSize},
+		{"worker_max_workers", snapshot.Before.WorkerMaxWorkers, snapshot.After.WorkerMaxWorkers},
+		{"worker_warm_spares", snapshot.Before.WorkerWarmSpares, snapshot.After.WorkerWarmSpares},
+		{"worker_max_session_lifetime_secs", snapshot.Before.WorkerMaxSessionLifetimeSecs, snapshot.After.WorkerMaxSessionLifetimeSecs},
 		{"name", snapshot.Before.Name, snapshot.After.Name}, {"description", snapshot.Before.Description, snapshot.After.Description},
 		{"icon_emoji", snapshot.Before.IconEmoji, snapshot.After.IconEmoji}, {"project_slug", snapshot.Before.ProjectSlug, snapshot.After.ProjectSlug},
 		{"hibernate_timeout_minutes", snapshot.Before.HibernateTimeoutMinutes, snapshot.After.HibernateTimeoutMinutes},
@@ -137,7 +142,8 @@ func publishHandoffSettingsTx(tx writeTx, id int64, revert bool) error {
 // Persist only the fields required for cutover/compensation, excluding unrelated
 // app metadata and runtime diagnostics from the durable settings snapshot.
 func handoffAppSnapshot(a *App) App {
-	return App{ID: a.ID, Name: a.Name, Description: a.Description, IconEmoji: a.IconEmoji, ProjectSlug: a.ProjectSlug,
+	return App{WorkerIsolation: a.WorkerIsolation, WorkerGroupedSize: a.WorkerGroupedSize, WorkerMaxWorkers: a.WorkerMaxWorkers,
+		WorkerWarmSpares: a.WorkerWarmSpares, WorkerMaxSessionLifetimeSecs: a.WorkerMaxSessionLifetimeSecs, ID: a.ID, Name: a.Name, Description: a.Description, IconEmoji: a.IconEmoji, ProjectSlug: a.ProjectSlug,
 		HibernateTimeoutMinutes: a.HibernateTimeoutMinutes, MaxSessionsPerReplica: a.MaxSessionsPerReplica, MinWarmReplicas: a.MinWarmReplicas,
 		MemoryLimitMB: a.MemoryLimitMB, CPUQuotaPercent: a.CPUQuotaPercent, RenderSeconds: a.RenderSeconds,
 		AutoscaleEnabled: a.AutoscaleEnabled, AutoscaleMinReplicas: a.AutoscaleMinReplicas, AutoscaleMaxReplicas: a.AutoscaleMaxReplicas, AutoscaleTarget: a.AutoscaleTarget}

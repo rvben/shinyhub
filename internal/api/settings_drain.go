@@ -94,5 +94,28 @@ func (s *Server) stopForSettings(app *db.App) error {
 	if s.proxy != nil {
 		s.proxy.Deregister(app.Slug)
 	}
+	// A structural restart may reuse the deployment ID. Its next cold start
+	// must not inherit stale durable identities from the confirmed old pool.
+	for _, row := range rows {
+		if err := s.store.ClearReplicaRuntimeIdentity(app.ID, row.Index); err != nil {
+			return fmt.Errorf("clear stopped replica identity: %w", err)
+		}
+	}
+	generationRows, err := s.store.ListDeploymentReplicas(app.ID)
+	if err != nil {
+		return err
+	}
+	seen := make(map[int64]bool)
+	for _, row := range generationRows {
+		seen[row.DeploymentID] = true
+	}
+	for id := range seen {
+		if err := s.stopGenerationForCleanup(app.Slug, id); err != nil {
+			return err
+		}
+		if err := s.store.DeleteDeploymentReplicas(id); err != nil {
+			return err
+		}
+	}
 	return nil
 }

@@ -46,6 +46,8 @@ func TestElasticNativeSpawnServesProducerApp(t *testing.T) {
 	prx.SetPoolMode(app.Slug, config.IsolationPerSession, 1, 1)
 	s := &lifecycle.ElasticSpawner{Store: store, Manager: mgr, Proxy: prx, HealthCheck: noopHealthCheck}
 
+	reserveDirectSpawn(t, prx, app.Slug, 0)
+
 	s.Spawn(app.Slug, 0)
 
 	if prx.ElasticWorkerCount(app.Slug) != 1 || !mgr.HasRunning(app.Slug) {
@@ -68,6 +70,8 @@ func TestElasticUnguardedSpawnIsRefusedForProducerApp(t *testing.T) {
 	prx.SetPoolAppID(app.Slug, app.ID)
 	prx.SetPoolMode(app.Slug, config.IsolationPerSession, 1, 1)
 	s := &lifecycle.ElasticSpawner{Store: store, Manager: mgr, Proxy: prx, HealthCheck: noopHealthCheck}
+
+	reserveDirectSpawn(t, prx, app.Slug, 0)
 
 	s.Spawn(app.Slug, 0)
 
@@ -140,6 +144,8 @@ func TestElasticUnguardedSpawnMarksOrphanRisk(t *testing.T) {
 	prx.SetPoolAppID(app.Slug, app.ID)
 	prx.SetPoolMode(app.Slug, config.IsolationPerSession, 1, 1)
 	s := &lifecycle.ElasticSpawner{Store: store, Manager: mgr, Proxy: prx, HealthCheck: noopHealthCheck}
+
+	reserveDirectSpawn(t, prx, app.Slug, 0)
 
 	s.Spawn(app.Slug, 0)
 

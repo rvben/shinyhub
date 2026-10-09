@@ -299,6 +299,9 @@ func (s *Server) decorateApp(app *db.App) {
 	app.Deploying = s.appDeploying(app)
 	app.EffectiveWorkerIsolation = deploy.ResolveWorkerIsolation(
 		app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation)
+	if serving, err := s.servingIsolation(app); err == nil {
+		app.EffectiveWorkerIsolation = serving
+	}
 	if app.HibernateTimeoutMinutes != nil {
 		app.EffectiveHibernateTimeoutMinutes = float64(*app.HibernateTimeoutMinutes)
 	} else {

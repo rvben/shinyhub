@@ -33,11 +33,12 @@ const defaultElasticHealthTimeout = 60 * time.Second
 //	prx.SetSpawnFunc(func(slug string, slotID int) { go spawner.Spawn(slug, slotID) })
 //	prx.SetTerminateFunc(spawner.Terminate)
 type ElasticSpawner struct {
-	Store          *db.Store
-	Manager        *process.Manager
-	Proxy          *proxy.Proxy
-	RuntimeCfg     config.RuntimeConfig
-	StartupSampler process.Sampler
+	Store               *db.Store
+	Manager             *process.Manager
+	Proxy               *proxy.Proxy
+	RuntimeCfg          config.RuntimeConfig
+	StartupSampler      process.Sampler
+	CheckLaunchCapacity func(*db.App) error
 
 	// HealthCheck is an optional override for the per-worker readiness probe.
 	// When nil the default HTTP poller (waitElasticHealthy) is used.
@@ -85,11 +86,13 @@ type ElasticSpawner struct {
 }
 
 type elasticLifetime struct {
-	timer   *time.Timer
-	epoch   uint64
-	started time.Time
-	limit   time.Duration
-	slot    int
+	timer        *time.Timer
+	epoch        uint64
+	started      time.Time
+	limit        time.Duration
+	slot         int
+	deploymentID int64
+	incarnation  uint64
 }
 
 type elasticWarmRetry struct {
@@ -211,6 +214,16 @@ func (s *ElasticSpawner) spawnFenced(slug string, slotID int) {
 		return
 	}
 
+	mode, policyErr := s.Store.ServingWorkerIsolation(app, s.RuntimeCfg.DefaultWorkerIsolation)
+	if policyErr != nil || !isElasticIsolation(mode) {
+		s.releaseReservation(slug, slotID)
+		return
+	}
+	if policyErr = s.Store.RecordDeploymentWorkerIsolation(app.ID, dep.ID, mode); policyErr != nil {
+		s.releaseReservation(slug, slotID)
+		return
+	}
+
 	// Resolve effective resource limits using the same path as the deploy fn.
 	defaultMem, defaultCPU := s.RuntimeCfg.DefaultResourcesForApp(app)
 	memMB := deploy.ResolveMemoryLimitMB(app.MemoryLimitMB, defaultMem)
@@ -304,6 +317,21 @@ func (s *ElasticSpawner) spawnFenced(slug string, slotID int) {
 		}
 	}
 
+	releaseLaunch := func() {}
+	if s.Proxy.HasDrainingGeneration(slug) {
+		releaseLaunch = s.Manager.AcquireLaunchReservation()
+		if s.CheckLaunchCapacity == nil {
+			releaseLaunch()
+			s.releaseReservation(slug, slotID)
+			return
+		}
+		if capacityErr := s.CheckLaunchCapacity(app); capacityErr != nil {
+			releaseLaunch()
+			s.releaseReservation(slug, slotID)
+			return
+		}
+	}
+	defer releaseLaunch()
 	// A failed instrumented boot is retried once without the overlay, on the
 	// same slot and port, mirroring bootReplicaAttempt's fallback for pool
 	// replicas. The reservation stays held across both attempts and is released
@@ -618,6 +646,12 @@ func (s *ElasticSpawner) armLifetime(app *db.App, slug string, slotID int) {
 	lifetime := time.Duration(app.WorkerMaxSessionLifetimeSecs) * time.Second
 	key := slug + "/" + strconv.Itoa(slotID)
 	backstop := &elasticLifetime{epoch: s.Proxy.PoolEpoch(slug), started: time.Now(), limit: lifetime, slot: slotID}
+	if s.Manager != nil {
+		if info, ok := s.Manager.GetReplica(slug, slotID); ok {
+			backstop.deploymentID = info.DeploymentID
+			backstop.incarnation, _, _ = s.Manager.GenerationReplicaIncarnation(slug, info.DeploymentID, slotID)
+		}
+	}
 	// Serialize publication with cancellation, including an expiration that
 	// runs immediately. Old callbacks cannot consume a replacement backstop.
 	s.lifetimeMu.Lock()
@@ -648,9 +682,15 @@ func (s *ElasticSpawner) expireLifetime(slug string, slotID int, backstop *elast
 		return
 	}
 	slog.Info("elastic spawn: max session lifetime reached, terminating worker", "slug", slug, "slotID", slotID)
+	if backstop.deploymentID > 0 {
+		gen, _, ok := s.Manager.GenerationReplicaIncarnation(slug, backstop.deploymentID, slotID)
+		if !ok || gen != backstop.incarnation {
+			return
+		}
+	}
 	clear := s.Proxy.MarkElasticWorkerLifetime(slug, slotID)
-	if err := s.terminate(slug, slotID); err != nil {
-		if info, ok := s.Manager.GetReplica(slug, slotID); ok && info.Status != process.StatusStopped && info.Status != process.StatusCrashed {
+	if err := s.terminateGeneration(slug, backstop.deploymentID, slotID); err != nil {
+		if info, ok := s.Manager.GetGenerationReplica(slug, backstop.deploymentID, slotID); ok && info.Status != process.StatusStopped && info.Status != process.StatusCrashed {
 			clear()
 		}
 	}
@@ -728,6 +768,9 @@ func (s *ElasticSpawner) Resume(slug string, slotID int) {
 // suspended and unreachable with nothing to wake or reclaim it.
 func (s *ElasticSpawner) resumeFenced(slug string, slotID int) {
 	defer s.recoverSpawn(slug, slotID)
+	if !s.Proxy.ElasticSlotCanStart(slug, slotID) {
+		return
+	}
 	if s.CanMutate != nil && !s.CanMutate() {
 		s.Terminate(slug, slotID)
 		return
@@ -755,7 +798,11 @@ func (s *ElasticSpawner) resumeFenced(slug string, slotID int) {
 		s.Terminate(slug, slotID)
 		return
 	}
-	info, ok := s.Manager.GetReplica(slug, slotID)
+	workerDeployment, exists := s.Proxy.ElasticWorkerGeneration(slug, slotID)
+	if !exists || workerDeployment != dep.ID {
+		return
+	}
+	info, ok := s.Manager.GetGenerationReplica(slug, workerDeployment, slotID)
 	if !ok {
 		s.Terminate(slug, slotID)
 		return
@@ -826,7 +873,18 @@ func (s *ElasticSpawner) Terminate(slug string, slotID int) {
 	_ = s.terminate(slug, slotID)
 }
 
+func (s *ElasticSpawner) TerminateGeneration(slug string, deploymentID int64, slotID int) {
+	_ = s.terminateGeneration(slug, deploymentID, slotID)
+}
 func (s *ElasticSpawner) terminate(slug string, slotID int) error {
+	// Published callbacks resolve retained proxy ownership, never the selected
+	// manager pool (which may now contain dense multiplex replicas).
+	if deploymentID, ok := s.Proxy.ElasticWorkerGeneration(slug, slotID); ok {
+		return s.terminateGeneration(slug, deploymentID, slotID)
+	}
+	return process.ErrReplicaNotFound
+}
+func (s *ElasticSpawner) terminateGeneration(slug string, deploymentID int64, slotID int) error {
 	if s.TerminateHook != nil {
 		s.TerminateHook(slug, slotID)
 	}
@@ -834,7 +892,7 @@ func (s *ElasticSpawner) terminate(slug string, slotID int) error {
 	// This prevents the timer goroutine from lingering after an early exit.
 	// A missing entry (already fired or never armed) is a no-op.
 	s.CancelLifetime(slug, slotID)
-	stopErr := s.stopWorker(slug, slotID)
+	stopErr := s.stopGenerationWorker(slug, deploymentID, slotID)
 	if stopErr != nil {
 		slog.Debug("elastic terminate: stop replica (may already be stopped)",
 			"slug", slug, "slotID", slotID, "err", stopErr)
@@ -881,7 +939,22 @@ type ElasticTerminateResult struct {
 func (s *ElasticSpawner) TerminateConfirmed(slug string, slotID int) ElasticTerminateResult {
 	result := ElasticTerminateResult{Slug: slug, SlotID: slotID}
 
-	info, ok := s.Manager.GetReplica(slug, slotID)
+	var info *process.ProcessInfo
+	var ok bool
+	if deploymentID, exists := s.Proxy.ElasticWorkerGeneration(slug, slotID); exists {
+		// An unpublished boot placeholder has no generation yet. Resolve it
+		// only while the fenced active elastic slot still permits this boot.
+		if deploymentID == 0 && s.Proxy.ElasticSlotCanStart(slug, slotID) {
+			if app, err := s.Store.GetApp(slug); err == nil {
+				if mode, err := s.Store.ServingWorkerIsolation(app, s.RuntimeCfg.DefaultWorkerIsolation); err == nil && isElasticIsolation(mode) {
+					if dep, err := s.Store.GetServingDeployment(app.ID); err == nil {
+						deploymentID = dep.ID
+					}
+				}
+			}
+		}
+		info, ok = s.Manager.GetGenerationReplica(slug, deploymentID, slotID)
+	}
 	if !ok {
 		// Nothing to stop and nothing to clear: either the slot was never
 		// occupied, or a previous call already finished both halves.
@@ -902,7 +975,7 @@ func (s *ElasticSpawner) TerminateConfirmed(slug string, slotID int) ElasticTerm
 	// The stop, and any retry of it, targets the exact incarnation GetReplica
 	// saw. A slot that is empty or holds a different process by now means that
 	// one already left it, so there is nothing of ours to signal.
-	if gen, pid, ok := s.Manager.ReplicaIncarnation(slug, slotID); !ok || pid != info.PID {
+	if gen, pid, ok := s.Manager.GenerationReplicaIncarnation(slug, info.DeploymentID, slotID); !ok || pid != info.PID {
 		result.Stopped = true
 	} else {
 		result.Incarnation = gen
@@ -942,7 +1015,11 @@ func (s *ElasticSpawner) TerminateConfirmed(slug string, slotID int) ElasticTerm
 // trigger fresh spawns on their next request.
 //
 // Call once on startup after RecoverProcesses.
-func ReapElasticOrphans(store *db.Store, mgr *process.Manager) {
+func ReapElasticOrphans(store *db.Store, mgr *process.Manager, defaultIsolation ...string) {
+	def := ""
+	if len(defaultIsolation) > 0 {
+		def = defaultIsolation[0]
+	}
 	// Load all apps so we know which slugs are in elastic mode.
 	apps, err := store.ListApps(0, 0)
 	if err != nil {
@@ -951,7 +1028,8 @@ func ReapElasticOrphans(store *db.Store, mgr *process.Manager) {
 	}
 	elasticSlugs := make(map[string]bool, len(apps))
 	for _, app := range apps {
-		if isElasticIsolation(app.WorkerIsolation) {
+		mode, modeErr := store.ServingWorkerIsolation(app, def)
+		if modeErr == nil && isElasticIsolation(mode) {
 			elasticSlugs[app.Slug] = true
 		}
 	}
@@ -969,7 +1047,7 @@ func ReapElasticOrphans(store *db.Store, mgr *process.Manager) {
 		}
 		slog.Warn("elastic orphan reap: stopping leftover worker",
 			"slug", info.Slug, "index", info.Index, "pid", info.PID)
-		if err := mgr.StopReplica(info.Slug, info.Index); err != nil {
+		if err := mgr.StopGenerationReplica(info.Slug, info.DeploymentID, info.Index, true); err != nil {
 			slog.Warn("elastic orphan reap: stop failed",
 				"slug", info.Slug, "index", info.Index, "err", err)
 		}
@@ -1081,15 +1159,30 @@ func waitElasticHealthy(endpointURL, readyPath string, readyStatus int, timeout 
 
 // stopWorker retains the durable identity until the runtime confirms exit.
 // Matching PID and deployment prevents delayed cleanup deleting a replacement.
+func (s *ElasticSpawner) stopGenerationWorker(slug string, deploymentID int64, slotID int) error {
+	info, ok := s.Manager.GetGenerationReplica(slug, deploymentID, slotID)
+	if !ok {
+		return process.ErrReplicaNotFound
+	}
+	gen, pid, ok := s.Manager.GenerationReplicaIncarnation(slug, deploymentID, slotID)
+	if !ok || pid != info.PID {
+		return process.ErrIncarnationGone
+	}
+	if err := s.Manager.StopReplicaIncarnation(slug, slotID, gen); err != nil {
+		return err
+	}
+	return s.Store.DeleteDeploymentReplicaIdentity(info.AppID, info.DeploymentID, slotID, info.PID)
+}
+
 func (s *ElasticSpawner) stopWorker(slug string, slotID int) error {
 	info, ok := s.Manager.GetReplica(slug, slotID)
 	if !ok {
 		return process.ErrReplicaNotFound
 	}
 	if _, native := s.Manager.RuntimeForTier(info.Tier).(process.LifetimeFileInheritor); !native {
-		return s.Manager.StopReplica(slug, slotID)
+		return s.Manager.StopGenerationReplica(slug, info.DeploymentID, slotID, false)
 	}
-	if err := s.Manager.StopReplicaConfirmed(slug, slotID); err != nil {
+	if err := s.Manager.StopGenerationReplica(slug, info.DeploymentID, slotID, true); err != nil {
 		return err
 	}
 	return s.Store.DeleteDeploymentReplicaIdentity(info.AppID, info.DeploymentID, slotID, info.PID)

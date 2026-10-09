@@ -2006,6 +2006,10 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		if err != nil {
 			return nil, fmt.Errorf("get app for deploy: %w", err)
 		}
+		mode, policyErr := store.ServingWorkerIsolation(app, cfg.Runtime.DefaultWorkerIsolation)
+		if policyErr != nil || mode != "multiplex" {
+			return nil, fmt.Errorf("replica deploy requires serving multiplex policy: %v", policyErr)
+		}
 		deployDefaultMem, deployDefaultCPU := cfg.Runtime.DefaultResourcesForApp(app)
 		p := deploy.Params{
 			Slug:                  slug,
@@ -2022,21 +2026,19 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 			MaxSessionsPerReplica: deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, cfg.Runtime.DefaultMaxSessionsPerReplica),
 			IdentityHeaders:       deploy.ResolveIdentityHeaders(app.IdentityHeaders, cfg.Auth.IdentityHeadersEnabled()),
 			StartupSampler:        replicaSampler,
+			WorkerIsolation:       mode,
 			// Pin a shared-mount consumer's restarted replica to the worker set
 			// hosting its source data, matching the full-deploy placement so a
 			// recovered replica lands beside the data it mounts.
 			ColocateWorkers: srv.ColocationPins(app),
 		}
-		deps, derr := store.ListRecentDeployments(app.ID, 1)
+		current, derr := store.GetServingDeployment(app.ID)
 		if derr != nil {
 			return nil, fmt.Errorf("list deployment for guarded consumer start: %w", derr)
 		}
-		if len(deps) == 0 {
-			return nil, fmt.Errorf("guarded consumer start: app %s has no successful deployment", slug)
-		}
-		current := deps[0]
 		p.ContentDigest = current.ContentDigest
 		p.DeploymentID = current.ID
+		p.RecordRuntimePolicy = func() error { return store.RecordDeploymentWorkerIsolation(app.ID, current.ID, mode) }
 		p.AppVersion = current.Version
 		p.Preparation = deploy.ActivationPreparation(current.Prepared)
 		p.GuardUntilAcknowledged = true
@@ -2088,10 +2090,17 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 			TierOrder:   cfg.Runtime.TierOrder(),
 			DefaultTier: cfg.Runtime.DefaultTierName(),
 		}
-		if deps, derr := store.ListRecentDeployments(app.ID, 1); derr == nil && len(deps) > 0 {
-			p.DeploymentID = deps[0].ID
-			p.AppVersion = deps[0].Version
+		mode, policyErr := store.ServingWorkerIsolation(app, cfg.Runtime.DefaultWorkerIsolation)
+		if policyErr != nil || mode != "multiplex" {
+			return nil, fmt.Errorf("replica resume requires serving multiplex policy: %v", policyErr)
 		}
+		current, derr := store.GetServingDeployment(app.ID)
+		if derr != nil {
+			return nil, derr
+		}
+		p.DeploymentID = current.ID
+		p.AppVersion = current.Version
+		p.WorkerIsolation = mode
 		return deploy.ResumeReplica(traceReplica(ctx, tracer, p), index)
 	}
 
@@ -2143,6 +2152,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// is called when all assigned clients disconnect (after the grace window).
 	elasticSpawner := &lifecycle.ElasticSpawner{
 		StartupSampler:      replicaSampler,
+		CheckLaunchCapacity: srv.CheckElasticLaunchCapacity,
 		Store:               store,
 		Manager:             mgr,
 		Proxy:               prx,
@@ -2158,6 +2168,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	})
 	prx.SetWarmSpareConsumedFunc(elasticSpawner.WarmSpareConsumed)
 	prx.SetTerminateFunc(elasticSpawner.Terminate)
+	prx.SetTerminateGenerationFunc(elasticSpawner.TerminateGeneration)
 	prx.SetCancelElasticLifetimeFunc(elasticSpawner.CancelLifetime)
 	prx.SetElasticLifetimeUpdateFunc(elasticSpawner.UpdateSessionLifetime)
 	// The watcher's hibernation sweep stops elastic worker slots through the
@@ -2626,7 +2637,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		// Stop any native processes in the Manager that belong to elastic-mode
 		// apps. Elastic workers are ephemeral and must not be re-adopted; the
 		// pool starts empty and clients trigger fresh spawns on next request.
-		lifecycle.ReapElasticOrphans(store, mgr)
+		lifecycle.ReapElasticOrphans(store, mgr, cfg.Runtime.DefaultWorkerIsolation)
 		// Apps that ran elastic workers under a version without durable worker
 		// identities carry an orphan-risk marker. With every known worker
 		// stopped, a free consumer-lifetime lock proves no unknown one survived,
@@ -3286,7 +3297,11 @@ func validateStoredProducerTopology(store *db.Store, runtimeCfg config.RuntimeCo
 			for tier := range placement {
 				roles[tier] = "is placed on"
 			}
-			if deploy.ResolveWorkerIsolation(app.WorkerIsolation, runtimeCfg.DefaultWorkerIsolation) != "multiplex" {
+			mode, policyErr := store.ServingWorkerIsolation(app, runtimeCfg.DefaultWorkerIsolation)
+			if policyErr != nil {
+				return fmt.Errorf("resolve serving isolation for %s: %w", app.Slug, policyErr)
+			}
+			if mode != "multiplex" {
 				spawnTier := runtimeCfg.DefaultTierName()
 				if spawnTier == "" {
 					spawnTier = process.DefaultTier

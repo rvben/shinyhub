@@ -6,6 +6,7 @@ import (
 
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/dbtest"
 	"github.com/rvben/shinyhub/internal/history"
 )
 
@@ -64,7 +65,7 @@ func TestEffectiveAutoscaleMaxReplicas(t *testing.T) {
 		{"no app maximum", 16, 0, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := &Server{cfg: &config.Config{Runtime: config.RuntimeConfig{MaxReplicas: tc.runtimeMax}}}
+			s := &Server{cfg: &config.Config{Runtime: config.RuntimeConfig{MaxReplicas: tc.runtimeMax}}, store: dbtest.New(t)}
 			app := &db.App{AutoscaleMaxReplicas: tc.appMax}
 			if got := s.effectiveAutoscaleMaxReplicas(app); got != tc.want {
 				t.Fatalf("effective maximum = %d, want %d", got, tc.want)

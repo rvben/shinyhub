@@ -699,6 +699,76 @@ func (m *Manager) poolKeyForDeploymentLocked(slug string, deploymentID int64) (s
 	return "", false
 }
 
+// PoolSelection is an opaque selected-pool identity. It remains valid after
+// the pool empties, so compensation can restore an idle grouped predecessor.
+type PoolSelection struct{ slug, key string }
+
+func (m *Manager) CapturePoolSelection(slug string) PoolSelection {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return PoolSelection{slug: slug, key: m.activePoolKeyLocked(slug)}
+}
+
+// RestorePoolSelection restores previous only if nobody changed selection
+// since expected was captured. It intentionally does not require a live pool.
+func (m *Manager) RestorePoolSelection(slug string, expected, previous PoolSelection) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if expected.slug != slug || previous.slug != slug || previous.key == "" || m.activePoolKeyLocked(slug) != expected.key {
+		return fmt.Errorf("restore pool selection for %s: selection changed", slug)
+	}
+	m.activePoolKeys[slug] = previous.key
+	return nil
+}
+
+// AllGenerationsForSlug includes staged, selected and draining process entries.
+func (m *Manager) AllGenerationsForSlug(slug string) []*ProcessInfo {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []*ProcessInfo
+	for _, pool := range m.entries {
+		for _, e := range pool {
+			if e != nil && e.info.Slug == slug {
+				snap := *e.info
+				out = append(out, &snap)
+			}
+		}
+	}
+	return out
+}
+
+// NextReplicaIndex is a floor above all occupied indices, including stopped
+// and stop-pending entries in every generation pool.
+func (m *Manager) NextReplicaIndex(slug string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	next := 0
+	for _, pool := range m.entries {
+		for i, e := range pool {
+			if e != nil && e.info.Slug == slug && i >= next {
+				next = i + 1
+			}
+		}
+	}
+	return next
+}
+
+// GenerationReplicaIncarnation captures occupancy without resolving the
+// selected pool, preventing a delayed callback targeting a new generation.
+func (m *Manager) GenerationReplicaIncarnation(slug string, deploymentID int64, index int) (uint64, int, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key, ok := m.poolKeyForDeploymentLocked(slug, deploymentID)
+	if !ok || index < 0 || index >= len(m.entries[key]) {
+		return 0, 0, false
+	}
+	e := m.entries[key][index]
+	if e == nil || e.info.DeploymentID != deploymentID {
+		return 0, 0, false
+	}
+	return e.incarnation, e.info.PID, true
+}
+
 // defaultStopGrace is the SIGTERM-to-SIGKILL window for a single replica. It is
 // generous enough for a Shiny/R or Python app to flush session state and close
 // its on-disk stores on shutdown; operators with slower cleanup can raise it via
@@ -2245,7 +2315,7 @@ func (m *Manager) HoldsLiveProcess(slug string) bool {
 			if e == nil || e.info.Slug != slug {
 				continue
 			}
-			if e.info.Status != StatusStopped && e.info.Status != StatusCrashed {
+			if e.stopPending || (e.info.Status != StatusStopped && e.info.Status != StatusCrashed) {
 				return true
 			}
 		}

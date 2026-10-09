@@ -342,7 +342,26 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 			slog.Warn("process recovery: skipped compatibility-quarantined app", "slug", app.Slug)
 			continue
 		}
-		resolvedIso := deploy.ResolveWorkerIsolation(app.WorkerIsolation, defaultWorkerIsolation)
+		resolvedIso, isoErr := store.ServingWorkerIsolation(app, defaultWorkerIsolation)
+		if isoErr != nil {
+			slog.Error("process recovery: resolve serving policy", "slug", app.Slug, "err", isoErr)
+			continue
+		}
+		// Bind legacy authority before publishing recovered routes. Once a
+		// living worker is adopted, cold-start policy initialization correctly
+		// refuses to reinterpret it. Record is same-or-unknown, so desired
+		// setting drift cannot overwrite an established generation policy.
+		serving, servingErr := store.GetServingDeployment(app.ID)
+		if servingErr != nil && !errors.Is(servingErr, db.ErrNotFound) {
+			slog.Error("process recovery: resolve serving deployment policy", "slug", app.Slug, "err", servingErr)
+			continue
+		}
+		if servingErr == nil && serving.Status == db.DeploymentSucceeded {
+			if err := store.RecordDeploymentWorkerIsolation(app.ID, serving.ID, resolvedIso); err != nil {
+				slog.Error("process recovery: bind serving deployment policy", "slug", app.Slug, "err", err)
+				continue
+			}
+		}
 		generationOK := true
 		if isElasticIsolation(resolvedIso) {
 			// Client bindings are process-local. After a hub restart, elastic
@@ -395,6 +414,7 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 
 		reps, err := store.ListReplicas(app.ID)
 		if err != nil || len(reps) == 0 {
+			cleanupObsoleteDeploymentGenerations(store, mgr, app)
 			markRecoveryStopped(store, app.Slug)
 			continue
 		}
@@ -550,27 +570,21 @@ func RecoverProcesses(store *db.Store, mgr *process.Manager, prx *proxy.Proxy, d
 		if !anyAlive && !indeterminate && !healable {
 			markRecoveryDown(store, app.Slug)
 		}
-		if anyAlive {
-			cleanupObsoleteDeploymentGenerations(store, mgr, app)
-		}
+		cleanupObsoleteDeploymentGenerations(store, mgr, app)
 	}
 
 	parkStrandedReplicas(store)
 
-	// Elastic orphans: apps outside the running/degraded set that still carry
-	// a durable native worker identity from before this restart. They are
+	// Ledger orphans: apps outside the running/degraded set that still carry
+	// a durable worker identity from before this restart. They are
 	// reconciled the same way a running elastic app's leftover generations
 	// are, but their app status is never touched here - a hibernated app
 	// stays hibernated and wakeable, a crashed app stays crashed for its own
 	// recovery path, and this pass only clears (or re-queues) the identity
 	// row.
 	for _, app := range inputs.ElasticOrphans {
-		resolvedIso := deploy.ResolveWorkerIsolation(app.WorkerIsolation, defaultWorkerIsolation)
-		if !isElasticIsolation(resolvedIso) {
-			// No longer (or never) elastic - e.g. a mode switch away from
-			// elastic left rows behind. Not this pass's to reconcile.
-			continue
-		}
+		// Non-serving apps have no traffic to restore. All ledger identities
+		// are leftovers regardless of today's desired isolation.
 		cleanupElasticDeploymentGenerations(store, mgr, prx, app, queue)
 	}
 }
@@ -658,8 +672,8 @@ func reconcileDeploymentGenerationProjection(store *db.Store, app *db.App) bool 
 	return true
 }
 
-// cleanupObsoleteDeploymentGenerations runs only after the authoritative
-// legacy projection has been adopted and routed. Each deployment ledger is
+// cleanupObsoleteDeploymentGenerations runs after authoritative projection
+// reconciliation, even if no active process could be adopted. Each ledger is
 // deleted as a unit only when every recorded native identity is confirmed gone;
 // failures remain durable and block another handoff until a later recovery.
 func cleanupObsoleteDeploymentGenerations(store *db.Store, mgr *process.Manager, app *db.App) {

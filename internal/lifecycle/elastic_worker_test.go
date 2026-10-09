@@ -228,6 +228,7 @@ func TestSpawnElasticWorker_BootsWithCorrectSlotID(t *testing.T) {
 	}
 
 	const slotID = 7
+	reserveDirectSpawn(t, prx, "app1", slotID)
 	spawner.Spawn("app1", slotID)
 
 	// Verify Manager.Start was called with the right Index.
@@ -278,6 +279,7 @@ func TestSpawnElasticWorker_HoldsAppOperationThroughRegistration(t *testing.T) {
 	}
 	done := make(chan struct{})
 	go func() {
+		reserveDirectSpawn(t, prx, "leased-spawn", 3)
 		spawner.Spawn("leased-spawn", 3)
 		close(done)
 	}()
@@ -334,6 +336,7 @@ func TestSpawnElasticWorker_RefusesPendingCompatibilityBarrier(t *testing.T) {
 		Store: store, Manager: process.NewManager(t.TempDir(), rt), Proxy: prx,
 		RuntimeCfg: config.RuntimeConfig{}, HealthCheck: noopHealthCheck,
 	}
+	reserveDirectSpawn(t, prx, "quarantined-spawn", 2)
 	spawner.Spawn("quarantined-spawn", 2)
 	rt.mu.Lock()
 	starts := len(rt.started)
@@ -368,6 +371,7 @@ func TestElasticWarmSpare_FreezesThenResumesOnDemand(t *testing.T) {
 			return appOperation.Unlock, nil
 		},
 	}
+	reserveDirectSpawn(t, prx, "warmapp", 0)
 	spawner.Spawn("warmapp", 0)
 	snap, _ := prx.ElasticWorkersSnapshot("warmapp")
 	if len(snap.Workers) != 1 || snap.Workers[0].Status != "suspended" || !snap.Workers[0].WarmSpare {
@@ -450,6 +454,7 @@ func TestElasticWarmSpare_ProvisionFailureRetriesWithoutDemand(t *testing.T) {
 	// The missing app makes Spawn fail before it needs a process manager. The
 	// failed reservation was a warm spare, so the controller must replenish it
 	// on its own rather than waiting for a browser request.
+	reserveDirectSpawn(t, prx, "missing", slotID)
 	spawner.Spawn("missing", slotID)
 
 	select {
@@ -478,6 +483,7 @@ func TestElasticWarmSpare_RetryCannotCrossPoolGeneration(t *testing.T) {
 		Store: store, Proxy: prx,
 		WarmRetryDelay: func(int) time.Duration { return 15 * time.Millisecond },
 	}
+	reserveDirectSpawn(t, prx, "missing", slotID)
 	spawner.Spawn("missing", slotID)
 	// A deploy/stop invalidates the pool after the retry was scheduled. Reusing
 	// the slug for a fresh pool must not let stale delayed work provision into
@@ -524,6 +530,8 @@ func TestSpawnElasticWorker_AppliesResourceLimits(t *testing.T) {
 		RuntimeCfg:  config.RuntimeConfig{},
 		HealthCheck: noopHealthCheck,
 	}
+
+	reserveDirectSpawn(t, prx, "limapp", 3)
 
 	spawner.Spawn("limapp", 3)
 
@@ -572,6 +580,8 @@ func TestSpawnElasticWorker_MaxSessionLifetimeBackstop(t *testing.T) {
 		RuntimeCfg:  config.RuntimeConfig{},
 		HealthCheck: noopHealthCheck,
 	}
+
+	reserveDirectSpawn(t, prx, "lifeapp", 0)
 
 	spawner.Spawn("lifeapp", 0)
 
@@ -627,6 +637,8 @@ func TestTerminateElasticWorker_CancelsLifetimeTimer(t *testing.T) {
 		},
 	}
 
+	reserveDirectSpawn(t, prx, "cancelapp", 0)
+
 	spawner.Spawn("cancelapp", 0)
 	if prx.ElasticWorkerCount("cancelapp") == 0 {
 		t.Fatal("worker should be registered in the elastic pool after Spawn")
@@ -656,9 +668,10 @@ func TestTerminateElasticWorker_StopsReplicaAndDeregisters(t *testing.T) {
 	// Adopt a fake process into the Manager (simulates an elastic worker that
 	// was spawned during a previous call).
 	mgr.Adopt("termapp", process.ProcessInfo{
-		Slug:   "termapp",
-		Index:  2,
-		Status: process.StatusRunning,
+		Slug:         "termapp",
+		DeploymentID: 1,
+		Index:        2,
+		Status:       process.StatusRunning,
 	}, process.RunHandle{PID: 99999})
 
 	prx := proxy.New()
@@ -873,6 +886,7 @@ func TestSpawnElasticWorker_RefusesWhenEnvironmentIsMissing(t *testing.T) {
 		Store: store, Manager: process.NewManager(t.TempDir(), rt),
 		Proxy: prx, RuntimeCfg: config.RuntimeConfig{}, HealthCheck: noopHealthCheck,
 	}
+	reserveDirectSpawn(t, prx, "noenv", 3)
 	spawner.Spawn("noenv", 3)
 
 	rt.mu.Lock()
@@ -902,6 +916,7 @@ func TestSpawnElasticWorker_StartsWhenEnvironmentIsPresent(t *testing.T) {
 		Store: store, Manager: process.NewManager(t.TempDir(), rt),
 		Proxy: prx, RuntimeCfg: config.RuntimeConfig{}, HealthCheck: noopHealthCheck,
 	}
+	reserveDirectSpawn(t, prx, "hasenv", 4)
 	spawner.Spawn("hasenv", 4)
 
 	rt.mu.Lock()
@@ -985,6 +1000,7 @@ func TestSpawnElasticWorker_AutoInstrumentsWhenFleetDefaultOn(t *testing.T) {
 	f := newElasticTracingFixture(t, "inst", mustMinimalBundle(t), &recordingRuntime{})
 	f.mgr.SetAutoInstrumentAppsDefault(true)
 	f.mgr.SetAutoInstrumentExtraPackages([]string{"opentelemetry-instrumentation-botocore"})
+	reserveDirectSpawn(t, f.prx, "inst", 1)
 	(&lifecycle.ElasticSpawner{Store: f.store, Manager: f.mgr, Proxy: f.prx, HealthCheck: noopHealthCheck}).Spawn("inst", 1)
 
 	cmds := f.startedCommands()
@@ -999,6 +1015,7 @@ func TestSpawnElasticWorker_AutoInstrumentsWhenFleetDefaultOn(t *testing.T) {
 func TestSpawnElasticWorker_FleetDefaultOffStaysUninstrumented(t *testing.T) {
 	f := newElasticTracingFixture(t, "plain", mustMinimalBundle(t), &recordingRuntime{})
 	f.mgr.SetAutoInstrumentExtraPackages([]string{"opentelemetry-instrumentation-botocore"})
+	reserveDirectSpawn(t, f.prx, "plain", 1)
 	(&lifecycle.ElasticSpawner{Store: f.store, Manager: f.mgr, Proxy: f.prx, HealthCheck: noopHealthCheck}).Spawn("plain", 1)
 
 	cmds := f.startedCommands()
@@ -1029,6 +1046,7 @@ func TestSpawnElasticWorker_ManifestTracingAutoOverridesFleet(t *testing.T) {
 			slug := "manifest-" + strconv.Itoa(i)
 			f := newElasticTracingFixture(t, slug, bundle, &recordingRuntime{})
 			f.mgr.SetAutoInstrumentAppsDefault(tc.fleet)
+			reserveDirectSpawn(t, f.prx, slug, 1)
 			(&lifecycle.ElasticSpawner{Store: f.store, Manager: f.mgr, Proxy: f.prx, HealthCheck: noopHealthCheck}).Spawn(slug, 1)
 
 			cmds := f.startedCommands()
@@ -1051,6 +1069,7 @@ func TestSpawnElasticWorker_InstrumentedHealthFailureRetriesUninstrumented(t *te
 	t.Cleanup(rt.closeExits)
 	f := newElasticTracingFixture(t, "retry", mustMinimalBundle(t), rt)
 	f.mgr.SetAutoInstrumentAppsDefault(true)
+	reserveDirectSpawn(t, f.prx, "retry", slotID)
 	(&lifecycle.ElasticSpawner{Store: f.store, Manager: f.mgr, Proxy: f.prx, HealthCheck: failingThenPassingHealth(1)}).Spawn("retry", slotID)
 
 	cmds := f.startedCommands()
@@ -1087,6 +1106,7 @@ func TestSpawnElasticWorker_InstrumentedHealthFailureRetriesUninstrumented(t *te
 
 func TestSpawnElasticWorker_UninstrumentedHealthFailureDoesNotRetry(t *testing.T) {
 	f := newElasticTracingFixture(t, "noretry", mustMinimalBundle(t), &recordingRuntime{})
+	reserveDirectSpawn(t, f.prx, "noretry", 2)
 	(&lifecycle.ElasticSpawner{Store: f.store, Manager: f.mgr, Proxy: f.prx, HealthCheck: failingThenPassingHealth(1)}).Spawn("noretry", 2)
 
 	if cmds := f.startedCommands(); len(cmds) != 1 {
@@ -1167,5 +1187,75 @@ func TestSpawnElasticWorker_RetryHoldsReservationAndReleasesOnceOnFinalFailure(t
 	}
 	if n := f.prx.ElasticWorkerCount("held"); n != before {
 		t.Fatalf("ElasticWorkerCount = %d after final failure, want %d", n, before)
+	}
+}
+
+// reserveDirectSpawn establishes proxy ownership for direct spawner tests. A
+// real request creates this slot before dispatching Spawn; these tests bypass
+// request admission to exercise launch behavior and explicit sparse indices.
+func reserveDirectSpawn(t *testing.T, p *proxy.Proxy, slug string, slot int) {
+	t.Helper()
+	if _, exists := p.ElasticWorkerGeneration(slug, slot); exists {
+		return
+	}
+	if err := p.RegisterElasticWorker(slug, slot, "http://127.0.0.1:1", nil, 0); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTerminateGenerationDoesNotSignalSelectedReplacement(t *testing.T) {
+	store := mustOpenStore(t)
+	app := mustCreateElasticApp(t, store, "retained")
+	rt := &recordingRuntime{exitOnSignal: true}
+	t.Cleanup(rt.closeExits)
+	mgr := process.NewManager(t.TempDir(), rt)
+	old, err := mgr.Start(process.StartParams{Slug: app.Slug, AppID: app.ID, Index: 0, Port: 23001, Command: []string{"app"}, DeploymentID: 101})
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := mgr.Start(process.StartParams{Slug: app.Slug, AppID: app.ID, Index: 0, Port: 23002, Command: []string{"app"}, DeploymentID: 202, GenerationScoped: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.ActivateGeneration(app.Slug, 202); err != nil {
+		t.Fatal(err)
+	}
+	prx := proxy.New()
+	prx.SetPoolMode(app.Slug, config.IsolationGrouped, 1, 5)
+	if err := prx.RegisterElasticWorker(app.Slug, 0, old.EndpointURL, nil, 101); err != nil {
+		t.Fatal(err)
+	}
+	s := &lifecycle.ElasticSpawner{Store: store, Manager: mgr, Proxy: prx}
+	s.TerminateGeneration(app.Slug, 101, 0)
+	info, ok := mgr.GetGenerationReplica(app.Slug, 202, 0)
+	if !ok || info.PID != next.PID || info.Status != process.StatusRunning {
+		t.Fatal("retired callback changed replacement")
+	}
+	if _, ok := mgr.GetGenerationReplica(app.Slug, 101, 0); ok {
+		t.Fatal("outgoing worker was not retired")
+	}
+}
+
+func TestReapElasticOrphansPreservesRecordedFixedGeneration(t *testing.T) {
+	store := mustOpenStore(t)
+	app := mustCreateApp(t, store, "recorded-fixed")
+	dep := mustCreateDeploymentInDir(t, store, app.ID, mustMinimalBundle(t))
+	if err := store.RecordDeploymentWorkerIsolation(app.ID, dep.ID, "multiplex"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec("UPDATE apps SET worker_isolation='grouped' WHERE id=?", app.ID); err != nil {
+		t.Fatal(err)
+	}
+	rt := &recordingRuntime{exitOnSignal: true}
+	t.Cleanup(rt.closeExits)
+	mgr := process.NewManager(t.TempDir(), rt)
+	info, err := mgr.Start(process.StartParams{Slug: app.Slug, AppID: app.ID, Index: 0, Port: 23003, Command: []string{"app"}, DeploymentID: dep.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lifecycle.ReapElasticOrphans(store, mgr, "grouped")
+	retained, ok := mgr.GetGenerationReplica(app.Slug, dep.ID, 0)
+	if !ok || retained.PID != info.PID || retained.Status != process.StatusRunning {
+		t.Fatal("desired isolation reinterpreted adopted fixed process")
 	}
 }

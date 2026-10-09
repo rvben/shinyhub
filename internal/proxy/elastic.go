@@ -292,22 +292,27 @@ func (p *Proxy) reconcileElasticWarmSpares(slug string, expectedEpoch *uint64) {
 		for missing > 0 && active < pool.maxWorkers {
 			id := pool.allocateSlotID()
 			addElasticWorker(pool, &replicaBackend{
-				slotID: id,
-				status: workerBooting,
-				spare:  true,
+				slotID:       id,
+				deploymentID: pool.activeDeploymentID,
+				status:       workerBooting,
+				spare:        true,
 			})
 			spawnIDs = append(spawnIDs, id)
 			missing--
 			active++
 		}
 	}
-	spawn, terminate := p.spawn, p.terminate
+	spawn := p.spawn
+	var terminate []func()
+	for _, id := range stopIDs {
+		if term := p.terminateWorkerLocked(slug, pool.workers[id]); term != nil {
+			terminate = append(terminate, term)
+		}
+	}
 	p.mu.Unlock()
 
-	if terminate != nil {
-		for _, id := range stopIDs {
-			safego.Go("proxy elastic warm spare terminate", func() { terminate(slug, id) })
-		}
+	for _, term := range terminate {
+		safego.Go("proxy elastic warm spare terminate", term)
 	}
 	if spawn != nil {
 		for _, id := range spawnIDs {
@@ -393,8 +398,9 @@ func (p *Proxy) reserveWorker(slug, _ string) int {
 
 	slotID := pool.allocateSlotID()
 	addElasticWorker(pool, &replicaBackend{
-		slotID: slotID,
-		status: workerBooting,
+		slotID:       slotID,
+		deploymentID: pool.activeDeploymentID,
+		status:       workerBooting,
 	})
 	return slotID
 }
@@ -428,11 +434,12 @@ func (p *Proxy) bindClientLocked(slug, clientID string, slotID int) {
 		if pool != nil {
 			if w, ok := pool.workers[old.slotID]; ok {
 				w.assignedClients--
-				if w.assignedClients == 0 && p.terminate != nil {
+				if w.assignedClients == 0 {
 					// Dispatch via goroutine: the callback must never run
 					// inline under the write lock (re-entry / deadlock).
-					oldSlotID := old.slotID
-					safego.Go("proxy elastic client migrate terminate", func() { p.terminate(slug, oldSlotID) })
+					if term := p.terminateWorkerLocked(slug, w); term != nil {
+						safego.Go("proxy elastic client migrate terminate", term)
+					}
 				}
 			}
 		}
@@ -593,19 +600,19 @@ func (p *Proxy) graceExpiry(slug, clientID string, armed *clientSlot) func() {
 		}
 
 		// Decrement the worker's assignedClients and optionally terminate.
-		var term func(string, int)
+		var term func()
 		if pool, ok := p.pools[slug]; ok {
 			if w, ok := pool.workers[slotID]; ok {
 				w.assignedClients--
-				if w.assignedClients == 0 && p.terminate != nil {
-					term = p.terminate
+				if w.assignedClients == 0 {
+					term = p.terminateWorkerLocked(slug, w)
 				}
 			}
 		}
 		p.mu.Unlock()
 		if term != nil {
 			// Dispatch outside the lock to avoid re-entry / deadlock.
-			safego.Go("proxy elastic grace expiry terminate", func() { term(slug, slotID) })
+			safego.Go("proxy elastic grace expiry terminate", term)
 		}
 	}
 }
@@ -825,15 +832,16 @@ func (s workerStatus) label() string {
 }
 
 // ElasticWorkersSnapshot returns the live capacity view of slug's elastic
-// pool for status surfaces (API, CLI, UI). ok is false for multiplex or
-// unknown pools, so callers can distinguish "no capacity view exists" from
+// pool for status surfaces (API, CLI, UI), including retained grouped drainers
+// while multiplex is active. ok is false for unknown pools or multiplex pools
+// without retained workers, so callers can distinguish "no capacity view exists" from
 // an elastic pool that currently has zero workers. Callers must NOT hold p.mu.
 func (p *Proxy) ElasticWorkersSnapshot(slug string) (ElasticPoolSnapshot, bool) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
 	pool, ok := p.pools[slug]
-	if !ok || !poolIsElastic(pool) {
+	if !ok || (!poolIsElastic(pool) && len(pool.workers) == 0) {
 		return ElasticPoolSnapshot{}, false
 	}
 	snap := ElasticPoolSnapshot{

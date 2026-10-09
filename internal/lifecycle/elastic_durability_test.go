@@ -57,6 +57,7 @@ func TestElasticNativeLaunchRequiresDurableIdentity(t *testing.T) {
 					return nil
 				},
 			}
+			reserveDirectSpawn(t, prx, app.Slug, 0)
 			s.Spawn(app.Slug, 0)
 			if failRecord {
 				if checked || mgr.HasRunning(app.Slug) || prx.ElasticWorkerCount(app.Slug) != 0 {

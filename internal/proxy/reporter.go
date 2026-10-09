@@ -6,6 +6,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
 )
 
@@ -148,11 +149,6 @@ func (p *Proxy) snapshotSessions(slugFilter map[string]struct{}) []db.ReplicaSes
 	p.mu.RLock()
 	snaps := make([]poolSnap, 0, len(p.pools))
 	for slug, pool := range p.pools {
-		if poolIsElastic(pool) {
-			// Grouped generations retain worker slots, not fixed replica rows.
-			// Their capacity is reported by ElasticWorkersSnapshot.
-			continue
-		}
 		if pool.appID.Load() == 0 {
 			continue // not wired for clustering; skip
 		}
@@ -167,7 +163,10 @@ func (p *Proxy) snapshotSessions(slugFilter map[string]struct{}) []db.ReplicaSes
 				ps.replicas = append(ps.replicas, rep)
 			}
 		}
-		for _, generation := range pool.drainingGenerations {
+		for deploymentID, generation := range pool.drainingGenerations {
+			if pool.generationPolicies[deploymentID].Mode == config.IsolationGrouped {
+				continue
+			}
 			for _, rep := range generation {
 				if rep != nil {
 					ps.replicas = append(ps.replicas, rep)

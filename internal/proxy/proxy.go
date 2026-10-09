@@ -357,6 +357,7 @@ type backendPool struct {
 	candidates          map[int64][]*replicaBackend
 	drainingGenerations map[int64][]*replicaBackend
 	generationTokens    map[int64]string
+	generationPolicies  map[int64]GenerationPolicy
 	rrCounter           atomic.Int64
 	maxSessions         int
 	// appID is atomic for lock-free reporting snapshots; request Directors use
@@ -374,7 +375,7 @@ type backendPool struct {
 	groupedSize     int
 	maxWorkers      int
 	warmSpareTarget int
-	workers         map[int]*replicaBackend // slotID -> backend; nil for multiplex
+	workers         map[int]*replicaBackend // slotID -> backend, including retained grouped drainers
 	nextSlotID      int
 }
 
@@ -619,7 +620,8 @@ type Proxy struct {
 	// worker's assignedClients reaches 0 after the grace window expires. Nil
 	// disables automatic termination (tests that only test accounting can leave it
 	// unset). Wire it via SetTerminateFunc.
-	terminate func(slug string, slotID int)
+	terminate           func(slug string, slotID int)
+	terminateGeneration func(slug string, deploymentID int64, slotID int)
 
 	// spawn is called (via goroutine, never inline under p.mu) when an elastic
 	// decisionAllocate reserves a new slot and the request is served the loading
@@ -974,14 +976,14 @@ func (p *Proxy) PoolHasAny(slug string) bool {
 
 // ElasticWorkerCount returns the number of workers (in any state) currently
 // tracked in the elastic pool for slug. Returns 0 for unknown slugs or
-// non-elastic pools. Intended for tests to assert that termination/deregistration
+// pools without tracked elastic workers. Intended for tests to assert that termination/deregistration
 // correctly empties the workers map (PoolHasAny always returns true for elastic
 // pools because they route on demand; it cannot be used for this assertion).
 func (p *Proxy) ElasticWorkerCount(slug string) int {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	pool, ok := p.pools[slug]
-	if !ok || !poolIsElastic(pool) {
+	if !ok {
 		return 0
 	}
 	return len(pool.workers)
@@ -1140,7 +1142,7 @@ func (p *Proxy) ClearGenerationAffinity(w http.ResponseWriter, r *http.Request, 
 	// reload a new client identity; open requests keep their original binding.
 	p.mu.RLock()
 	pool := p.pools[slug]
-	elastic := pool != nil && poolIsElastic(pool)
+	elastic := pool != nil && (poolIsElastic(pool) || len(pool.workers) > 0)
 	p.mu.RUnlock()
 	if elastic {
 		http.SetCookie(w, &http.Cookie{
@@ -1731,6 +1733,9 @@ func (p *Proxy) SetPoolMode(slug string, mode config.WorkerIsolationMode, groupe
 		pool = p.newBackendPoolLocked(slug, 1)
 		p.pools[slug] = pool
 	}
+	if mode != pool.mode && (len(pool.drainingGenerations) > 0 || len(pool.candidates) > 0) {
+		return
+	}
 	pool.mode = mode
 	pool.groupedSize = groupedSize
 	pool.maxWorkers = maxWorkers
@@ -1783,8 +1788,7 @@ func (p *Proxy) SetPoolAppID(slug string, appID int64) {
 		pool = p.newBackendPoolLocked(slug, 1)
 		p.pools[slug] = pool
 	}
-	var terminate func(string, int)
-	var staleSlots []int
+	var staleTerminations []func()
 	replaced := false
 	if previous := pool.appID.Load(); previous != 0 && previous != appID {
 		// A deleted-and-recreated slug is a different security principal. Fence
@@ -1800,12 +1804,16 @@ func (p *Proxy) SetPoolAppID(slug string, appID int64) {
 				cs.releaseTimer = nil
 			}
 		}
-		if poolIsElastic(pool) && p.terminate != nil {
-			terminate = p.terminate
-			for slotID := range pool.workers {
-				staleSlots = append(staleSlots, slotID)
+		for _, worker := range pool.workers {
+			if term := p.terminateWorkerLocked(slug, worker); term != nil {
+				staleTerminations = append(staleTerminations, term)
 			}
 		}
+		pool.candidates = nil
+		pool.drainingGenerations = nil
+		pool.generationPolicies = nil
+		pool.activeDeploymentID = 0
+
 		pool.replicas = make([]*replicaBackend, pool.size)
 		pool.workers = make(map[int]*replicaBackend)
 		delete(p.clients, slug)
@@ -1816,9 +1824,8 @@ func (p *Proxy) SetPoolAppID(slug string, appID int64) {
 	if replaced {
 		p.clearWSReady(slug)
 	}
-	for _, slotID := range staleSlots {
-		sid := slotID
-		safego.Go("proxy stale worker terminate", func() { terminate(slug, sid) })
+	for _, term := range staleTerminations {
+		safego.Go("proxy stale worker terminate", term)
 	}
 }
 
@@ -2054,38 +2061,11 @@ func (p *Proxy) HasDrainingGeneration(slug string) bool {
 }
 
 // StageGeneration allocates an unpublished fixed-replica generation. It is
-// deliberately unsupported for elastic pools: their server-side client
-// bindings need a different migration contract.
+// uses a multiplex target policy; cross-isolation callers should pass the
+// complete target policy to StageGenerationWithPolicy.
 func (p *Proxy) StageGeneration(slug string, deploymentID int64, size int) error {
-	if deploymentID <= 0 {
-		return fmt.Errorf("stage %s: deployment ID must be positive", slug)
-	}
-	if size < 1 {
-		return fmt.Errorf("stage %s: generation size must be positive", slug)
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	pool := p.pools[slug]
-	if pool == nil {
-		return fmt.Errorf("stage %s: pool not found", slug)
-	}
-	if poolIsElastic(pool) {
-		return fmt.Errorf("stage %s: elastic pools do not support generations", slug)
-	}
-	if deploymentID == pool.activeDeploymentID {
-		return fmt.Errorf("stage %s: deployment %d is already active", slug, deploymentID)
-	}
-	if pool.candidates == nil {
-		pool.candidates = make(map[int64][]*replicaBackend)
-	}
-	if _, exists := pool.candidates[deploymentID]; exists {
-		return fmt.Errorf("stage %s: deployment %d is already staged", slug, deploymentID)
-	}
-	if _, exists := pool.drainingGenerations[deploymentID]; exists {
-		return fmt.Errorf("stage %s: deployment %d is draining", slug, deploymentID)
-	}
-	pool.candidates[deploymentID] = make([]*replicaBackend, size)
-	return nil
+	_, err := p.StageGenerationWithPolicy(slug, deploymentID, size, GenerationPolicy{Mode: config.IsolationMultiplex}, 0)
+	return err
 }
 
 // RegisterGenerationReplica installs a ready backend into an unpublished
@@ -2112,7 +2092,7 @@ func (p *Proxy) RegisterGenerationReplica(slug string, deploymentID int64, index
 	if !ok || index < 0 || index >= len(slots) {
 		return fmt.Errorf("register generation %s#%d: generation not staged or index out of range", slug, index)
 	}
-	if pool.mode == config.IsolationGrouped && index != len(slots)-1 {
+	if pool.generationPolicies[deploymentID].Mode == config.IsolationGrouped && index != len(slots)-1 {
 		return fmt.Errorf("register grouped generation %s#%d: slot was not reserved for this candidate", slug, index)
 	}
 	ownerAppID := pool.appID.Load()
@@ -2136,55 +2116,66 @@ func (p *Proxy) RegisterGenerationReplica(slug string, deploymentID int64, index
 // browsers and moves the previous active set into cookie-only draining.
 func (p *Proxy) ActivateGeneration(slug string, deploymentID int64) (int64, error) {
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	pool := p.pools[slug]
 	if pool == nil {
-		p.mu.Unlock()
 		return 0, fmt.Errorf("activate %s: pool not found", slug)
 	}
 	slots, ok := pool.candidates[deploymentID]
 	if !ok {
-		p.mu.Unlock()
 		return 0, fmt.Errorf("activate %s: deployment %d is not staged", slug, deploymentID)
 	}
-	if pool.mode == config.IsolationGrouped {
-		previous, err := p.activateGroupedGenerationLocked(pool, deploymentID, slots)
-		p.mu.Unlock()
-		if err == nil {
-			p.clearWSReady(slug)
+	policy := pool.generationPolicies[deploymentID]
+	if policy.Mode == config.IsolationGrouped {
+		if len(slots) == 0 || slots[len(slots)-1] == nil {
+			return 0, fmt.Errorf("activate %s: grouped candidate is not ready", slug)
 		}
-		return previous, err
-	}
-	for index, rep := range slots {
-		if rep == nil {
-			p.mu.Unlock()
-			return 0, fmt.Errorf("activate %s: deployment %d replica %d is not ready", slug, deploymentID, index)
+	} else {
+		for i, rep := range slots {
+			if rep == nil {
+				return 0, fmt.Errorf("activate %s: replica %d is not ready", slug, i)
+			}
 		}
 	}
 	previous := pool.activeDeploymentID
+	old := activeGenerationBackends(pool)
 	if previous == 0 {
-		for _, rep := range pool.replicas {
-			if rep != nil {
+		for _, rep := range old {
+			if rep != nil && rep.deploymentID != 0 {
 				previous = rep.deploymentID
 				break
 			}
 		}
 	}
-	if previous != 0 && len(pool.replicas) > 0 {
+	if previous != 0 {
+		pool.generationPolicies[previous] = poolPolicy(pool)
 		if pool.drainingGenerations == nil {
 			pool.drainingGenerations = make(map[int64][]*replicaBackend)
 		}
-		for _, rep := range pool.replicas {
+		for _, rep := range old {
 			if rep != nil {
 				rep.draining.Store(true)
 			}
 		}
-		pool.drainingGenerations[previous] = pool.replicas
+		pool.drainingGenerations[previous] = old
 	}
-	pool.replicas = slots
-	pool.size = len(slots)
+	publishGenerationPolicy(pool, policy)
+	if policy.Mode == config.IsolationGrouped {
+		worker := slots[len(slots)-1]
+		worker.slotID = worker.index
+		worker.status = workerRunning
+		worker.handoffReady = true
+		if pool.workers == nil {
+			pool.workers = make(map[int]*replicaBackend)
+		}
+		pool.workers[worker.slotID] = worker
+		pool.replicas = nil
+	} else {
+		pool.replicas = slots
+		pool.size = len(slots)
+	}
 	pool.activeDeploymentID = deploymentID
 	delete(pool.candidates, deploymentID)
-	p.mu.Unlock()
 	p.clearWSReady(slug)
 	return previous, nil
 }
@@ -2205,6 +2196,7 @@ func (p *Proxy) RetireGeneration(slug string, deploymentID int64) bool {
 	p.removeGroupedGenerationLocked(slug, pool, deploymentID)
 	delete(pool.drainingGenerations, deploymentID)
 	delete(pool.generationTokens, deploymentID)
+	delete(pool.generationPolicies, deploymentID)
 	return true
 }
 
@@ -2224,13 +2216,14 @@ func (p *Proxy) TryRetireGeneration(slug string, deploymentID int64) bool {
 		return false
 	}
 	for _, replica := range replicas {
-		if replica != nil && (replica.activeConns.Load() > 0 || (pool.mode == config.IsolationGrouped && replica.assignedClients > 0)) {
+		if replica != nil && (replica.activeConns.Load() > 0 || (pool.generationPolicies[deploymentID].Mode == config.IsolationGrouped && replica.assignedClients > 0)) {
 			return false
 		}
 	}
 	p.removeGroupedGenerationLocked(slug, pool, deploymentID)
 	delete(pool.drainingGenerations, deploymentID)
 	delete(pool.generationTokens, deploymentID)
+	delete(pool.generationPolicies, deploymentID)
 	return true
 }
 
@@ -2282,6 +2275,7 @@ func (p *Proxy) AbortGeneration(slug string, deploymentID int64) bool {
 		return false
 	}
 	delete(pool.candidates, deploymentID)
+	delete(pool.generationPolicies, deploymentID)
 	return true
 }
 
@@ -2310,33 +2304,13 @@ func (p *Proxy) RevertGeneration(slug string, failedDeploymentID, previousDeploy
 	if pool.drainingGenerations == nil {
 		pool.drainingGenerations = make(map[int64][]*replicaBackend)
 	}
-	if pool.mode == config.IsolationGrouped {
-		// Mark the failed generation's workers draining in place. Their slots
-		// stay in pool.workers and their client bindings are left alone, so an
-		// open request keeps its route and a reconnect still finds its own
-		// worker; removeGroupedGenerationLocked (via RetireGeneration /
-		// TryRetireGeneration) is what eventually clears both once idle.
-		failed := make([]*replicaBackend, 0, len(pool.workers))
-		for _, worker := range pool.workers {
-			if worker.deploymentID == failedDeploymentID {
-				worker.draining.Store(true)
-				failed = append(failed, worker)
-			}
-		}
-		for _, worker := range previous {
-			worker.draining.Store(false)
-		}
-		delete(pool.drainingGenerations, previousDeploymentID)
-		pool.drainingGenerations[failedDeploymentID] = failed
-		pool.activeDeploymentID = previousDeploymentID
-		return nil
-	}
-	for _, rep := range pool.replicas {
+	failed := activeGenerationBackends(pool)
+	pool.generationPolicies[failedDeploymentID] = poolPolicy(pool)
+	for _, rep := range failed {
 		if rep != nil {
 			rep.draining.Store(true)
 		}
 	}
-	failed := pool.replicas
 	for _, rep := range previous {
 		if rep != nil {
 			rep.draining.Store(false)
@@ -2344,8 +2318,14 @@ func (p *Proxy) RevertGeneration(slug string, failedDeploymentID, previousDeploy
 	}
 	delete(pool.drainingGenerations, previousDeploymentID)
 	pool.drainingGenerations[failedDeploymentID] = failed
-	pool.replicas = previous
-	pool.size = len(previous)
+	policy := pool.generationPolicies[previousDeploymentID]
+	publishGenerationPolicy(pool, policy)
+	if policy.Mode == config.IsolationGrouped {
+		pool.replicas = nil
+	} else {
+		pool.replicas = previous
+		pool.size = len(previous)
+	}
 	pool.activeDeploymentID = previousDeploymentID
 	return nil
 }
@@ -2388,6 +2368,9 @@ func (p *Proxy) registerElasticWorker(slug string, slotID int, targetURL string,
 	pool, ok := p.pools[slug]
 	if !ok || !poolIsElastic(pool) {
 		return fmt.Errorf("register elastic %s#%d: pool not found or not elastic", slug, slotID)
+	}
+	if pool.activeDeploymentID != 0 && deploymentID != pool.activeDeploymentID {
+		return fmt.Errorf("register elastic %s#%d: generation is no longer active", slug, slotID)
 	}
 	ownerAppID := pool.appID.Load()
 	if len(expectedAppID) > 1 {
@@ -2452,6 +2435,9 @@ func (p *Proxy) registerElasticWorker(slug string, slotID int, targetURL string,
 	// only when the slot is absent (defensive: normal flow always creates a
 	// placeholder via reserveWorker before RegisterElasticWorker is called).
 	if existing := pool.workers[slotID]; existing != nil {
+		if existing.draining.Load() || (pool.activeDeploymentID != 0 && deploymentID != pool.activeDeploymentID) {
+			return fmt.Errorf("register elastic %s#%d: generation is no longer active", slug, slotID)
+		}
 		existing.rp = rp
 		existing.ownerAppID = ownerAppID
 		existing.targetURL = targetURL
@@ -2689,14 +2675,13 @@ func (p *Proxy) Deregister(slug string) {
 	}
 	p.poolEpoch[slug]++
 	pool := p.pools[slug]
-	if pool != nil && poolIsElastic(pool) {
+	if pool != nil {
 		p.dropElasticStateLocked(slug, pool)
 		// Dispatch terminate for each worker. The callback is captured before
 		// the loop so it is read once under the lock; goroutines run outside it.
-		if term := p.terminate; term != nil {
-			for slotID := range pool.workers {
-				sid := slotID
-				safego.Go("proxy deregister worker terminate", func() { term(slug, sid) })
+		for _, worker := range pool.workers {
+			if term := p.terminateWorkerLocked(slug, worker); term != nil {
+				safego.Go("proxy deregister worker terminate", term)
 			}
 		}
 	}
@@ -2740,6 +2725,9 @@ func (p *Proxy) BeginHibernate(slug string, since time.Time) bool {
 		return false
 	}
 	if pool := p.pools[slug]; pool != nil {
+		if len(pool.drainingGenerations) > 0 || len(pool.candidates) > 0 {
+			return false
+		}
 		for _, rep := range pool.replicas {
 			if rep != nil && rep.activeConns.Load() > 0 {
 				return false
@@ -2750,7 +2738,7 @@ func (p *Proxy) BeginHibernate(slug string, since time.Time) bool {
 		// A long-lived Shiny WebSocket holds activeConns > 0 on its worker while
 		// lastSeen goes stale; without this scan the watchdog would hibernate the
 		// pool and tear down the live session mid-use (ARCH-1). workers is nil for
-		// multiplex pools, so this is a no-op there.
+		// multiplex pools without grouped drainers, so this is a no-op there.
 		for _, wkr := range pool.workers {
 			if wkr != nil && wkr.activeConns.Load() > 0 {
 				return false
@@ -2836,28 +2824,15 @@ func (p *Proxy) PoolSessionSnapshot() map[string]PoolSessionStat {
 	defer p.mu.RUnlock()
 	out := make(map[string]PoolSessionStat, len(p.pools))
 	for slug, pool := range p.pools {
-		var sessions, admitting int
-		if poolIsElastic(pool) {
-			for _, worker := range pool.workers {
-				sessions += int(worker.activeConns.Load())
-				if !worker.draining.Load() && worker.status == workerRunning {
+		sessions, admitting := 0, 0
+		for _, rep := range activeGenerationBackends(pool) {
+			if rep != nil {
+				sessions += int(rep.activeConns.Load())
+				if !rep.draining.Load() && (!poolIsElastic(pool) || rep.status == workerRunning) {
 					admitting++
 				}
 			}
-			out[slug] = PoolSessionStat{Sessions: sessions, Cap: perWorkerCap(pool.mode, pool.groupedSize), Replicas: admitting}
-			continue
 		}
-		for _, rep := range pool.replicas {
-			if rep == nil {
-				continue
-			}
-			sessions += int(rep.activeConns.Load())
-			if !rep.draining.Load() {
-				admitting++
-			}
-		}
-		// Draining generations admit no new work, but their already-open HTTP
-		// streams and WebSockets remain real sessions until retirement.
 		for _, generation := range pool.drainingGenerations {
 			for _, rep := range generation {
 				if rep != nil {
@@ -2865,7 +2840,11 @@ func (p *Proxy) PoolSessionSnapshot() map[string]PoolSessionStat {
 				}
 			}
 		}
-		out[slug] = PoolSessionStat{Sessions: sessions, Cap: pool.maxSessions, Replicas: admitting}
+		cap := pool.maxSessions
+		if poolIsElastic(pool) {
+			cap = perWorkerCap(pool.mode, pool.groupedSize)
+		}
+		out[slug] = PoolSessionStat{Sessions: sessions, Cap: cap, Replicas: admitting}
 	}
 	return out
 }
@@ -3285,7 +3264,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Elastic path: demand-driven per-client routing (per_session or grouped mode).
 	// The multiplex path below is byte-for-byte unchanged; only elastic pools
 	// enter this branch.
-	if poolIsElastic(pool) {
+	if poolIsElastic(pool) || p.hasRetainedClientLocked(slug, pool, r) {
 		// Capture the spawn callback while holding the read lock so the read is
 		// race-free against SetSpawnFunc (which takes the write lock).
 		spawnFn := p.spawn
@@ -3325,7 +3304,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		d := decide(pool.workerStatesForClient(pinnedSlot), pool.mode, pool.groupedSize, pool.maxWorkers, pinnedSlot)
+		routingMode := pool.mode
+		if !poolIsElastic(pool) && pinnedSlot >= 0 {
+			routingMode = config.IsolationGrouped
+		}
+		d := decide(pool.workerStatesForClient(pinnedSlot), routingMode, pool.groupedSize, pool.maxWorkers, pinnedSlot)
 
 		switch d.kind {
 		case decisionRoute:

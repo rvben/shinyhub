@@ -2109,7 +2109,11 @@ func (s *Server) persistDrainingGeneration(app *db.App, deployment *db.Deploymen
 	if active.DeploymentID != deployment.ID {
 		return fmt.Errorf("deployment history points to %d while active generation is %d", deployment.ID, active.DeploymentID)
 	}
-	if deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation) == "grouped" {
+	mode, policyErr := s.servingIsolation(app)
+	if policyErr != nil {
+		return policyErr
+	}
+	if mode == "grouped" {
 		return s.persistGroupedGeneration(app, deployment)
 	}
 	rows, err := s.store.ListReplicas(app.ID)
@@ -2473,7 +2477,12 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	if s.proxy != nil {
 		if active, err := s.store.GetActiveDeploymentGeneration(app.ID); err == nil {
 			rows, err := s.store.ListDeploymentReplicas(app.ID)
-			grouped := deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation) == "grouped"
+			mode, policyErr := s.servingIsolation(app)
+			grouped := mode == "grouped"
+			if policyErr != nil {
+				writeError(w, http.StatusInternalServerError, "inspect serving policy: "+policyErr.Error())
+				return
+			}
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "inspect generation cleanup: "+err.Error())
 				return
@@ -2741,8 +2750,13 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	currentIsolation := deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation)
-	targetIsolation := currentIsolation
+	currentIsolation, policyErr := s.servingIsolation(app)
+	if policyErr != nil {
+		_ = s.store.FailDeployment(pendingDep.ID)
+		writeError(w, http.StatusInternalServerError, "inspect serving policy: "+policyErr.Error())
+		return
+	}
+	targetIsolation := deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation)
 	if manifest != nil && manifest.App.Worker != nil && manifest.App.Worker.Isolation != nil {
 		targetIsolation = *manifest.App.Worker.Isolation
 	}
@@ -2766,7 +2780,8 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// live even when this node has no local runtime entry.
 	liveUpgrade := prevActive != nil && !keepStopped &&
 		(activeProcessPresent || activeRoutePresent || durableServingState || s.clustered)
-	groupedHandoff := currentIsolation == "grouped" && targetIsolation == "grouped"
+	previousGrouped := currentIsolation == "grouped"
+	groupedHandoff := targetIsolation == "grouped"
 	generationHandoff := liveUpgrade
 	unsupportedReason := ""
 	if liveUpgrade {
@@ -2777,12 +2792,12 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			unsupportedReason = "parallel generation handoff is unavailable"
 		case s.proxy.HasDrainingGeneration(slug):
 			unsupportedReason = "the previous generation is still draining; switch or close its remaining sessions before deploying again"
-		case hasBlockingGenerationRows(durableGenerationRows, prevActive.ID, groupedHandoff):
+		case hasBlockingGenerationRows(durableGenerationRows, prevActive.ID, previousGrouped):
 			unsupportedReason = "a previous generation still has pending process cleanup"
 		case producerBarrierEntered || prestartPlan.deploymentRepairRequired || len(prestartPlan.producers) > 0:
 			unsupportedReason = "this deployment changes shared producer state and requires an explicit stop-first deploy"
-		case !groupedHandoff && (currentIsolation != "multiplex" || targetIsolation != "multiplex"):
-			unsupportedReason = fmt.Sprintf("worker isolation is %q (target: %q); deploying without downtime currently supports matching multiplex or grouped isolation for both versions, so this update requires stopping the old version before starting its replacement", deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation), targetIsolation)
+		case !supportedHandoffIsolation(currentIsolation) || !supportedHandoffIsolation(targetIsolation):
+			unsupportedReason = fmt.Sprintf("worker isolation is %q (target: %q); parallel handoff supports grouped and multiplex isolation only", currentIsolation, targetIsolation)
 		case manifest != nil && !s.manifestHandoffSafe(app, prevActive, manifest):
 			// Manifest reconciliation has deliberate omitted-key reset semantics
 			// (identity/privacy/access included). Multiplex and grouped handoffs
@@ -2791,11 +2806,12 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			unsupportedReason = s.manifestHandoffReason(app, prevActive, manifest)
 		}
 		if unsupportedReason == "" {
-			if groupedHandoff {
+			if previousGrouped || groupedHandoff {
 				unsupportedReason = s.groupedHandoffRuntimeReason(app)
-			} else if len(activeRows) == 0 {
+			}
+			if unsupportedReason == "" && !previousGrouped && len(activeRows) == 0 {
 				unsupportedReason = "the current generation has no durable replica identities"
-			} else {
+			} else if unsupportedReason == "" && !previousGrouped {
 				for _, replica := range activeRows {
 					if replica.Provider != "" && replica.Provider != "native" {
 						unsupportedReason = fmt.Sprintf("the current generation uses provider %q; v1 handoff supports native replicas only", replica.Provider)
@@ -2819,7 +2835,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			projected.Replicas = *manifest.App.Replicas
 		}
 		if groupedHandoff {
-			projected.Replicas = max(1, 1+app.WorkerWarmSpares)
+			projected.Replicas = groupedCandidateWorkers(&projected)
 		}
 		if capacityErr := s.generationHandoffCapacityCheck(&projected); capacityErr != nil {
 			unsupportedReason = capacityErr.Error()
@@ -2864,6 +2880,11 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		if err := s.recordServingIsolation(app, prevActive); err != nil {
+			_ = s.store.FailDeploymentWithReason(pendingDep.ID, err.Error())
+			writeError(w, http.StatusConflict, "working version preserved: "+err.Error())
+			return
+		}
 		if err := s.persistDrainingGeneration(app, prevActive); err != nil {
 			_ = s.store.FailDeploymentWithReason(pendingDep.ID, "record current generation before handoff: "+err.Error())
 			writeError(w, http.StatusConflict, "working version preserved: current generation could not be recorded safely")
@@ -2873,7 +2894,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			// Fixed replicas retain their legacy projection on failure. Grouped
 			// workers have no such projection, so keep their active identities.
-			if drainingRowsStaged && !groupedHandoff {
+			if drainingRowsStaged && !previousGrouped {
 				_ = s.store.DeleteDeploymentReplicas(prevActive.ID)
 			}
 		}()
@@ -3009,6 +3030,15 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		PrepareOnly: keepStopped,
 		Progress:    deployResponse.event,
 	}, app)
+	if groupedHandoff {
+		floor, floorErr := s.generationSlotFloor(app)
+		if floorErr != nil {
+			_ = s.store.FailDeployment(pendingDep.ID)
+			writeError(w, http.StatusInternalServerError, "inspect grouped slot identities: "+floorErr.Error())
+			return
+		}
+		deployParams.GroupedSlotFloor = floor
+	}
 	deployParams.GuardUntilAcknowledged = true
 	var generationStarts atomic.Int32
 	targetGenerationStarts := app.Replicas
@@ -3097,7 +3127,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 					defer releaseGenerationLaunch()
 					projected := *app
 					if groupedHandoff {
-						projected.Replicas = max(1, 1+app.WorkerWarmSpares)
+						projected.Replicas = groupedCandidateWorkers(&projected)
 					}
 					if capacityErr := s.generationHandoffCapacityCheck(&projected); capacityErr != nil {
 						releaseGenerationLaunch()
@@ -3379,7 +3409,9 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		// The manager performs the final all-replicas-running validation before
 		// any durable or proxy publication. A candidate that died after readiness
 		// therefore cannot become the authority on a later restart.
-		managerPrevious, activateErr := s.activateDeployManagerGeneration(app, pendingDep.ID, prevActive.ID, result, groupedHandoff)
+		managerBefore := s.manager.CapturePoolSelection(slug)
+		_, activateErr := s.activateDeployManagerGeneration(app, pendingDep.ID, prevActive.ID, result, groupedHandoff)
+		managerSelected := s.manager.CapturePoolSelection(slug)
 		if activateErr != nil {
 			endHandoff(activateErr)
 			_ = s.store.FailDeploymentWithReason(pendingDep.ID, "candidate failed final activation validation: "+activateErr.Error())
@@ -3405,7 +3437,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 				slog.Warn("deploy: promotion returned an error but durable candidate authority was confirmed",
 					"slug", slug, "deployment_id", pendingDep.ID, "err", promoteErr)
 			case activeErr == nil && active.DeploymentID != pendingDep.ID:
-				if selectErr := s.selectDeployManagerGeneration(slug, managerPrevious, groupedHandoff); selectErr != nil {
+				if selectErr := s.manager.RestorePoolSelection(slug, managerSelected, managerBefore); selectErr != nil {
 					drainingRowsStaged = false
 					_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "degraded"})
 					slog.Error("deploy: promotion failed and manager rollback requires startup repair; preserving both generations",
@@ -3437,10 +3469,10 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 
 		proxyPrevious, activateErr := s.activateProxyGeneration(slug, pendingDep.ID)
 		if activateErr != nil {
-			revertErr := s.store.RevertDeploymentActivation(pendingDep.ID, managerPrevious, "proxy publication failed: "+activateErr.Error())
+			revertErr := s.store.RevertDeploymentActivation(pendingDep.ID, prevActive.ID, "proxy publication failed: "+activateErr.Error())
 			var selectErr error
 			if revertErr == nil {
-				selectErr = s.selectDeployManagerGeneration(slug, managerPrevious, groupedHandoff)
+				selectErr = s.manager.RestorePoolSelection(slug, managerSelected, managerBefore)
 			}
 			if revertErr == nil && selectErr == nil {
 				deploymentPromoted = false
@@ -5442,7 +5474,8 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) effectiveAutoscaleMaxReplicas(app *db.App) int {
-	if deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation) != "multiplex" {
+	mode, err := s.servingIsolation(app)
+	if err != nil || mode != "multiplex" {
 		return 0
 	}
 	maximum := app.AutoscaleMaxReplicas

@@ -333,6 +333,14 @@ func (s *Server) withTierPlacement(p deploy.Params, app *db.App) deploy.Params {
 	p.WorkerGroupedSize = app.WorkerGroupedSize
 	p.WorkerMaxWorkers = app.WorkerMaxWorkers
 	p.WorkerWarmSpares = app.WorkerWarmSpares
+	if p.DeploymentID > 0 {
+		deploymentID := p.DeploymentID
+		mode := deploy.ResolveWorkerIsolation(p.WorkerIsolation, p.DefaultWorkerIsolation)
+		launchApp := *app
+		p.RecordRuntimePolicy = func() error {
+			return s.recordLaunchIsolation(&launchApp, deploymentID, mode)
+		}
+	}
 	// Pin a shared-mount consumer to the worker(s) hosting its source data so
 	// each replica lands beside the data it mounts. resolveColocation returns no
 	// pin (and no error) for the common case of no shared mounts or a

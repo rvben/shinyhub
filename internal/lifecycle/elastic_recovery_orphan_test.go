@@ -21,13 +21,8 @@ import (
 // TestRecoverProcesses_ElasticGenerationsAreReapedWithoutFixedReplicaAdoption,
 // which only covers a currently-running elastic app's leftover generations.
 
-// TestRecoverProcesses_ElasticOrphanLoopSkipsNonElasticApp verifies that a
-// non-elastic (fixed-replica) app that still carries deployment_replicas rows
-// - left behind by an older rolling deploy, since that table is written by
-// more than just elastic apps - is not touched by the elastic-orphan loop:
-// its process keeps running and its row survives, because reconciling it is
-// the fixed-replica adoption path's job, not this one's.
-func TestRecoverProcesses_ElasticOrphanLoopSkipsNonElasticApp(t *testing.T) {
+// Ledger-bearing non-serving apps are cleaned regardless of desired mode.
+func TestRecoverProcesses_OrphanLoopCleansNonElasticApp(t *testing.T) {
 	store := mustOpenStore(t)
 	app := mustCreateApp(t, store, "fixed-replica-orphan") // default worker_isolation: multiplex
 	bundleDir := t.TempDir()
@@ -42,9 +37,7 @@ func TestRecoverProcesses_ElasticOrphanLoopSkipsNonElasticApp(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// Hibernated (not running/degraded) so PrepareRecovery surfaces it as an
-	// elastic-orphan candidate; it must be filtered back out by the
-	// isElasticIsolation guard before any reconciliation runs.
+	// Hibernated apps cannot retain serving processes in a cleanup ledger.
 	if _, err := store.DB().Exec(`UPDATE apps SET status='hibernated' WHERE id=?`, app.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -55,12 +48,12 @@ func TestRecoverProcesses_ElasticOrphanLoopSkipsNonElasticApp(t *testing.T) {
 
 	select {
 	case <-done:
-		t.Fatal("fixed-replica orphan's process was stopped; the elastic-orphan loop must not touch it")
-	case <-time.After(200 * time.Millisecond):
+	case <-time.After(2 * time.Second):
+		t.Fatal("non-serving fixed orphan was not stopped")
 	}
 	rows, err := store.ListDeploymentReplicas(app.ID)
-	if err != nil || len(rows) != 1 {
-		t.Fatalf("expected the leftover replica row to survive untouched, got %+v err=%v", rows, err)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("expected confirmed orphan identity cleared, got %+v err=%v", rows, err)
 	}
 }
 

@@ -76,8 +76,9 @@ func TestGenerationHandoffPreservesOpenRequestAndRepinsNewRequests(t *testing.T)
 }
 
 func TestGenerationHandoffKeepsOpenWebSocketWhileNewWorkUsesActive(t *testing.T) {
-	for _, grouped := range []bool{false, true} {
-		t.Run(fmt.Sprintf("grouped=%t", grouped), func(t *testing.T) {
+	for _, modes := range [][2]bool{{false, false}, {true, true}, {false, true}, {true, false}} {
+		grouped, targetGrouped := modes[0], modes[1]
+		t.Run(fmt.Sprintf("grouped=%t,targetGrouped=%t", grouped, targetGrouped), func(t *testing.T) {
 			backend := func(version string) *httptest.Server {
 				return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
@@ -153,15 +154,17 @@ func TestGenerationHandoffKeepsOpenWebSocketWhileNewWorkUsesActive(t *testing.T)
 			}
 			oldConn, oldReader := openWS(oldCookies)
 			defer oldConn.Close()
-			slot := 0
-			if grouped {
-				var err error
-				slot, err = p.StageGroupedGeneration("dashboard", 202)
-				if err != nil {
-					t.Fatal(err)
-				}
-			} else if err := p.StageGeneration("dashboard", 202, 1); err != nil {
+			policy := proxy.GenerationPolicy{Mode: config.IsolationMultiplex}
+			if targetGrouped {
+				policy = proxy.GenerationPolicy{Mode: config.IsolationGrouped, GroupedSize: 8, MaxWorkers: 2}
+			}
+			reserved, err := p.StageGenerationWithPolicy("dashboard", 202, 1, policy, 1)
+			if err != nil {
 				t.Fatal(err)
+			}
+			slot := 0
+			if targetGrouped {
+				slot = reserved
 			}
 			if err := p.RegisterGenerationReplica("dashboard", 202, slot, v2.URL, nil); err != nil {
 				t.Fatal(err)

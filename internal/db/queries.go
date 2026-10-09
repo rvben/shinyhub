@@ -2623,6 +2623,11 @@ func (s *Store) PromoteDeployment(id int64) error {
 		return fmt.Errorf("promote deployment %d: not pending", id)
 	}
 	if status == DeploymentPending {
+		// A grouped authority has no fixed projection. Clear only the outgoing
+		// authority's rows, never a concurrently recorded candidate's rows.
+		if _, err := tx.Exec(`DELETE FROM replicas WHERE app_id=? AND deployment_id=(SELECT active_deployment_id FROM apps WHERE id=?) AND EXISTS (SELECT 1 FROM deployments WHERE id=? AND worker_isolation IN ('grouped','per_session'))`, appID, appID, id); err != nil {
+			return fmt.Errorf("promote deployment projection: %w", err)
+		}
 		if err := publishHandoffSettingsTx(tx, id, false); err != nil {
 			return fmt.Errorf("promote deployment settings: %w", err)
 		}
@@ -2707,6 +2712,15 @@ func (s *Store) RevertDeploymentActivation(failedID, previousID int64, reason st
 	}
 	if err := publishHandoffSettingsTx(tx, failedID, true); err != nil {
 		return fmt.Errorf("revert deployment settings: %w", err)
+	}
+	// Restore only missing slots from durable outgoing identities. A fixed
+	// projection changed after publication must never be overwritten.
+	if _, err := tx.Exec(`INSERT INTO replicas (app_id,idx,pid,port,status,provider,tier,endpoint_url,worker_id,app_version,desired_state,deployment_id,updated_at,data_generation,startup_peak_rss_bytes)
+        SELECT r.app_id,r.idx,r.pid,r.port,r.status,r.provider,r.tier,r.endpoint_url,r.worker_id,d.version,'running',r.deployment_id,`+s.d.nowEpoch()+`,r.data_generation,r.startup_peak_rss_bytes
+        FROM deployment_replicas r JOIN deployments d ON d.id=r.deployment_id
+        WHERE r.app_id=? AND r.deployment_id=? AND d.worker_isolation='multiplex'
+        ON CONFLICT(app_id,idx) DO NOTHING`, failedAppID, previousID); err != nil {
+		return fmt.Errorf("revert deployment projection: %w", err)
 	}
 	failedResult, err := tx.Exec(`UPDATE deployments SET status = ?, failure_reason = ? WHERE id = ? AND status = ?`,
 		DeploymentFailed, reason, failedID, DeploymentSucceeded)
