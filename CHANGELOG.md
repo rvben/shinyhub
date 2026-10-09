@@ -6,9 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.20.3](https://github.com/rvben/shinyhub/compare/v0.20.2...v0.20.3) - 2026-10-09
+
 ### Added
 
 - **branding**: mark configured environments with a persistent strip independent of announcements, prefixed browser titles, generated environment favicons, and a production link that preserves app state while removing platform launch parameters. Identity is also exposed in `whoami` and fleet plan/apply output; the unset configuration keeps existing presentation.
+- **deploy**: hand off across worker isolation modes ([ad6741b](https://github.com/rvben/shinyhub/commit/ad6741b0b5e88ea90e10455b5ebf2429ea30b269))
+- **lifecycle**: support safe handoffs and rolling restarts ([8452de3](https://github.com/rvben/shinyhub/commit/8452de34ef807753d9ca0a1e95f1d496cf30afa3))
+- **cli**: add pipeline announcement commands ([f7121f8](https://github.com/rvben/shinyhub/commit/f7121f872889e0b49829e43b9604b625b484f3ec))
 
 ### Fixed
 
@@ -19,6 +24,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **routing**: keep backend-local redirects on the app mount and preserve escaped asset paths when app slugs or mount separators are encoded. Preserve app query bytes through app-origin launches and forward-auth cookie confirmation.
 - **auth**: return GitHub, Google, and OIDC logins to the requested app or dashboard route, preserving query and fragment state. Bind validated return paths to the provider-specific, one-time OAuth state.
 - **routing**: redirect known bare app roots (`/app/<slug>`) to their trailing-slash form with HTTP 308, preserving the method and query string so relative app assets load correctly. Canonicalization runs before app-session checks and empty-state pages, including support sessions, separate app origins, and local development.
+- **localrun**: await exit events before reporting shutdown ([e6b58f0](https://github.com/rvben/shinyhub/commit/e6b58f04cf092cf1f6ea02922f9cfa070665fc3b))
+- **demo**: harden cold-start readiness and websocket smoke checks ([ec689b3](https://github.com/rvben/shinyhub/commit/ec689b3040bb9e15f9c397f7d6d1154d9a6f395c))
+- **demo**: exclude expected sleep responses from Worker alerts ([d1614fa](https://github.com/rvben/shinyhub/commit/d1614fa0b35e48649aba681ba15a70139ed3e0c0))
+- **ui**: inset app detail metrics consistently ([585a957](https://github.com/rvben/shinyhub/commit/585a9575e55511b8b5d8b0ecaedaa503d707c6bf))
 
 ## [0.20.2](https://github.com/rvben/shinyhub/compare/v0.20.1...v0.20.2) - 2026-10-08
 
