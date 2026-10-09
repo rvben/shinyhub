@@ -1,5 +1,5 @@
 ---
-description: "The UTF-8 contract for forward-auth identity headers, including Starlette and FastAPI integrations."
+description: "Define UTF-8 for forward-auth identity headers, handle malformed proxy assertions safely, and preserve Unicode in Starlette and FastAPI integrations."
 ---
 
 # Forward-auth identity header encoding
