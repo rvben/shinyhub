@@ -41,6 +41,40 @@ Injection follows the existing bounded HTML and CSP rules. Unsupported or restri
 
 Notices communicate maintenance; they do not stop apps, drain sessions, guarantee readership, or send email. They also cannot substitute for an external status page while ShinyHub is unreachable.
 
+## Release pipeline CLI
+
+Use `shinyhub announcements` with platform-wide administrator credentials. The example below requires Bash and `jq`. The CLI uses the existing `SHINYHUB_HOST` and `SHINYHUB_TOKEN` environment variables or saved client credentials. App-scoped credentials cannot manage announcements.
+
+```bash
+set -euo pipefail
+
+# Publish before the first disruptive step; keep this ID as a pipeline artifact
+# together with its revision if publication and withdrawal run in separate jobs.
+notice=$(shinyhub announcements publish --severity warning --ttl 60m \
+  --title "Release in progress" \
+  --message "Dashboards may briefly disconnect; reload the page if one stops responding." \
+  --output json)
+notice_id=$(jq -er '.id' <<<"$notice")
+notice_revision=$(jq -er '.announcement.revision' <<<"$notice")
+
+# Allow connected, visible pages time to fetch the notice before disruption.
+sleep 45
+
+# Run the host upgrade, app rollout, and smoke tests here.
+# Only withdraw after those steps succeed:
+shinyhub announcements disable "$notice_id" --expected-revision "$notice_revision"
+```
+
+`publish` requires exactly one of a positive `--ttl` (for example `60m`) or a future `--ends-at` RFC3339 timestamp with an explicit timezone. Expiry is calculated using the CLI machine's clock; keep pipeline and server clocks synchronized and allow sufficient time for the release. Severity defaults to `information`. Critical notices default to non-dismissible; override with `--dismissible=true`. Use `--details-url` for an optional public details link. JSON publication output contains `status`, `id`, and the saved record under `announcement`.
+
+Inspect a notice with `shinyhub announcements get "$notice_id"`. `shinyhub announcements list` traverses all history pages, then applies the standard `--limit`, `--offset`, and `--fields` controls. JSON list output uses the standard `items`, `total`, `limit`, and `offset` envelope. Concurrent changes to history can affect pagination; this is not a transactional snapshot.
+
+`disable` fetches the latest saved revision and protects against edits between that read and the write. Without `--expected-revision`, it also withdraws edits made after publication. Pipelines should pass the revision returned by `publish` using `--expected-revision`; a later edit then returns a conflict (exit 5) without withdrawal. Already disabled or archived records succeed without a write. A concurrent edit returns a conflict; inspect the record before explicitly retrying. Each release should retain its own notice ID so an older release cannot clear a newer release's notice. Writes are not automatically retried. Transport failures, service/proxy errors, and malformed success responses after a write return `internal` with exit 1 and an outcome-unknown hint, rather than a retryable exit 3. Publication or withdrawal may already have succeeded: inspect history or the record before retrying. HTTP 4xx rejections retain the standard error kinds and exit codes.
+
+The 45-second delay is a best-effort propagation window, not a readership guarantee. Background tabs, pages that have not fetched the notice, and new or reloaded pages during an outage cannot rely on the retained notice. Feed failures retain previously fetched notices in the current page until expiry; that cache does not persist across a page reload.
+
+Do not withdraw unconditionally in an exit trap: a failed release may leave users experiencing disruption. Retain its notice until expiry, or use the administration UI/API to describe the remaining impact. TTL expiry withdraws stale messaging; it does not indicate recovery. The outer release pipeline owns the full window, including host/auth restarts and smoke tests; `fleet apply` does not publish or clear notices.
+
 ## API
 
 Public active feeds:

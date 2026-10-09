@@ -32,6 +32,17 @@ test('critical notices cannot be dismissed, overlap expands, expiry and body rep
   const host=r.w.document.getElementById('shinyhub-platform-announcements');host.remove();r.w.document.body.replaceChildren(r.w.document.createElement('main'));await flush();assert.equal(host.parentNode,r.w.document.documentElement);
   await new Promise(resolve=>setTimeout(resolve,550));assert.equal(root.querySelector('[data-dismiss]').dataset.dismiss,'info');r.dom.window.close();
 });
+test('offline feed retains the last notice until expiry using server time',async(t)=>{
+  const r=reader();t.after(()=>r.dom.window.close());let offline=false;
+  const serverTime=Date.now()+3600000;
+  const end=new Date(serverTime+800).toISOString();
+  r.w.fetch=async()=>{if(offline)throw new Error('offline');return {ok:true,json:async()=>({announcements:[notice({ends_at:end})],server_time:new Date(serverTime).toISOString(),next_transition:null})}};
+  r.w.eval(source);await flush();const host=r.w.document.getElementById('shinyhub-platform-announcements');assert.equal(host.hidden,false);
+  offline=true;r.w.dispatchEvent(new r.w.Event('shinyhub:announcements-changed'));await flush();
+  assert.equal(host.hidden,false,'offline read retains an unexpired notice');
+  await new Promise(resolve=>setTimeout(resolve,850));
+  assert.equal(host.hidden,true,'notice expires locally while feed is still offline');
+});
 test('dismissal still works when browser storage is unavailable',async(t)=>{
   const r=reader();t.after(()=>r.dom.window.close());Object.defineProperty(r.w,'localStorage',{get(){throw new Error('blocked')}});r.w.fetch=async()=>({ok:true,json:async()=>feed([notice()])});r.w.eval(source);await flush();r.root().querySelector('button').click();assert.equal(r.w.document.getElementById('shinyhub-platform-announcements').hidden,true);r.dom.window.close();
 });

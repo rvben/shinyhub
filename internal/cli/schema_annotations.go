@@ -53,6 +53,15 @@ var mut = boolp(true) // mutating
 // schemaAnnotations is keyed by command path: space-joined command names
 // below the root, e.g. "apps list", "schedule add", "serve".
 var schemaAnnotations = map[string]cmdAnnotation{
+	"announcements": {Mutating: ro},
+	"announcements publish": {Mutating: mut, ArgEnums: map[string][]string{"--severity": {"information", "warning", "critical"}}, Notes: "Requires exactly one of positive --ttl or future --ends-at. Platform-wide administrator credentials required. Writes are not automatically retried; ambiguous write outcomes return internal/exit 1 with an inspection hint.", OutputFields: []fieldSpec{
+		{Name: "status", Type: "string"}, {Name: "id", Type: "string"}, {Name: "announcement", Type: "object"},
+	}},
+	"announcements get":  {Mutating: ro, OutputFields: announcementOutputFields},
+	"announcements list": {Mutating: ro, Cardinality: "unbounded", OutputFields: announcementOutputFields, EnvelopeFields: []fieldSpec{{Name: "items", Type: "array"}, {Name: "total", Type: "integer"}, {Name: "limit", Type: "integer"}, {Name: "offset", Type: "integer"}}, Notes: "Traverses the paginated history before applying --limit, --offset and --fields; total is the fetched history size."},
+	"announcements disable": {Mutating: mut, Notes: "Reads the latest revision before PATCH. Use --expected-revision from publish to protect subsequent edits; mismatch returns conflict/exit 5. Already disabled or archived records succeed without writes; ambiguous write outcomes return internal/exit 1.", OutputFields: []fieldSpec{
+		{Name: "status", Type: "string"}, {Name: "id", Type: "string"}, {Name: "publication", Type: "string"}, {Name: "revision", Type: "integer"},
+	}},
 	"diagnose": {Mutating: ro},
 	"diagnose python": {Mutating: mut, Stability: "experimental",
 		ArgTypes: map[string]string{"pid": "integer", "--python": "path", "--save": "path"},
@@ -997,4 +1006,14 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	// ── schema ────────────────────────────────────────────────────────────────
 	"schema":      {Mutating: ro},
 	"healthcheck": {Mutating: ro},
+}
+
+var announcementOutputFields = []fieldSpec{
+	{Name: "id", Type: "string"}, {Name: "title", Type: "string"}, {Name: "message", Type: "string"},
+	{Name: "details_url", Type: "string"}, {Name: "severity", Type: "string"}, {Name: "publication", Type: "string"},
+	{Name: "status", Type: "string"}, {Name: "dismissible", Type: "boolean"},
+	{Name: "starts_at", Type: "string", Nullable: true}, {Name: "ends_at", Type: "string", Nullable: true},
+	{Name: "published_at", Type: "string", Nullable: true}, {Name: "created_at", Type: "string"}, {Name: "updated_at", Type: "string"},
+	{Name: "created_by", Type: "integer", Nullable: true}, {Name: "updated_by", Type: "integer", Nullable: true},
+	{Name: "revision", Type: "integer"}, {Name: "display_revision", Type: "integer"},
 }
