@@ -33,10 +33,11 @@ const defaultElasticHealthTimeout = 60 * time.Second
 //	prx.SetSpawnFunc(func(slug string, slotID int) { go spawner.Spawn(slug, slotID) })
 //	prx.SetTerminateFunc(spawner.Terminate)
 type ElasticSpawner struct {
-	Store      *db.Store
-	Manager    *process.Manager
-	Proxy      *proxy.Proxy
-	RuntimeCfg config.RuntimeConfig
+	Store          *db.Store
+	Manager        *process.Manager
+	Proxy          *proxy.Proxy
+	RuntimeCfg     config.RuntimeConfig
+	StartupSampler process.Sampler
 
 	// HealthCheck is an optional override for the per-worker readiness probe.
 	// When nil the default HTTP poller (waitElasticHealthy) is used.
@@ -202,14 +203,13 @@ func (s *ElasticSpawner) spawnFenced(slug string, slotID int) {
 		return
 	}
 
-	// Load the latest ready (non-pending, non-failed) deployment.
-	deps, err := s.Store.ListRecentDeployments(app.ID, 1)
-	if err != nil || len(deps) == 0 {
+	// Load the atomically published serving deployment.
+	dep, err := s.Store.GetServingDeployment(app.ID)
+	if err != nil {
 		slog.Warn("elastic spawn: no ready deployments", "slug", slug, "slotID", slotID)
 		s.releaseReservation(slug, slotID)
 		return
 	}
-	dep := deps[0]
 
 	// Resolve effective resource limits using the same path as the deploy fn.
 	defaultMem, defaultCPU := s.RuntimeCfg.DefaultResourcesForApp(app)
@@ -432,9 +432,17 @@ func (s *ElasticSpawner) startAndCheck(app *db.App, dep *db.Deployment, slug str
 	}
 
 	if guarded {
+		var started int64
+		if _, native := s.Manager.RuntimeForTier(tier).(*process.NativeRuntime); native {
+			started, err = process.NativeProcessStartIdentity(info.PID)
+			if err != nil {
+				stopErr := s.stopWorker(slug, slotID)
+				return nil, false, stopErr == nil
+			}
+		}
 		if err := s.Store.UpsertDeploymentReplica(db.UpsertDeploymentReplicaParams{
 			AppID: app.ID, DeploymentID: dep.ID, Index: slotID,
-			PID: &info.PID, Port: &info.Port, Status: "starting",
+			PID: &info.PID, Port: &info.Port, Status: "starting", ProcessStartIdentity: started,
 			Provider: info.Provider, Tier: tier, EndpointURL: info.EndpointURL,
 			WorkerID: info.WorkerID,
 		}); err != nil {
@@ -455,6 +463,13 @@ func (s *ElasticSpawner) startAndCheck(app *db.App, dep *db.Deployment, slug str
 		}
 	}
 
+	finishObservation := deploy.ObserveWorkerStartupRSS(s.StartupSampler, s.Manager, slug, slotID)
+	var startupPeak int64
+	defer func() {
+		if finishObservation != nil {
+			finishObservation()
+		}
+	}()
 	transport := s.Manager.TransportForWorker(tier, info.WorkerID)
 
 	// Health-check the started process (fast-fail on crash, bounded timeout).
@@ -478,6 +493,18 @@ func (s *ElasticSpawner) startAndCheck(app *db.App, dep *db.Deployment, slug str
 			slog.Warn("elastic spawn: stop after health failure", "slug", slug, "slotID", slotID, "err", stopErr)
 		}
 		return nil, false, stopErr == nil
+	}
+	startupPeak = finishObservation()
+	finishObservation = nil
+	if guarded {
+		var generation int64
+		if publication, err := s.Store.GetAppDataPublication(app.ID); err == nil {
+			generation = publication.Generation
+		}
+		if err := s.Store.UpsertDeploymentReplica(db.UpsertDeploymentReplicaParams{AppID: app.ID, DeploymentID: dep.ID, Index: slotID, PID: &info.PID, Port: &info.Port, Status: "running", Provider: info.Provider, Tier: tier, EndpointURL: info.EndpointURL, WorkerID: info.WorkerID, DataGeneration: generation, StartupPeakRSSBytes: startupPeak}); err != nil {
+			stopErr := s.stopWorker(slug, slotID)
+			return nil, false, stopErr == nil
+		}
 	}
 	return info, true, false
 }
@@ -722,8 +749,8 @@ func (s *ElasticSpawner) resumeFenced(slug string, slotID int) {
 		s.Terminate(slug, slotID)
 		return
 	}
-	deps, depsErr := s.Store.ListRecentDeployments(app.ID, 1)
-	if depsErr != nil || len(deps) == 0 {
+	dep, depsErr := s.Store.GetServingDeployment(app.ID)
+	if depsErr != nil {
 		slog.Warn("elastic warm spare: load resume deployment failed", "slug", slug, "slotID", slotID, "err", depsErr)
 		s.Terminate(slug, slotID)
 		return
@@ -733,9 +760,9 @@ func (s *ElasticSpawner) resumeFenced(slug string, slotID int) {
 		s.Terminate(slug, slotID)
 		return
 	}
-	if info.DeploymentID != deps[0].ID {
+	if info.DeploymentID != dep.ID {
 		slog.Info("elastic warm spare: discarding superseded deployment", "slug", slug, "slotID", slotID,
-			"worker_deployment", info.DeploymentID, "current_deployment", deps[0].ID)
+			"worker_deployment", info.DeploymentID, "current_deployment", dep.ID)
 		s.Terminate(slug, slotID)
 		return
 	}
@@ -751,7 +778,7 @@ func (s *ElasticSpawner) resumeFenced(slug string, slotID int) {
 	}
 	transport := s.Manager.TransportForWorker(info.Tier, info.WorkerID)
 
-	plan, planErr := deploy.ResolveLaunch(deps[0].BundleDir, deploy.LaunchOptions{
+	plan, planErr := deploy.ResolveLaunch(dep.BundleDir, deploy.LaunchOptions{
 		AppPath: "/app/" + slug,
 		Port:    info.Port, BindHost: s.Manager.AppBindHostFor(info.Tier), PrepHostDeps: false,
 		CommandHostDeps: s.Manager.HostPreparesDepsFor(info.Tier),

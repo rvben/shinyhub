@@ -25,6 +25,7 @@ import (
 )
 
 type scheduleDTO struct {
+	Inputs                 []string `json:"inputs,omitempty"`
 	ID                     int64    `json:"id"`
 	AppID                  int64    `json:"app_id"`
 	Name                   string   `json:"name"`
@@ -152,6 +153,8 @@ func (d *scheduleDTO) applyFreshness(fr db.ScheduleFreshness, def *time.Location
 func toScheduleDTO(sc *db.Schedule, next *time.Time, serverDefaultLoc *time.Location) scheduleDTO {
 	var cmd []string
 	_ = json.Unmarshal([]byte(sc.CommandJSON), &cmd)
+	var inputs []string
+	_ = json.Unmarshal([]byte(sc.InputsJSON), &inputs)
 	if serverDefaultLoc == nil {
 		serverDefaultLoc = time.UTC
 	}
@@ -159,7 +162,7 @@ func toScheduleDTO(sc *db.Schedule, next *time.Time, serverDefaultLoc *time.Loca
 	inherited := sc.Timezone == nil || *sc.Timezone == ""
 	out := scheduleDTO{
 		ID: sc.ID, AppID: sc.AppID, Name: sc.Name, CronExpr: sc.CronExpr,
-		Command: cmd, Enabled: sc.Enabled, TimeoutSeconds: sc.TimeoutSeconds,
+		Command: cmd, Inputs: inputs, Enabled: sc.Enabled, TimeoutSeconds: sc.TimeoutSeconds,
 		OverlapPolicy: sc.OverlapPolicy, MissedPolicy: sc.MissedPolicy,
 		DeployTrigger: sc.DeployTrigger,
 		OnSuccess:     sc.OnSuccess, MinRollIntervalSeconds: sc.MinRollIntervalSeconds,
@@ -655,6 +658,15 @@ func (s *Server) validateScheduleActivationForApp(app *db.App, action string) er
 	}
 	if isolation == "" {
 		isolation = "multiplex"
+	}
+	if isolation == "grouped" {
+		if s.manager == nil {
+			return errors.New("grouped roll requires a local process manager")
+		}
+		if reason := s.groupedHandoffRuntimeReason(app); reason != "" {
+			return errors.New(reason)
+		}
+		return nil
 	}
 	if isolation != "multiplex" {
 		return fmt.Errorf("on_success=roll requires multiplex worker isolation; app uses %s", isolation)

@@ -395,11 +395,16 @@ func (s *Server) applyManifestSchedules(r *http.Request, app *db.App, deployment
 		if spec.Timezone != "" {
 			tzPtr = &spec.Timezone
 		}
+		inputsJSON, err := json.Marshal(spec.Inputs)
+		if err != nil {
+			return nil, err
+		}
 		params = append(params, db.UpsertScheduleByNameParams{
 			AppID:                  app.ID,
 			Name:                   spec.Name,
 			CronExpr:               spec.Cron,
 			CommandJSON:            string(cmdJSON),
+			InputsJSON:             string(inputsJSON),
 			Enabled:                !spec.Disabled,
 			TimeoutSeconds:         timeout,
 			OverlapPolicy:          spec.Overlap,

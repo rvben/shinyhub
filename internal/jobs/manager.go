@@ -670,14 +670,10 @@ func (m *Manager) runAdmitted(ctx context.Context, scheduleID int64, trigger str
 		gate.RUnlock()
 		return 0, ErrAppDeploying
 	}
-	deployments, err := m.store.ListRecentDeployments(app.ID, 1)
+	deployment, err := m.store.GetServingDeployment(app.ID)
 	if err != nil {
 		gate.RUnlock()
 		return 0, fmt.Errorf("list deployments for app %d: %w", app.ID, err)
-	}
-	if len(deployments) == 0 {
-		gate.RUnlock()
-		return 0, fmt.Errorf("app %q has no deployments; cannot run schedule", app.Slug)
 	}
 	if err := ctx.Err(); err != nil {
 		gate.RUnlock()
@@ -685,9 +681,9 @@ func (m *Manager) runAdmitted(ctx context.Context, scheduleID int64, trigger str
 	}
 	if refresh != nil {
 		refresh.result.Status = "started"
-		return m.runRefresh(ctx, sched, app, deployments[0], userID, gate, refresh)
+		return m.runRefresh(ctx, sched, app, deployment, userID, gate, refresh)
 	}
-	return m.runForDeployment(sched, app, deployments[0], trigger, userID, gate)
+	return m.runForDeployment(sched, app, deployment, trigger, userID, gate)
 }
 
 // RunForDeployment admits a schedule run against one exact immutable bundle.
@@ -758,24 +754,18 @@ func (m *Manager) RunDeployObligation(obligation *db.ScheduleDeployObligation) (
 	if err != nil {
 		return 0, fmt.Errorf("get app %d: %w", sched.AppID, err)
 	}
-	deployments, err := m.store.ListDeployments(app.ID)
+	deployment, err := m.store.GetDeploymentByID(obligation.DeploymentID)
 	if err != nil {
 		return 0, fmt.Errorf("list deployments for app %d: %w", app.ID, err)
 	}
-	var deployment *db.Deployment
-	for _, candidate := range deployments {
-		if candidate.ID == obligation.DeploymentID {
-			deployment = candidate
-			break
-		}
-	}
-	if deployment == nil {
+	if deployment == nil || deployment.AppID != app.ID {
 		return 0, fmt.Errorf("deployment %d for obligation %d is unavailable", obligation.DeploymentID, obligation.ID)
 	}
 	// Execute the immutable obligation snapshot even if the schedule is edited
 	// after admission. A subsequent reconciliation creates a new identity.
 	snapshot := *sched
 	snapshot.CommandJSON = obligation.ProducerCommandJSON
+	snapshot.InputsJSON = obligation.ProducerInputsJSON
 	snapshot.TimeoutSeconds = obligation.TimeoutSeconds
 	snapshot.OnSuccess = obligation.OnSuccess
 	snapshot.MinRollIntervalSeconds = obligation.MinRollIntervalSeconds
@@ -793,7 +783,9 @@ func (m *Manager) runRequired(sched *db.Schedule, app *db.App, deployment *db.De
 	// Reserve writer admission synchronously, but acquire the potentially
 	// long-held writer gate in the run goroutine. The durable dispatcher stays
 	// non-blocking while later readers/barriers still cannot overtake this run.
-	admission.Lock()
+	if !admission.TryLock() {
+		return 0, errors.New("producer admission is busy; retry convergence")
+	}
 	if pending, err := m.store.HasPendingDeployment(app.ID); err != nil {
 		admission.Unlock()
 		return 0, fmt.Errorf("check pending deployment for app %d: %w", app.ID, err)
@@ -801,12 +793,12 @@ func (m *Manager) runRequired(sched *db.Schedule, app *db.App, deployment *db.De
 		admission.Unlock()
 		return 0, ErrAppDeploying
 	}
-	current, err := m.store.ListRecentDeployments(app.ID, 1)
+	current, err := m.store.GetServingDeployment(app.ID)
 	if err != nil {
 		admission.Unlock()
 		return 0, fmt.Errorf("revalidate deployment for app %d: %w", app.ID, err)
 	}
-	if len(current) == 0 || current[0].ID != deployment.ID {
+	if !sameServingBundle(current, deployment) {
 		admission.Unlock()
 		return 0, fmt.Errorf("deployment %d is no longer current", deployment.ID)
 	}
@@ -836,8 +828,8 @@ func (m *Manager) runRequired(sched *db.Schedule, app *db.App, deployment *db.De
 			m.finishRun(sched, runID, "failed", nil, "deploy", nil, false)
 			return
 		}
-		current, err := m.store.ListRecentDeployments(app.ID, 1)
-		if err != nil || len(current) == 0 || current[0].ID != deployment.ID {
+		current, err := m.store.GetServingDeployment(app.ID)
+		if err != nil || !sameServingBundle(current, deployment) {
 			m.finishRun(sched, runID, "failed", nil, "deploy", nil, false)
 			return
 		}
@@ -1394,7 +1386,7 @@ func (m *Manager) buildRunContext() (context.Context, context.CancelFunc) {
 // insertRunRow creates a schedule_runs row with status "running", opens the
 // run's span, and returns its ID.
 func (m *Manager) insertRunRow(sched *db.Schedule, app *db.App, deployment *db.Deployment, trigger string, userID *int64) (int64, error) {
-	canonical, fingerprint, err := schedulespec.ProducerIdentity(sched.CommandJSON)
+	canonical, fingerprint, err := schedulespec.ProducerBundleIdentity(sched.CommandJSON, sched.InputsJSON, deployment.BundleDir)
 	if err != nil {
 		return 0, err
 	}
@@ -1457,7 +1449,7 @@ func (m *Manager) insertDeployRunRow(sched *db.Schedule, app *db.App, deployment
 // status "skipped_overlap". Returns the run ID.
 
 func (m *Manager) recordSkipped(sched *db.Schedule, deployment *db.Deployment, trigger string, userID *int64) (int64, error) {
-	canonical, fingerprint, identityErr := schedulespec.ProducerIdentity(sched.CommandJSON)
+	canonical, fingerprint, identityErr := schedulespec.ProducerBundleIdentity(sched.CommandJSON, sched.InputsJSON, deployment.BundleDir)
 	if identityErr != nil {
 		return 0, identityErr
 	}
@@ -1830,20 +1822,31 @@ func (m *Manager) servingRunStillCurrent(sched *db.Schedule, app *db.App, deploy
 	if pending, err := m.store.HasPendingDeployment(app.ID); err != nil || pending {
 		return false
 	}
-	current, err := m.store.ListRecentDeployments(app.ID, 1)
-	if err != nil || len(current) == 0 || current[0].ID != deployment.ID {
+	current, err := m.store.GetServingDeployment(app.ID)
+	if err != nil || !sameServingBundle(current, deployment) {
 		return false
 	}
 	declaration, err := m.store.GetSchedule(sched.ID)
 	if err != nil || declaration.AppID != app.ID || (!declaration.Enabled && trigger != "manual") {
 		return false
 	}
-	_, admittedFingerprint, err := schedulespec.ProducerIdentity(sched.CommandJSON)
+	_, admittedFingerprint, err := schedulespec.ProducerBundleIdentity(sched.CommandJSON, sched.InputsJSON, deployment.BundleDir)
 	if err != nil {
 		return false
 	}
-	_, currentFingerprint, err := schedulespec.ProducerIdentity(declaration.CommandJSON)
+	_, currentFingerprint, err := schedulespec.ProducerBundleIdentity(declaration.CommandJSON, declaration.InputsJSON, deployment.BundleDir)
 	return err == nil && currentFingerprint == admittedFingerprint
+}
+
+// A serving-only activation replaces processes without changing their immutable
+// bundle. Such a cutover must not invalidate an already admitted producer.
+func sameServingBundle(current, admitted *db.Deployment) bool {
+	if current == nil || admitted == nil || current.AppID != admitted.AppID {
+		return false
+	}
+	return current.ID == admitted.ID || (current.BundleDir != "" &&
+		current.BundleDir == admitted.BundleDir && current.Version == admitted.Version &&
+		current.ContentDigest == admitted.ContentDigest)
 }
 
 // intPtr returns a pointer to i, used to pass a concrete exit code where a

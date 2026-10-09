@@ -10,31 +10,37 @@ import (
 // generation. It exists alongside the legacy active-replica projection while
 // a candidate or previous generation is staged or draining.
 type DeploymentReplica struct {
-	AppID        int64
-	DeploymentID int64
-	Index        int
-	PID          *int
-	Port         *int
-	Status       string
-	Provider     string
-	Tier         string
-	EndpointURL  string
-	WorkerID     string
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	AppID                int64
+	DeploymentID         int64
+	Index                int
+	PID                  *int
+	Port                 *int
+	Status               string
+	Provider             string
+	Tier                 string
+	EndpointURL          string
+	WorkerID             string
+	DataGeneration       int64
+	StartupPeakRSSBytes  int64
+	ProcessStartIdentity int64
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
 }
 
 type UpsertDeploymentReplicaParams struct {
-	AppID        int64
-	DeploymentID int64
-	Index        int
-	PID          *int
-	Port         *int
-	Status       string
-	Provider     string
-	Tier         string
-	EndpointURL  string
-	WorkerID     string
+	AppID                int64
+	DeploymentID         int64
+	Index                int
+	PID                  *int
+	Port                 *int
+	Status               string
+	Provider             string
+	Tier                 string
+	EndpointURL          string
+	WorkerID             string
+	DataGeneration       int64
+	StartupPeakRSSBytes  int64
+	ProcessStartIdentity int64
 }
 
 func (s *Store) UpsertDeploymentReplica(p UpsertDeploymentReplicaParams) error {
@@ -50,8 +56,8 @@ func (s *Store) UpsertDeploymentReplica(p UpsertDeploymentReplicaParams) error {
 	}
 	_, err := s.db.Exec(`
 		INSERT INTO deployment_replicas
-			(app_id, deployment_id, idx, pid, port, status, provider, tier, endpoint_url, worker_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			(app_id, deployment_id, idx, pid, port, status, provider, tier, endpoint_url, worker_id, data_generation, startup_peak_rss_bytes, process_start_identity)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (deployment_id, idx) DO UPDATE SET
 			pid = excluded.pid,
 			port = excluded.port,
@@ -60,9 +66,12 @@ func (s *Store) UpsertDeploymentReplica(p UpsertDeploymentReplicaParams) error {
 			tier = excluded.tier,
 			endpoint_url = excluded.endpoint_url,
 			worker_id = excluded.worker_id,
+ process_start_identity = CASE WHEN excluded.process_start_identity > 0 THEN excluded.process_start_identity ELSE deployment_replicas.process_start_identity END,
+ data_generation = CASE WHEN excluded.data_generation > 0 THEN excluded.data_generation ELSE deployment_replicas.data_generation END,
+ startup_peak_rss_bytes = CASE WHEN excluded.startup_peak_rss_bytes > 0 THEN excluded.startup_peak_rss_bytes ELSE deployment_replicas.startup_peak_rss_bytes END,
 			updated_at = CURRENT_TIMESTAMP`,
 		p.AppID, p.DeploymentID, p.Index, p.PID, p.Port, p.Status,
-		p.Provider, p.Tier, p.EndpointURL, p.WorkerID)
+		p.Provider, p.Tier, p.EndpointURL, p.WorkerID, p.DataGeneration, p.StartupPeakRSSBytes, p.ProcessStartIdentity)
 	if err != nil {
 		return fmt.Errorf("upsert deployment replica: %w", err)
 	}
@@ -72,7 +81,7 @@ func (s *Store) UpsertDeploymentReplica(p UpsertDeploymentReplicaParams) error {
 func (s *Store) ListDeploymentReplicas(appID int64) ([]*DeploymentReplica, error) {
 	rows, err := s.db.Query(`
 		SELECT app_id, deployment_id, idx, pid, port, status, provider, tier,
-		       endpoint_url, worker_id, created_at, updated_at
+		       endpoint_url, worker_id, data_generation, startup_peak_rss_bytes, process_start_identity, created_at, updated_at
 		FROM deployment_replicas
 		WHERE app_id = ?
 		ORDER BY deployment_id, idx`, appID)
@@ -88,7 +97,7 @@ func (s *Store) ListDeploymentReplicas(appID int64) ([]*DeploymentReplica, error
 			port sql.NullInt64
 		)
 		if err := rows.Scan(&r.AppID, &r.DeploymentID, &r.Index, &pid, &port,
-			&r.Status, &r.Provider, &r.Tier, &r.EndpointURL, &r.WorkerID,
+			&r.Status, &r.Provider, &r.Tier, &r.EndpointURL, &r.WorkerID, &r.DataGeneration, &r.StartupPeakRSSBytes, &r.ProcessStartIdentity,
 			&r.CreatedAt, &r.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("list deployment replicas: %w", err)
 		}

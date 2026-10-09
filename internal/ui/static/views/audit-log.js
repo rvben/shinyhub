@@ -13,7 +13,7 @@
 export const AUDIT_ACTIONS = [
   // Deployment actions (green)
   'draft_create', 'draft_preview_create', 'draft_promote', 'draft_delete',
-  'deploy', 'restart', 'rollback', 'fleet_apply_started', 'fleet_apply_finished',
+  'deploy', 'restart', 'rolling_restart', 'rollback', 'fleet_apply_started', 'fleet_apply_finished',
   // Auth actions
   'login', 'login_failed', 'logout', 'logout_handoff', 'connect_cli',
   'change_own_password', 'update_profile',

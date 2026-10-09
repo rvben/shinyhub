@@ -401,7 +401,9 @@ var schemaAnnotations = map[string]cmdAnnotation{
 		{Name: "warning", Type: "string", Desc: "Present when rollback committed but schedule convergence requires asynchronous repair"},
 	}},
 	"apps restart": {Mutating: mut, OutputFields: []fieldSpec{
-		{Name: "status", Type: "string", Desc: "running"},
+		{Name: "status", Type: "string", Desc: "running or accepted for a queued rolling restart"},
+		{Name: "activation_id", Type: "integer", Desc: "Durable rolling restart activation ID"},
+		{Name: "drain_timeout_seconds", Type: "integer", Desc: "Maximum session drain per retiring worker/generation"},
 		{Name: "slug", Type: "string"},
 	}},
 	"apps start": {Mutating: mut, OutputFields: []fieldSpec{

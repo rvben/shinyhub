@@ -335,11 +335,10 @@ func (s *Server) WarmExpand(slug string) (bool, error) {
 		}
 	}
 
-	deployments, err := s.store.ListRecentDeployments(app.ID, 1)
-	if err != nil || len(deployments) == 0 {
+	current, err := s.store.GetServingDeployment(app.ID)
+	if err != nil {
 		return false, fmt.Errorf("warm expand %s: no deployments", slug)
 	}
-	current := deployments[0]
 
 	// Build deploy params using the same field set as ScaleUp, reusing the
 	// current deployment's bundle dir and all resource/session config from the

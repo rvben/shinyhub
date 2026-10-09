@@ -216,7 +216,7 @@ func (s *Store) CompleteScheduleRunAndEnqueueActivation(p CompleteScheduleRunPar
 	}
 	if producerFingerprint != "" && !sourceIsPending {
 		schedule, err := scanSchedule(tx.QueryRowContext(ctx, `
-			SELECT id, app_id, name, cron_expr, command_json, enabled, timeout_seconds,
+			SELECT id, app_id, name, cron_expr, command_json, inputs_json, enabled, timeout_seconds,
 			       overlap_policy, missed_policy, deploy_trigger, timezone, on_success,
 			       min_roll_interval_seconds, roll_fallback, max_defer_age_seconds,
 			       created_at, updated_at
@@ -227,9 +227,9 @@ func (s *Store) CompleteScheduleRunAndEnqueueActivation(p CompleteScheduleRunPar
 		var currentDeploymentID int64
 		var currentVersion, currentDigest string
 		err = tx.QueryRowContext(ctx, `
-			SELECT id, version, COALESCE(content_digest, '') FROM deployments
-			WHERE app_id = ? AND status = 'succeeded'
-			ORDER BY id DESC LIMIT 1`, appID).Scan(&currentDeploymentID, &currentVersion, &currentDigest)
+			SELECT d.id,d.version,COALESCE(d.content_digest,'') FROM deployments d JOIN apps a ON a.id=d.app_id
+ WHERE d.app_id=? AND d.status='succeeded' AND (d.id=a.active_deployment_id OR a.active_deployment_id IS NULL)
+ ORDER BY d.id DESC LIMIT 1`, appID).Scan(&currentDeploymentID, &currentVersion, &currentDigest)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("complete schedule run: load current deployment: %w", err)
 		}
@@ -292,7 +292,7 @@ func (s *Store) CompleteScheduleRunAndEnqueueActivation(p CompleteScheduleRunPar
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE schedule_activations
 			SET status = 'superseded', finished_at = ?, updated_at = CURRENT_TIMESTAMP
-			WHERE app_id = ? AND target_generation <> ?
+			WHERE app_id = ? AND target_generation <> ? AND schedule_run_id IS NOT NULL
 			  AND status IN ('pending', 'deferred_interval', 'deferred_capacity')`,
 			p.FinishedAt, appID, generation); err != nil {
 			return nil, fmt.Errorf("complete schedule run: supersede stale activations: %w", err)
@@ -314,7 +314,7 @@ func (s *Store) CompleteScheduleRunAndEnqueueActivation(p CompleteScheduleRunPar
 	var lastFinished sql.NullTime
 	err = tx.QueryRowContext(ctx, `
 		SELECT finished_at FROM schedule_activations
-		WHERE app_id = ? AND status = 'succeeded'
+		WHERE app_id = ? AND status = 'succeeded' AND schedule_run_id IS NOT NULL
 		ORDER BY finished_at DESC, id DESC LIMIT 1`, appID).Scan(&lastFinished)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("complete schedule run: load damper anchor: %w", err)
@@ -369,7 +369,7 @@ func (s *Store) CompleteScheduleRunAndEnqueueActivation(p CompleteScheduleRunPar
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE schedule_activations
 		SET status = 'superseded', superseded_by_id = ?, finished_at = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE app_id = ? AND id <> ?
+		WHERE app_id = ? AND id <> ? AND schedule_run_id IS NOT NULL
 		  AND status IN ('pending', 'deferred_interval', 'deferred_capacity')`,
 		activationID, p.FinishedAt, appID, activationID,
 	); err != nil {
@@ -530,6 +530,9 @@ func (s *Store) ClaimNextScheduleActivation(now time.Time) (*ScheduleActivation,
 			_ = tx.Rollback()
 		}
 	}()
+	if err := reapUnstartedServingActivationsTx(tx); err != nil {
+		return nil, err
+	}
 	var id int64
 	var priorStatus, priorPhase string
 	err = tx.QueryRowContext(ctx, `
@@ -539,6 +542,10 @@ func (s *Store) ClaimNextScheduleActivation(now time.Time) (*ScheduleActivation,
 		ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'repairing' THEN 1 ELSE 2 END,
 		         due_at ASC, id ASC LIMIT 1`, now).Scan(&id, &priorStatus, &priorPhase)
 	if errors.Is(err, sql.ErrNoRows) {
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		committed = true
 		return nil, ErrNotFound
 	}
 	if err != nil {
@@ -554,7 +561,10 @@ func (s *Store) ClaimNextScheduleActivation(now time.Time) (*ScheduleActivation,
 		updated_at = CURRENT_TIMESTAMP WHERE id = ?`, now, id); err != nil {
 		return nil, fmt.Errorf("claim schedule activation: update: %w", err)
 	}
-	if phase == "recovering" {
+	if priorPhase == "grouped_restart" {
+		phase = "grouped_restart"
+	}
+	if phase == "recovering" || phase == "grouped_restart" {
 		if _, err := tx.ExecContext(ctx, `UPDATE schedule_activations SET phase = ? WHERE id = ?`, phase, id); err != nil {
 			return nil, fmt.Errorf("claim schedule activation: mark recovery: %w", err)
 		}
@@ -659,7 +669,7 @@ func (s *Store) FinishScheduleActivation(id int64, status, lastError string, fin
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound
 	}
-	if status == "succeeded" {
+	if status == "succeeded" && scheduleRunID.Valid {
 		rows, err := tx.QueryContext(ctx, `SELECT id, due_at, min_roll_interval_seconds
 			FROM schedule_activations
 			WHERE app_id = (SELECT app_id FROM schedule_activations WHERE id = ?)
@@ -736,7 +746,7 @@ func nullableInt64(v sql.NullInt64) *int64 {
 // an unpersisted surge is cleaned up by normal startup orphan recovery.
 func (s *Store) RequeueRunningScheduleActivations(now time.Time) (int64, error) {
 	res, err := s.db.Exec(`UPDATE schedule_activations
-		SET status = 'repairing', phase = 'recovering', due_at = ?, defer_reason = 'server restarted during activation',
+		SET status = 'repairing', phase = CASE WHEN phase='grouped_restart' THEN phase ELSE 'recovering' END, due_at = ?, defer_reason = 'server restarted during activation',
 		updated_at = CURRENT_TIMESTAMP WHERE status = 'running'`, now)
 	if err != nil {
 		return 0, fmt.Errorf("requeue running schedule activations: %w", err)
@@ -785,10 +795,10 @@ func (s *Store) PruneScheduleActivations(keepTerminalPerSchedule int) (int64, er
 		)
 		AND id NOT IN (
 			SELECT succeeded.id FROM schedule_activations succeeded
-			WHERE succeeded.status = 'succeeded' AND succeeded.app_id IS NOT NULL
+			WHERE succeeded.status = 'succeeded' AND succeeded.app_id IS NOT NULL AND succeeded.schedule_run_id IS NOT NULL
 			  AND NOT EXISTS (
 				SELECT 1 FROM schedule_activations newer
-				WHERE newer.app_id = succeeded.app_id AND newer.status = 'succeeded'
+				WHERE newer.app_id = succeeded.app_id AND newer.status = 'succeeded' AND newer.schedule_run_id IS NOT NULL
 				  AND (newer.finished_at > succeeded.finished_at OR
 				       (newer.finished_at = succeeded.finished_at AND newer.id > succeeded.id))
 			  )

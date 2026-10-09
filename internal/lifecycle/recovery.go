@@ -35,6 +35,16 @@ func ReconcileInflightDeployments(store *db.Store) error {
 		return fmt.Errorf("deploy reconcile: list inflight deployments: %w", err)
 	}
 	for _, d := range inflight {
+		serving, err := store.IsServingActivationDeployment(d.ID)
+		if err != nil {
+			return err
+		}
+		if serving {
+			if err := store.FailDeploymentWithReason(d.ID, "server interrupted serving activation"); err != nil {
+				return err
+			}
+			continue
+		}
 		if _, err := store.RestoreDeploymentPriorScheduleSnapshot(d.ID, d.AppID); err != nil {
 			if errors.Is(err, db.ErrNotFound) {
 				reason := "server interrupted a deployment created before prior schedule snapshots were supported; app left stopped because its declaration provenance is unknown"
@@ -140,14 +150,14 @@ func validateNativeProcessCWD(pid int, bundleDir string, readCWD func() (string,
 // frozen-warm row to stopped. See PrepareRecovery, which resolves this for
 // every app before recovery is allowed to mutate anything.
 func activeBundleDir(store *db.Store, appID int64) (string, error) {
-	deps, err := store.ListRecentDeployments(appID, 1)
+	dep, err := store.GetServingDeployment(appID)
+	if errors.Is(err, db.ErrNotFound) {
+		return "", nil
+	}
 	if err != nil {
 		return "", err
 	}
-	if len(deps) == 0 {
-		return "", nil
-	}
-	return deps[0].BundleDir, nil
+	return dep.BundleDir, nil
 }
 
 // RecoveryInputs is the read-only snapshot RecoverProcesses needs, resolved
@@ -681,7 +691,7 @@ func cleanupObsoleteDeploymentGenerations(store *db.Store, mgr *process.Manager,
 				}
 				continue
 			}
-			if !stopRecordedNativeReplica(store, app, replica.PID, replica.Provider, &id) {
+			if !stopRecordedNativeReplica(store, app, replica.PID, replica.Provider, &id, replica.ProcessStartIdentity) {
 				allStopped = false
 			}
 		}
@@ -749,12 +759,21 @@ func recordedNativeGroupGone(pid int) bool {
 // otherwise; every signal is preceded by a fresh bundle-identity check, so a
 // recycled PID is never signalled. It then waits up to budget (never less
 // than recordedNativeStopProbeFloor) for the process and its group to exit.
-func stepRecordedNativeStop(store nativeReplicaStopper, app *db.App, pid *int, provider string, deploymentID *int64, progress *nativeStopProgress, budget time.Duration) nativeStopResult {
+func stepRecordedNativeStop(store nativeReplicaStopper, app *db.App, pid *int, provider string, deploymentID *int64, progress *nativeStopProgress, budget time.Duration, expectedStart ...int64) nativeStopResult {
 	if pid == nil || *pid <= 0 || (provider != "" && provider != "native") {
 		return nativeStopConfirmed
 	}
 	if recordedNativeGroupGone(*pid) {
 		return nativeStopConfirmed
+	}
+	if len(expectedStart) > 0 && expectedStart[0] > 0 {
+		started, err := process.NativeProcessStartIdentity(*pid)
+		if err != nil {
+			return nativeStopRefused
+		}
+		if started != expectedStart[0] {
+			return nativeStopConfirmed
+		}
 	}
 
 	var sig syscall.Signal
@@ -808,10 +827,10 @@ func stepRecordedNativeStop(store nativeReplicaStopper, app *db.App, pid *int, p
 // confirmed semantics, blocking through the whole escalation: SIGTERM, up to
 // recordedNativeStopGrace for an exit, an identity-revalidated SIGKILL, and
 // up to the same grace again. It reports whether the exit was confirmed.
-func stopRecordedNativeReplica(store nativeReplicaStopper, app *db.App, pid *int, provider string, deploymentID *int64) bool {
+func stopRecordedNativeReplica(store nativeReplicaStopper, app *db.App, pid *int, provider string, deploymentID *int64, expectedStart ...int64) bool {
 	var progress nativeStopProgress
 	for {
-		switch stepRecordedNativeStop(store, app, pid, provider, deploymentID, &progress, time.Second) {
+		switch stepRecordedNativeStop(store, app, pid, provider, deploymentID, &progress, time.Second, expectedStart...) {
 		case nativeStopConfirmed:
 			return true
 		case nativeStopRefused:
@@ -1698,12 +1717,12 @@ func cleanupElasticDeploymentGenerations(store *db.Store, mgr *process.Manager, 
 			ok = false
 			continue
 		}
-		if !stopRecordedNativeReplica(store, app, row.PID, row.Provider, &id) {
+		if !stopRecordedNativeReplica(store, app, row.PID, row.Provider, &id, row.ProcessStartIdentity) {
 			ok = false
 			if row.PID != nil && queue != nil {
 				queue.QueuePendingStop(PendingStopEntry{
 					Kind: pendingStopElasticRecovery, Slug: app.Slug, Index: row.Index,
-					AppID: app.ID, DeploymentID: row.DeploymentID, PID: *row.PID,
+					AppID: app.ID, DeploymentID: row.DeploymentID, PID: *row.PID, ProcessStartIdentity: row.ProcessStartIdentity,
 					Reason: "recorded native worker identity did not stop during recovery",
 				})
 			}

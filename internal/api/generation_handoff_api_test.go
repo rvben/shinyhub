@@ -177,7 +177,7 @@ func TestDeploy_CandidateDiesBeforeCutoverKeepsHealthyRoute(t *testing.T) {
 	srv.SetDeployRunForTest(func(p deploy.Params) (*deploy.PoolResult, error) {
 		p.HealthCheck = func(string, time.Duration, http.RoundTripper) error { return nil }
 		result, err := deploy.Run(p)
-		if err == nil && p.GenerationScoped {
+		if err == nil && p.GenerationScoped && !p.PrepareOnly {
 			if stopErr := mgr.StopGeneration(p.Slug, p.DeploymentID); stopErr != nil {
 				t.Fatalf("stop staged candidate: %v", stopErr)
 			}

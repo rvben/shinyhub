@@ -2142,6 +2142,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// worker per slot and registers it with the proxy; the terminate callback
 	// is called when all assigned clients disconnect (after the grace window).
 	elasticSpawner := &lifecycle.ElasticSpawner{
+		StartupSampler:      replicaSampler,
 		Store:               store,
 		Manager:             mgr,
 		Proxy:               prx,

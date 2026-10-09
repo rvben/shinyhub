@@ -186,6 +186,30 @@ func (f *fakeStore) ListRecentDeployments(appID int64, n int) ([]*db.Deployment,
 	return all, nil
 }
 
+func (f *fakeStore) GetServingDeployment(appID int64) (*db.Deployment, error) {
+	deps, err := f.ListRecentDeployments(appID, 1)
+	if err != nil {
+		return nil, err
+	}
+	if len(deps) == 0 {
+		return nil, db.ErrNotFound
+	}
+	return deps[0], nil
+}
+
+func (f *fakeStore) GetDeploymentByID(id int64) (*db.Deployment, error) {
+	deps, err := f.ListDeployments(0)
+	if err != nil {
+		return nil, err
+	}
+	for _, dep := range deps {
+		if dep.ID == id {
+			return dep, nil
+		}
+	}
+	return nil, db.ErrNotFound
+}
+
 func (f *fakeStore) HasPendingDeployment(appID int64) (bool, error) {
 	return f.pending, nil
 }
@@ -444,6 +468,47 @@ func TestManager_ProducerBarrierCannotOvertakeAdmittedOrdinaryRun(t *testing.T) 
 		release()
 	case <-time.After(2 * time.Second):
 		t.Fatal("producer barrier did not acquire after ordinary run completed")
+	}
+}
+
+func TestManager_AdmittedProducerSurvivesSameBundleServingRoll(t *testing.T) {
+	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 0}}
+	schedule := makeSchedule("concurrent", 30)
+	schedule.OnSuccess = "roll"
+	st := newFakeStore(schedule, makeApp())
+	m := newTestManager(t, rt, st)
+	release, err := m.AcquireConsumerBootGate(st.app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID, err := m.Run(schedule.ID, "manual", nil)
+	if err != nil {
+		release()
+		t.Fatal(err)
+	}
+	st.mu.Lock()
+	replacement := *st.deployments[0]
+	replacement.ID++
+	st.deployments = []*db.Deployment{&replacement, st.deployments[0]}
+	st.mu.Unlock()
+	release()
+	waitForCalls(t, rt, 1, 2*time.Second)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		run, err := st.GetScheduleRun(runID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if run.Status != "running" {
+			if run.Status != "succeeded" {
+				t.Fatalf("same-bundle producer status=%q", run.Status)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("producer did not complete")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -2094,5 +2159,36 @@ func TestManager_Run_PrunesReleasedNamespacesWhenItEnds(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(cacheRoot, "test-app", "d5")); err != nil {
 		t.Fatalf("the run's own retained namespace was pruned: %v", err)
+	}
+}
+
+func TestManager_RequiredProducerAdmissionDoesNotBlockDispatcher(t *testing.T) {
+	st := newFakeStore(makeSchedule("concurrent", 30), makeApp())
+	m := newTestManager(t, &fakeRuntime{}, st)
+	release := m.AcquireProducerGates([]int64{st.schedule.ID})
+	obligation := &db.ScheduleDeployObligation{ID: 1, ScheduleID: st.schedule.ID, DeploymentID: st.deployments[0].ID, ProducerCommandJSON: st.schedule.CommandJSON}
+	// The first dispatcher reserves admission and waits asynchronously for the
+	// producer barrier. A second dispatcher must return rather than queue on it.
+	if _, err := m.RunDeployObligation(obligation); err != nil {
+		release()
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { _, err := m.RunDeployObligation(obligation); done <- err }()
+	select {
+	case err := <-done:
+		release()
+		if err == nil {
+			t.Fatal("busy producer admission succeeded")
+		}
+	case <-time.After(time.Second):
+		release()
+		<-done
+		t.Fatal("busy producer admission blocked the durable dispatcher")
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if len(st.runs) != 1 {
+		t.Fatalf("busy admission inserted another run: %d", len(st.runs))
 	}
 }

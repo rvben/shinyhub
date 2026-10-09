@@ -225,14 +225,15 @@ func (a AppSettings) IsZero() bool {
 // LoadManifest so the application layer doesn't re-parse and never sees
 // an unparseable manifest reach the DB.
 type ScheduleSpec struct {
-	Name           string `toml:"name"`
-	Cron           string `toml:"cron"`
-	Cmd            string `toml:"cmd"`
-	CmdJSON        string `toml:"cmd_json"`
-	TimeoutSeconds *int   `toml:"timeout_seconds"`
-	Overlap        string `toml:"overlap"`
-	Missed         string `toml:"missed"`
-	Disabled       bool   `toml:"disabled"`
+	Inputs         []string `toml:"inputs"`
+	Name           string   `toml:"name"`
+	Cron           string   `toml:"cron"`
+	Cmd            string   `toml:"cmd"`
+	CmdJSON        string   `toml:"cmd_json"`
+	TimeoutSeconds *int     `toml:"timeout_seconds"`
+	Overlap        string   `toml:"overlap"`
+	Missed         string   `toml:"missed"`
+	Disabled       bool     `toml:"disabled"`
 	// Timezone is an optional IANA timezone for the schedule. Empty means
 	// "inherit the server default". Validated against time.LoadLocation at
 	// manifest parse time.
@@ -600,6 +601,10 @@ func resolveAndValidateSchedule(s *ScheduleSpec) error {
 	}
 	s.OnSuccess = onSuccess
 	s.RollFallback = rollFallback
+	s.Inputs, err = schedulespec.NormalizeInputs(s.Inputs)
+	if err != nil {
+		return err
+	}
 	s.DeployTrigger, err = schedulespec.NormalizeDeployTrigger(s.DeployTrigger)
 	if err != nil {
 		return err

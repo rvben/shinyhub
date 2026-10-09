@@ -43,6 +43,8 @@ type serverInfoResponse struct {
 // rely on precondition headers and content-digest tracking, or must degrade
 // gracefully against an older server.
 type serverCapabilities struct {
+	RollingRestart            bool `json:"rolling_restart"`
+	ScheduleInputs            bool `json:"schedule_inputs"`
 	RuntimeCapabilities       bool `json:"runtime_capabilities"`
 	TrustedPublishing         bool `json:"trusted_publishing"`
 	FleetPreconditions        bool `json:"fleet_preconditions"`
@@ -83,6 +85,8 @@ func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 		Commit:           s.commitForCaller(r),
 		ProtocolVersion:  protocol.CurrentVersion,
 		Capabilities: serverCapabilities{
+			RollingRestart:            true,
+			ScheduleInputs:            true,
 			RuntimeCapabilities:       true,
 			TrustedPublishing:         len(s.cfg.Auth.TrustedPublishers) > 0,
 			FleetPreconditions:        true,

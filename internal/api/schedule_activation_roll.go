@@ -20,13 +20,48 @@ import (
 // lifecycle mutation, brings up one healthy surge replica, then replaces stale
 // canonical slots one at a time. The configured replica count is never changed:
 // max_replicas remains a steady-state ceiling and activation owns max_surge=1.
-func (s *Server) Roll(ctx context.Context, a *db.ScheduleActivation) error {
+func (s *Server) Roll(ctx context.Context, a *db.ScheduleActivation) (runErr error) {
 	if a == nil || a.AppID == nil {
 		return activation.ErrTargetDeleted
 	}
 	release := s.acquireDeployLock(a.AppSlug)
-	defer release()
+	defer func() { release() }()
 
+	// Terminal outcomes must not abandon a durable pending execution.
+	defer func() {
+		terminal := errors.Is(runErr, activation.ErrNotNeeded) || errors.Is(runErr, activation.ErrSuperseded) || errors.Is(runErr, activation.ErrUnsupported) || errors.Is(runErr, activation.ErrTargetDeleted)
+		if !terminal {
+			return
+		}
+		id, err := s.store.ActivationDeploymentID(a.ID)
+		if err != nil {
+			runErr = s.activationRepairError(err)
+			return
+		}
+		if id == 0 {
+			return
+		}
+		candidate, err := s.store.GetDeploymentByID(id)
+		if errors.Is(err, db.ErrNotFound) {
+			return
+		}
+		if err != nil {
+			runErr = s.activationRepairError(err)
+			return
+		}
+		if candidate.Status != db.DeploymentPending && candidate.Status != db.DeploymentFailed {
+			return
+		}
+		if !s.stopAndForgetCandidate(a.AppSlug, id) {
+			runErr = s.activationRepairError(errors.New("terminal activation candidate cleanup is unconfirmed"))
+			return
+		}
+		if candidate.Status == db.DeploymentPending {
+			if err := s.store.FailDeploymentWithReason(id, "serving activation ended before publication"); err != nil {
+				runErr = s.activationRepairError(err)
+			}
+		}
+	}()
 	app, err := s.store.GetAppByID(*a.AppID)
 	if errors.Is(err, db.ErrNotFound) {
 		return activation.ErrTargetDeleted
@@ -44,7 +79,14 @@ func (s *Server) Roll(ctx context.Context, a *db.ScheduleActivation) error {
 	if gateErr != nil {
 		return fmt.Errorf("acquire activation publication fence: %w", gateErr)
 	}
-	defer releaseConsumerBoot()
+	defer func() { releaseConsumerBoot() }()
+	if a.ScheduleRunID == nil {
+		generation, err := s.store.RefreshManualActivationTarget(a.ID, app.ID)
+		if err != nil {
+			return err
+		}
+		a.TargetGeneration = generation
+	}
 	if a.SourceContentDigest != "" && a.SourceProducerFingerprint != "" {
 		publication, publicationErr := s.store.GetAppDataPublication(app.ID)
 		if errors.Is(publicationErr, db.ErrNotFound) {
@@ -84,14 +126,13 @@ func (s *Server) Roll(ctx context.Context, a *db.ScheduleActivation) error {
 		}
 	}
 	surgeIndex := targetReplicas
-	deployments, err := s.store.ListRecentDeployments(app.ID, 1)
-	if err != nil {
-		return fmt.Errorf("list deployments: %w", err)
-	}
-	if len(deployments) == 0 {
+	current, err := s.store.GetServingDeployment(app.ID)
+	if errors.Is(err, db.ErrNotFound) {
 		return fmt.Errorf("%w: app has no deployment", activation.ErrUnsupported)
 	}
-	current := deployments[0]
+	if err != nil {
+		return fmt.Errorf("load serving deployment: %w", err)
+	}
 	if a.SourceContentDigest != "" && current.ContentDigest != a.SourceContentDigest {
 		return activation.ErrSuperseded
 	}
@@ -103,7 +144,7 @@ func (s *Server) Roll(ctx context.Context, a *db.ScheduleActivation) error {
 		if err != nil {
 			return fmt.Errorf("load activation producer: %w", err)
 		}
-		_, currentFingerprint, err := schedulespec.ProducerIdentity(schedule.CommandJSON)
+		_, currentFingerprint, err := schedulespec.ProducerBundleIdentity(schedule.CommandJSON, schedule.InputsJSON, current.BundleDir)
 		if err != nil {
 			return fmt.Errorf("resolve activation producer: %w", err)
 		}
@@ -112,6 +153,44 @@ func (s *Server) Roll(ctx context.Context, a *db.ScheduleActivation) error {
 		}
 	}
 
+	if deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation) == "grouped" {
+		publication, err := s.store.GetAppDataPublication(app.ID)
+		if err != nil && !errors.Is(err, db.ErrNotFound) {
+			return err
+		}
+		return s.rollGroupedActivation(ctx, app, current, a, func() func() error {
+			relock := s.unlockForServingReadiness(a.AppSlug, &release)
+			return func() error {
+				// A queued writer makes RWMutex block new readers. A demand spawn can
+				// hold the app mutex waiting for that reader gate, so release the old
+				// read fence before reacquiring the app mutex. Then revalidate the exact
+				// publication the candidate read before allowing cutover.
+				releaseConsumerBoot()
+				releaseConsumerBoot = func() {}
+				relock()
+				bootRelease, err := s.acquireConsumerBootGate(app.ID)
+				if err != nil {
+					return err
+				}
+				releaseConsumerBoot = bootRelease
+				after, err := s.store.GetAppDataPublication(app.ID)
+				if err != nil && !errors.Is(err, db.ErrNotFound) {
+					return err
+				}
+				changed := (publication == nil) != (after == nil)
+				if publication != nil && after != nil {
+					changed = publication.Generation != after.Generation || publication.ScheduleRunID != after.ScheduleRunID || publication.DataWriteSequence != after.DataWriteSequence
+				}
+				if changed {
+					if a.ScheduleRunID != nil {
+						return activation.ErrSuperseded
+					}
+					return errors.New("data publication changed during readiness; retry the rolling restart against current data")
+				}
+				return nil
+			}
+		})
+	}
 	replicaRows, err := s.store.ListReplicas(app.ID)
 	if err != nil {
 		return fmt.Errorf("list replicas: %w", err)
@@ -597,6 +676,14 @@ func (s *Server) activationSurgeMemoryEstimate(app *db.App, preferredIndex int) 
 	var baselineBytes int64
 	provenance := ""
 	if s.store != nil {
+		if rows, err := s.store.ListDeploymentReplicas(app.ID); err == nil {
+			for _, row := range rows {
+				if row.StartupPeakRSSBytes > baselineBytes {
+					baselineBytes = row.StartupPeakRSSBytes
+					provenance = "persisted healthy-start RSS peak"
+				}
+			}
+		}
 		replicas, err := s.store.ListReplicas(app.ID)
 		if err == nil {
 			for _, replica := range replicas {
@@ -615,6 +702,14 @@ func (s *Server) activationSurgeMemoryEstimate(app *db.App, preferredIndex int) 
 	for index := 0; index < app.Replicas; index++ {
 		if index != preferredIndex {
 			indices = append(indices, index)
+		}
+	}
+	if deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation) == "grouped" && s.manager != nil {
+		indices = indices[:0]
+		for _, worker := range s.manager.AllForSlug(app.Slug) {
+			if worker != nil && worker.Status == process.StatusRunning {
+				indices = append(indices, worker.Index)
+			}
 		}
 	}
 	if s.sampler != nil && s.manager != nil {
@@ -643,6 +738,9 @@ func (s *Server) activationSurgeMemoryEstimate(app *db.App, preferredIndex int) 
 }
 
 func (s *Server) activationCanonicalCurrent(app *db.App, current *db.Deployment, a *db.ScheduleActivation, index int, row *db.Replica) bool {
+	if a.ScheduleRunID == nil && (row == nil || row.ActivationID == nil || *row.ActivationID != a.ID) {
+		return false
+	}
 	if row == nil || row.Status != db.ReplicaStatusRunning || row.DataGeneration < a.TargetGeneration ||
 		row.DeploymentID == nil || *row.DeploymentID != current.ID {
 		return false

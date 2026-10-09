@@ -162,12 +162,15 @@ No additional flag is needed, and `--allow-downtime` still permits a fallback
 rather than forcing one.
 
 This path supports matching `grouped` isolation on the default native tier of
-a single server. An unchanged manifest is accepted when its declared settings
-still match the live app. Changed configuration, hooks, shared producer changes,
-explicit placement, other providers, and an older generation still draining or
-awaiting cleanup require the existing stop-first path. The server also checks
-that there is memory for the additional worker before starting it. A candidate
-that fails readiness leaves the old version serving.
+a single server. Metadata, resource limits, pool policy, and schedule declarations
+can be staged and published with the replacement when no producer needs to run.
+Isolation changes, hooks, deploy-time shared producers, and unsupported placement
+still require stop-first deployment. The refusal names the reason. A consecutive
+deploy waits for the previous drain and cleanup within a bounded deadline.
+
+The server reserves memory for the candidate and configured warm spares, using
+explicit limits or observed worker startup peaks. A candidate that fails
+readiness leaves the old version and its configuration serving.
 
 Old workers count as draining and do not accept new clients or consume the new
 generation's `max_workers` allowance. They retain memory until their clients

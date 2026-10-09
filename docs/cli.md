@@ -54,7 +54,8 @@ Operate what is running:
 
 | Command | What it does |
 |---|---|
-| `apps` | Manage apps |
+| `apps` | Manage apps; use `apps restart <slug> --roll --wait` for a durable rolling restart |
+| `announcements` | Manage [server announcements](announcements.md) |
 | `projects` | Manage app projects (grouping) |
 | `env` | Manage app environment variables |
 | `data` | Manage an app's persistent data dir |
@@ -125,14 +126,19 @@ current one, plus the configured host memory floor. For 16 replicas, budget for
 separate operation. Grouped apps use the
 [grouped worker handoff](deployment-plan.md#grouped-worker-handoff).
 
-A handoff is deferred when memory cannot be proven, an older generation is still
-draining or awaiting cleanup, the app uses a non-native provider or clustered
-control plane, worker isolation does not match `multiplex` or `grouped` across
-both versions, or shared producer state requires a deploy-time write. A bundle
-with `shinyhub.toml` can hand off when its parsed manifest matches the previous
-bundle, it declares no hooks, and its reconciled app settings already match the
-live app. Changed manifest declarations require stop-first. The working version
-remains available on refusal and the CLI returns a conflict with the reason.
+A handoff is refused when parallel memory cannot be proved, cleanup cannot be
+confirmed, the topology is unsupported, or a deploy-time producer changes shared
+state. Consecutive deployments first wait a bounded period for the previous
+drain outside the app operation lock. Safe metadata, resource-limit, pool-policy
+and schedule changes can hand off; their effective configuration publishes with
+the ready generation. Hooks, worker-layout and access-policy changes remain
+stop-first. The refusal names the fields or condition and preserves the working
+version. Schedule `inputs` can avoid dispatching a producer for UI-only changes.
+
+Handoff output states the drain limit: existing sessions stay on the old worker
+for at most `server.drain_timeout` (60 seconds by default) before termination
+begins. Long-lived sessions can therefore disconnect even when new admissions
+continue uninterrupted.
 
 If interruption is acceptable, opt in explicitly:
 

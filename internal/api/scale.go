@@ -76,11 +76,10 @@ func (s *Server) ScaleUp(slug string) (bool, error) {
 func (s *Server) scaleUpLocked(app *db.App, persistSize bool) (bool, error) {
 	slug := app.Slug
 
-	deployments, err := s.store.ListRecentDeployments(app.ID, 1)
-	if err != nil || len(deployments) == 0 {
+	current, err := s.store.GetServingDeployment(app.ID)
+	if err != nil {
 		return false, fmt.Errorf("scale up %s: no deployments", slug)
 	}
-	current := deployments[0]
 	if err := s.checkColocatedShared(app.ID, s.tiersForApp(app)); err != nil {
 		return false, fmt.Errorf("scale up %s: %w", slug, err)
 	}

@@ -36,6 +36,7 @@ type ScheduleDeployObligation struct {
 	AppVersion             string     `json:"app_version"`
 	ContentDigest          string     `json:"content_digest"`
 	ProducerFingerprint    string     `json:"producer_fingerprint"`
+	ProducerInputsJSON     string     `json:"producer_inputs_json,omitempty"`
 	ProducerCommandJSON    string     `json:"-"`
 	TimeoutSeconds         int        `json:"timeout_seconds"`
 	OnSuccess              string     `json:"on_success"`
@@ -54,7 +55,7 @@ type ScheduleDeployObligation struct {
 
 const deployObligationColumns = `
 id, schedule_id, deployment_id, app_version, content_digest,
-producer_fingerprint, producer_command_json, timeout_seconds, on_success,
+producer_fingerprint, producer_command_json, producer_inputs_json, timeout_seconds, on_success,
 min_roll_interval_seconds, roll_fallback, max_defer_age_seconds, status,
 schedule_run_id, attempts, last_error, next_attempt_at, created_at, updated_at, finished_at`
 
@@ -63,7 +64,7 @@ func scanDeployObligation(s rowScanner) (*ScheduleDeployObligation, error) {
 	var runID sql.NullInt64
 	var nextAttempt, finished sql.NullTime
 	if err := s.Scan(&o.ID, &o.ScheduleID, &o.DeploymentID, &o.AppVersion, &o.ContentDigest,
-		&o.ProducerFingerprint, &o.ProducerCommandJSON, &o.TimeoutSeconds, &o.OnSuccess,
+		&o.ProducerFingerprint, &o.ProducerCommandJSON, &o.ProducerInputsJSON, &o.TimeoutSeconds, &o.OnSuccess,
 		&o.MinRollIntervalSeconds, &o.RollFallback, &o.MaxDeferAgeSeconds, &o.Status,
 		&runID, &o.Attempts, &o.LastError, &nextAttempt, &o.CreatedAt, &o.UpdatedAt, &finished); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -120,7 +121,7 @@ func (s *Store) ReconcileDeployObligationsForDeployment(appID, deploymentID int6
 	}
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT id, app_id, name, cron_expr, command_json, enabled, timeout_seconds,
+		SELECT id, app_id, name, cron_expr, command_json, inputs_json, enabled, timeout_seconds,
 		       overlap_policy, missed_policy, deploy_trigger, timezone, on_success,
 		       min_roll_interval_seconds, roll_fallback, max_defer_age_seconds,
 		       created_at, updated_at
@@ -159,7 +160,13 @@ func (s *Store) ReconcileDeployObligationsForDeployment(appID, deploymentID int6
 }
 
 func reconcileScheduleObligationTx(ctx context.Context, tx writeTx, schedule *Schedule, deploymentID int64, version, digest string) (*ScheduleDeployObligation, error) {
-	canonical, fingerprint, err := schedulespec.ProducerIdentity(schedule.CommandJSON)
+	var bundleDir string
+	if schedule.InputsJSON != "" && schedule.InputsJSON != "[]" && schedule.InputsJSON != "null" {
+		if err := tx.QueryRowContext(ctx, "SELECT bundle_dir FROM deployments WHERE id=?", deploymentID).Scan(&bundleDir); err != nil {
+			return nil, err
+		}
+	}
+	canonical, fingerprint, err := schedulespec.ProducerBundleIdentity(schedule.CommandJSON, schedule.InputsJSON, bundleDir)
 	if err != nil {
 		return nil, err
 	}
@@ -195,7 +202,7 @@ func reconcileScheduleObligationTx(ctx context.Context, tx writeTx, schedule *Sc
 	case schedulespec.DeployTriggerFirstDeploy:
 		satisfied = stateErr == nil && state.PublicationGeneration > 0
 	case schedulespec.DeployTriggerBundleChange:
-		satisfied = stateErr == nil && state.ContentDigest == digest && state.ProducerFingerprint == fingerprint
+		satisfied = stateErr == nil && (state.ContentDigest == digest || strings.HasPrefix(fingerprint, "inputs:")) && state.ProducerFingerprint == fingerprint
 	default:
 		return nil, fmt.Errorf("invalid deploy trigger %q", schedule.DeployTrigger)
 	}
@@ -218,13 +225,13 @@ func reconcileScheduleObligationTx(ctx context.Context, tx writeTx, schedule *Sc
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO schedule_deploy_obligations
 			(schedule_id, deployment_id, app_version, content_digest,
-			 producer_fingerprint, producer_command_json, timeout_seconds,
+			 producer_fingerprint, producer_command_json, producer_inputs_json, timeout_seconds,
 			 on_success, min_roll_interval_seconds, roll_fallback,
 			 max_defer_age_seconds, status, schedule_run_id, finished_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 		        CASE WHEN ? = 'satisfied' THEN CURRENT_TIMESTAMP ELSE NULL END)
 		ON CONFLICT(schedule_id, deployment_id, producer_fingerprint) DO NOTHING`,
-		schedule.ID, deploymentID, version, digest, fingerprint, canonical,
+		schedule.ID, deploymentID, version, digest, fingerprint, canonical, schedule.InputsJSON,
 		schedule.TimeoutSeconds, schedule.OnSuccess, schedule.MinRollIntervalSeconds,
 		schedule.RollFallback, schedule.MaxDeferAgeSeconds, initialStatus, satisfiedRunID, initialStatus); err != nil {
 		return nil, err
@@ -348,9 +355,9 @@ func (s *Store) ReconcileAllDeployObligations() error {
 		SELECT d.app_id, d.id
 		FROM deployments d
 		WHERE d.status = 'succeeded'
-		  AND d.id = (SELECT d2.id FROM deployments d2
+		  AND d.id = COALESCE((SELECT active_deployment_id FROM apps WHERE id = d.app_id), (SELECT d2.id FROM deployments d2
 		              WHERE d2.app_id = d.app_id AND d2.status = 'succeeded'
-		              ORDER BY d2.id DESC LIMIT 1)
+		              ORDER BY d2.id DESC LIMIT 1))
 		ORDER BY d.app_id`)
 	if err != nil {
 		return fmt.Errorf("list current deployments: %w", err)
@@ -415,16 +422,17 @@ func (s *Store) claimNextDeployObligation(appID, deploymentID int64, scoped bool
 		  AND (o.next_attempt_at IS NULL OR o.next_attempt_at <= CURRENT_TIMESTAMP)
 		  AND sc.enabled = 1
 		  AND sc.deploy_trigger <> 'never'
-		  AND o.deployment_id = (
+		  AND o.deployment_id = COALESCE((SELECT active_deployment_id FROM apps WHERE id = sc.app_id), (
 		    SELECT d.id FROM deployments d
 		    WHERE d.app_id = sc.app_id AND d.status = 'succeeded'
 		    ORDER BY d.id DESC LIMIT 1
-		  )
+		  ))
 		  AND NOT EXISTS (
 		    SELECT 1 FROM deployments staging
-		    WHERE staging.app_id = sc.app_id AND staging.status = 'pending'
+		    WHERE staging.app_id = sc.app_id AND staging.status = 'pending' AND staging.serving_activation_id IS NULL
 		  )
 		  AND o.producer_command_json = sc.command_json
+          AND o.producer_inputs_json = sc.inputs_json
 		  AND (
 		    EXISTS (SELECT 1 FROM schedule_data_uncertainty uncertainty
 		            WHERE uncertainty.schedule_id = sc.id)
@@ -436,7 +444,7 @@ func (s *Store) claimNextDeployObligation(appID, deploymentID int64, scoped bool
 		    (sc.deploy_trigger = 'bundle_change' AND NOT EXISTS (
 		      SELECT 1 FROM schedule_producer_state ps
 		      WHERE ps.schedule_id = sc.id
-		        AND ps.content_digest = o.content_digest
+		        AND (ps.content_digest = o.content_digest OR o.producer_fingerprint LIKE 'inputs:%')
 		        AND ps.producer_fingerprint = o.producer_fingerprint
 		    ))
 		  )
@@ -475,7 +483,7 @@ func (s *Store) claimNextDeployObligation(appID, deploymentID int64, scoped bool
 func prefixedDeployObligationColumns(alias string) string {
 	columns := []string{
 		"id", "schedule_id", "deployment_id", "app_version", "content_digest",
-		"producer_fingerprint", "producer_command_json", "timeout_seconds", "on_success",
+		"producer_fingerprint", "producer_command_json", "producer_inputs_json", "timeout_seconds", "on_success",
 		"min_roll_interval_seconds", "roll_fallback", "max_defer_age_seconds", "status",
 		"schedule_run_id", "attempts", "last_error", "next_attempt_at", "created_at", "updated_at", "finished_at",
 	}
@@ -618,7 +626,8 @@ func (s *Store) ListPinnedScheduleDeploymentDirs(appID int64) ([]string, error) 
 		JOIN app_schedules sc ON sc.id = o.schedule_id
 		JOIN deployments d ON d.id = o.deployment_id
 		WHERE sc.app_id = ? AND o.status IN ('pending', 'dispatching', 'running')
-		  AND d.bundle_dir <> ''`, appID, appID)
+		  AND d.bundle_dir <> ''
+ UNION SELECT DISTINCT d.bundle_dir FROM deployment_replicas r JOIN deployments d ON d.id=r.deployment_id WHERE r.app_id=? AND d.bundle_dir <> ''`, appID, appID, appID)
 	if err != nil {
 		return nil, err
 	}

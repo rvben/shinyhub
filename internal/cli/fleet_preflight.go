@@ -170,6 +170,10 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 			resolveProblems = append(resolveProblems, fmt.Sprintf("app %q: %v", app.Slug, merr))
 			continue
 		}
+		if manifestUsesProducerInputs(bm) && !caps.ScheduleInputs {
+			resolveProblems = append(resolveProblems, fmt.Sprintf("app %q: server does not support schedule inputs; upgrade to a server advertising schedule_inputs", app.Slug))
+			continue
+		}
 		if bm != nil {
 			app.Bundle = bundleFleetConfig(bm.App)
 		}

@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -2079,9 +2080,17 @@ func (s *Server) persistStartingDeploymentReplica(app *db.App, deployment *db.De
 
 func (s *Server) persistStartingGenerationReplica(app *db.App, deployment *db.Deployment, result deploy.Result) error {
 	pid, port := result.PID, result.Port
+	var started int64
+	if _, native := s.manager.RuntimeForTier(result.Tier).(*process.NativeRuntime); native {
+		var err error
+		started, err = process.NativeProcessStartIdentity(pid)
+		if err != nil {
+			return fmt.Errorf("record native start identity: %w", err)
+		}
+	}
 	return s.store.UpsertDeploymentReplica(db.UpsertDeploymentReplicaParams{
 		AppID: app.ID, DeploymentID: deployment.ID, Index: result.Index,
-		PID: &pid, Port: &port, Status: "starting", Provider: result.Provider,
+		PID: &pid, Port: &port, Status: "starting", Provider: result.Provider, ProcessStartIdentity: started,
 		Tier: result.Tier, EndpointURL: result.EndpointURL, WorkerID: result.WorkerID,
 	})
 }
@@ -2179,10 +2188,7 @@ func (s *Server) retireGenerationWhenIdle(ctx context.Context, slug string, depl
 		s.metrics.BeginGenerationDrain()
 		defer func() { s.metrics.EndGenerationDrain(lastSessions, time.Since(started)) }()
 	}
-	deadlineAfter := s.cfg.Server.DrainTimeout
-	if deadlineAfter <= 0 {
-		deadlineAfter = time.Minute
-	}
+	deadlineAfter := s.generationDrainTimeout()
 	poll := deadlineAfter / 20
 	if poll > 5*time.Second {
 		poll = 5 * time.Second
@@ -2300,8 +2306,13 @@ func (s *Server) startGenerationLedgerCleanup(slug string, deploymentID int64) {
 }
 
 func (s *Server) startGenerationRetirement(slug string, deploymentID int64) {
+	key := fmt.Sprintf("%s/%d", slug, deploymentID)
+	if _, loaded := s.generationRetirements.LoadOrStore(key, true); loaded {
+		return
+	}
 	s.generationWG.Add(1)
 	safego.Go("generation retirement", func() {
+		defer s.generationRetirements.Delete(key)
 		defer s.generationWG.Done()
 		s.retireGenerationWhenIdle(s.generationCtx, slug, deploymentID)
 	})
@@ -2457,6 +2468,28 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Wait outside the app operation lock and before recording a pending row:
+	// grouped spawn must remain available while the prior generation retires.
+	if s.proxy != nil {
+		if active, err := s.store.GetActiveDeploymentGeneration(app.ID); err == nil {
+			rows, err := s.store.ListDeploymentReplicas(app.ID)
+			grouped := deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation) == "grouped"
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "inspect generation cleanup: "+err.Error())
+				return
+			}
+			if s.proxy.HasDrainingGeneration(slug) || hasBlockingGenerationRows(rows, active.DeploymentID, grouped) {
+				if pending, err := s.store.HasPendingDeployment(app.ID); err != nil || pending {
+					writeError(w, http.StatusConflict, "another deployment is pending; working version preserved")
+					return
+				}
+				if err := s.waitForPreviousGeneration(r.Context(), app, active.DeploymentID, grouped); err != nil {
+					writeError(w, http.StatusConflict, "working version preserved: "+err.Error())
+					return
+				}
+			}
+		}
+	}
 	// Serialize the mutation phase so a concurrent restart/rollback/stop on
 	// the same slug can't tear down the pool we are about to bring up.
 	release := s.acquireDeployLock(slug)
@@ -2608,8 +2641,8 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// rows, so recovery/watcher/scheduler/rollback keep pointing at the
 	// previous bundle until PromoteDeployment confirms the new pool is live.
 	var prevActive *db.Deployment
-	if existing, lerr := s.store.ListRecentDeployments(app.ID, 1); lerr == nil && len(existing) > 0 {
-		prevActive = existing[0]
+	if existing, lerr := s.store.GetServingDeployment(app.ID); lerr == nil {
+		prevActive = existing
 	}
 	preexistingCompatibilityQuarantine, err := s.store.AppCompatibilityQuarantined(app.ID)
 	if err != nil {
@@ -2680,7 +2713,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	pendingDep.ContentDigest = digest
 	pendingDep.Status = db.DeploymentPending
 
-	prestartPlan, err := s.planPrestartSchedules(app, manifest, digest)
+	prestartPlan, err := s.planPrestartSchedules(app, manifest, digest, bundleDir)
 	if err != nil {
 		_ = s.store.FailDeployment(pendingDep.ID)
 		writeError(w, http.StatusInternalServerError, "plan schedule convergence: "+err.Error())
@@ -2753,9 +2786,9 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		case manifest != nil && !s.manifestHandoffSafe(app, prevActive, manifest):
 			// Manifest reconciliation has deliberate omitted-key reset semantics
 			// (identity/privacy/access included). Multiplex and grouped handoffs
-			// accept an unchanged declaration when its live app settings match;
+			// admit safe declaration changes with settings staged until cutover;
 			// producer state is checked independently above.
-			unsupportedReason = "this bundle contains a manifest whose configuration must be reconciled by an explicit stop-first deploy"
+			unsupportedReason = s.manifestHandoffReason(app, prevActive, manifest)
 		}
 		if unsupportedReason == "" {
 			if groupedHandoff {
@@ -2779,15 +2812,23 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		releaseGenerationLaunch = s.manager.AcquireLaunchReservation()
 		defer releaseGenerationLaunch()
 		projected := *app
+		if manifest != nil {
+			projected = *projectHandoffApp(app, manifest.App)
+		}
 		if manifest != nil && manifest.App.Replicas != nil {
 			projected.Replicas = *manifest.App.Replicas
 		}
 		if groupedHandoff {
-			projected.Replicas = 1
+			projected.Replicas = max(1, 1+app.WorkerWarmSpares)
 		}
 		if capacityErr := s.generationHandoffCapacityCheck(&projected); capacityErr != nil {
 			unsupportedReason = capacityErr.Error()
 		}
+	}
+	// Admission above is advisory until preparation finishes. Release the
+	// host launch gate while building; reserve again immediately before boot.
+	if releaseGenerationLaunch != nil {
+		releaseGenerationLaunch()
 	}
 	generationHandoff = generationHandoff && unsupportedReason == ""
 	groupedHandoff = groupedHandoff && generationHandoff
@@ -2884,7 +2925,13 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		// replicas, max_sessions) keep declared-only semantics inside the
 		// function; IsZero manifests produce no DB writes for those fields and
 		// no audit event.
-		if err := s.applyManifestAppSettings(r, app, manifest.App); err != nil {
+		if err := func() error {
+			if generationHandoff {
+				app = projectHandoffApp(app, manifest.App)
+				return nil
+			}
+			return s.applyManifestAppSettings(r, app, manifest.App)
+		}(); err != nil {
 			slog.Error("manifest [app] apply failed", "slug", slug, "err", err)
 			_ = s.store.FailDeployment(pendingDep.ID)
 			if producerBarrierEntered {
@@ -2895,7 +2942,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "manifest apply failed")
 			return
 		}
-		manifestApplied = true
+		manifestApplied = !generationHandoff
 		manifestSummary.App = manifestAppliedSummary(manifest.App)
 		// Read from preManifestApp, not the post-Phase-A refresh below: this
 		// must reflect whether an image was uploaded BEFORE this deploy, and
@@ -2904,7 +2951,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		manifestSummary.IconShadowedUpload = manifest.App.Icon != nil &&
 			*manifest.App.Icon != "" && preManifestApp.IconMime != ""
 		// Refresh so deploy.Run sees the updated replicas / max_sessions.
-		if fresh, ferr := s.store.GetAppBySlug(slug); ferr == nil {
+		if fresh, ferr := s.store.GetAppBySlug(slug); !generationHandoff && ferr == nil {
 			app = fresh
 		}
 		// A manifest that declares a keep-warm floor or the isolation mode
@@ -2921,8 +2968,23 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if generationHandoff {
+		desired := make([]*db.Schedule, 0, len(prestartPlan.candidates))
+		for _, candidate := range prestartPlan.candidates {
+			desired = append(desired, candidate)
+		}
+		sort.Slice(desired, func(i, j int) bool { return desired[i].Name < desired[j].Name })
+		if err := s.store.StageHandoffSettings(pendingDep.ID, &preManifestApp, app, prestartPlan.previousDeclarations, desired); err != nil {
+			_ = s.store.FailDeploymentWithReason(pendingDep.ID, err.Error())
+			writeError(w, http.StatusInternalServerError, "stage handoff configuration: "+err.Error())
+			return
+		}
+	}
 	deployDefaultMem, deployDefaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)
 	deployResponse := newDeployResponder(w, r)
+	if liveUpgrade && !generationHandoff {
+		deployResponse.event(deployevent.Phase("handoff", deployevent.StatusWarning, "Stop-first deployment: "+unsupportedReason))
+	}
 	if generationHandoff {
 		deployResponse.event(deployevent.Phase("handoff", deployevent.StatusStarted, "Preparing the new version while the current version stays available"))
 	}
@@ -2941,16 +3003,25 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		AppVersion:            version,
 		GenerationScoped:      generationHandoff,
 		GroupedHandoff:        groupedHandoff,
-		LaunchReservationHeld: generationHandoff,
+		LaunchReservationHeld: false,
 		// A stopped app is built and validated but not booted, so a broken
 		// bundle is still rejected here rather than at start time.
 		PrepareOnly: keepStopped,
 		Progress:    deployResponse.event,
 	}, app)
 	deployParams.GuardUntilAcknowledged = true
+	var generationStarts atomic.Int32
+	targetGenerationStarts := app.Replicas
+	if groupedHandoff {
+		targetGenerationStarts = 1
+	}
 	deployParams.ReplicaStarted = func(result deploy.Result) error {
 		if generationHandoff {
-			return s.persistStartingGenerationReplica(app, pendingDep, result)
+			err := s.persistStartingGenerationReplica(app, pendingDep, result)
+			if generationStarts.Add(1) == int32(targetGenerationStarts) {
+				releaseGenerationLaunch()
+			}
+			return err
 		}
 		return s.persistStartingDeploymentReplica(app, pendingDep, result)
 	}
@@ -2962,7 +3033,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// satisfied now can be invalidated by a writer admitted on a retiring server;
 	// activation therefore revalidates after acquiring the cross-process
 	// publication fence and may need to republish before consumer startup.
-	needsPreactivationConfig := prestartPlan.deploymentRepairRequired || len(prestartPlan.gateIDs) > 0 || (manifest != nil && len(manifest.Schedules) > 0)
+	needsPreactivationConfig := generationHandoff || prestartPlan.deploymentRepairRequired || len(prestartPlan.gateIDs) > 0 || (manifest != nil && len(manifest.Schedules) > 0)
 	if needsPreactivationConfig {
 		prepared := deployParams
 		prepared.PrepareOnly = true
@@ -2988,7 +3059,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 				prestartPlan.deploymentRepairComplete = true
 			}
 		}
-		if err == nil && manifest != nil && len(manifest.Schedules) > 0 {
+		if err == nil && !generationHandoff && manifest != nil && len(manifest.Schedules) > 0 {
 			if err == nil {
 				deployResponse.event(deployevent.Phase("configuration", deployevent.StatusStarted, "Applying manifest configuration"))
 				targetDeployment := &db.Deployment{
@@ -3003,14 +3074,14 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		if err == nil {
+		if err == nil && !generationHandoff {
 			if snapshotErr := s.store.RecordDeploymentScheduleSnapshot(pendingDep.ID, app.ID); snapshotErr != nil {
 				err = fmt.Errorf("record deployment schedule snapshot: %w", snapshotErr)
 			}
 		}
 		if err == nil {
 			releaseConsumerBoot, convergenceErr := s.convergePrestartAndFenceConsumer(
-				prestartPlan, digest, app, pendingDep, &producerBarrierEntered,
+				prestartPlan, digest, app, pendingDep, &producerBarrierEntered, !generationHandoff,
 			)
 			if convergenceErr != nil {
 				err = convergenceErr
@@ -3021,11 +3092,26 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 				releaseConsumerBoot()
 			} else {
 				defer releaseConsumerBoot()
+				if generationHandoff {
+					releaseGenerationLaunch = s.manager.AcquireLaunchReservation()
+					defer releaseGenerationLaunch()
+					projected := *app
+					if groupedHandoff {
+						projected.Replicas = max(1, 1+app.WorkerWarmSpares)
+					}
+					if capacityErr := s.generationHandoffCapacityCheck(&projected); capacityErr != nil {
+						releaseGenerationLaunch()
+						err = capacityErr
+					}
+				}
 				activate := deployParams
 				activate.Preparation = deploy.PrepareSkip
 				activate.PrepareOnly = false
+				activate.LaunchReservationHeld = generationHandoff
 				var activated *deploy.PoolResult
-				activated, err = s.deployRun(activate)
+				if err == nil {
+					activated, err = s.deployRun(activate)
+				}
 				if err == nil {
 					activated.HooksDeclared = result.HooksDeclared
 					activated.HooksRun = result.HooksRun
@@ -3196,6 +3282,22 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	deployResponse.event(deployevent.Phase("commit", deployevent.StatusStarted, "Recording the new deployment"))
 
 	var replicaPersistenceErr error
+	if groupedHandoff {
+		publication, _ := s.store.GetAppDataPublication(app.ID)
+		for _, rep := range result.Replicas {
+			var generation int64
+			if publication != nil {
+				generation = publication.Generation
+			}
+			pid, port := rep.PID, rep.Port
+			if err := s.store.UpsertDeploymentReplica(db.UpsertDeploymentReplicaParams{AppID: app.ID, DeploymentID: pendingDep.ID, Index: rep.Index, PID: &pid, Port: &port, Status: "running", Provider: rep.Provider, Tier: rep.Tier, EndpointURL: rep.EndpointURL, WorkerID: rep.WorkerID, DataGeneration: generation, StartupPeakRSSBytes: rep.StartupPeakRSSBytes}); err != nil {
+				s.stopAndForgetCandidate(slug, pendingDep.ID)
+				_ = s.store.FailDeploymentWithReason(pendingDep.ID, err.Error())
+				deployResponse.fail(http.StatusInternalServerError, "candidate identity could not be recorded; working version preserved", "", "commit")
+				return
+			}
+		}
+	}
 	if !generationHandoff {
 		replicaPersistenceErr = s.persistDeployedPool(app, pendingDep, result)
 	}
@@ -3267,7 +3369,9 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		slog.Error("deploy: increment deploy_count failed; bundle is deployed", "slug", slug, "err", err)
 	}
 
+	var deployWarning string
 	deploymentPromoted := false
+
 	if generationHandoff {
 		// deploy.handoff covers the cutover from validation through proxy
 		// publication; every failed cutover ends it with its cause.
@@ -3288,6 +3392,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		defer s.reconcileHandoffPolicy(slug, app.ID)
 		promoteErr := s.promoteDeployment(pendingDep.ID)
 		if promoteErr != nil {
 			// A database commit acknowledgement may be lost after the transaction
@@ -3363,6 +3468,20 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			deployResponse.fail(http.StatusInternalServerError, "working route was preserved but deployment cutover requires startup repair", "", "commit")
 			return
 		}
+		s.applyHandoffProxySettings(app)
+		if manifest != nil && !manifest.App.IsZero() {
+			s.audit(r, "update_app", "app", slug, manifestAppDetail(manifest.App))
+		}
+		placeholdersCommitted = true
+		if schedules, reloadErr := s.store.ListSchedulesByApp(app.ID); reloadErr != nil {
+			deployWarning = "deployment is serving but schedule reload requires reconciliation: " + reloadErr.Error()
+		} else {
+			for _, schedule := range schedules {
+				if reloadErr := s.reloadScheduler(schedule.ID, slug, schedule.Name); reloadErr != nil {
+					deployWarning = "deployment is serving but schedule reload requires reconciliation: " + reloadErr.Error()
+				}
+			}
+		}
 		// The candidate is now the durable and routed authority. Keep the old
 		// generation ledger until its sessions drain and physical stop succeeds.
 		drainingRowsStaged = false
@@ -3390,7 +3509,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		if s.metrics != nil {
 			s.metrics.RecordGenerationHandoff("success")
 		}
-		deployResponse.event(deployevent.Phase("handoff", deployevent.StatusCompleted, "New version is ready; existing sessions remain on their current version"))
+		deployResponse.event(deployevent.Phase("handoff", deployevent.StatusCompleted, fmt.Sprintf("New version is ready; existing sessions remain on their current version for up to %s, then termination of remaining sessions begins", s.generationDrainTimeout())))
 		endHandoff(nil)
 	}
 
@@ -3421,7 +3540,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// Materialize convergence only after every manifest upsert has landed, and
 	// always across the complete persisted schedule set. This same boundary is
 	// used by rollback and direct schedule writes.
-	var deployWarning string
+
 	scheduleConvergence, err := s.reconcileAndDispatchScheduleConvergence(app.ID, pendingDep.ID)
 	if err != nil {
 		slog.Error("schedule convergence reconciliation failed", "slug", slug, "err", err)
@@ -3559,6 +3678,9 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		KeptStopped         bool                        `json:"kept_stopped,omitempty"`
 		ScheduleConvergence []ScheduleConvergenceResult `json:"schedule_convergence,omitempty"`
 		Warning             string                      `json:"warning,omitempty"`
+		Handoff             bool                        `json:"handoff,omitempty"`
+		StopFirstReason     string                      `json:"stop_first_reason,omitempty"`
+		DrainTimeoutSeconds int                         `json:"drain_timeout_seconds,omitempty"`
 	}{
 		App:                 updatedApp,
 		HooksSkipped:        result.HooksSkipped,
@@ -3567,6 +3689,11 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		KeptStopped:         keepStopped,
 		ScheduleConvergence: scheduleConvergence,
 		Warning:             deployWarning,
+		Handoff:             generationHandoff,
+		StopFirstReason:     unsupportedReason,
+	}
+	if generationHandoff {
+		resp.DrainTimeoutSeconds = s.generationDrainTimeoutSeconds()
 	}
 	if !manifestSummary.IsEmpty() {
 		resp.Manifest = &manifestSummary
@@ -3695,8 +3822,8 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 	// the rollback target as a pending deployment BEFORE tearing down the pool
 	// (same durability contract as a forward deploy).
 	var prevActive *db.Deployment
-	if existing, lerr := s.store.ListRecentDeployments(app.ID, 1); lerr == nil && len(existing) > 0 {
-		prevActive = existing[0]
+	if existing, lerr := s.store.GetServingDeployment(app.ID); lerr == nil {
+		prevActive = existing
 	}
 	preexistingCompatibilityQuarantine, err := s.store.AppCompatibilityQuarantined(app.ID)
 	if err != nil {
@@ -4081,23 +4208,43 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	deployments, err := s.store.ListRecentDeployments(app.ID, 1)
+	current, err := s.store.GetServingDeployment(app.ID)
+	if errors.Is(err, db.ErrNotFound) {
+		writeError(w, http.StatusConflict, "app has no successful deployment")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	if len(deployments) == 0 {
-		writeError(w, http.StatusConflict,
-			"app has no successful deployment - see: shinyhub apps deployments "+slug)
-		return
-	}
-	current := deployments[0]
 
 	if err := s.checkColocatedShared(app.ID, s.tiersForApp(app)); err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
 
+	if r.URL.Query().Get("roll") == "true" {
+		if err := s.validateScheduleActivationForApp(app, "roll"); err != nil {
+			writeError(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+		if app.Status != "running" && app.Status != "degraded" {
+			writeError(w, http.StatusConflict, "rolling restart requires a running app; use apps start for a stopped or hibernated app")
+			return
+		}
+		if !current.Prepared {
+			writeError(w, http.StatusConflict, "rolling restart requires a prepared deployment; deploy the app first")
+			return
+		}
+		a, err := s.store.EnqueueRollingRestart(app, current)
+		if err != nil {
+			writeError(w, http.StatusConflict, "enqueue rolling restart: "+err.Error())
+			return
+		}
+		s.audit(r, "rolling_restart", "app", slug, fmt.Sprintf(`{"activation_id":%d}`, a.ID))
+		writeJSON(w, http.StatusAccepted, map[string]any{"status": "accepted", "slug": slug, "activation_id": a.ID, "drain_timeout_seconds": s.generationDrainTimeoutSeconds()})
+		return
+	}
 	if s.proxy != nil {
 		s.proxy.Deregister(slug)
 	}
@@ -5127,10 +5274,11 @@ func (s *Server) buildWorkerPool(slug string, snap proxy.ElasticPoolSnapshot) wo
 }
 
 type replicaMetrics struct {
-	Index        int    `json:"index"`
-	Status       string `json:"status"`
-	DesiredState string `json:"desired_state,omitempty"`
-	PID          int    `json:"pid,omitempty"`
+	DataGeneration int64  `json:"data_generation,omitempty"`
+	Index          int    `json:"index"`
+	Status         string `json:"status"`
+	DesiredState   string `json:"desired_state,omitempty"`
+	PID            int    `json:"pid,omitempty"`
 	// CPUPercent is the replica's CPU rate since the previous poll, where 100 is
 	// one fully busy core. It is null when no rate is available yet, which covers
 	// the first poll after a replica starts and every tier that cannot report one.
@@ -5514,11 +5662,20 @@ func (s *Server) buildAppMetricsFrom(slug string, app *db.App, dbReplicas []*db.
 			for _, rm := range resp.Replicas {
 				managerRow[rm.Index] = rm
 			}
+			generationRows, _ := s.store.ListDeploymentReplicas(app.ID)
+			generationByIndex := make(map[int]*db.DeploymentReplica, len(generationRows))
+			for _, row := range generationRows {
+				generationByIndex[row.Index] = row
+			}
 			rows := make([]replicaMetrics, 0, len(snap.Workers))
 			for _, w := range snap.Workers {
 				rm, tracked := managerRow[w.SlotID]
 				if !tracked {
 					rm = replicaMetrics{Index: w.SlotID, DesiredState: "running"}
+				}
+				if row := generationByIndex[w.SlotID]; row != nil {
+					rm.DataGeneration = row.DataGeneration
+					rm.StartupPeakRSSBytes = row.StartupPeakRSSBytes
 				}
 				rm.Sessions = int64(w.Sessions)
 				// The manager tracks process health; the proxy tracks routing.

@@ -314,11 +314,10 @@ func (s *Server) maybeRestartForChange(r *http.Request, app *db.App, slug string
 		return false, nil
 	}
 
-	deployments, err := s.store.ListRecentDeployments(app.ID, 1)
-	if err != nil || len(deployments) == 0 {
+	current, err := s.store.GetServingDeployment(app.ID)
+	if err != nil {
 		return false, nil
 	}
-	current := deployments[0]
 
 	// Reject an infeasible shared-mount colocation before disrupting the running
 	// pool, matching the user-facing deploy/restart/rollback paths. Otherwise the

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -1033,6 +1034,7 @@ func runAppsRollback(cmd *cobra.Command, args []string, f *rollbackFlags) error 
 // ── apps restart / start ────────────────────────────────────────────────────
 
 type restartFlags struct {
+	roll        bool
 	wait        bool
 	waitTimeout time.Duration
 }
@@ -1047,6 +1049,7 @@ func newAppsRestartCmd() *cobra.Command {
 			return runAppsRestart(cmd, args, f)
 		},
 	}
+	cmd.Flags().BoolVar(&f.roll, "roll", false, "Replace workers while serving traffic; defer if parallel capacity is unavailable")
 	cmd.Flags().BoolVar(&f.wait, "wait", false,
 		"After restarting, wait until the app is healthy again")
 	cmd.Flags().DurationVar(&f.waitTimeout, "wait-timeout", 300*time.Second,
@@ -1060,7 +1063,18 @@ func runAppsRestart(cmd *cobra.Command, args []string, f *restartFlags) error {
 		return err
 	}
 	slug := args[0]
-	req, err := http.NewRequest("POST", cfg.Host+"/api/apps/"+slug+"/restart", nil)
+	endpoint := cfg.Host + "/api/apps/" + slug + "/restart"
+	if f.roll {
+		info, err := probeServer(cfg)
+		if err != nil {
+			return fmt.Errorf("verify rolling restart support: %w", err)
+		}
+		if !info.Capabilities.RollingRestart {
+			return validationErr("server does not support rolling restarts; no restart was requested", "Upgrade to a server advertising rolling_restart.")
+		}
+		endpoint += "?roll=true"
+	}
+	req, err := http.NewRequest("POST", endpoint, nil)
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
@@ -1073,6 +1087,29 @@ func runAppsRestart(cmd *cobra.Command, args []string, f *restartFlags) error {
 	out, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
 		return httpError(cfg.Token, "restart", resp, out)
+	}
+	if f.roll {
+		var accepted struct {
+			ActivationID        int64 `json:"activation_id"`
+			DrainTimeoutSeconds int   `json:"drain_timeout_seconds"`
+		}
+		if err := json.Unmarshal(out, &accepted); err != nil {
+			return fmt.Errorf("decode rolling restart: %w", err)
+		}
+		if accepted.ActivationID <= 0 {
+			return errors.New("server did not acknowledge a rolling activation")
+		}
+		if f.wait {
+			if err := waitForRollingActivation(cmd.Context(), cfg, slug, accepted.ActivationID, f.waitTimeout); err != nil {
+				return err
+			}
+		}
+		status, prose := "accepted", fmt.Sprintf("%s: rolling restart queued; old sessions may remain for up to %ds after draining begins, then termination begins", slug, accepted.DrainTimeoutSeconds)
+		if f.wait {
+			status = "running"
+			prose = fmt.Sprintf("%s: rolling restart completed", slug)
+		}
+		return renderAction(cmd, status, map[string]any{"slug": slug, "activation_id": accepted.ActivationID, "drain_timeout_seconds": accepted.DrainTimeoutSeconds}, prose)
 	}
 	if err := renderAction(cmd, "running",
 		map[string]any{"slug": slug},

@@ -26,6 +26,7 @@ type Schedule struct {
 	AppID                  int64
 	Name                   string
 	CronExpr               string
+	InputsJSON             string
 	CommandJSON            string
 	Enabled                bool
 	TimeoutSeconds         int
@@ -84,6 +85,7 @@ type CreateScheduleParams struct {
 	AppID                  int64
 	Name                   string
 	CronExpr               string
+	InputsJSON             string
 	CommandJSON            string
 	Enabled                bool
 	TimeoutSeconds         int
@@ -100,6 +102,7 @@ type CreateScheduleParams struct {
 type UpdateScheduleParams struct {
 	Name                   *string
 	CronExpr               *string
+	InputsJSON             *string
 	CommandJSON            *string
 	Enabled                *bool
 	TimeoutSeconds         *int
@@ -130,11 +133,11 @@ func (s *Store) CreateSchedule(p CreateScheduleParams) (int64, error) {
 	var id int64
 	err := s.db.QueryRow(`
 		INSERT INTO app_schedules
-			(app_id, name, cron_expr, command_json, enabled, timeout_seconds, overlap_policy, missed_policy, deploy_trigger, timezone,
+			(app_id, name, cron_expr, command_json, inputs_json, enabled, timeout_seconds, overlap_policy, missed_policy, deploy_trigger, timezone,
 			 on_success, min_roll_interval_seconds, roll_fallback, max_defer_age_seconds)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		RETURNING id`,
-		p.AppID, p.Name, p.CronExpr, p.CommandJSON, boolToInt(p.Enabled), p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy,
+		p.AppID, p.Name, p.CronExpr, p.CommandJSON, p.InputsJSON, boolToInt(p.Enabled), p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy,
 		normalizeDeployTrigger(p.DeployTrigger), tz,
 		normalizeScheduleAction(p.OnSuccess), p.MinRollIntervalSeconds, normalizeRollFallback(p.RollFallback), p.MaxDeferAgeSeconds,
 	).Scan(&id)
@@ -149,7 +152,7 @@ func (s *Store) CreateSchedule(p CreateScheduleParams) (int64, error) {
 
 func (s *Store) GetSchedule(id int64) (*Schedule, error) {
 	row := s.db.QueryRow(`
-		SELECT id, app_id, name, cron_expr, command_json, enabled, timeout_seconds,
+		SELECT id, app_id, name, cron_expr, command_json, inputs_json, enabled, timeout_seconds,
 		       overlap_policy, missed_policy, deploy_trigger, timezone, on_success, min_roll_interval_seconds,
 		       roll_fallback, max_defer_age_seconds, created_at, updated_at
 		FROM app_schedules WHERE id = ?`, id)
@@ -160,7 +163,7 @@ func (s *Store) GetSchedule(id int64) (*Schedule, error) {
 // or ErrNotFound when no such schedule exists.
 func (s *Store) GetScheduleByName(appID int64, name string) (*Schedule, error) {
 	row := s.db.QueryRow(`
-		SELECT id, app_id, name, cron_expr, command_json, enabled, timeout_seconds,
+		SELECT id, app_id, name, cron_expr, command_json, inputs_json, enabled, timeout_seconds,
 		       overlap_policy, missed_policy, deploy_trigger, timezone, on_success, min_roll_interval_seconds,
 		       roll_fallback, max_defer_age_seconds, created_at, updated_at
 		FROM app_schedules WHERE app_id = ? AND name = ?`, appID, name)
@@ -169,7 +172,7 @@ func (s *Store) GetScheduleByName(appID int64, name string) (*Schedule, error) {
 
 func (s *Store) ListSchedulesByApp(appID int64) ([]*Schedule, error) {
 	rows, err := s.db.Query(`
-		SELECT id, app_id, name, cron_expr, command_json, enabled, timeout_seconds,
+		SELECT id, app_id, name, cron_expr, command_json, inputs_json, enabled, timeout_seconds,
 		       overlap_policy, missed_policy, deploy_trigger, timezone, on_success, min_roll_interval_seconds,
 		       roll_fallback, max_defer_age_seconds, created_at, updated_at
 		FROM app_schedules WHERE app_id = ? ORDER BY name`, appID)
@@ -190,7 +193,7 @@ func (s *Store) ListSchedulesByApp(appID int64) ([]*Schedule, error) {
 
 func (s *Store) ListEnabledSchedules() ([]*Schedule, error) {
 	rows, err := s.db.Query(`
-		SELECT id, app_id, name, cron_expr, command_json, enabled, timeout_seconds,
+		SELECT id, app_id, name, cron_expr, command_json, inputs_json, enabled, timeout_seconds,
 		       overlap_policy, missed_policy, deploy_trigger, timezone, on_success, min_roll_interval_seconds,
 		       roll_fallback, max_defer_age_seconds, created_at, updated_at
 		FROM app_schedules WHERE enabled = 1`)
@@ -219,6 +222,10 @@ func (s *Store) UpdateSchedule(id int64, p UpdateScheduleParams) error {
 	if p.CronExpr != nil {
 		sets = append(sets, "cron_expr = ?")
 		args = append(args, *p.CronExpr)
+	}
+	if p.InputsJSON != nil {
+		sets = append(sets, "inputs_json = ?")
+		args = append(args, *p.InputsJSON)
 	}
 	if p.CommandJSON != nil {
 		sets = append(sets, "command_json = ?")
@@ -788,6 +795,7 @@ type UpsertScheduleByNameParams struct {
 	AppID                  int64
 	Name                   string
 	CronExpr               string
+	InputsJSON             string
 	CommandJSON            string
 	Enabled                bool
 	TimeoutSeconds         int
@@ -823,12 +831,12 @@ func (s *Store) UpsertSchedulesByName(params []UpsertScheduleByNameParams) ([]Up
 		var id int64
 		scanErr := tx.QueryRow(`
 INSERT INTO app_schedules
-  (app_id, name, cron_expr, command_json, enabled, timeout_seconds, overlap_policy, missed_policy, deploy_trigger, timezone,
+  (app_id, name, cron_expr, command_json, inputs_json, enabled, timeout_seconds, overlap_policy, missed_policy, deploy_trigger, timezone,
    on_success, min_roll_interval_seconds, roll_fallback, max_defer_age_seconds)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(app_id, name) DO NOTHING
 RETURNING id`,
-			p.AppID, p.Name, p.CronExpr, p.CommandJSON, boolToInt(p.Enabled),
+			p.AppID, p.Name, p.CronExpr, p.CommandJSON, p.InputsJSON, boolToInt(p.Enabled),
 			p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy, normalizeDeployTrigger(p.DeployTrigger), tz,
 			normalizeScheduleAction(p.OnSuccess), p.MinRollIntervalSeconds,
 			normalizeRollFallback(p.RollFallback), p.MaxDeferAgeSeconds).Scan(&id)
@@ -839,12 +847,12 @@ RETURNING id`,
 		if !created {
 			if err := tx.QueryRow(`
 UPDATE app_schedules
-   SET cron_expr = ?, command_json = ?, enabled = ?, timeout_seconds = ?,
+   SET cron_expr = ?, command_json = ?, inputs_json = ?, enabled = ?, timeout_seconds = ?,
 	   overlap_policy = ?, missed_policy = ?, deploy_trigger = ?, timezone = ?, on_success = ?,
 	   min_roll_interval_seconds = ?, roll_fallback = ?, max_defer_age_seconds = ?, updated_at = CURRENT_TIMESTAMP
  WHERE app_id = ? AND name = ?
 RETURNING id`,
-				p.CronExpr, p.CommandJSON, boolToInt(p.Enabled), p.TimeoutSeconds,
+				p.CronExpr, p.CommandJSON, p.InputsJSON, boolToInt(p.Enabled), p.TimeoutSeconds,
 				p.OverlapPolicy, p.MissedPolicy, normalizeDeployTrigger(p.DeployTrigger), tz,
 				normalizeScheduleAction(p.OnSuccess), p.MinRollIntervalSeconds,
 				normalizeRollFallback(p.RollFallback), p.MaxDeferAgeSeconds,
@@ -874,10 +882,10 @@ func (s *Store) RecordDeploymentScheduleSnapshot(deploymentID, appID int64) erro
 	}
 	if _, err := tx.Exec(`
 		INSERT INTO deployment_schedule_snapshots
-			(deployment_id, name, cron_expr, command_json, enabled, timeout_seconds,
+			(deployment_id, name, cron_expr, command_json, inputs_json, enabled, timeout_seconds,
 			 overlap_policy, missed_policy, deploy_trigger, timezone, on_success,
 			 min_roll_interval_seconds, roll_fallback, max_defer_age_seconds)
-		SELECT ?, name, cron_expr, command_json, enabled, timeout_seconds,
+		SELECT ?, name, cron_expr, command_json, inputs_json, enabled, timeout_seconds,
 		       overlap_policy, missed_policy, deploy_trigger, timezone, on_success,
 		       min_roll_interval_seconds, roll_fallback, max_defer_age_seconds
 		FROM app_schedules WHERE app_id = ?`, deploymentID, appID); err != nil {
@@ -912,7 +920,7 @@ func (s *Store) DeploymentScheduleSnapshot(deploymentID int64) ([]*Schedule, err
 		return nil, ErrNotFound
 	}
 	rows, err := s.db.Query(`
-		SELECT name, cron_expr, command_json, enabled, timeout_seconds,
+		SELECT name, cron_expr, command_json, inputs_json, enabled, timeout_seconds,
 		       overlap_policy, missed_policy, deploy_trigger, timezone, on_success,
 		       min_roll_interval_seconds, roll_fallback, max_defer_age_seconds
 		FROM deployment_schedule_snapshots WHERE deployment_id = ? ORDER BY name`, deploymentID)
@@ -925,7 +933,7 @@ func (s *Store) DeploymentScheduleSnapshot(deploymentID int64) ([]*Schedule, err
 		var schedule Schedule
 		var enabled int
 		var timezone sql.NullString
-		if err := rows.Scan(&schedule.Name, &schedule.CronExpr, &schedule.CommandJSON, &enabled,
+		if err := rows.Scan(&schedule.Name, &schedule.CronExpr, &schedule.CommandJSON, &schedule.InputsJSON, &enabled,
 			&schedule.TimeoutSeconds, &schedule.OverlapPolicy, &schedule.MissedPolicy,
 			&schedule.DeployTrigger, &timezone, &schedule.OnSuccess,
 			&schedule.MinRollIntervalSeconds, &schedule.RollFallback,
@@ -958,7 +966,7 @@ func (s *Store) RestoreDeploymentPriorScheduleSnapshot(deploymentID, appID int64
 		return nil, ErrNotFound
 	}
 	rows, err := s.db.Query(`
-		SELECT name, cron_expr, command_json, enabled, timeout_seconds,
+		SELECT name, cron_expr, command_json, inputs_json, enabled, timeout_seconds,
 		       overlap_policy, missed_policy, deploy_trigger, timezone, on_success,
 		       min_roll_interval_seconds, roll_fallback, max_defer_age_seconds
 		FROM deployment_prior_schedule_snapshots WHERE deployment_id = ? ORDER BY name`, deploymentID)
@@ -971,7 +979,7 @@ func (s *Store) RestoreDeploymentPriorScheduleSnapshot(deploymentID, appID int64
 		var schedule Schedule
 		var enabled int
 		var timezone sql.NullString
-		if err := rows.Scan(&schedule.Name, &schedule.CronExpr, &schedule.CommandJSON, &enabled,
+		if err := rows.Scan(&schedule.Name, &schedule.CronExpr, &schedule.CommandJSON, &schedule.InputsJSON, &enabled,
 			&schedule.TimeoutSeconds, &schedule.OverlapPolicy, &schedule.MissedPolicy,
 			&schedule.DeployTrigger, &timezone, &schedule.OnSuccess,
 			&schedule.MinRollIntervalSeconds, &schedule.RollFallback,
@@ -1023,12 +1031,12 @@ func (s *Store) RestoreScheduleDeclarations(appID int64, snapshots []*Schedule) 
 		}
 		if _, err := tx.Exec(`
 			INSERT INTO app_schedules
-				(app_id, name, cron_expr, command_json, enabled, timeout_seconds,
+				(app_id, name, cron_expr, command_json, inputs_json, enabled, timeout_seconds,
 				 overlap_policy, missed_policy, deploy_trigger, timezone, on_success,
 				 min_roll_interval_seconds, roll_fallback, max_defer_age_seconds)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(app_id, name) DO UPDATE SET
-				cron_expr = excluded.cron_expr, command_json = excluded.command_json,
+				cron_expr = excluded.cron_expr, command_json = excluded.command_json, inputs_json = excluded.inputs_json,
 				enabled = excluded.enabled, timeout_seconds = excluded.timeout_seconds,
 				overlap_policy = excluded.overlap_policy, missed_policy = excluded.missed_policy,
 				deploy_trigger = excluded.deploy_trigger, timezone = excluded.timezone,
@@ -1037,7 +1045,7 @@ func (s *Store) RestoreScheduleDeclarations(appID int64, snapshots []*Schedule) 
 				roll_fallback = excluded.roll_fallback,
 				max_defer_age_seconds = excluded.max_defer_age_seconds,
 				updated_at = CURRENT_TIMESTAMP`,
-			appID, schedule.Name, schedule.CronExpr, schedule.CommandJSON, boolToInt(schedule.Enabled),
+			appID, schedule.Name, schedule.CronExpr, schedule.CommandJSON, schedule.InputsJSON, boolToInt(schedule.Enabled),
 			schedule.TimeoutSeconds, schedule.OverlapPolicy, schedule.MissedPolicy,
 			schedule.DeployTrigger, timezone, schedule.OnSuccess,
 			schedule.MinRollIntervalSeconds, schedule.RollFallback,
@@ -1078,12 +1086,12 @@ func (s *Store) UpsertScheduleByName(p UpsertScheduleByNameParams) (int64, bool,
 	var insertedID int64
 	scanErr := tx.QueryRow(`
 INSERT INTO app_schedules
-  (app_id, name, cron_expr, command_json, enabled, timeout_seconds, overlap_policy, missed_policy, deploy_trigger, timezone,
+  (app_id, name, cron_expr, command_json, inputs_json, enabled, timeout_seconds, overlap_policy, missed_policy, deploy_trigger, timezone,
    on_success, min_roll_interval_seconds, roll_fallback, max_defer_age_seconds)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(app_id, name) DO NOTHING
 RETURNING id`,
-		p.AppID, p.Name, p.CronExpr, p.CommandJSON,
+		p.AppID, p.Name, p.CronExpr, p.CommandJSON, p.InputsJSON,
 		boolToInt(p.Enabled), p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy,
 		normalizeDeployTrigger(p.DeployTrigger), tz,
 		normalizeScheduleAction(p.OnSuccess), p.MinRollIntervalSeconds,
@@ -1103,12 +1111,12 @@ RETURNING id`,
 	var id int64
 	err = tx.QueryRow(`
 UPDATE app_schedules
-   SET cron_expr = ?, command_json = ?, enabled = ?, timeout_seconds = ?,
+   SET cron_expr = ?, command_json = ?, inputs_json = ?, enabled = ?, timeout_seconds = ?,
 	   overlap_policy = ?, missed_policy = ?, deploy_trigger = ?, timezone = ?, on_success = ?,
 	   min_roll_interval_seconds = ?, roll_fallback = ?, max_defer_age_seconds = ?, updated_at = CURRENT_TIMESTAMP
  WHERE app_id = ? AND name = ?
 RETURNING id`,
-		p.CronExpr, p.CommandJSON, boolToInt(p.Enabled),
+		p.CronExpr, p.CommandJSON, p.InputsJSON, boolToInt(p.Enabled),
 		p.TimeoutSeconds, p.OverlapPolicy, p.MissedPolicy, normalizeDeployTrigger(p.DeployTrigger), tz,
 		normalizeScheduleAction(p.OnSuccess), p.MinRollIntervalSeconds,
 		normalizeRollFallback(p.RollFallback), p.MaxDeferAgeSeconds,
@@ -1364,9 +1372,13 @@ func (s *Store) scheduleFreshness(where string, args ...any) ([]ScheduleFreshnes
 		    ) THEN 1
 		    WHEN sc.deploy_trigger = 'bundle_change' AND EXISTS (
 		      SELECT 1 FROM schedule_producer_state ps
-		      WHERE ps.schedule_id=sc.id AND ps.content_digest=(
-		        SELECT content_digest FROM deployments WHERE app_id=sc.app_id AND status='succeeded' ORDER BY id DESC LIMIT 1
-		      ) AND ps.producer_command_json=sc.command_json
+		      WHERE ps.schedule_id=sc.id AND ((sc.inputs_json IN ('','[]','null') AND ps.content_digest=(
+              SELECT content_digest FROM deployments WHERE app_id=sc.app_id AND status='succeeded' ORDER BY id DESC LIMIT 1
+            )) OR EXISTS (
+              SELECT 1 FROM schedule_deploy_obligations scoped
+              WHERE scoped.schedule_id=sc.id AND scoped.deployment_id=(SELECT id FROM deployments WHERE app_id=sc.app_id AND status='succeeded' ORDER BY id DESC LIMIT 1)
+                AND scoped.producer_fingerprint LIKE 'inputs:%' AND scoped.producer_fingerprint=ps.producer_fingerprint AND scoped.producer_inputs_json=sc.inputs_json
+            )) AND ps.producer_command_json=sc.command_json
 		    ) AND NOT EXISTS (
 		      SELECT 1 FROM schedule_data_uncertainty uncertainty
 		      WHERE uncertainty.schedule_id=sc.id
@@ -1535,7 +1547,7 @@ func scanSchedule(s rowScanner) (*Schedule, error) {
 	var sched Schedule
 	var enabled int
 	var tz sql.NullString
-	err := s.Scan(&sched.ID, &sched.AppID, &sched.Name, &sched.CronExpr, &sched.CommandJSON,
+	err := s.Scan(&sched.ID, &sched.AppID, &sched.Name, &sched.CronExpr, &sched.CommandJSON, &sched.InputsJSON,
 		&enabled, &sched.TimeoutSeconds, &sched.OverlapPolicy, &sched.MissedPolicy,
 		&sched.DeployTrigger, &tz, &sched.OnSuccess, &sched.MinRollIntervalSeconds, &sched.RollFallback,
 		&sched.MaxDeferAgeSeconds, &sched.CreatedAt, &sched.UpdatedAt)

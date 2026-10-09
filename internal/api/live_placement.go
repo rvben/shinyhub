@@ -60,14 +60,10 @@ func (s *Server) reconcilePlacementLocked(app *db.App, rows []*db.Replica) error
 	if err := s.checkColocatedShared(app.ID, s.tiersForApp(app)); err != nil {
 		return err
 	}
-	deps, err := s.store.ListRecentDeployments(app.ID, 1)
+	current, err := s.store.GetServingDeployment(app.ID)
 	if err != nil {
 		return err
 	}
-	if len(deps) == 0 {
-		return fmt.Errorf("resize %s: no deployment", app.Slug)
-	}
-	current := deps[0]
 	existing := make(map[int]*db.Replica, len(rows))
 	for _, row := range rows {
 		existing[row.Index] = row

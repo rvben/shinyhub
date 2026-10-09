@@ -59,6 +59,7 @@ Fields:
 | `overlap` | `skip` (default) drops new ticks while one is in flight; `queue` holds at most one extra; `concurrent` allows overlap. |
 | `missed` | `skip` (default) ignores ticks missed during downtime; `run_once` dispatches one catch-up at startup, recorded with `trigger: "missed"` (see "Run provenance" below). |
 | `deploy_trigger` | `never` (default), `first_deploy`, or `bundle_change`. The last mode requires the authoritative last writer to match the current bundle digest and canonical command. CLI flag: `--deploy-trigger`. |
+| `inputs` | Optional manifest-only list of bundle-relative file globs for `bundle_change`, e.g. `["helpers/**", "queries/**", "uv.lock"]`. Unset or empty retains whole-bundle invalidation. |
 | `on_success` | `none` (default) leaves serving processes unchanged. `roll` durably and gracefully replaces this app's replicas after a successful run so module-scope data is re-imported. |
 | `min_roll_interval` | Optional damper such as `1h`. Successful runs still advance job history and the target data generation, but queued activation is coalesced and cannot run before this interval after the last completed successful roll. CLI flag: `--min-roll-interval`. |
 | `roll_fallback` | Behavior when the temporary surge cannot be admitted: `defer` (default) keeps serving the old generation and retries, while `restart` stops the old pool first and accepts an availability gap to activate fresh data. CLI flag: `--roll-fallback`. |
@@ -92,7 +93,7 @@ Fields:
 > the same locks, so an elastic pool can host a deploy-triggered producer. A
 > deploy that runs a producer is always stop-first, which recycles every
 > worker of the pool onto the published data at once. Automatic serving-data
-> activation (`on_success = "roll"`) still requires multiplex.
+> activation (`on_success = "roll"`) supports multiplex and grouped workers.
 
 > An app that ran elastic workers under a ShinyHub version without durable
 > worker identities carries an orphan-risk marker, because such a worker could
@@ -213,6 +214,22 @@ waits for its health check, drains and replaces canonical slots one at a time,
 invalidates suspended snapshots, and removes the surge. Existing sessions are
 allowed to drain; once activation succeeds, every routable or resumable replica
 belongs to the run's target generation.
+
+For grouped apps, activation starts a readiness-tested worker under a unique
+serving generation of the same prepared bundle. New clients use that generation;
+existing clients and WebSockets retain their old worker until it drains or
+`server.drain_timeout` expires. Dependency preparation and hooks are not rerun.
+`defer` keeps serving when parallel memory cannot be admitted; `restart` explicitly
+accepts a stop-first availability gap. The interval and deferral limits still apply.
+
+`shinyhub apps restart <slug> --roll --wait` requests the same durable activation
+without requiring a schedule run. It replaces workers even when their data is
+already current, and `--wait` follows the exact activation ID. Without `--wait`
+the command reports acceptance; completion can be inspected at
+`GET /api/apps/{slug}/activations/{id}`. The CLI verifies the `rolling_restart`
+server capability before requesting any restart. Unsupported isolation and
+unprepared bundles are refused. Environment values saved earlier are read by
+the replacement workers.
 
 Important behavior:
 
@@ -534,7 +551,7 @@ either sees the old file or the new one - never a partial write.
 - **Timezone.** Each schedule fires in its effective timezone (see "Timezone resolution" above). Schedules without an explicit timezone inherit the server default; the fallback is always UTC, never the host `TZ`. Server-default changes take effect on restart - running schedules are not hot-reloaded on config change.
 - **`run_once` catch-up runs at startup only.** It does not re-fire missed runs from arbitrary points in time.
 - **Native runtime read-only enforcement.** RO is a convention for native (filesystem permits writes through the symlink). Producer semantics require native execution; use atomic replacement and appropriate filesystem permissions for the data contract.
-- **Activation scope.** `on_success = "roll"` is limited to self-rolls for multiplex apps on the native runtime. Unsupported topology is rejected when the schedule or app placement is written; `roll_fallback` applies only to a supported roll that fails capacity admission.
+- **Activation scope.** `on_success = "roll"` supports self-rolls for multiplex and grouped apps on the native runtime. Unsupported topology is rejected when the schedule or app placement is written; `roll_fallback` applies only to a supported roll that fails capacity admission.
 
 ## Audit log
 
@@ -557,3 +574,32 @@ enable/disable is recorded as `schedule_update`.
 snapshot, target generation, terminal status, last operational phase, and error.
 Admins can expand those details in **Audit Log**, or filter the API with
 `GET /api/audit?action=schedule_activation_outcome`.
+
+## Producer input scopes
+
+For a deploy-triggered producer, declare all files that can change its output:
+
+```toml
+[[schedule]]
+name = "refresh-data"
+cron = "0 5 * * *"
+cmd = "uv run python helpers/refresh.py"
+deploy_trigger = "bundle_change"
+inputs = ["helpers/**", "templated_queries/**", "pyproject.toml", "uv.lock"]
+```
+
+The identity includes the normalized glob declaration, canonical command, and
+sorted matched file paths, modes and content hashes from the retained accepted
+upload archive. Generated data and dependency installations do not alter it.
+`**` matches zero or more path components; additions and deletions invalidate
+the identity. Patterns must be relative to the uploaded bundle; parent traversal,
+absolute paths and matched nonregular files are refused. A missing archive fails
+closed. Unmatched patterns are allowed, so verify the bundle contains the intended
+inputs. Include shared helper code and dependency declarations explicitly.
+
+This detects code and declared file changes. Environment changes and external
+database contents do not enter the digest; use an explicit or periodic refresh
+for those. A UI-only bundle change with unchanged inputs skips the producer and
+can hand off. A required producer still requires stop-first because it publishes
+shared state; atomic rename alone does not establish compatibility with all old
+readers or make failed deployment rollback safe.

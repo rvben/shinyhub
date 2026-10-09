@@ -182,7 +182,7 @@ func (s *Server) WaitForAppOperations(ctx context.Context) error {
 	defer ticker.Stop()
 	for {
 		s.deployLocksMu.Lock()
-		idle := len(s.deployInFlight) == 0
+		idle := len(s.deployInFlight) == 0 && s.unlockedReadinessOperations == 0
 		s.deployLocksMu.Unlock()
 		if idle {
 			return nil
@@ -652,16 +652,15 @@ func (s *Server) cycleRedeploy(slug string) (outcome, reason string) {
 		return db.RedeploySkipped, "not_running"
 	}
 
-	deployments, err := s.store.ListRecentDeployments(app.ID, 1)
-	if err != nil {
+	current, err := s.store.GetServingDeployment(app.ID)
+	if err != nil && !errors.Is(err, db.ErrNotFound) {
 		slog.Error("redeployApp: list deployments", "slug", slug, "err", err)
 		return db.RedeployFailed, "list deployments: " + err.Error()
 	}
-	if len(deployments) == 0 {
+	if errors.Is(err, db.ErrNotFound) {
 		slog.Warn("redeployApp: no deployments", "slug", slug)
 		return db.RedeploySkipped, "no_deployment"
 	}
-	current := deployments[0]
 
 	if err := s.checkColocatedShared(app.ID, s.tiersForApp(app)); err != nil {
 		slog.Error("redeploy: cross-node shared mount rejected", "slug", slug, "err", err)
@@ -875,5 +874,25 @@ func (s *Server) RelaunchOwedRedeploys() {
 		slug, seq := o.Slug, o.Seq
 		s.markRedeployInFlight(slug)
 		safego.Go("settings redeploy", func() { s.redeployApp(slug, seq) })
+	}
+}
+
+// unlockForServingReadiness permits demand workers while retaining the fleet
+// fence and shutdown accounting. Durable activation state fences app mutations.
+func (s *Server) unlockForServingReadiness(slug string, release *func()) func() {
+	fleetRelease, err := s.acquireFleetMutationFence(unix.LOCK_SH)
+	if err != nil {
+		panic(fmt.Sprintf("retain readiness fleet fence: %v", err))
+	}
+	s.deployLocksMu.Lock()
+	s.unlockedReadinessOperations++
+	s.deployLocksMu.Unlock()
+	(*release)()
+	return func() {
+		*release = s.acquireDeployLock(slug)
+		s.deployLocksMu.Lock()
+		s.unlockedReadinessOperations--
+		s.deployLocksMu.Unlock()
+		fleetRelease()
 	}
 }

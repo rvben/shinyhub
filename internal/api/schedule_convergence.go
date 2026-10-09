@@ -17,16 +17,16 @@ func (s *Server) handleReconcileScheduleConvergence(w http.ResponseWriter, r *ht
 	}
 	release := s.acquireDeployLock(app.Slug)
 	defer release()
-	deployments, err := s.store.ListRecentDeployments(app.ID, 1)
-	if err != nil {
+	current, err := s.store.GetServingDeployment(app.ID)
+	if err != nil && !errors.Is(err, db.ErrNotFound) {
 		writeError(w, http.StatusInternalServerError, "resolve current deployment")
 		return
 	}
-	if len(deployments) == 0 {
+	if errors.Is(err, db.ErrNotFound) {
 		writeJSON(w, http.StatusOK, []ScheduleConvergenceResult{})
 		return
 	}
-	results, err := s.reconcileAndDispatchScheduleConvergence(app.ID, deployments[0].ID)
+	results, err := s.reconcileAndDispatchScheduleConvergence(app.ID, current.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -205,14 +205,14 @@ func (s *Server) dispatchScheduleConvergence(appID, deploymentID int64, scoped b
 }
 
 func (s *Server) reconcileCurrentSchedule(appID, scheduleID int64) (*ScheduleConvergenceResult, error) {
-	deployments, err := s.store.ListRecentDeployments(appID, 1)
+	current, err := s.store.GetServingDeployment(appID)
+	if errors.Is(err, db.ErrNotFound) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
-	if len(deployments) == 0 {
-		return nil, nil
-	}
-	results, err := s.reconcileAndDispatchScheduleConvergence(appID, deployments[0].ID)
+	results, err := s.reconcileAndDispatchScheduleConvergence(appID, current.ID)
 	if err != nil {
 		return nil, err
 	}

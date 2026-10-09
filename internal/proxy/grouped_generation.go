@@ -6,6 +6,18 @@ import (
 	"github.com/rvben/shinyhub/internal/config"
 )
 
+// GroupedGenerationReady verifies routing for a specific serving worker.
+func (p *Proxy) GroupedGenerationReady(slug string, deploymentID int64, slot int, endpoint string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	pool := p.pools[slug]
+	if pool == nil || pool.mode != config.IsolationGrouped || pool.activeDeploymentID != deploymentID {
+		return false
+	}
+	worker := pool.workers[slot]
+	return worker != nil && worker.deploymentID == deploymentID && worker.targetURL == endpoint && !worker.draining.Load()
+}
+
 // StageGroupedGeneration reserves a unique slot for a readiness-tested worker.
 // The candidate is absent from workers and cannot receive client assignments.
 // Slot IDs are never reused, including after abort, so old disconnect timers

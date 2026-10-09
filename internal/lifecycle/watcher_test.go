@@ -686,6 +686,17 @@ func (f *fakeStore) ListDeployments(_ int64) ([]*db.Deployment, error) {
 	defer f.mu.Unlock()
 	return f.deployments, nil
 }
+func (f *fakeStore) GetServingDeployment(appID int64) (*db.Deployment, error) {
+	deps, err := f.ListRecentDeployments(appID, 1)
+	if err != nil {
+		return nil, err
+	}
+	if len(deps) == 0 {
+		return nil, db.ErrNotFound
+	}
+	return deps[0], nil
+}
+
 func (f *fakeStore) ListRecentDeployments(appID int64, n int) ([]*db.Deployment, error) {
 	all, err := f.ListDeployments(appID)
 	if err != nil {

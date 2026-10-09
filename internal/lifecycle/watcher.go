@@ -126,15 +126,16 @@ const (
 // this never writes a replica row - the worker was never adopted into the
 // manager.
 type PendingStopEntry struct {
-	Kind         pendingStopKind
-	Slug         string
-	Index        int
-	AppID        int64
-	PID          int
-	Incarnation  uint64
-	Reason       string
-	LogRunID     string
-	DeploymentID int64
+	Kind                 pendingStopKind
+	Slug                 string
+	Index                int
+	AppID                int64
+	PID                  int
+	ProcessStartIdentity int64
+	Incarnation          uint64
+	Reason               string
+	LogRunID             string
+	DeploymentID         int64
 	// Port, EndpointURL and WorkerID complete, with PID and DeploymentID,
 	// the replica row identity a pendingStopRecoveryUnready entry was queued
 	// for (see replicaIdentity). Container and remote runtimes persist pid 0
@@ -319,7 +320,7 @@ type appStore interface {
 	AbortWake(slug string) error
 	FinishWake(slug string) (bool, error)
 	ListDeployments(appID int64) ([]*db.Deployment, error)
-	ListRecentDeployments(appID int64, n int) ([]*db.Deployment, error)
+	GetServingDeployment(appID int64) (*db.Deployment, error)
 	UpsertReplica(p db.UpsertReplicaParams) error
 	SetReplicaDesiredState(appID int64, idx int, state string) error
 	RecordReplicaCrash(p db.UpsertReplicaParams) error
@@ -964,7 +965,7 @@ func (w *Watcher) retryElasticRecoveryStop(e PendingStopEntry) {
 		pid := e.PID
 		app := &db.App{Slug: e.Slug}
 		progress := e.nativeStop
-		result := stepRecordedNativeStop(w.store, app, &pid, "native", &deploymentID, &progress, w.pendingStopRetryBudget())
+		result := stepRecordedNativeStop(w.store, app, &pid, "native", &deploymentID, &progress, w.pendingStopRetryBudget(), e.ProcessStartIdentity)
 		w.mu.Lock()
 		if cur, ok := w.pendingStops[key]; ok && e.sameQueuedStop(cur) {
 			cur.nativeStop = progress
@@ -1346,8 +1347,8 @@ func (w *Watcher) RestoreWarm(ctx context.Context) {
 			continue
 		}
 
-		deployments, derr := w.store.ListRecentDeployments(app.ID, 1)
-		if derr != nil || len(deployments) == 0 {
+		current, derr := w.store.GetServingDeployment(app.ID)
+		if derr != nil {
 			if derr != nil {
 				slog.Warn("warm restore: list deployments failed", "slug", app.Slug, "err", derr)
 			}
@@ -1355,7 +1356,7 @@ func (w *Watcher) RestoreWarm(ctx context.Context) {
 			release()
 			continue
 		}
-		bundleDir := deployments[0].BundleDir
+		bundleDir := current.BundleDir
 
 		// Snapshot the activity mark BEFORE the pool exists so the freeze below can
 		// detect any real request that lands on a booted replica during restore.
@@ -1397,11 +1398,11 @@ func (w *Watcher) RestoreWarm(ctx context.Context) {
 				break
 			}
 			pid, port := result.PID, result.Port
-			deploymentID := deployments[0].ID
+			deploymentID := current.ID
 			if uerr := w.store.UpsertReplica(db.UpsertReplicaParams{
 				AppID: app.ID, Index: i, PID: &pid, Port: &port, Status: "running",
 				Provider: result.Provider, Tier: result.Tier, EndpointURL: result.EndpointURL,
-				WorkerID: result.WorkerID, AppVersion: deployments[0].Version,
+				WorkerID: result.WorkerID, AppVersion: current.Version,
 				DesiredState: "running", DeploymentID: &deploymentID,
 				StartupPeakRSSBytes: result.StartupPeakRSSBytes, ConsumerBooted: true,
 			}); uerr != nil {
@@ -2052,8 +2053,8 @@ func (w *Watcher) restartSlotLocked(app *db.App, index int, fromLost bool) {
 	var opErr error
 	defer func() { endSpan(opErr) }()
 
-	deployments, err := w.store.ListRecentDeployments(app.ID, 1)
-	if err != nil || len(deployments) == 0 {
+	current, err := w.store.GetServingDeployment(app.ID)
+	if err != nil {
 		opErr = err
 		return
 	}
@@ -2074,7 +2075,7 @@ func (w *Watcher) restartSlotLocked(app *db.App, index int, fromLost bool) {
 		opErr = qerr
 		return
 	}
-	res, err := w.deploy(ctx, app.Slug, deployments[0].BundleDir, index)
+	res, err := w.deploy(ctx, app.Slug, current.BundleDir, index)
 	if err != nil {
 		if errors.Is(err, process.ErrNoLiveWorker) || errors.Is(err, process.ErrReplicaAlreadyRunning) {
 			return // not the app's fault: retry next tick at zero cost
@@ -2098,7 +2099,7 @@ func (w *Watcher) restartSlotLocked(app *db.App, index int, fromLost bool) {
 	}
 
 	pid, port := res.PID, res.Port
-	depID := deployments[0].ID
+	depID := current.ID
 	if err := w.store.UpsertReplica(db.UpsertReplicaParams{
 		AppID:               app.ID,
 		Index:               index,
@@ -2109,7 +2110,7 @@ func (w *Watcher) restartSlotLocked(app *db.App, index int, fromLost bool) {
 		Tier:                res.Tier,
 		EndpointURL:         res.EndpointURL,
 		WorkerID:            res.WorkerID,
-		AppVersion:          deployments[0].Version,
+		AppVersion:          current.Version,
 		DesiredState:        "running",
 		DeploymentID:        &depID,
 		StartupPeakRSSBytes: res.StartupPeakRSSBytes,
@@ -3062,8 +3063,8 @@ func (w *Watcher) driveWakingApp(parent context.Context, slug, trigger string) <
 			opErr = qerr
 			return
 		}
-		deployments, err := w.store.ListRecentDeployments(app.ID, 1)
-		if err != nil || len(deployments) == 0 {
+		current, err := w.store.GetServingDeployment(app.ID)
+		if err != nil {
 			opErr = err
 			return
 		}
@@ -3086,7 +3087,7 @@ func (w *Watcher) driveWakingApp(parent context.Context, slug, trigger string) <
 		// the replica boot loop; FinishWake transitions the app to running and
 		// the proxy pool is ready to spawn workers on first request.
 		if !isElasticIsolation(resolvedIso) {
-			deploymentID := deployments[0].ID
+			deploymentID := current.ID
 			// Replicas persisted as suspended take the warm Resume path; the rest
 			// (and any resume failure) cold-boot. Reading the rows once here keeps the
 			// per-replica goroutines lock-free.
@@ -3164,7 +3165,7 @@ func (w *Watcher) driveWakingApp(parent context.Context, slug, trigger string) <
 							return
 						}
 					}
-					res, consumerBooted, err := w.wakeReplica(ctx, slug, deployments[0].BundleDir, idx, suspendedByIdx[idx])
+					res, consumerBooted, err := w.wakeReplica(ctx, slug, current.BundleDir, idx, suspendedByIdx[idx])
 					if err != nil {
 						slog.Warn("wake replica failed", "slug", slug, "idx", idx, "err", err)
 						firstFailure.CompareAndSwap(nil, &wakeReplicaFailure{index: idx, err: err})
@@ -3211,7 +3212,7 @@ func (w *Watcher) driveWakingApp(parent context.Context, slug, trigger string) <
 						Tier:                res.Tier,
 						EndpointURL:         res.EndpointURL,
 						WorkerID:            res.WorkerID,
-						AppVersion:          deployments[0].Version,
+						AppVersion:          current.Version,
 						DesiredState:        "running",
 						DeploymentID:        &deploymentID,
 						StartupPeakRSSBytes: res.StartupPeakRSSBytes,

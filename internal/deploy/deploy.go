@@ -1319,8 +1319,10 @@ func Run(p Params) (res *PoolResult, err error) {
 	} else {
 		p.Proxy.SetPoolSize(p.Slug, total)
 	}
-	p.Proxy.SetPoolCap(p.Slug, p.MaxSessionsPerReplica)
-	p.Proxy.SetPoolIdentityHeaders(p.Slug, p.IdentityHeaders)
+	if !p.GenerationScoped {
+		p.Proxy.SetPoolCap(p.Slug, p.MaxSessionsPerReplica)
+		p.Proxy.SetPoolIdentityHeaders(p.Slug, p.IdentityHeaders)
+	}
 	// SetPoolMode propagates the worker-isolation strategy so the proxy can
 	// apply the correct routing algorithm for this pool's sessions.
 	resolvedMode := config.WorkerIsolationMode(ResolveWorkerIsolation(p.WorkerIsolation, p.DefaultWorkerIsolation))
@@ -2582,4 +2584,17 @@ func ResolveWorkerIsolation(perApp, def string) string {
 		return "multiplex"
 	}
 	return def
+}
+
+// ObserveWorkerStartupRSS shares the cold-start sampler with demand-spawned
+// grouped workers. The returned function must be called exactly once.
+func ObserveWorkerStartupRSS(sampler process.Sampler, manager *process.Manager, slug string, index int) func() int64 {
+	if sampler == nil || manager == nil {
+		return func() int64 { return 0 }
+	}
+	handle, ok := manager.HandleReplica(slug, index)
+	if !ok {
+		return func() int64 { return 0 }
+	}
+	return observeStartupRSSHandle(sampler, handle)
 }

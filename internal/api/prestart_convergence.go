@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/db"
@@ -13,6 +14,7 @@ import (
 )
 
 type prestartSchedulePlan struct {
+	bundleDir                string
 	producers                []*db.Schedule
 	gateIDs                  []int64
 	placeholder              map[string]int64
@@ -28,12 +30,15 @@ const deploymentRepairNoProducerMessage = "repair-blocked-no-producer: the app h
 // existing schedule row. New producer schedules receive disabled placeholders
 // solely to obtain stable IDs/FKs; they cannot fire until the normal manifest
 // commit after the candidate producer succeeds.
-func (s *Server) planPrestartSchedules(app *db.App, manifest *deploy.Manifest, digest string) (*prestartSchedulePlan, error) {
+func (s *Server) planPrestartSchedules(app *db.App, manifest *deploy.Manifest, digest string, bundleDirs ...string) (*prestartSchedulePlan, error) {
 	existing, err := s.store.ListSchedulesByApp(app.ID)
 	if err != nil {
 		return nil, err
 	}
 	plan := &prestartSchedulePlan{placeholder: map[string]int64{}}
+	if len(bundleDirs) > 0 {
+		plan.bundleDir = bundleDirs[0]
+	}
 	plan.deploymentRepairRequired, err = s.store.AppDeploymentCompatibilityQuarantined(app.ID)
 	if err != nil {
 		return nil, err
@@ -61,7 +66,7 @@ func (s *Server) planPrestartSchedules(app *db.App, manifest *deploy.Manifest, d
 			if candidate.ID == 0 && candidate.Enabled && candidate.DeployTrigger != schedulespec.DeployTriggerNever {
 				id, err := s.store.CreateSchedule(db.CreateScheduleParams{
 					AppID: app.ID, Name: candidate.Name, CronExpr: candidate.CronExpr,
-					CommandJSON: candidate.CommandJSON, Enabled: false,
+					CommandJSON: candidate.CommandJSON, InputsJSON: candidate.InputsJSON, Enabled: false,
 					TimeoutSeconds: candidate.TimeoutSeconds, OverlapPolicy: candidate.OverlapPolicy,
 					MissedPolicy: candidate.MissedPolicy, DeployTrigger: schedulespec.DeployTriggerNever,
 					Timezone: candidate.Timezone, OnSuccess: "none", RollFallback: "defer",
@@ -98,6 +103,11 @@ func (s *Server) planRollbackPrestartSchedules(app *db.App, deploymentID int64, 
 		return nil, err
 	}
 	plan := &prestartSchedulePlan{placeholder: map[string]int64{}}
+	deployment, err := s.store.GetDeploymentByID(deploymentID)
+	if err != nil {
+		return nil, err
+	}
+	plan.bundleDir = deployment.BundleDir
 	plan.deploymentRepairRequired, err = s.store.AppDeploymentCompatibilityQuarantined(app.ID)
 	if err != nil {
 		return nil, err
@@ -130,7 +140,7 @@ func (s *Server) planRollbackPrestartSchedules(app *db.App, deploymentID int64, 
 		} else {
 			id, err := s.store.CreateSchedule(db.CreateScheduleParams{
 				AppID: app.ID, Name: candidate.Name, CronExpr: candidate.CronExpr,
-				CommandJSON: candidate.CommandJSON, Enabled: false,
+				CommandJSON: candidate.CommandJSON, InputsJSON: candidate.InputsJSON, Enabled: false,
 				TimeoutSeconds: candidate.TimeoutSeconds, OverlapPolicy: candidate.OverlapPolicy,
 				MissedPolicy: candidate.MissedPolicy, DeployTrigger: schedulespec.DeployTriggerNever,
 				Timezone: candidate.Timezone, OnSuccess: "none", RollFallback: "defer",
@@ -190,6 +200,7 @@ func (s *Server) convergePrestartAndFenceConsumer(
 	app *db.App,
 	deployment *db.Deployment,
 	producerBarrierEntered *bool,
+	allowProducer ...bool,
 ) (func(), error) {
 	for {
 		releaseConsumer, err := s.acquireRawConsumerBootGate(app.ID)
@@ -217,6 +228,9 @@ func (s *Server) convergePrestartAndFenceConsumer(
 			return releaseConsumer, nil
 		}
 		releaseConsumer()
+		if len(allowProducer) > 0 && !allowProducer[0] {
+			return nil, errors.New("producer state changed during preparation; working version preserved, retry deployment")
+		}
 
 		if s.jobs == nil {
 			return nil, errors.New("deploy-triggered producer runner unavailable")
@@ -241,7 +255,7 @@ func (s *Server) populateUnsatisfiedProducers(plan *prestartSchedulePlan, candid
 		if !candidate.Enabled || candidate.DeployTrigger == schedulespec.DeployTriggerNever || candidate.ID == 0 {
 			continue
 		}
-		canonical, fingerprint, err := schedulespec.ProducerIdentity(candidate.CommandJSON)
+		canonical, fingerprint, err := schedulespec.ProducerBundleIdentity(candidate.CommandJSON, candidate.InputsJSON, plan.bundleDir)
 		if err != nil {
 			return err
 		}
@@ -256,7 +270,7 @@ func (s *Server) populateUnsatisfiedProducers(plan *prestartSchedulePlan, candid
 		case schedulespec.DeployTriggerFirstDeploy:
 			satisfied = stateErr == nil && state.PublicationGeneration > 0
 		case schedulespec.DeployTriggerBundleChange:
-			satisfied = stateErr == nil && state.ContentDigest == digest && state.ProducerFingerprint == fingerprint
+			satisfied = stateErr == nil && (state.ContentDigest == digest || strings.HasPrefix(fingerprint, "inputs:")) && state.ProducerFingerprint == fingerprint
 		}
 		if stateErr != nil && !errors.Is(stateErr, db.ErrNotFound) {
 			return stateErr
@@ -290,6 +304,11 @@ func projectedManifestSchedule(appID int64, base *db.Schedule, spec deploy.Sched
 		return nil, err
 	}
 	out.CommandJSON = string(command)
+	inputs, err := json.Marshal(spec.Inputs)
+	if err != nil {
+		return nil, err
+	}
+	out.InputsJSON = string(inputs)
 	out.Enabled = !spec.Disabled
 	out.TimeoutSeconds = 3600
 	if spec.TimeoutSeconds != nil {

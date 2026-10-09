@@ -71,15 +71,27 @@ For a stop-first deployment, deploy proceeds in this order:
    rules. Unlike schedules, this is declarative: a group removed from the
    manifest loses its manifest rule on the next deploy.
 
-Multiplex and grouped apps can instead hand off with an unchanged parsed
-manifest, no hooks, and reconciled app settings that already match the live app.
-Comments and formatting are ignored by the comparison. Schedule and access
-declarations are still reconciled; equality with the previous bundle does not
-prove that their live rows have not drifted. A required deploy-time producer or
-compatibility repair independently requires stop-first. A satisfied
-`first_deploy` bootstrap can allow a code-only handoff; `bundle_change` requires
-a producer run when the bundle digest changes. See [redeploy without
-interrupting the current version](cli.md#redeploy-without-interrupting-the-current-version)
+Multiplex and grouped apps can hand off code and safe manifest changes without
+stopping the serving generation. Display metadata, resource limits, hibernation,
+replica admission and autoscaling policy, and schedule declarations can change.
+Candidate processes use the new resource limits; effective app settings and
+schedules publish atomically with serving authority after readiness. Pool caps
+and render pacing then reconcile for the whole app, including draining sessions.
+Hooks, isolation or worker-layout changes, access-policy changes, compatibility
+repair, and a producer required during this deploy remain stop-first. Errors name
+the fields or condition requiring `--allow-downtime`.
+
+A satisfied `first_deploy` bootstrap permits handoff. `bundle_change` can use
+schedule `inputs` to restrict invalidation to declared producer files and the
+canonical command; without `inputs` the whole bundle digest still applies.
+Consecutive deploys wait a bounded period for an existing drain and confirmed
+process cleanup before taking the app operation lock. Unconfirmed cleanup keeps
+the working version serving and refuses another handoff.
+
+Existing sessions retain their worker up to `server.drain_timeout` (60 seconds
+by default); the deadline initiates termination of remaining sessions. This is
+bounded graceful handoff, so sessions longer than the drain window can disconnect.
+See [redeploy without interrupting the current version](cli.md#redeploy-without-interrupting-the-current-version)
 for capacity and downtime fallback behavior.
 
 Phase A or Phase B failure aborts the deploy before the new bundle starts.

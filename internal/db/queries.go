@@ -1293,17 +1293,17 @@ func (a *App) MissStatus(deployInFlight bool) (status, reason string) {
 // content_digest, last_deployment_status) to an apps query. Kept as a constant
 // so every App query stays in sync; append it wherever appColumns is selected.
 const deploymentSummarySQL = `
-		(SELECT MAX(created_at) FROM deployments WHERE app_id = apps.id) AS last_deployed_at,
+		(SELECT MAX(created_at) FROM deployments WHERE app_id = apps.id AND serving_activation_id IS NULL) AS last_deployed_at,
 		(SELECT COUNT(*) FROM deployments
-		   WHERE app_id = apps.id AND status = 'succeeded') AS release_number,
+		   WHERE app_id = apps.id AND serving_activation_id IS NULL AND status = 'succeeded') AS release_number,
 		(SELECT created_at FROM deployments
-		   WHERE app_id = apps.id AND status = 'succeeded'
+		   WHERE app_id = apps.id AND serving_activation_id IS NULL AND status = 'succeeded'
 		   ORDER BY id DESC LIMIT 1) AS released_at,
-		(SELECT version FROM deployments WHERE app_id = apps.id ORDER BY created_at DESC, id DESC LIMIT 1) AS current_version,
+		(SELECT version FROM deployments WHERE app_id = apps.id AND serving_activation_id IS NULL ORDER BY created_at DESC, id DESC LIMIT 1) AS current_version,
 		(SELECT content_digest FROM deployments
-		   WHERE app_id = apps.id AND status = 'succeeded'
+		   WHERE app_id = apps.id AND serving_activation_id IS NULL AND status = 'succeeded'
 		   ORDER BY created_at DESC, id DESC LIMIT 1) AS content_digest,
-		(SELECT status FROM deployments WHERE app_id = apps.id
+		(SELECT status FROM deployments WHERE app_id = apps.id AND serving_activation_id IS NULL
 		   ORDER BY created_at DESC, id DESC LIMIT 1) AS last_deployment_status`
 
 // appColumns is the plain apps.* column list shared by every App SELECT, in the
@@ -2582,10 +2582,10 @@ func (s *Store) BeginDeploymentWithOrigin(appID int64, version, bundleDir, runID
 	}
 	if _, err := tx.Exec(`
 		INSERT INTO deployment_prior_schedule_snapshots
-			(deployment_id, name, cron_expr, command_json, enabled, timeout_seconds,
+			(deployment_id, name, cron_expr, command_json, inputs_json, enabled, timeout_seconds,
 			 overlap_policy, missed_policy, deploy_trigger, timezone, on_success,
 			 min_roll_interval_seconds, roll_fallback, max_defer_age_seconds)
-		SELECT ?, name, cron_expr, command_json, enabled, timeout_seconds,
+		SELECT ?, name, cron_expr, command_json, inputs_json, enabled, timeout_seconds,
 		       overlap_policy, missed_policy, deploy_trigger, timezone, on_success,
 		       min_roll_interval_seconds, roll_fallback, max_defer_age_seconds
 		FROM app_schedules WHERE app_id = ?`, id, appID); err != nil {
@@ -2621,6 +2621,11 @@ func (s *Store) PromoteDeployment(id int64) error {
 	}
 	if status != DeploymentPending && status != DeploymentSucceeded {
 		return fmt.Errorf("promote deployment %d: not pending", id)
+	}
+	if status == DeploymentPending {
+		if err := publishHandoffSettingsTx(tx, id, false); err != nil {
+			return fmt.Errorf("promote deployment settings: %w", err)
+		}
 	}
 	if status == DeploymentPending {
 		res, err := tx.Exec(
@@ -2699,6 +2704,9 @@ func (s *Store) RevertDeploymentActivation(failedID, previousID int64, reason st
 			return fmt.Errorf("revert deployment activation %d: active pointer rows affected: %w", failedID, err)
 		}
 		return fmt.Errorf("revert deployment activation %d: active pointer changed", failedID)
+	}
+	if err := publishHandoffSettingsTx(tx, failedID, true); err != nil {
+		return fmt.Errorf("revert deployment settings: %w", err)
 	}
 	failedResult, err := tx.Exec(`UPDATE deployments SET status = ?, failure_reason = ? WHERE id = ? AND status = ?`,
 		DeploymentFailed, reason, failedID, DeploymentSucceeded)
@@ -3058,12 +3066,12 @@ func (s *Store) ListDeploymentsBySlug(slug string) ([]DeploymentSummary, error) 
 		SELECT d.id, d.version, d.status, d.failure_reason, d.created_at,
 		       CASE WHEN d.status = 'succeeded' THEN (
 		           SELECT COUNT(*) FROM deployments d2
-		           WHERE d2.app_id = d.app_id AND d2.status = 'succeeded' AND d2.id <= d.id
+		           WHERE d2.app_id = d.app_id AND d2.status = 'succeeded' AND d2.serving_activation_id IS NULL AND d2.id <= d.id
 		       ) END AS release_number,
 		       d.restored_from_id,
 		       CASE WHEN d.restored_from_id IS NOT NULL THEN (
 		           SELECT COUNT(*) FROM deployments d3
-		           WHERE d3.app_id = d.app_id AND d3.status = 'succeeded' AND d3.id <= d.restored_from_id
+		           WHERE d3.app_id = d.app_id AND d3.status = 'succeeded' AND d3.serving_activation_id IS NULL AND d3.id <= d.restored_from_id
 		       ) END AS restored_from_release_number,
 		       d.origin_kind, d.origin_channel, d.development_session_id, d.origin_user_id, d.origin_actor,
 		       d.origin_credential_id, d.origin_credential_type, d.origin_credential_name,
@@ -3073,7 +3081,7 @@ func (s *Store) ListDeploymentsBySlug(slug string) ([]DeploymentSummary, error) 
 		JOIN apps a ON a.id = d.app_id
 		LEFT JOIN fleet_runs fr ON fr.id = d.run_id
 		LEFT JOIN development_sessions ds ON ds.id = d.development_session_id
-		WHERE a.slug = ?
+		WHERE a.slug = ? AND d.serving_activation_id IS NULL
 		ORDER BY d.id DESC`, slug)
 	if err != nil {
 		return nil, err
@@ -3292,7 +3300,7 @@ func (s *Store) ListDeployments(appID int64) ([]*Deployment, error) {
 	rows, err := s.db.Query(`
 		SELECT id, app_id, version, bundle_dir, status, content_digest, created_at, prepared
 		FROM deployments
-		WHERE app_id = ? AND status NOT IN ('pending', 'failed')
+		WHERE app_id = ? AND status NOT IN ('pending', 'failed') AND serving_activation_id IS NULL
 		ORDER BY id DESC`, appID)
 	if err != nil {
 		return nil, err
@@ -3316,18 +3324,13 @@ func (s *Store) ListDeployments(appID int64) ([]*Deployment, error) {
 	return ds, rows.Err()
 }
 
-// ListRecentDeployments returns an app's n newest deployments (same shape and
-// ordering as ListDeployments) without materializing the full history. Use it
-// on the hot paths that only ever consult the current bundle (index 0) and/or
-// the rollback target (index 1); callers that need the full history (the
-// deployments tab/API list, or a lookup of an arbitrary historical
-// DeploymentID) stay on ListDeployments. Served by idx_deployments_app_id_desc
-// (migration 086).
+// ListRecentDeployments returns an app's newest release history, excluding
+// serving-only activations. Use GetServingDeployment for the live execution.
 func (s *Store) ListRecentDeployments(appID int64, n int) ([]*Deployment, error) {
 	rows, err := s.db.Query(`
 		SELECT id, app_id, version, bundle_dir, status, content_digest, created_at, prepared
 		FROM deployments
-		WHERE app_id = ? AND status NOT IN ('pending', 'failed')
+		WHERE app_id = ? AND status NOT IN ('pending', 'failed') AND serving_activation_id IS NULL
 		ORDER BY id DESC LIMIT ?`, appID, n)
 	if err != nil {
 		return nil, err
@@ -3366,7 +3369,7 @@ func (s *Store) HasAnyDeployment(appID int64) (bool, error) {
 // bundle that is not yet safe to expose to ordinary schedule admissions.
 func (s *Store) HasPendingDeployment(appID int64) (bool, error) {
 	var n int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM deployments WHERE app_id = ? AND status = 'pending'`, appID).Scan(&n); err != nil {
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM deployments WHERE app_id = ? AND status = 'pending' AND serving_activation_id IS NULL`, appID).Scan(&n); err != nil {
 		return false, err
 	}
 	return n > 0, nil
@@ -3398,12 +3401,12 @@ func (s *Store) GetDeploymentBySlugAndID(slug string, id int64) (*Deployment, er
 // GetDeploymentByID resolves an internal deployment identity for recovery.
 func (s *Store) GetDeploymentByID(id int64) (*Deployment, error) {
 	row := s.db.QueryRow(`
-		SELECT id, app_id, version, bundle_dir, status, content_digest, created_at, prepared
+		SELECT id, app_id, version, bundle_dir, status, content_digest, created_at, prepared, activation_token
 		FROM deployments WHERE id = ?`, id)
 	var dep Deployment
 	var digest sql.NullString
 	var preparedInt int
-	if err := row.Scan(&dep.ID, &dep.AppID, &dep.Version, &dep.BundleDir, &dep.Status, &digest, &dep.CreatedAt, &preparedInt); err != nil {
+	if err := row.Scan(&dep.ID, &dep.AppID, &dep.Version, &dep.BundleDir, &dep.Status, &digest, &dep.CreatedAt, &preparedInt, &dep.ActivationToken); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -6514,4 +6517,24 @@ func parseSQLiteTime(s string) (time.Time, bool) {
 		}
 	}
 	return time.Time{}, false
+}
+
+// GetServingDeployment resolves the atomically published serving authority.
+// The fallback supports deployments predating generation authority.
+func (s *Store) GetServingDeployment(appID int64) (*Deployment, error) {
+	active, err := s.GetActiveDeploymentGeneration(appID)
+	if err == nil {
+		return s.GetDeploymentByID(active.DeploymentID)
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return nil, err
+	}
+	deps, err := s.ListRecentDeployments(appID, 1)
+	if err != nil {
+		return nil, err
+	}
+	if len(deps) == 0 {
+		return nil, ErrNotFound
+	}
+	return deps[0], nil
 }

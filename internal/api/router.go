@@ -191,9 +191,11 @@ type Server struct {
 	// Generation retirement is server-owned work. Cancellation prevents cleanup
 	// retries from outliving shutdown; durable deployment_replicas rows let the
 	// next owner resume safely.
-	generationCtx    context.Context
-	generationCancel context.CancelFunc
-	generationWG     sync.WaitGroup
+	generationCtx               context.Context
+	generationCancel            context.CancelFunc
+	generationWG                sync.WaitGroup
+	generationRetirements       sync.Map
+	unlockedReadinessOperations int
 }
 
 // markRedeployInFlight adds one reference for slug's pending pool cycle. Each
@@ -1038,6 +1040,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Delete("/api/apps/{slug}/schedules/{id}", s.handleDeleteSchedule)
 		r.With(rateLimitByUser(s.actionLimiter)).Post("/api/apps/{slug}/schedules/{id}/convergence/retry", s.handleRetryScheduleConvergence)
 		r.With(rateLimitByUser(s.actionLimiter)).Post("/api/apps/{slug}/schedules/{id}/activation/cancel", s.handleCancelScheduleActivation)
+		r.Get("/api/apps/{slug}/activations/{id}", s.handleGetAppActivation)
 		r.With(rateLimitByUser(s.actionLimiter)).Post("/api/apps/{slug}/schedules/{id}/run", s.handleRunSchedule)
 		r.With(rateLimitByUser(s.actionLimiter)).Post("/api/apps/{slug}/schedules/{id}/refresh-stale", s.handleRefreshStaleSchedule)
 		r.Get("/api/apps/{slug}/schedules/{id}/runs", s.handleListScheduleRuns)

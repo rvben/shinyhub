@@ -282,6 +282,19 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 		}
 		return err
 	}
+	manifest, err := deploypkg.LoadManifest(abs)
+	if err != nil {
+		return err
+	}
+	if manifestUsesProducerInputs(manifest) {
+		info, err := probeServer(cfg)
+		if err != nil {
+			return fmt.Errorf("verify producer input scope support: %w", err)
+		}
+		if !info.Capabilities.ScheduleInputs {
+			return validationErr("server does not support schedule inputs; no deployment was requested", "Upgrade to a server advertising schedule_inputs.")
+		}
+	}
 	bundleBuf := bundlePlan.Buffer
 	bundleEvent := deployevent.Phase("bundle", deployevent.StatusCompleted, "Bundle ready")
 	bundleEvent.FileCount = bundlePlan.FileCount
@@ -1599,4 +1612,16 @@ func summarizeRejections(r map[bundle.FilterDecision][]string) string {
 	}
 	sort.Strings(parts)
 	return "Skipped from bundle (push with `shinyhub data push`): " + strings.Join(parts, "; ")
+}
+
+func manifestUsesProducerInputs(manifest *deploypkg.Manifest) bool {
+	if manifest == nil {
+		return false
+	}
+	for _, schedule := range manifest.Schedules {
+		if len(schedule.Inputs) > 0 {
+			return true
+		}
+	}
+	return false
 }

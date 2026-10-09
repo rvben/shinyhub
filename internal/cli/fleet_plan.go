@@ -207,6 +207,8 @@ type serverCaps struct {
 	FleetState                bool   `json:"fleet_state"`
 	FleetStateChangeTracking  bool   `json:"fleet_state_change_tracking"`
 	FleetRunLifecycle         bool   `json:"fleet_run_lifecycle"`
+	RollingRestart            bool   `json:"rolling_restart"`
+	ScheduleInputs            bool   `json:"schedule_inputs"`
 	ScheduleDeployConvergence bool   `json:"schedule_deploy_convergence"`
 	ScheduleRefreshStale      bool   `json:"schedule_refresh_stale"`
 	DeployPreflight           bool   `json:"deploy_preflight"`
