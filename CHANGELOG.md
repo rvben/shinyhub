@@ -12,6 +12,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **auth**: enforce UTF-8 on forward-auth identity headers. Reject malformed usernames or group snapshots before account and role changes, preserve stored names on invalid name assertions, and omit invalid email from app headers and token claims. Add recurring, bounded diagnostics and Starlette/FastAPI integration guidance.
+
 - **apps**: show a browser recovery page with a catalog link for unknown app slugs, including on isolated app origins. API and monitoring requests retain the existing JSON 404 response.
 
 - **routing**: keep backend-local redirects on the app mount and preserve escaped asset paths when app slugs or mount separators are encoded. Preserve app query bytes through app-origin launches and forward-auth cookie confirmation.

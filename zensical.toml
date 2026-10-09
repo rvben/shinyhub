@@ -85,6 +85,7 @@ nav = [
     { "Reverse proxy overview" = "reverse-proxy/deploying-behind-a-proxy.md" },
     { "Caddy" = "reverse-proxy/caddy.md" },
     { "nginx" = "reverse-proxy/nginx.md" },
+    { "Forward-auth header encoding" = "reverse-proxy/forward-auth-encoding.md" },
     { "OIDC bridge" = "reverse-proxy/oidc-bridge.md" },
   ]},
   { "Reference" = [

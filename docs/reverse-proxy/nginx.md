@@ -91,9 +91,16 @@ oauth2-proxy at `http://oauth2-proxy:4180/oauth2/auth`).
 | Header | Config key | Description |
 |---|---|---|
 | `X-Forwarded-User` | `user_header` | Username (required). Default header name. |
-| `X-Forwarded-Email` | `email_header` | Email address (optional). Accepted by config but not yet used by ShinyHub (reserved). |
+| `X-Forwarded-Email` | `email_header` | Email address (optional). Forwarded to apps and included in the identity token for this request. |
+| `X-Forwarded-Name` | `name_header` | Display name (optional). Refreshes the stored name for IdP-governed accounts. |
 | `X-Forwarded-Groups` | `groups_header` | Comma-separated group list. When `groups_header` is configured the proxy MUST send this header on every request (empty when the user has no groups); the listed groups drive role promotion AND revocation. An absent header is treated as no groups and revokes any group-derived role, so a dropped header demotes the user to the default role. |
 | `X-ShinyHub-Forward-Auth-Secret` | `secret_header` | Required proxy credential. Generate at least 32 random characters and configure the same value as `shared_secret`. ShinyHub strips it before proxying. |
+
+All identity header values must contain **UTF-8 bytes**. Invalid usernames or
+groups produce HTTP 400 before account or role changes; invalid names are
+ignored, and invalid email is omitted from the request identity. Starlette/FastAPI
+auth services must adapt their Latin-1 header API to preserve UTF-8 bytes. See
+[the encoding contract and Python example](forward-auth-encoding.md).
 
 ## ShinyHub configuration
 

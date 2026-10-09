@@ -909,6 +909,8 @@ func (c *Config) HasSSOLoginPath() bool {
 // already authenticated the user. When Enabled is true, the forward-auth
 // middleware trusts UserHeader (and optional EmailHeader / GroupsHeader) on
 // requests whose direct peer IP is in Config.TrustedProxyNets.
+// Identity values must be UTF-8 bytes. Invalid usernames/groups are refused
+// with 400; invalid names are ignored and invalid email is omitted for the request.
 type ForwardAuthConfig struct {
 	LogoutURL    string `yaml:"logout_url"`
 	LogoutMethod string `yaml:"logout_method"`
@@ -922,7 +924,7 @@ type ForwardAuthConfig struct {
 	// EmailHeader is the proxy header carrying the user's email (e.g. Authelia's
 	// Remote-Email). When set, the middleware captures it request-scoped and
 	// forwards it to apps as X-Shinyhub-Email and the identity token's email
-	// claim. Not persisted (the users table has no email column). Empty disables
+	// claim. Not persisted by forward-auth. Empty disables
 	// email capture.
 	EmailHeader string `yaml:"email_header"`
 	// NameHeader is the proxy header carrying the user's friendly name (e.g.

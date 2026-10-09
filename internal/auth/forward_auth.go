@@ -29,6 +29,9 @@ var ErrReservedIdentity = errors.New("forward auth: identity is reserved")
 
 // ForwardAuthConfig mirrors config.ForwardAuthConfig. Duplicated here so the auth
 // package has no import cycle on config.
+// Identity header values must contain UTF-8 bytes; no decoding or Unicode
+// normalization is applied. Invalid usernames/groups refuse authentication,
+// while invalid names/emails are omitted from the incoming assertion.
 type ForwardAuthConfig struct {
 	// Tracking uses the platform secret; the cookie alone never grants identity.
 	AppOriginHost string
@@ -93,6 +96,19 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 	// invalidSecretPeers similarly bounds the operator-facing warning for a
 	// trusted proxy that asserts an identity without the configured credential.
 	var invalidSecretPeers sync.Map
+	// Encoding diagnostics recur at a bounded rate without retaining identity
+	// values or an unbounded number of peer addresses.
+	var invalidEncodingPeers encodingWarnings
+	warnInvalidEncoding := func(r *http.Request, header string) {
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			host = r.RemoteAddr
+		}
+		if allowed, overflow := invalidEncodingPeers.allow(host, header, time.Now()); allowed {
+			slog.Warn("forward_auth: identity header contains invalid UTF-8; configure the proxy to send UTF-8 bytes",
+				"peer", host, "header", header, "peer_tracking_limited", overflow)
+		}
+	}
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -108,10 +124,13 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 			// unconditionally (even from an untrusted direct-port peer) prevents a
 			// caller from injecting a forged Remote-User/-Groups/-Email/-Name into a
 			// tenant app.
-			userHdr := strings.TrimSpace(r.Header.Get(cfg.UserHeader))
+			userVals := r.Header.Values(cfg.UserHeader)
+			userHdr := r.Header.Get(cfg.UserHeader)
 			proxySecret := r.Header.Get(cfg.SecretHeader)
-			nameHdr := strings.TrimSpace(r.Header.Get(cfg.NameHeader))
-			emailHdr := strings.TrimSpace(r.Header.Get(cfg.EmailHeader))
+			nameVals := r.Header.Values(cfg.NameHeader)
+			nameHdr := r.Header.Get(cfg.NameHeader)
+			emailVals := r.Header.Values(cfg.EmailHeader)
+			emailHdr := r.Header.Get(cfg.EmailHeader)
 			var groupsVals []string
 			groupsPresent := false
 			if cfg.GroupsHeader != "" {
@@ -142,7 +161,7 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 				// user, the operator most likely forgot to add this peer to
 				// server.trusted_proxies. Log a WARN once per distinct peer IP so
 				// the misconfiguration surfaces without flooding the log.
-				if userHdr != "" {
+				if strings.TrimSpace(userHdr) != "" {
 					host, _, err := net.SplitHostPort(r.RemoteAddr)
 					if err != nil {
 						host = r.RemoteAddr
@@ -157,7 +176,7 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 				next.ServeHTTP(w, r)
 				return
 			}
-			username := userHdr
+			username := strings.TrimSpace(userHdr)
 			if username == "" {
 				next.ServeHTTP(w, r)
 				return
@@ -194,6 +213,29 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 				http.Error(w, "reconnect must originate from the dashboard", http.StatusForbidden)
 				return
 			}
+			// Validate only authenticated proxy assertions, before any account or
+			// authorization mutation. Never interpret an unreadable group snapshot
+			// as a partial membership list or retain stale roles for this request.
+			if !validUTF8HeaderValues(userVals) {
+				warnInvalidEncoding(r, cfg.UserHeader)
+				http.Error(w, "forward auth: user header must contain valid UTF-8", http.StatusBadRequest)
+				return
+			}
+			if !validUTF8HeaderValues(groupsVals) {
+				warnInvalidEncoding(r, cfg.GroupsHeader)
+				http.Error(w, "forward auth: groups header must contain valid UTF-8", http.StatusBadRequest)
+				return
+			}
+			if !validUTF8HeaderValues(nameVals) {
+				warnInvalidEncoding(r, cfg.NameHeader)
+				nameHdr = ""
+			}
+			if !validUTF8HeaderValues(emailVals) {
+				warnInvalidEncoding(r, cfg.EmailHeader)
+				emailHdr = ""
+			}
+			nameHdr = strings.TrimSpace(nameHdr)
+			emailHdr = strings.TrimSpace(emailHdr)
 			user, err := store.GetForwardAuthUser(username)
 			if errors.Is(err, ErrUserNotFound) {
 				user, err = store.CreateForwardAuthUser(username, cfg.DefaultRole)
@@ -252,9 +294,11 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 			}
 
 			// Capture the email the proxy asserts, if configured. It is
-			// request-scoped (the users table has no email column) and forwarded
+			// request-scoped (not persisted by forward-auth) and forwarded
 			// to apps via X-Shinyhub-Email and the identity token's email claim.
 			if cfg.EmailHeader != "" {
+				// An invalid assertion must not fall back to an older persisted
+				// email and present it to apps as the current proxy identity.
 				user.Email = emailHdr
 			}
 

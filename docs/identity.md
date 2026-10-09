@@ -155,6 +155,33 @@ accounts carry no IdP-governed name, so the header (and the helper) return empty
 for them.
 
 
+### Header encoding
+
+Free-text `X-Shinyhub-*` header values (username, name, email, groups, and actor
+username) contain raw UTF-8 bytes. They are not percent-encoded. Numeric IDs,
+roles, flags, and the signed identity token use ASCII.
+
+For Python apps, prefer `shinyhub_identity` or verified identity-token claims:
+the token carries Unicode strings in JSON without relying on the web
+framework's interpretation of header bytes. Starlette's `request.headers`
+interface decodes incoming header bytes as Latin-1, so reading a non-ASCII
+plain header directly can produce mojibake. If reading these headers through
+that interface, restore the UTF-8 text explicitly:
+
+```python
+raw_name = request.headers.get("X-Shinyhub-Name")
+name = raw_name.encode("latin-1").decode("utf-8") if raw_name is not None else None
+```
+
+Use this conversion only with an interface that decodes header bytes as
+Latin-1; do not apply it to token claims or strings already decoded as UTF-8.
+Keep strict decoding: replacement characters can change identity values.
+For authorization, verify the identity token as described below.
+
+See [the forward-auth encoding contract](reverse-proxy/forward-auth-encoding.md)
+for proxy requirements, validation behavior, and Starlette/FastAPI response
+header examples.
+
 ## Token reference
 
 The identity token is a standard JWT signed with HS256. Its claims are:
