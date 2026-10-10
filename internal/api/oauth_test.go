@@ -41,8 +41,8 @@ func TestGitHubLogin_NotConfigured(t *testing.T) {
 	req := httptest.NewRequest("GET", "/api/auth/github/login", nil)
 	rec := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotImplemented {
-		t.Errorf("expected 501 when OAuth not configured, got %d", rec.Code)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404 when OAuth not configured, got %d", rec.Code)
 	}
 }
 
@@ -51,8 +51,8 @@ func TestGitHubCallback_NotConfigured(t *testing.T) {
 	req := httptest.NewRequest("GET", "/api/auth/github/callback?state=x&code=y", nil)
 	rec := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotImplemented {
-		t.Errorf("expected 501 when OAuth not configured, got %d", rec.Code)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404 when OAuth not configured, got %d", rec.Code)
 	}
 }
 
@@ -127,8 +127,8 @@ func TestGoogleLogin_NotConfigured(t *testing.T) {
 	req := httptest.NewRequest("GET", "/api/auth/google/login", nil)
 	rec := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotImplemented {
-		t.Errorf("expected 501 when OAuth not configured, got %d", rec.Code)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404 when OAuth not configured, got %d", rec.Code)
 	}
 }
 
@@ -137,8 +137,8 @@ func TestGoogleCallback_NotConfigured(t *testing.T) {
 	req := httptest.NewRequest("GET", "/api/auth/google/callback?state=x&code=y", nil)
 	rec := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotImplemented {
-		t.Errorf("expected 501 when OAuth not configured, got %d", rec.Code)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404 when OAuth not configured, got %d", rec.Code)
 	}
 }
 

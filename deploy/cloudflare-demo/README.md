@@ -48,6 +48,14 @@ whatever the server would 404 anyway, mirroring `internal/apporigin`. Before
 that gate existed, sparse automated traffic to control-plane paths woke the demo
 around the clock and was the entire metered charge on the bill.
 
+The demo configures no external authentication providers. Requests under
+`/api/auth/github`, `/api/auth/google`, and `/api/auth/oidc` receive a 404 at
+the edge, including escaped provider names and callbacks. These requests never
+touch the container, whether it is asleep, starting, or healthy, so they cannot
+wake it or extend its idle deadline. Local viewer sessions still work normally.
+This blocks unused routes, not all bots: a client that imitates a browser on an
+entry path or submits the start form can still cause a wake.
+
 While the container is asleep, exactly two requests may start it: a browser
 navigating to `/` or `/login` on the demo host, and the start page's button. The
 first is recognised by `Sec-Fetch-Dest: document`, which browsers generate and a

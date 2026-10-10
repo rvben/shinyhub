@@ -76,7 +76,7 @@ func (s *Server) handleGetProviders(w http.ResponseWriter, r *http.Request) {
 // authorization endpoint.
 func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 	if s.oidcProvider == nil {
-		writeError(w, http.StatusNotImplemented, "OIDC SSO not configured")
+		writeError(w, http.StatusNotFound, "OIDC SSO not configured")
 		return
 	}
 
@@ -102,7 +102,7 @@ func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 // issuing a session JWT.
 func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	if s.oidcProvider == nil {
-		writeError(w, http.StatusNotImplemented, "OIDC SSO not configured")
+		writeError(w, http.StatusNotFound, "OIDC SSO not configured")
 		return
 	}
 

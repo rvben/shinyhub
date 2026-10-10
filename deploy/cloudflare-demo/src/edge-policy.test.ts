@@ -102,6 +102,16 @@ test("the control host still forwards its own routes", () => {
   assert.equal(classifyEdgeRequest(DEMO_HOST, "/apps/demo/logs"), "forward");
 });
 
+test("disabled demo providers are rejected at the edge without blocking local auth", () => {
+  for (const path of ["/api/auth/google/login", "/api/auth/github/callback", "/api/auth/oidc/",
+    "/api/auth/%67oogle/login", "/api/auth%2Fgoogle%2Flogin", "/api/auth/google", "/api/auth/%zz/login"]) {
+    assert.equal(classifyEdgeRequest(DEMO_HOST, path), "reject");
+  }
+  for (const path of ["/api/auth/providers", "/api/auth/session", "/api/auth/logout", "/api/auth/googleish/login"]) {
+    assert.equal(classifyEdgeRequest(DEMO_HOST, path), "forward");
+  }
+});
+
 test("a browser arriving at an entry page wakes a sleeping container", () => {
   assert.equal(classifyColdRequest({
     hostname: DEMO_HOST,

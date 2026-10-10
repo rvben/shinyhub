@@ -59,6 +59,35 @@ test("cold entry and readiness probes cannot start or proxy into the container",
   assert.equal(f.counts.start, 0); assert.equal(f.counts.fetch, 0);
 });
 
+test("disabled OAuth probes never touch the container, even with browser headers or a warm memo", async (t) => {
+  const errors = t.mock.method(console, "error", () => {});
+  for (const status of ["stopped", "starting", "healthy"]) {
+    const f = fixture(status);
+    if (status === "healthy") {
+      // Populate the fast path, which must not bypass edge rejection.
+      await f.fetch(new Request("https://" + control + "/api/auth/providers"));
+    }
+    const before = { ...f.counts };
+    for (const host of [control, apps]) {
+      for (const provider of ["github", "google", "oidc", "%67oogle"]) {
+        for (const route of ["", "/login", "/callback?state=x&code=y", "/login/"]) {
+          for (const method of ["GET", "HEAD", "POST"]) {
+            const response = await f.fetch(new Request(`https://${host}/api/auth/${provider}${route}`, {
+              method, headers: { "sec-fetch-dest": "document", accept: "text/html" },
+            }));
+            assert.equal(response.status, 404);
+            assert.equal(response.headers.get("location"), null);
+            assert.equal(response.headers.get("cache-control"), "no-store");
+          }
+        }
+      }
+    }
+    assert.deepEqual(f.counts, before);
+    assert.equal(f.work.length, 0);
+  }
+  assert.equal(errors.mock.callCount(), 0);
+});
+
 test("browser wakes carry deep links through staging URLs", async () => {
   const f = fixture();
   const destination = "/apps/operations-dashboard?tab=overview";

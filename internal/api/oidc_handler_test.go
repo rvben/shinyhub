@@ -36,8 +36,8 @@ func TestOIDCLogin_NotConfigured(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusNotImplemented {
-		t.Errorf("expected 501 when OIDC not configured, got %d", rec.Code)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404 when OIDC not configured, got %d", rec.Code)
 	}
 }
 
@@ -47,7 +47,7 @@ func TestOIDCCallback_NotConfigured(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusNotImplemented {
-		t.Errorf("expected 501 when OIDC not configured, got %d", rec.Code)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404 when OIDC not configured, got %d", rec.Code)
 	}
 }

@@ -32,7 +32,7 @@ func (s *Server) SetGoogleProvider(g *oauth.Google) { s.googleOAuth = g }
 // handleGitHubLogin redirects the browser to GitHub's OAuth2 authorization page.
 func (s *Server) handleGitHubLogin(w http.ResponseWriter, r *http.Request) {
 	if s.github == nil {
-		writeError(w, http.StatusNotImplemented, "GitHub OAuth not configured")
+		writeError(w, http.StatusNotFound, "GitHub OAuth not configured")
 		return
 	}
 
@@ -56,7 +56,7 @@ func (s *Server) handleGitHubLogin(w http.ResponseWriter, r *http.Request) {
 // the local user account, and issues a JWT.
 func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 	if s.github == nil {
-		writeError(w, http.StatusNotImplemented, "GitHub OAuth not configured")
+		writeError(w, http.StatusNotFound, "GitHub OAuth not configured")
 		return
 	}
 
@@ -153,7 +153,7 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 // handleGoogleLogin redirects the browser to Google's OAuth2 authorization page.
 func (s *Server) handleGoogleLogin(w http.ResponseWriter, r *http.Request) {
 	if s.googleOAuth == nil {
-		writeError(w, http.StatusNotImplemented, "Google OAuth not configured")
+		writeError(w, http.StatusNotFound, "Google OAuth not configured")
 		return
 	}
 
@@ -177,7 +177,7 @@ func (s *Server) handleGoogleLogin(w http.ResponseWriter, r *http.Request) {
 // the local user account, and issues a JWT.
 func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 	if s.googleOAuth == nil {
-		writeError(w, http.StatusNotImplemented, "Google OAuth not configured")
+		writeError(w, http.StatusNotFound, "Google OAuth not configured")
 		return
 	}
 

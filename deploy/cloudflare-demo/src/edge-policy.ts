@@ -133,6 +133,11 @@ export type EdgeVerdict = "serve-robots" | "reject" | "forward";
 // already awake.
 const ENTRY_PATHS = new Set(["/", "/login"]);
 
+// The demo uses a local viewer session and configures no external providers.
+// Reject these routes even while warm: forwarding a probe would either wake
+// the container or extend its idle deadline just to reject a disabled login.
+const DISABLED_AUTH_PATHS = ["/api/auth/github", "/api/auth/google", "/api/auth/oidc"];
+
 // The fields of a request the cold-start gate reads.
 export interface ColdRequest {
   hostname: string;
@@ -264,6 +269,18 @@ export function classifyEdgeRequest(hostname: string, pathname: string): EdgeVer
   }
   if (hostname === APP_HOST && !appOriginAdmits(pathname)) {
     return "reject";
+  }
+  if (hostname === DEMO_HOST) {
+    // Match escaped provider names too, before the backend decodes the path.
+    let decodedPath = pathname;
+    try {
+      decodedPath = decodeURIComponent(pathname);
+    } catch {
+      return "reject";
+    }
+    if (DISABLED_AUTH_PATHS.some((path) => decodedPath === path || decodedPath.startsWith(path + "/"))) {
+      return "reject";
+    }
   }
   return "forward";
 }
