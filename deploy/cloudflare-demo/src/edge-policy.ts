@@ -5,6 +5,8 @@
 // whole time the container is awake, so a path answered at the edge costs
 // nothing and the same path forwarded costs a wake cycle.
 
+import { canonicalDemoPath, demoAppPath, demoControlAdmits, demoNavigationPath } from "./demo-routes.ts";
+
 export const DEMO_HOST = "demo.shinyhub.dev";
 export const APP_HOST = "apps.demo.shinyhub.dev";
 
@@ -56,6 +58,9 @@ export function safeDestination(raw: string | null): string | null {
   }
   const destination = resolved.pathname + resolved.search;
   if (!destination.startsWith("/") || destination.startsWith("//")) {
+    return null;
+  }
+  if (!demoNavigationPath(resolved.pathname)) {
     return null;
   }
   return destination;
@@ -133,11 +138,6 @@ export type EdgeVerdict = "serve-robots" | "reject" | "forward";
 // already awake.
 const ENTRY_PATHS = new Set(["/", "/login"]);
 
-// The demo uses a local viewer session and configures no external providers.
-// Reject these routes even while warm: forwarding a probe would either wake
-// the container or extend its idle deadline just to reject a disabled login.
-const DISABLED_AUTH_PATHS = ["/api/auth/github", "/api/auth/google", "/api/auth/oidc"];
-
 // The fields of a request the cold-start gate reads.
 export interface ColdRequest {
   hostname: string;
@@ -172,7 +172,8 @@ function isNavigation(request: ColdRequest): boolean {
 
 // Reports whether a browser generated request by navigating to it. Sec-Fetch-Dest
 // is added by the browser and cannot be set by the page issuing the request, so
-// unlike Accept it is not something a crawler produces by asking for HTML.
+// unlike Accept ordinary HTTP crawlers do not send it automatically. A custom
+// client can forge it: this is an admission heuristic, not authentication.
 function isBrowserNavigation(request: ColdRequest): boolean {
   return request.method === "GET" && request.secFetchDest === "document";
 }
@@ -187,7 +188,7 @@ export function classifyColdRequest(request: ColdRequest): ColdVerdict {
   // origin wakes it directly: the app is not running yet, so spending the cold
   // start there buys a page that still cannot be served.
   if (request.hostname === APP_HOST) {
-    return request.method === "GET" && isNavigation(request) ? "redirect-to-entry" : "refuse";
+    return demoAppPath(request.pathname) && request.method === "GET" && isNavigation(request) ? "redirect-to-entry" : "refuse";
   }
   if (request.hostname !== DEMO_HOST) {
     return "refuse";
@@ -215,7 +216,7 @@ export function classifyColdRequest(request: ColdRequest): ColdVerdict {
     return "refuse";
   }
   if (!ENTRY_PATHS.has(request.pathname)) {
-    return isNavigation(request) ? "redirect-to-entry" : "refuse";
+    return demoNavigationPath(request.pathname) && isNavigation(request) ? "redirect-to-entry" : "refuse";
   }
   // Nothing is refused on an entry page. The start page is rendered here at the
   // edge, so answering with it costs nothing and gives whoever asked something
@@ -263,24 +264,17 @@ export function mayAssumeAwake(lastHealthyAt: number | null, now: number): boole
   return age >= 0 && age < AWAKE_MEMO_MS;
 }
 
-export function classifyEdgeRequest(hostname: string, pathname: string): EdgeVerdict {
+export function classifyEdgeRequest(hostname: string, pathname: string, method?: string): EdgeVerdict {
+  if (canonicalDemoPath(pathname) === null) return "reject";
   if (pathname === ROBOTS_PATH) {
-    return "serve-robots";
+    return method === undefined || method === "GET" || method === "HEAD" ? "serve-robots" : "reject";
   }
-  if (hostname === APP_HOST && !appOriginAdmits(pathname)) {
-    return "reject";
-  }
-  if (hostname === DEMO_HOST) {
-    // Match escaped provider names too, before the backend decodes the path.
-    let decodedPath = pathname;
-    try {
-      decodedPath = decodeURIComponent(pathname);
-    } catch {
-      return "reject";
+  if (hostname === APP_HOST) {
+    if (!appOriginAdmits(pathname)) return "reject";
+    if (pathname.startsWith("/app/") && pathname !== "/app/.shinyhub/favicon.ico") {
+      return demoAppPath(pathname) ? "forward" : "reject";
     }
-    if (DISABLED_AUTH_PATHS.some((path) => decodedPath === path || decodedPath.startsWith(path + "/"))) {
-      return "reject";
-    }
+    return method === undefined || method === "GET" || method === "HEAD" ? "forward" : "reject";
   }
-  return "forward";
+  return hostname === DEMO_HOST && demoControlAdmits(pathname, method) ? "forward" : "reject";
 }

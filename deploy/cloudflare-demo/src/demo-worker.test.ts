@@ -88,6 +88,45 @@ test("disabled OAuth probes never touch the container, even with browser headers
   assert.equal(errors.mock.callCount(), 0);
 });
 
+test("unknown paths never resolve or refresh a container in any lifecycle state", async (t) => {
+  const errors = t.mock.method(console, "error", () => {});
+  for (const status of ["stopped", "starting", "healthy"]) {
+    const f = fixture(status);
+    if (status === "healthy") await f.fetch(new Request("https://" + control + "/api/server-info"));
+    const before = { ...f.counts };
+    for (const host of [control, apps]) {
+      for (const path of ["/.env", "/.git/config", "/wp-login.php", "/phpmyadmin/", "/cgi-bin/test", "/metrics", "/debug/pprof/", "/__demo/unknown",
+        "/api/unknown", "/static/unknown.js", "/apps/unknown", "/app/unknown/", "/projects/unknown", "/api/auth/%zz/login", "/static/%252e%252e/app.js"]) {
+        for (const method of ["GET", "HEAD", "POST"]) {
+          const response = await f.fetch(new Request(`https://${host}${path}?demo_next=/`, {
+            method, headers: { "sec-fetch-dest": "document", accept: "text/html" },
+          }));
+          assert.equal(response.status, 404, method + " " + host + path);
+          assert.equal(response.headers.get("location"), null);
+          assert.equal(response.headers.get("cache-control"), "no-store");
+        }
+      }
+    }
+    assert.deepEqual(f.counts, before);
+    assert.equal(f.work.length, 0);
+  }
+  assert.equal(errors.mock.callCount(), 0);
+});
+
+test("cold browser-shaped background requests have no redirect or allocation", async () => {
+  const f = fixture();
+  for (const path of ["/api/server-info", "/api/auth/providers", "/api/apps", "/static/app.js", "/healthz", "/readyz", "/favicon.ico"]) {
+    const response = await f.fetch(new Request(`https://${control}${path}`, {
+      headers: { "sec-fetch-dest": "document", accept: "text/html" },
+    }));
+    assert.equal(response.status, 503, path);
+    assert.equal(response.headers.get("location"), null, path);
+  }
+  assert.equal(f.counts.start, 0);
+  assert.equal(f.counts.fetch, 0);
+  assert.equal(f.work.length, 0);
+});
+
 test("browser wakes carry deep links through staging URLs", async () => {
   const f = fixture();
   const destination = "/apps/operations-dashboard?tab=overview";
@@ -139,7 +178,7 @@ test("failed proxy responses invalidate the warm memo so a later navigation can 
 test("intentional asleep and readiness 503s do not log upstream failures", async (t) => {
   const errors = t.mock.method(console, "error", () => {});
   const f = fixture();
-  assert.equal((await f.fetch(new Request("https://" + control + "/api/about"))).status, 503);
+  assert.equal((await f.fetch(new Request("https://" + control + "/api/server-info"))).status, 503);
   assert.equal((await f.fetch(new Request("https://" + control + "/__demo/ready"))).status, 503);
   f.setStatus("starting");
   f.setResponse(() => new Response(null, { status: 503 }));

@@ -102,7 +102,7 @@ export function createDemoWorker<Env>(options: DemoWorkerOptions<Env>): Exported
       // Answer what the edge can answer before touching the container: a
       // forwarded request wakes a sleeping one, and wake time is what the
       // container bills for.
-      const verdict = classifyEdgeRequest(url.hostname === appHost ? APP_HOST : DEMO_HOST, url.pathname);
+      const verdict = classifyEdgeRequest(url.hostname === appHost ? APP_HOST : DEMO_HOST, url.pathname, request.method);
       if (verdict === "serve-robots") {
         return demoAsset(robotsBody, "text/plain; charset=utf-8");
       }

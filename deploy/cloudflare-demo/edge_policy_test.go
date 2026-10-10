@@ -46,7 +46,7 @@ func TestDemoWorkerAppliesEdgePolicyBeforeReachingTheContainer(t *testing.T) {
 	worker := string(source)
 
 	for _, required := range []string{
-		`classifyEdgeRequest(url.hostname === appHost ? APP_HOST : DEMO_HOST, url.pathname)`,
+		`classifyEdgeRequest(url.hostname === appHost ? APP_HOST : DEMO_HOST, url.pathname, request.method)`,
 		`verdict === "serve-robots"`,
 		`demoAsset(robotsBody, "text/plain; charset=utf-8")`,
 		`verdict === "reject"`,
@@ -57,7 +57,7 @@ func TestDemoWorkerAppliesEdgePolicyBeforeReachingTheContainer(t *testing.T) {
 	}
 
 	hostCheck := indexOf(t, worker, "src/demo-worker.ts", "allowedHosts.has(url.hostname)")
-	verdict := indexOf(t, worker, "src/demo-worker.ts", "classifyEdgeRequest(url.hostname === appHost ? APP_HOST : DEMO_HOST, url.pathname)")
+	verdict := indexOf(t, worker, "src/demo-worker.ts", "classifyEdgeRequest(url.hostname === appHost ? APP_HOST : DEMO_HOST, url.pathname, request.method)")
 	container := indexOf(t, worker, "src/demo-worker.ts", "options.container(env)")
 	if verdict < hostCheck {
 		t.Error("the edge policy runs before the host check, so it classifies requests for hosts the Worker does not serve")

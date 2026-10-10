@@ -1,0 +1,727 @@
+{
+  "uiExact": [
+    "/",
+    "/announcements",
+    "/apps",
+    "/audit-log",
+    "/home",
+    "/identity",
+    "/invite",
+    "/launchpad",
+    "/login",
+    "/tokens",
+    "/users",
+    "/workers"
+  ],
+  "uiPatterns": [
+    "^/apps/[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(/[a-z-]+)?/?$",
+    "^/projects/[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?/?$"
+  ],
+  "api": [
+    {
+      "method": "GET",
+      "path": "/api/announcements"
+    },
+    {
+      "method": "POST",
+      "path": "/api/announcements"
+    },
+    {
+      "method": "GET",
+      "path": "/api/announcements/active"
+    },
+    {
+      "method": "GET",
+      "path": "/api/announcements/{id}"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/announcements/{id}"
+    },
+    {
+      "method": "GET",
+      "path": "/api/apps"
+    },
+    {
+      "method": "POST",
+      "path": "/api/apps"
+    },
+    {
+      "method": "GET",
+      "path": "/api/apps/metrics"
+    },
+    {
+      "method": "GET",
+      "path": "/api/apps/metrics/history"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/apps/{slug}"
+    },
+    {
+      "method": "GET",
+      "path": "/api/apps/{slug}"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/apps/{slug}"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/apps/{slug}/access"
+    },
+    {
+      "method": "GET",
+      "path": "/api/apps/{slug}/activations/{id}"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/apps/{slug}/cache"
+    },
+    {
+      "method": "GET",
+      "path": "/api/apps/{slug}/capabilities"
+    },
+    {
+      "method": "GET",
+      "path": "/api/apps/{slug}/data"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/apps/{slug}/data/*"
+    },
+    {
+      "method": "GET",
+      "path": "/api/apps/{slug}/data/*"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/apps/{slug}/data/*"
+    },
+    {
+      "method": "POST",
+      "path": "/api/apps/{slug}/deploy"
+    },
+    {
+      "method": "POST",
+      "path": "/api/apps/{slug}/deploy-preflight"
+    },
+    {
+      "method": "GET",
+      "path": "/api/apps/{slug}/deployments"
+    },
+    {
+      "method": "POST",
+      "path": "/api/apps/{slug}/development-sessions/{sessionID}/end"
+    },
+    {
+      "method": "POST",
+      "path": "/api/apps/{slug}/development-sessions/{sessionID}/heartbeat"
+    },
+    {
+      "method": "GET",
+      "path": "/api/apps/{slug}/drafts"
+    },
+    {
+      "method": "POST",
+      "path": "/api/apps/{slug}/drafts"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/apps/{slug}/drafts/{draftID}"
+    },
+    {
+      "method": "POST",
+      "path": "/api/apps/{slug}/drafts/{draftID}/preview"
+    },
+    {
+      "method": "POST",
+      "path": "/api/apps/{slug}/drafts/{draftID}/promote"
+    },
+    {
+      "method": "GET",
+      "path": "/api/apps/{slug}/entitlement-grants"
+    },
+    {
+      "method": "GET",
+      "path": "/api/apps/{slug}/entitlements"
+    },
+    {
+      "method": "GET",
+      "path": "/api/apps/{slug}/entitlements/effective"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/apps/{slug}/entitlements/{entitlement}"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/apps/{slug}/entitlements/{entitlement}"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/apps/{slug}/entitlements/{entitlement}/grants"
+    },
+    {
+      "method": "POST",
+      "path": "/api/apps/{slug}/entitlements/{entitlement}/grants"
+    },
+    {
+      "method": "GET",
+      "path": "/api/apps/{slug}/env"
+    },
+    {
+      "method": "POST",
+      "path": "/api/apps/{slug}/env/apply"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/apps/{slug}/env/{key}"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/apps/{slug}/env/{key}"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/apps/{slug}/fleet-state"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/apps/{slug}/group-access"
+    },
+    {
+      "method": "GET",
+      "path": "/api/apps/{slug}/group-access"
+    },
+    {
+      "method": "POST",
+      "path": "/api/apps/{slug}/group-access"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/apps/{slug}/group-access/{group}"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/apps/{slug}/icon"
+    },
+    {
+      "method": "GET",
+      "path": "/api/apps/{slug}/icon"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/apps/{slug}/icon"
+    },
+    {
+      "method": "GET",
+      "path": "/api/apps/{slug}/logs"
+    },
+    {
+      "method": "GET",
+      "path": "/api/apps/{slug}/logs/sources"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/apps/{slug}/members"
+    },
+    {
+      "method": "GET",
+      "path": "/api/apps/{slug}/members"
+    },
+    {
+      "method": "POST",
+      "path": "/api/apps/{slug}/members"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/apps/{slug}/members/{user_id}"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/apps/{slug}/members/{user_id}"
+    },
+    {
+      "method": "GET",
+      "path": "/api/apps/{slug}/metrics"
+    },
+    {
+      "method": "GET",
+      "path": "/api/apps/{slug}/metrics/history"
+    },
+    {
+      "method": "POST",
+      "path": "/api/apps/{slug}/owner"
+    },
+    {
+      "method": "POST",
+      "path": "/api/apps/{slug}/restart"
+    },
+    {
+      "method": "POST",
+      "path": "/api/apps/{slug}/rollback"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/apps/{slug}/rollback"
+    },
+    {
+      "method": "GET",
+      "path": "/api/apps/{slug}/schedules"
+    },
+    {
+      "method": "POST",
+      "path": "/api/apps/{slug}/schedules"
+    },
+    {
+      "method": "POST",
+      "path": "/api/apps/{slug}/schedules/reconcile"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/apps/{slug}/schedules/{id}"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/apps/{slug}/schedules/{id}"
+    },
+    {
+      "method": "POST",
+      "path": "/api/apps/{slug}/schedules/{id}/activation/cancel"
+    },
+    {
+      "method": "POST",
+      "path": "/api/apps/{slug}/schedules/{id}/convergence/retry"
+    },
+    {
+      "method": "POST",
+      "path": "/api/apps/{slug}/schedules/{id}/refresh-stale"
+    },
+    {
+      "method": "POST",
+      "path": "/api/apps/{slug}/schedules/{id}/run"
+    },
+    {
+      "method": "GET",
+      "path": "/api/apps/{slug}/schedules/{id}/runs"
+    },
+    {
+      "method": "GET",
+      "path": "/api/apps/{slug}/schedules/{id}/runs/{run_id}"
+    },
+    {
+      "method": "POST",
+      "path": "/api/apps/{slug}/schedules/{id}/runs/{run_id}/cancel"
+    },
+    {
+      "method": "GET",
+      "path": "/api/apps/{slug}/schedules/{id}/runs/{run_id}/logs"
+    },
+    {
+      "method": "GET",
+      "path": "/api/apps/{slug}/shared-data"
+    },
+    {
+      "method": "POST",
+      "path": "/api/apps/{slug}/shared-data"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/apps/{slug}/shared-data/{source_slug}"
+    },
+    {
+      "method": "POST",
+      "path": "/api/apps/{slug}/sleep"
+    },
+    {
+      "method": "POST",
+      "path": "/api/apps/{slug}/stop"
+    },
+    {
+      "method": "GET",
+      "path": "/api/apps/{slug}/traces"
+    },
+    {
+      "method": "GET",
+      "path": "/api/apps/{slug}/usage"
+    },
+    {
+      "method": "GET",
+      "path": "/api/audit"
+    },
+    {
+      "method": "POST",
+      "path": "/api/auth/cli-connect/approve"
+    },
+    {
+      "method": "POST",
+      "path": "/api/auth/cli-connect/register"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/cli-connect/status"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/forward-auth/logout"
+    },
+    {
+      "method": "POST",
+      "path": "/api/auth/forward-auth/resume"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/github/callback"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/github/login"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/google/callback"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/google/login"
+    },
+    {
+      "method": "POST",
+      "path": "/api/auth/handoff"
+    },
+    {
+      "method": "POST",
+      "path": "/api/auth/invitations/accept"
+    },
+    {
+      "method": "POST",
+      "path": "/api/auth/invitations/preview"
+    },
+    {
+      "method": "POST",
+      "path": "/api/auth/login"
+    },
+    {
+      "method": "POST",
+      "path": "/api/auth/logout"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/me"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/auth/me"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/oidc/callback"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/oidc/login"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/providers"
+    },
+    {
+      "method": "POST",
+      "path": "/api/auth/revoke-sessions"
+    },
+    {
+      "method": "POST",
+      "path": "/api/auth/session"
+    },
+    {
+      "method": "POST",
+      "path": "/api/auth/trusted-publishing"
+    },
+    {
+      "method": "GET",
+      "path": "/api/fleet/health"
+    },
+    {
+      "method": "POST",
+      "path": "/api/fleet/runs"
+    },
+    {
+      "method": "GET",
+      "path": "/api/fleet/runs/{id}"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/fleet/runs/{id}"
+    },
+    {
+      "method": "GET",
+      "path": "/api/fleet/schedules/status"
+    },
+    {
+      "method": "GET",
+      "path": "/api/projects"
+    },
+    {
+      "method": "POST",
+      "path": "/api/projects"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/projects/{slug}"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/projects/{slug}"
+    },
+    {
+      "method": "GET",
+      "path": "/api/runtime-capabilities"
+    },
+    {
+      "method": "GET",
+      "path": "/api/server-info"
+    },
+    {
+      "method": "GET",
+      "path": "/api/service-accounts"
+    },
+    {
+      "method": "GET",
+      "path": "/api/service-accounts/{key}"
+    },
+    {
+      "method": "GET",
+      "path": "/api/service-accounts/{key}/credentials"
+    },
+    {
+      "method": "POST",
+      "path": "/api/service-accounts/{key}/credentials"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/service-accounts/{key}/credentials/{id}"
+    },
+    {
+      "method": "POST",
+      "path": "/api/support-sessions"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/support-sessions/current"
+    },
+    {
+      "method": "GET",
+      "path": "/api/support-sessions/current"
+    },
+    {
+      "method": "GET",
+      "path": "/api/tokens"
+    },
+    {
+      "method": "POST",
+      "path": "/api/tokens"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/tokens/{id}"
+    },
+    {
+      "method": "GET",
+      "path": "/api/user-invitations"
+    },
+    {
+      "method": "POST",
+      "path": "/api/user-invitations"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/user-invitations/{id}"
+    },
+    {
+      "method": "POST",
+      "path": "/api/user-invitations/{id}/replace"
+    },
+    {
+      "method": "GET",
+      "path": "/api/users"
+    },
+    {
+      "method": "POST",
+      "path": "/api/users"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/users/{id}"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/users/{id}"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/users/{id}/password"
+    },
+    {
+      "method": "POST",
+      "path": "/api/users/{id}/revoke-sessions"
+    },
+    {
+      "method": "GET",
+      "path": "/api/users/{id}/support-apps"
+    },
+    {
+      "method": "GET",
+      "path": "/api/users/{username}"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workers"
+    },
+    {
+      "method": "POST",
+      "path": "/api/workers/{node_id}/revoke"
+    }
+  ],
+  "assets": [
+    "accept-invitation.html",
+    "app.js",
+    "auth-navigation.js",
+    "brand/README.md",
+    "brand/apple-touch-icon.png",
+    "brand/favicon-64.png",
+    "brand/favicon-dark-16.png",
+    "brand/favicon-dark-32.png",
+    "brand/favicon-light-16.png",
+    "brand/favicon-light-32.png",
+    "brand/favicon.ico",
+    "brand/orbit-hub-lockup-dark.png",
+    "brand/orbit-hub-lockup-dark.svg",
+    "brand/orbit-hub-lockup-light.png",
+    "brand/orbit-hub-lockup-light.svg",
+    "brand/orbit-hub-mark-dark.png",
+    "brand/orbit-hub-mark-dark.svg",
+    "brand/orbit-hub-mark-light.png",
+    "brand/orbit-hub-mark-light.svg",
+    "bundle-rules.json",
+    "deploy-summary.js",
+    "fonts/OFL-Manrope.txt",
+    "fonts/OFL-SpaceMono.txt",
+    "fonts/fonts.css",
+    "fonts/manrope-cyrillic-ext.woff2",
+    "fonts/manrope-cyrillic.woff2",
+    "fonts/manrope-greek.woff2",
+    "fonts/manrope-latin-ext.woff2",
+    "fonts/manrope-latin.woff2",
+    "fonts/manrope-vietnamese.woff2",
+    "fonts/space-mono-400-latin-ext.woff2",
+    "fonts/space-mono-400-latin.woff2",
+    "fonts/space-mono-400-vietnamese.woff2",
+    "fonts/space-mono-700-latin-ext.woff2",
+    "fonts/space-mono-700-latin.woff2",
+    "fonts/space-mono-700-vietnamese.woff2",
+    "index.html",
+    "metrics-controller.js",
+    "not-found.html",
+    "router.js",
+    "style.css",
+    "vendor/jszip.min.js",
+    "views/about.js",
+    "views/accept-invitation.js",
+    "views/announcements.js",
+    "views/app-attention.js",
+    "views/app-avatar.js",
+    "views/app-card-actions.js",
+    "views/app-card-badge.js",
+    "views/app-card-facts.js",
+    "views/app-card-lifecycle.js",
+    "views/app-deploy-state.js",
+    "views/app-detail-envelope.js",
+    "views/app-detail-nav.js",
+    "views/app-detail.js",
+    "views/app-grid-groups.js",
+    "views/app-isolation-banner.js",
+    "views/apps-grid.js",
+    "views/audit-detail.js",
+    "views/audit-log.js",
+    "views/autoscale-visual.js",
+    "views/autoscale.js",
+    "views/boot-prefetch.js",
+    "views/branding.js",
+    "views/bundle-filter.js",
+    "views/cli-connect.js",
+    "views/connectivity-banner.js",
+    "views/cpu-capacity.js",
+    "views/crash-banner.js",
+    "views/deployment-row.js",
+    "views/detail-capacity.js",
+    "views/emoji-picker.js",
+    "views/fleet-health.js",
+    "views/fleet-ui.js",
+    "views/focus-restore.js",
+    "views/focus-trap.js",
+    "views/freshness.js",
+    "views/group-disclosure.js",
+    "views/in-flight.js",
+    "views/kebab-menu.js",
+    "views/launchpad-model.js",
+    "views/launchpad.js",
+    "views/log-pane.js",
+    "views/login-providers.js",
+    "views/logout-navigation.js",
+    "views/logs-ui.js",
+    "views/new-person.js",
+    "views/overview-activity.js",
+    "views/overview-model.js",
+    "views/overview.js",
+    "views/people-onboarding.js",
+    "views/person-actions.js",
+    "views/project-detail.js",
+    "views/project-edit-body.js",
+    "views/project-groups.js",
+    "views/release-strip.js",
+    "views/render-pacing.js",
+    "views/render-window.js",
+    "views/replica-display.js",
+    "views/request-coalesce.js",
+    "views/resource-settings.js",
+    "views/scaling-settings.js",
+    "views/schedule-ui.js",
+    "views/session-controller.js",
+    "views/sidebar-drawer.js",
+    "views/sidebar-nav.js",
+    "views/sparkline.js",
+    "views/stat-format.js",
+    "views/status-label.js",
+    "views/support-session-modal.js",
+    "views/support-session-recovery.js",
+    "views/support-session-settings.js",
+    "views/tablist-keys.js",
+    "views/theme.js",
+    "views/tokens.js",
+    "views/traces-ui.js",
+    "views/trends-card.js",
+    "views/usage-privacy.js",
+    "views/usage-ui.js",
+    "views/user-identity.js",
+    "views/user-row.js",
+    "views/users.js",
+    "views/visible-poll.js",
+    "views/worker-isolation.js",
+    "views/workers.js",
+    "zip-writer.js"
+  ],
+  "apps": [
+    "agent-capabilities-demo",
+    "bookmarking-demo",
+    "dash-demo",
+    "identity-demo",
+    "operations-dashboard",
+    "r-shiny-gallery",
+    "streamlit-demo"
+  ],
+  "projects": [
+    "featured",
+    "frameworks"
+  ]
+}

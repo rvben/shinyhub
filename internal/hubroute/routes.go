@@ -17,6 +17,12 @@ var appDetailPath = regexp.MustCompile(`^/apps/` + slugpkg.Pattern + `(/[a-z-]+)
 // apps, so malformed paths still receive a real 404 from the server.
 var projectDetailPath = regexp.MustCompile(`^/projects/` + slugpkg.Pattern + `/?$`)
 
+// UIPathPatterns exposes the dynamic route contract to the demo edge manifest.
+// The expressions use syntax shared by Go and JavaScript regular expressions.
+func UIPathPatterns() []string {
+	return []string{appDetailPath.String(), projectDetailPath.String()}
+}
+
 // ExactUIRoutes is the single source of truth for the client-side SPA routes
 // that are matched by an EXACT path (as opposed to the /apps/<slug> pattern).
 // Both IsUIPath (the shell-fallback guard) and the server's mux registrations

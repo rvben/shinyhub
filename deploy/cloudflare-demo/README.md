@@ -48,8 +48,32 @@ whatever the server would 404 anyway, mirroring `internal/apporigin`. Before
 that gate existed, sparse automated traffic to control-plane paths woke the demo
 around the clock and was the entire metered charge on the bill.
 
+The control host uses an allowlist generated from the registered API methods,
+dashboard route contract, embedded static files, and curated fleet. Unknown
+paths, asset names, app names, and project names receive an edge 404 in every
+lifecycle state. Scanner paths such as `/.env`, `/.git/config`, `/wp-login.php`,
+`/phpmyadmin/`, `/cgi-bin/`, `/debug/pprof/`, `/metrics`, and `/internal/` never
+resolve a container handle. Malformed escapes, encoded separators, repeated
+slashes, traversal segments, and double-encoded paths fail closed. Real API
+routes still enforce authentication and authorization in ShinyHub.
+
+Regenerate `src/route-manifest.json` from the repository root after changing
+routes, static assets, or `fleet.toml`:
+
+```sh
+GOWORK=off go run ./deploy/cloudflare-demo/generate-routes
+GOWORK=off go run ./deploy/cloudflare-demo/generate-routes --check
+```
+
+The ordinary Go test suite checks for manifest drift. Versioned and unversioned
+asset URLs are both admitted, so a Worker update can retain the current
+container image. When retaining an older image, also audit its asset references
+and routes against the manifest before deploying; removed assets or routes may
+require a coordinated image rollout.
+
 The demo configures no external authentication providers. Requests under
-`/api/auth/github`, `/api/auth/google`, and `/api/auth/oidc` receive a 404 at
+`/api/auth/github`, `/api/auth/google`, `/api/auth/oidc`, and
+`/api/auth/forward-auth` receive a 404 at
 the edge, including escaped provider names and callbacks. These requests never
 touch the container, whether it is asleep, starting, or healthy, so they cannot
 wake it or extend its idle deadline. Local viewer sessions still work normally.
@@ -59,11 +83,10 @@ entry path or submits the start form can still cause a wake.
 While the container is asleep, exactly two requests may start it: a browser
 navigating to `/` or `/login` on the demo host, and the start page's button. The
 first is recognised by `Sec-Fetch-Dest: document`, which browsers generate and a
-page cannot set, so unlike `Accept: text/html` it is not something a crawler
-produces merely by asking for HTML. The second rests on a plainer fact: bots
-fetch and parse, they do not submit forms, so a POST to `/__demo/start` is the
-one request the gate can believe with no headers at all. That is what lets a
-visitor through whose browser tells the edge nothing. The one thing it will not
+page cannot set. Ordinary HTTP crawlers do not send it automatically, although
+an HTTP client can forge it and a headless browser can supply it. The second
+allows a POST to `/__demo/start`, so visitors whose browser tells the edge
+nothing can still start the demo deliberately. The one thing it will not
 believe is a browser saying that post came from somewhere else: any page on the
 web can submit a form here, and `Sec-Fetch-Site` is how a browser reports that
 one did. Those get the start page, so a visitor whose click was borrowed still
@@ -75,11 +98,12 @@ Everything else on an entry path is answered with the start page, a 200 rendered
 at the edge that costs nothing and says what is true: the demo is asleep, and
 here is the button that starts it. Nothing on an entry path is refused, so a
 shared link previews as the demo rather than as an error, which is why the page
-carries Open Graph tags. Requests off the entry paths are sent to the entry page
-if they look like a page load at all, including a link into an app on the app
-origin, whose page could not be served before the container is up anyway; the
-redirect names that page absolutely, because the app origin does not serve it.
-Only what is neither is refused with a 503 that never touches the container.
+carries Open Graph tags. Only admitted dashboard and app navigations off the
+entry paths can redirect to the entry page. API requests, static asset requests,
+favicons, and health probes receive a 503 while asleep, even with browser
+navigation headers, and never redirect into a wake. Unknown routes receive a
+404 before the lifecycle check. App-origin navigations redirect to the control
+host, carrying the original app link through the viewer session flow.
 
 A deep link has to survive the wake, because the demo's apps are private and a
 visitor arriving cold has no session yet. The path they asked for therefore

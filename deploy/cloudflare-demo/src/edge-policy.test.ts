@@ -99,7 +99,7 @@ test("the app origin rejects what its server would 404", () => {
 test("the control host still forwards its own routes", () => {
   assert.equal(classifyEdgeRequest(DEMO_HOST, "/"), "forward");
   assert.equal(classifyEdgeRequest(DEMO_HOST, "/api/auth/session"), "forward");
-  assert.equal(classifyEdgeRequest(DEMO_HOST, "/apps/demo/logs"), "forward");
+  assert.equal(classifyEdgeRequest(DEMO_HOST, "/apps/dash-demo/logs"), "forward");
 });
 
 test("disabled demo providers are rejected at the edge without blocking local auth", () => {
@@ -107,7 +107,7 @@ test("disabled demo providers are rejected at the edge without blocking local au
     "/api/auth/%67oogle/login", "/api/auth%2Fgoogle%2Flogin", "/api/auth/google", "/api/auth/%zz/login"]) {
     assert.equal(classifyEdgeRequest(DEMO_HOST, path), "reject");
   }
-  for (const path of ["/api/auth/providers", "/api/auth/session", "/api/auth/logout", "/api/auth/googleish/login"]) {
+  for (const path of ["/api/auth/providers", "/api/auth/session", "/api/auth/logout"]) {
     assert.equal(classifyEdgeRequest(DEMO_HOST, path), "forward");
   }
 });
@@ -323,7 +323,7 @@ test("a control-plane call dressed as a navigation leaves the container asleep",
     method: "GET",
     pathname: "/api/user/login",
     ...navigation,
-  }), "redirect-to-entry");
+  }), "refuse");
   assert.equal(classifyColdRequest({
     hostname: DEMO_HOST,
     method: "POST",
@@ -402,7 +402,7 @@ test("the whole surface offers exactly two ways to spend a cold start", () => {
   const woken: string[] = [];
   for (const hostname of [DEMO_HOST, APP_HOST]) {
     for (const method of ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"]) {
-      for (const pathname of ["/", "/login", DEMO_START_PATH, "/__demo/session", "/apps/x", "/app/streamlit-demo/", "/healthz"]) {
+      for (const pathname of ["/", "/login", DEMO_START_PATH, "/__demo/session", "/apps/dash-demo", "/app/streamlit-demo/", "/healthz"]) {
         for (const [sender, dest] of Object.entries(senders)) {
           if (classifyColdRequest({ hostname, method, pathname, ...dest }) === "wake") {
             woken.push(`${sender}: ${method} ${hostname}${pathname}`);
@@ -438,7 +438,7 @@ function everyColdVerdict(): { label: string; verdict: ReturnType<typeof classif
   const out = [];
   for (const hostname of [DEMO_HOST, APP_HOST]) {
     for (const method of ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"]) {
-      for (const pathname of ["/", "/login", DEMO_START_PATH, "/__demo/session", "/api/server-info", "/apps/x", "/app/streamlit-demo/", "/healthz"]) {
+      for (const pathname of ["/", "/login", DEMO_START_PATH, "/__demo/session", "/api/server-info", "/apps/dash-demo", "/app/streamlit-demo/", "/healthz"]) {
         for (const [sender, dest] of Object.entries(senders)) {
           out.push({
             label: `${sender}: ${method} ${hostname}${pathname}`,
@@ -502,7 +502,7 @@ test("a hop of the cold path asks for its threaded destination, not its own path
 });
 
 test("a threaded destination that could leave the demo is not inherited from the path", () => {
-  assert.equal(requestedDestination("/apps/x", `?${DEMO_NEXT_PARAM}=//evil.example`), null);
+  assert.equal(requestedDestination("/apps/dash-demo", `?${DEMO_NEXT_PARAM}=//evil.example`), null);
 });
 
 test("a threaded destination is kept only when it stays on the demo", () => {

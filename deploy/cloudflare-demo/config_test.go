@@ -49,6 +49,9 @@ func TestCloudflareDemoConfigurationIsEphemeralAndBounded(t *testing.T) {
 	if !cfg.Auth.LocalLoginEnabled() {
 		t.Fatal("the public read-only demo account requires local login")
 	}
+	if cfg.OAuth.GitHub.ClientID != "" || cfg.OAuth.Google.ClientID != "" || cfg.OAuth.OIDC.IssuerURL != "" || cfg.Auth.ForwardAuth.Enabled {
+		t.Fatal("demo edge admission rejects external providers; update the policy before enabling one")
+	}
 }
 
 func TestCloudflareDemoFleetIsCurated(t *testing.T) {
