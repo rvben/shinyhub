@@ -178,6 +178,18 @@ events from stdout/stderr and the Worker:
 - `demo_wake_failed`: the SDK failed to start the container, including failures
   that happen before the entrypoint can run. It records the request attempt's
   elapsed time and a bounded reason without request URLs, cookies, or tokens.
+- `demo_wake_requested`: the edge admitted a start attempt. `cold_start` says
+  whether the observed container was asleep rather than already booting;
+  `trigger` separates navigation from a start-form submission. `entry`,
+  `fetch_site`, and `browser_navigation` are bounded categories, not proof of a
+  human visitor. No IP address, URL, cookie, or user-agent value is logged.
+- `demo_wake_completed`: the start routine resolved, with `elapsed_ms`. A random
+  `wake_id` links the request to completion or `demo_wake_failed`. These are
+  request attempts, not unique container boots: concurrent requests can observe
+  the same sleeping container. Use `demo_boot_started` to count process boots.
+  In Workers Logs, filter `event = "demo_wake_requested" AND cold_start = true`
+  to inspect cold admission, then compare navigation and start-form counts
+  before adding a challenge. Passive probes and warm visits emit no wake events.
 - `demo_upstream_failed`: a proxied application or viewer-session request
   returned HTTP 5xx. It records only the operation and status, without request
   paths, query strings, cookies, or response bodies.

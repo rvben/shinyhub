@@ -21,9 +21,10 @@ function fixture(status = "stopped", passiveReadiness = false) {
   const requests: Request[] = [];
   const work: Promise<unknown>[] = [];
   let response = () => Response.json({ ok: true });
+  let start = async () => {};
   const backend = {
     async getState() { counts.state++; return { status }; },
-    async start() { counts.start++; },
+    async start() { counts.start++; await start(); },
     async fetch(request: Request) { counts.fetch++; requests.push(request); return response(); },
   };
   const worker = createDemoWorker({ controlHost: control, appHost: apps, passiveReadiness,
@@ -33,6 +34,7 @@ function fixture(status = "stopped", passiveReadiness = false) {
     fetch(request: Request) { return worker.fetch!(request, {}, ctx); },
     setStatus(value: string) { status = value; },
     setResponse(value: () => Response) { response = value; },
+    setStart(value: () => Promise<void>) { start = value; },
   };
 }
 
@@ -44,6 +46,58 @@ test("unknown hosts, robots and rejected app APIs never resolve a container", as
     ["https://" + apps + "/api/auth/session", 404],
   ] as const) assert.equal((await f.fetch(new Request(url))).status, status);
   assert.deepEqual(f.counts, { resolve: 0, state: 0, start: 0, fetch: 0 });
+});
+
+test("wake logs distinguish cold starts from ongoing boots and keep request data bounded", async (t) => {
+  const logs = t.mock.method(console, "info", () => {});
+  const errors = t.mock.method(console, "error", () => {});
+  for (const status of ["stopped", "starting"]) {
+    for (const method of ["GET", "POST"]) {
+      const f = fixture(status);
+      await f.fetch(new Request(`https://${control}${method === "POST" ? "/__demo/start" : "/login"}?secret=private`, {
+        method, headers: { "sec-fetch-dest": "document", "sec-fetch-site": "private", cookie: "private", "user-agent": "private" },
+      }));
+      await Promise.all(f.work);
+      const requested = logs.mock.calls.at(-2)!.arguments[0];
+      assert.match(requested.wake_id, /^[0-9a-f-]{36}$/);
+      assert.deepEqual(requested, {
+        event: "demo_wake_requested", wake_id: requested.wake_id,
+        cold_start: status === "stopped", trigger: method === "POST" ? "start_form" : "navigation",
+        entry: method === "POST" ? "start" : "login", fetch_site: "other", browser_navigation: true,
+      });
+      const completed = logs.mock.calls.at(-1)!.arguments[0];
+      assert.deepEqual(Object.keys(completed).sort(), ["elapsed_ms", "event", "wake_id"]);
+      assert.equal(completed.event, "demo_wake_completed");
+      assert.equal(completed.wake_id, requested.wake_id);
+      assert.ok(completed.elapsed_ms >= 0);
+    }
+  }
+  const failed = fixture();
+  failed.setStart(async () => { throw new Error("private timeout details"); });
+  await failed.fetch(new Request(`https://${control}/__demo/start`, { method: "POST" }));
+  await Promise.all(failed.work);
+  const requested = logs.mock.calls.at(-1)!.arguments[0];
+  assert.equal(requested.fetch_site, "missing");
+  assert.equal(requested.browser_navigation, false);
+  const error = errors.mock.calls.at(-1)!.arguments[0];
+  assert.deepEqual(Object.keys(error).sort(), ["elapsed_ms", "event", "reason", "wake_id"]);
+  assert.equal(error.event, "demo_wake_failed");
+  assert.equal(error.wake_id, requested.wake_id);
+  assert.equal(error.reason, "timeout");
+  assert.equal(logs.mock.callCount(), 9);
+});
+
+test("edge rejections, cold probes, cross-site forms and warm visits emit no wake logs", async (t) => {
+  const logs = t.mock.method(console, "info", () => {});
+  const f = fixture();
+  for (const path of ["/", "/healthz", "/__demo/ready", "/__demo/status", "/.env"]) {
+    await f.fetch(new Request(`https://${control}${path}`));
+  }
+  await f.fetch(new Request(`https://${control}/__demo/start`, { method: "POST", headers: { "sec-fetch-site": "cross-site" } }));
+  f.setStatus("healthy");
+  await f.fetch(new Request(`https://${control}/`, { headers: { "sec-fetch-dest": "document" } }));
+  assert.equal(logs.mock.callCount(), 0);
+  assert.equal(f.counts.start, 0);
 });
 
 test("cold entry and readiness probes cannot start or proxy into the container", async () => {

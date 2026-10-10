@@ -208,9 +208,24 @@ export function createDemoWorker<Env>(options: DemoWorkerOptions<Env>): Exported
           return demoStartResponse(destination, request.method, entryURL);
         }
         if (coldVerdict === "wake") {
-          ctx.waitUntil(container.start().catch((error: unknown) => {
+          const wakeID = crypto.randomUUID();
+          const site = request.headers.get("sec-fetch-site");
+          console.info({
+            event: "demo_wake_requested",
+            wake_id: wakeID,
+            cold_start: asleep,
+            trigger: request.method === "POST" ? "start_form" : "navigation",
+            entry: url.pathname === DEMO_START_PATH ? "start" : url.pathname === "/login" ? "login" : "root",
+            fetch_site: site === null ? "missing"
+              : ["none", "same-origin", "same-site", "cross-site"].includes(site) ? site : "other",
+            browser_navigation: request.headers.get("sec-fetch-dest") === "document",
+          });
+          ctx.waitUntil(container.start().then(() => {
+            console.info({ event: "demo_wake_completed", wake_id: wakeID, elapsed_ms: Date.now() - now });
+          }).catch((error: unknown) => {
             console.error({
               event: "demo_wake_failed",
+              wake_id: wakeID,
               elapsed_ms: Date.now() - now,
               reason: error instanceof Error && /timeout|timed out/i.test(error.message)
                 ? "timeout" : "start_failed",
