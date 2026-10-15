@@ -1,2 +1,2 @@
 shiny>=1.8
-PyJWT>=2.14
+PyJWT>=2.15.1

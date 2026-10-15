@@ -1,1 +1,1 @@
-streamlit>=1.64
+streamlit>=1.65
