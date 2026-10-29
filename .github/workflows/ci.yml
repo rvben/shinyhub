@@ -3,7 +3,7 @@ name: ci
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, verify/session-recovery]
 
 permissions:
   contents: read
