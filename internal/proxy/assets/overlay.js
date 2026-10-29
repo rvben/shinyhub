@@ -16,7 +16,9 @@
  *      reaches the native constructor unchanged. Its disconnect UI depends on
  *      Shiny appending a #shiny-disconnected-overlay
  *      div to <body> on disconnect and removing it on reconnect, which is a
- *      public, user-styleable DOM contract shared by R and Python Shiny. After
+ *      public, user-styleable DOM contract shared by R and Python Shiny. During
+ *      safe automatic recovery it makes that marker transparent, retaining its
+ *      pointer blocker. After
  *      an explicit viewer choice it may hide that marker so the retained page
  *      can be inspected as a clearly labelled offline snapshot.
  *   2. Every entry point is wrapped. A throw here must never escape into a page
@@ -76,6 +78,129 @@
   var activeConnectionID = "";
   var endedConnectionID = "";
   var incidentConnectionID = "";
+  var recoveryTimer = null;
+  var recoveryDeadline = null;
+  var restoreTimer = null;
+  var recoveryStarted = 0;
+  var quietMarker = null;
+  var markerOpacity = "";
+  var markerOpacityPriority = "";
+  var markerAriaHidden = null;
+  var recoveryKey = "shinyhub-recovery:" + window.location.pathname;
+  var incidentSerial = 0;
+  var probeSerial = 0;
+  var probeTimer = null;
+  var probeAbort = null;
+
+  function cancelProbe() {
+    probeSerial++;
+    if (probeTimer !== null) window.clearTimeout(probeTimer);
+    probeTimer = null;
+    if (probeAbort) probeAbort.abort();
+    probeAbort = null;
+  }
+
+  function canRestore() {
+    if (!everConnected || typeof window.CustomEvent !== "function" ||
+        document.getElementById("shinyhub-session-notice")) return false;
+    try {
+      // Keep the circuit breaker across reloads, including a briefly successful
+      // connection. With storage disabled, keep the safe manual fallback.
+      var last = Number(window.sessionStorage.getItem(recoveryKey));
+      if (last && Date.now() - last < 60000) return false;
+      return !window.dispatchEvent(new window.CustomEvent("shinyhub:session-recovery", { cancelable: true }));
+    } catch (e) { return false; }
+  }
+
+  function cancelRecoveryNotice() {
+    if (recoveryTimer !== null) window.clearTimeout(recoveryTimer);
+    if (recoveryDeadline !== null) window.clearTimeout(recoveryDeadline);
+    if (restoreTimer !== null) window.clearTimeout(restoreTimer);
+    recoveryTimer = null;
+    recoveryDeadline = null;
+    restoreTimer = null;
+  }
+
+  function quietDisconnectMarker() {
+    var marker = document.getElementById(SHINY_OVERLAY_ID);
+    if (!marker || marker === quietMarker) return;
+    restoreDisconnectMarker();
+    quietMarker = marker;
+    markerOpacity = marker.style.getPropertyValue("opacity");
+    markerOpacityPriority = marker.style.getPropertyPriority("opacity");
+    markerAriaHidden = marker.getAttribute("aria-hidden");
+    // Keep Shiny's pointer blocker in place while avoiding a grey flash.
+    // Keyboard edits are still observed by the bookmark bridge and veto reload.
+    marker.style.setProperty("opacity", "0", "important");
+    marker.setAttribute("aria-hidden", "true");
+  }
+
+  function restoreDisconnectMarker() {
+    if (!quietMarker) return;
+    if (markerOpacity) quietMarker.style.setProperty("opacity", markerOpacity, markerOpacityPriority);
+    else quietMarker.style.removeProperty("opacity");
+    if (markerAriaHidden === null) quietMarker.removeAttribute("aria-hidden");
+    else quietMarker.setAttribute("aria-hidden", markerAriaHidden);
+    quietMarker = null;
+  }
+
+  function queueRestore() {
+    stopPolling();
+    // Give Shiny a short chance to reconnect its existing session before
+    // replacing the page. Recheck the bookmark at the moment of navigation.
+    restoreTimer = window.setTimeout(guard(function () {
+      restoreTimer = null;
+      if (!showing || currentState !== "recovering") return;
+      if (window.navigator.onLine === false) { recoveryNotice(); schedule(); return; }
+      if (!restoreView()) recovered();
+    }), Math.max(0, 750 - (Date.now() - recoveryStarted)));
+  }
+
+  function restoreView() {
+    if (currentState !== "recovering" || !canRestore()) return false;
+    try { window.sessionStorage.setItem(recoveryKey, String(Date.now())); }
+    catch (e) { return false; }
+    cancelRecoveryNotice();
+    cancelProbe();
+    stopPolling();
+    currentState = "restoring";
+    // Reload preserves the complete current query and hash. Shiny restores the
+    // registered filters using its normal bookmark lifecycle.
+    window.location.reload();
+    return true;
+  }
+
+  function recoveryNotice() {
+    if (!ui) ui = build();
+    ui.openLink.href = window.location.href;
+    ui.root.className = "is-snapshot";
+    ui.root.style.display = "flex";
+    ui.root.style.inset = "auto 16px 16px";
+    ui.root.style.padding = "0";
+    ui.root.style.background = "transparent";
+    ui.root.removeAttribute("aria-modal");
+    ui.root.setAttribute("role", "status");
+    ui.box.style.padding = "16px 20px";
+    ui.box.style.display = "block";
+    ui.box.style.maxWidth = "520px";
+    ui.box.style.margin = "0";
+    var offline = window.navigator.onLine === false;
+    ui.title.textContent = offline ? "You’re offline" : "Reconnecting to your dashboard";
+    ui.msg.textContent = offline
+      ? "We’ll reconnect when you’re back online. Your last results are still here."
+      : "We’ll restore your saved filters. You can also keep these results open.";
+    ui.spinner.style.display = offline ? "none" : "block";
+    ui.stateDot.style.display = offline ? "block" : "none";
+    ui.reference.style.display = "none";
+    ui.actions.style.display = "flex";
+    ui.actions.style.marginTop = "12px";
+    show(ui.openLink, false);
+    show(ui.reloadButton, false);
+    show(ui.restartButton, false);
+    show(ui.keepButton, true);
+    if (!ui.root.parentNode) document.body.appendChild(ui.root);
+    // A status update must not take keyboard focus from the dashboard.
+  }
 
   // The browser hides 101 response headers from JavaScript. Tag the Shiny
   // socket before it opens so the browser and proxy know the same ID. If this
@@ -274,7 +399,8 @@
         "#" + OWN_ID + " a:focus-visible, #" + OWN_ID + " button:focus-visible { outline: 3px solid #38BDF8; outline-offset: 3px; }",
         "#" + OWN_ID + " ::selection { background: #38BDF8; color: #030510; }",
         "@media (max-width: 520px) { #" + OWN_ID + " { padding: 16px !important; align-items: flex-end !important; } #" + OWN_ID + " > div { padding: 22px 18px !important; } #" + OWN_ID + " [data-shinyhub-actions] { flex-direction: column; } #" + OWN_ID + " [data-shinyhub-actions] > * { width: 100%; } #" + OWN_ID + ".is-snapshot { inset: auto 8px 8px 8px !important; padding: 0 !important; } #" + OWN_ID + ".is-snapshot > div { display: block !important; padding: 16px !important; } #" + OWN_ID + ".is-snapshot [data-shinyhub-actions] { margin-top: 16px !important; } }",
-        "@media (prefers-reduced-motion: reduce) { #" + OWN_ID + " * { transition: none !important; } #shinyhub-status-spinner, #" + DOT_ID + " { animation: none !important; } }"
+        "@media (prefers-reduced-motion: reduce) { #" + OWN_ID + " * { transition: none !important; } #shinyhub-status-spinner, #" + DOT_ID + " { animation: none !important; } }",
+        "@media (forced-colors: active) { #" + OWN_ID + " > div { border: 1px solid CanvasText; } #" + OWN_ID + " a, #" + OWN_ID + " button { border: 1px solid ButtonText; } }"
       ];
       for (var i = 0; i < rules.length; i++) {
         style.sheet.insertRule(rules[i], style.sheet.cssRules.length);
@@ -296,7 +422,7 @@
         justifyContent: "center",
         boxSizing: "border-box",
         padding: "24px",
-        background: "rgba(3,5,16,0.90)",
+        background: "rgba(3,5,16,0.60)",
         color: "#E8EEFF",
         fontFamily:
           'Manrope, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif'
@@ -370,7 +496,7 @@
     title.id = TITLE_ID;
     var msg = el("p", {
       color: "#A8B4D4",
-      fontSize: "0.875rem",
+      fontSize: "1rem",
       margin: "6px 0 0",
       lineHeight: "1.55",
       maxWidth: "64ch"
@@ -428,6 +554,10 @@
       })
     );
     openLink.addEventListener("click", guard(enterSnapshot));
+    var keepButton = el("button", actionStyles("quiet"), "Keep these results");
+    keepButton.id = "shinyhub-status-keep";
+    keepButton.type = "button";
+    keepButton.addEventListener("click", guard(enterSnapshot));
 
     signal.appendChild(spinner);
     signal.appendChild(stateDot);
@@ -439,6 +569,7 @@
     actions.appendChild(openLink);
     actions.appendChild(reloadButton);
     actions.appendChild(restartButton);
+    actions.appendChild(keepButton);
     box.appendChild(header);
     box.appendChild(actions);
     root.appendChild(box);
@@ -450,7 +581,7 @@
         if (root.getAttribute("aria-modal") !== "true") {
           return;
         }
-        if (event.key === "Escape" && currentState === "ready") {
+        if (event.key === "Escape" && everConnected) {
           event.preventDefault();
           enterSnapshot();
           return;
@@ -458,7 +589,7 @@
         if (event.key !== "Tab") {
           return;
         }
-        var controls = [openLink, reloadButton, restartButton];
+        var controls = [openLink, reloadButton, restartButton, keepButton];
         var visible = [];
         for (var i = 0; i < controls.length; i++) {
           if (controls[i].style.display !== "none") {
@@ -503,7 +634,8 @@
       reference: reference,
       openLink: openLink,
       reloadButton: reloadButton,
-      restartButton: restartButton
+      restartButton: restartButton,
+      keepButton: keepButton
     };
   }
 
@@ -514,6 +646,8 @@
   }
 
   function render(state, titleText, msgText, reloadText) {
+    cancelRecoveryNotice();
+    restoreDisconnectMarker();
     if (!ui) {
       ui = build();
     }
@@ -524,7 +658,7 @@
     ui.root.style.display = "flex";
     ui.root.style.alignItems = "center";
     ui.root.style.justifyContent = "center";
-    ui.root.style.background = "rgba(3,5,16,0.90)";
+    ui.root.style.background = "rgba(3,5,16,0.60)";
     ui.root.style.pointerEvents = "auto";
     ui.root.setAttribute("role", "dialog");
     ui.root.setAttribute("aria-modal", "true");
@@ -538,7 +672,9 @@
     ui.header.style.flex = "";
     ui.header.style.alignItems = "flex-start";
     ui.actions.style.flexWrap = "wrap";
+    ui.actions.style.display = "flex";
     ui.actions.style.marginTop = "24px";
+    ui.openLink.href = window.location.href;
     ui.title.textContent = titleText;
     ui.title.style.color = "#E8EEFF";
     ui.msg.textContent = msgText;
@@ -552,9 +688,10 @@
       state === "ready"
         ? "shinyhub-ready-pulse 760ms cubic-bezier(0.16,1,0.3,1) 2"
         : "";
-    Object.assign(ui.reloadButton.style, actionStyles(state === "waiting" ? "secondary" : "primary"));
-    show(ui.openLink, state === "ready" || state === "waiting");
+    Object.assign(ui.reloadButton.style, actionStyles(state === "waiting" || state === "unavailable" ? "secondary" : "primary"));
+    show(ui.openLink, state === "ready" || state === "waiting" || state === "unavailable");
     show(ui.restartButton, state === "ready");
+    show(ui.keepButton, everConnected);
     show(ui.reloadButton, !!reloadText);
     if (reloadText) {
       ui.reloadButton.textContent = reloadText;
@@ -562,7 +699,7 @@
     if (!ui.root.parentNode) {
       document.body.appendChild(ui.root);
     }
-    if (state === "ready" || state === "waiting") {
+    if (state === "ready" || state === "waiting" || state === "unavailable") {
       ui.openLink.focus();
     } else if (reloadText) {
       ui.reloadButton.focus();
@@ -572,9 +709,13 @@
   }
 
   function enterSnapshot() {
-    if (!ui || (currentState !== "ready" && currentState !== "waiting")) {
+    if (!ui || !everConnected || currentState === "restoring" || currentState === "snapshot") {
       return;
     }
+    incidentSerial++;
+    cancelRecoveryNotice();
+    cancelProbe();
+    restoreDisconnectMarker();
     stopPolling();
     currentState = "snapshot";
     var marker = document.getElementById(SHINY_OVERLAY_ID);
@@ -611,6 +752,7 @@
     show(ui.openLink, true);
     show(ui.reloadButton, false);
     show(ui.restartButton, true);
+    show(ui.keepButton, false);
     if (publishSnapshot(true)) {
       ui.root.style.display = "none";
     } else {
@@ -650,6 +792,10 @@
   }
 
   function teardown() {
+    incidentSerial++;
+    cancelRecoveryNotice();
+    cancelProbe();
+    restoreDisconnectMarker();
     stopPolling();
     connected();
     showing = false;
@@ -657,11 +803,12 @@
     publishConnected();
     currentState = null;
     incidentConnectionID = "";
+    var heldFocus = ui && ui.root.contains(document.activeElement);
     if (ui && ui.root.parentNode) {
       ui.root.parentNode.removeChild(ui.root);
     }
     if (
-      previousFocus &&
+      heldFocus && previousFocus &&
       previousFocus !== document.body &&
       document.documentElement.contains(previousFocus) &&
       typeof previousFocus.focus === "function"
@@ -715,16 +862,18 @@
   // snapshot. Viewers can also inspect the snapshot first or explicitly choose
   // to replace it by restarting in this tab.
   function recovered() {
+    cancelProbe();
     stopPolling();
     render(
       "ready",
-      "This session was interrupted",
-      "Results and controls no longer update. Use a new tab to keep these results available.",
+      "Your dashboard is ready to reopen",
+      "These results are still here, but no longer update. Use a new tab to keep these results available.",
       null
     );
   }
 
   function gone() {
+    cancelProbe();
     stopPolling();
     render(
       "error",
@@ -735,6 +884,7 @@
   }
 
   function gaveUp() {
+    cancelProbe();
     stopPolling();
     if (!everConnected) {
       clearCapacityDeadline();
@@ -747,24 +897,62 @@
       return;
     }
     render(
-      "error",
-      "The app did not come back",
-      "Gave up after " +
-        Math.round((maxPolls * pollMs) / 1000) +
-        " seconds. It may have failed to restart.",
-      "Try again"
+      "unavailable",
+      window.navigator.onLine === false ? "You’re still offline" : "We couldn’t reconnect yet",
+      "Your previous results are still available. Keep them open, or try connecting again.",
+      "Start in this tab"
     );
   }
 
   var poll = guard(function () {
     timer = null;
-    if (!showing || currentState === "snapshot") {
+    if (!showing || currentState === "snapshot" || currentState === "restoring") {
       return;
     }
+    var serial = incidentSerial;
+    if (currentState === "recovering" && window.navigator.onLine === false) {
+      recoveryNotice();
+      schedule();
+      return;
+    }
+    cancelProbe();
+    var requestSerial = probeSerial;
+    probeAbort = typeof window.AbortController === "function" ? new window.AbortController() : null;
+    var options = { cache: "no-store", credentials: "same-origin", redirect: "error" };
+    if (probeAbort) options.signal = probeAbort.signal;
+    probeTimer = window.setTimeout(guard(function () {
+      if (requestSerial !== probeSerial || serial !== incidentSerial || !showing) return;
+      cancelProbe();
+      schedule();
+    }), 10000);
     window
-      .fetch(readyURL, { cache: "no-store", credentials: "same-origin" })
+      .fetch(readyURL, options)
       .then(function (res) {
-        if (!showing || currentState === "snapshot") {
+        if (!showing || serial !== incidentSerial || requestSerial !== probeSerial || currentState === "snapshot") {
+          return;
+        }
+        if (currentState === "recovering" && !canRestore()) waiting();
+        if (currentState === "recovering" && (res.status === 200 ||
+            (res.status === 503 && res.headers && res.headers.get("X-Shinyhub-Reject") === "app-not-ready"))) {
+          // Validate the probe body too: an upstream sign-in page is not proof
+          // that restoring the dashboard is safe. A cold app needs navigation
+          // to wake it; polling alone cannot make its ready flag become true.
+          return res.json().then(function (body) {
+            if (!showing || serial !== incidentSerial || requestSerial !== probeSerial || currentState === "snapshot") return;
+            if (!body || body.ready !== (res.status === 200)) throw new Error("Invalid readiness response");
+            if (currentState === "recovering" && canRestore()) { queueRestore(); return; }
+            waiting();
+            if (res.status === 200) recovered();
+            else schedule();
+          });
+        }
+        if (res.status === 401 || res.status === 403) {
+          cancelProbe();
+          stopPolling();
+          render("access", res.status === 401 ? "Sign in to reconnect" : "Access to this app has changed",
+            "Open the app in a new tab to check your access. These results will stay here.", null);
+          show(ui.openLink, true);
+          ui.openLink.focus();
           return;
         }
         if (res.status === 200) {
@@ -786,11 +974,16 @@
         guard(function () {
           // A failed fetch is indistinguishable from a down server from here,
           // so it counts as a miss rather than as an error state.
-          if (showing && currentState !== "snapshot") {
+          if (showing && serial === incidentSerial && requestSerial === probeSerial && currentState !== "snapshot") {
             schedule();
           }
         })
-      );
+      ).finally(function () {
+        if (requestSerial !== probeSerial) return;
+        if (probeTimer !== null) window.clearTimeout(probeTimer);
+        probeTimer = null;
+        probeAbort = null;
+      });
   });
 
   function schedule() {
@@ -808,10 +1001,27 @@
       return;
     }
     showing = true;
+    incidentSerial++;
+    cancelProbe();
     incidentConnectionID = endedConnectionID;
     polls = 0;
     previousFocus = document.activeElement;
-    if (everConnected) waiting();
+    if (canRestore()) {
+      currentState = "recovering";
+      recoveryStarted = Date.now();
+      quietDisconnectMarker();
+      recoveryDeadline = window.setTimeout(guard(function () {
+        if (currentState !== "recovering") return;
+        incidentSerial++;
+        gaveUp();
+      }), maxPolls * pollMs);
+      recoveryTimer = window.setTimeout(guard(function () {
+        recoveryTimer = null;
+        if (currentState !== "recovering") return;
+        if (canRestore()) recoveryNotice();
+        else waiting();
+      }), 1200);
+    } else if (everConnected) waiting();
     else busy();
     poll();
   });
@@ -823,6 +1033,7 @@
     if (!node || node.nodeType !== 1 || node.id !== SHINY_OVERLAY_ID) return;
     if (isShinyOverlay(node)) {
       onLost();
+      if (currentState === "recovering") quietDisconnectMarker();
     } else if (reloadTimer === null) {
       reloadTimer = window.setTimeout(guard(function () {
         reloadTimer = null;
@@ -840,6 +1051,28 @@
       teardown();
     }
   });
+
+  window.addEventListener("online", guard(function () {
+    if (!showing || currentState !== "recovering") return;
+    // Invalidate any pre-offline response before checking again.
+    incidentSerial++;
+    cancelProbe();
+    if (restoreTimer !== null) window.clearTimeout(restoreTimer);
+    restoreTimer = null;
+    recoveryNotice();
+    stopPolling();
+    poll();
+  }));
+  window.addEventListener("offline", guard(function () {
+    if (!showing || currentState !== "recovering") return;
+    incidentSerial++;
+    cancelProbe();
+    if (restoreTimer !== null) window.clearTimeout(restoreTimer);
+    restoreTimer = null;
+    recoveryNotice();
+    stopPolling();
+    schedule();
+  }));
 
   window.addEventListener(SESSION_OWNER_EVENT, guard(function (event) {
     if (!ui || currentState !== "snapshot") {

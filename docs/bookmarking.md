@@ -346,6 +346,38 @@ opt into unattended reloading safely. Deploying the hub alone does not upgrade
 an adapter installed in an app's environment. The policy belongs to the bundle
 that served the page, so a later deploy cannot retroactively opt an older page in.
 
+### Recovering an interrupted dashboard
+
+The same `version_switch = "when_hidden"` opt-in also allows automatic recovery
+after a session disconnects, including in a visible tab. The app switcher and
+status overlay must both be enabled. Recovery reloads the current URL to restore
+the registered filters; it does not resume the old server session or preserve
+unregistered state. A brief page refresh may be visible.
+
+Recovery requires the adapter's explicit disconnect signal described below and
+a fully saved bookmark immediately before the disconnect. Pending edits,
+unsettled restoration, open bookmark or chat panels, busy chats, and snapshots
+keep manual recovery. A ready response is verified before reloading; a verified
+cold-app response also permits reloading to wake the app. Network failures and
+sign-in redirects do not trigger a reload.
+
+Fast recovery skips the interruption dialog and Shiny's grey disconnect veil.
+The pointer blocker remains in place, and keyboard edits still cancel automatic
+restoration. Shiny has a 750 ms grace period to reconnect the existing session
+before a reload is attempted. After 1.2 seconds, a small status notice explains
+that the dashboard is reconnecting without taking keyboard focus. Its **Keep
+these results** action cancels recovery and opens the retained page as an offline
+snapshot. The manual fallback offers the same action.
+
+When the browser is offline, the notice explains this and checks again as soon
+as the connection returns. Sign-in and access failures stop automatic recovery
+and offer a new tab, preserving the current results. Readiness requests time out
+after 10 seconds; responses from cancelled or superseded requests are ignored.
+Automatic recovery is limited to one attempt per minute per tab and app;
+if browser session storage is unavailable, recovery stays manual. A stalled
+recovery falls back to manual actions within 60 seconds. Updating ShinyHub alone
+does not enable this behavior for an older bookmark adapter.
+
 ### Pending-sync adapter contract
 
 Protocol version 1 capabilities add `pendingSync: true`, `syncReady` (restoration
@@ -366,3 +398,11 @@ clear a newer edit. Sync statuses include `pendingSync`, `session`,
 an automatic switch. Missing capability, unsettled restore, disconnect, or
 serialization failure blocks it. The Python adapter implements this contract;
 other adapters must implement the same safeguards before advertising it.
+
+On disconnect, the adapter emits a `pending` status with `code: "disconnected"`,
+retaining the session, sync revision, and browser revision. This still blocks
+automatic version switching. For session recovery only, the switcher can retain
+the immediately preceding `saved` checkpoint if all three values match and the
+page URL has not changed. Every other pending or error status invalidates that
+checkpoint. Adapters that emit an unqualified `pending` on disconnect retain
+manual recovery.

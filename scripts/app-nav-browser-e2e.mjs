@@ -24,6 +24,9 @@ if (!navSource.includes('shinyhub-app-nav')) {
 
 const artifactDir = await mkdtemp(join(tmpdir(), 'shinyhub-app-nav-'));
 const bridgeSource = await readFile(new URL('../packaging/python-bookmarks/src/shinyhub_bookmarks/www/bridge.js', import.meta.url));
+const overlaySource = await readFile(new URL('../internal/proxy/assets/overlay.js', import.meta.url));
+let holdReadiness = false;
+let releaseReadiness;
 let switched = false;
 let switchRequests = 0;
 const hiddenPage = () => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Dashboard</title></head>
@@ -87,6 +90,17 @@ const apps = {
 };
 
 const server = createServer((request, response) => {
+  if (request.url === '/overlay.js') {
+    response.setHeader('content-type', 'text/javascript; charset=utf-8'); response.end(overlaySource); return;
+  }
+  if (request.url.endsWith('/.shinyhub/ready')) {
+    const answer = () => {
+      response.setHeader('content-type', 'application/json'); response.end('{"ready":true}');
+    };
+    if (holdReadiness) releaseReadiness = answer;
+    else answer();
+    return;
+  }
   if (request.url === '/bridge.js') {
     response.setHeader('content-type', 'text/javascript; charset=utf-8'); response.end(bridgeSource); return;
   }
@@ -111,6 +125,13 @@ const server = createServer((request, response) => {
     return;
   }
   response.setHeader('content-type', 'text/html; charset=utf-8');
+  if (request.url.includes('recovery=1')) {
+    response.end(hiddenPage()
+      .replace('<script src="/bridge.js">', '<script src="/overlay.js" data-ready-url="/app/demo/.shinyhub/ready"></script><script src="/bridge.js">')
+      .replace(' data-version-url="/app/demo/.shinyhub/version.json"', '')
+      .replace('</body>', '<script>document.dispatchEvent(new Event("shiny:connected"));</script></body>'));
+    return;
+  }
   response.end(request.url.startsWith("/app/demo/?") ? hiddenPage() : page);
 });
 server.listen(0, '127.0.0.1');
@@ -229,6 +250,53 @@ try {
     assert.equal(await dashboard.evaluate(() => !!window.__navShadow.querySelector('.automatic-update-notice')), false);
     assert.deepEqual(errors, []);
     await dashboard.close();
+  });
+
+  await check('interrupted bookmarked dashboards recover automatically; slow recovery stays quiet', async () => {
+    for (const width of [1280, 390]) {
+      // Each page gets its own sessionStorage and recovery circuit breaker.
+      const dashboard = await browser.newPage({ viewport: { width, height: 844 } });
+      const errors = [];
+      dashboard.on('pageerror', error => errors.push(error.message));
+      await dashboard.addInitScript(() => {
+        window.addEventListener('shinyhub:bookmark:sync-status', event => { window.__syncStatus = event.detail; });
+        window.__interruptionDialogShown = false;
+        new MutationObserver(() => {
+          if (document.querySelector('#shinyhub-status-overlay[role="dialog"]')) window.__interruptionDialogShown = true;
+        }).observe(document, { childList: true, subtree: true });
+      });
+      await dashboard.goto(`${origin}/app/demo/?recovery=1&_inputs_&region=Asia#plot`);
+      await dashboard.waitForFunction(() => window.__syncStatus?.state === 'saved');
+      await dashboard.focus('#region');
+      holdReadiness = true;
+      const loaded = dashboard.waitForEvent('load');
+      await dashboard.evaluate(() => {
+        document.dispatchEvent(new Event('shiny:disconnected'));
+        const marker = document.createElement('div'); marker.id = 'shiny-disconnected-overlay'; document.body.appendChild(marker);
+      });
+      const notice = dashboard.locator('#shinyhub-status-overlay');
+      await notice.waitFor();
+      assert.equal(await notice.getAttribute('role'), 'status');
+      assert.equal(await dashboard.evaluate(() => document.activeElement.id), 'region');
+      assert.equal(await dashboard.evaluate(() => window.__interruptionDialogShown), false);
+      const box = await notice.boundingBox();
+      assert.ok(box.x >= 0 && box.x + box.width <= width && box.height < 220);
+      await dashboard.screenshot({ path: join(artifactDir, `recovery-${width}.png`), animations: 'disabled' });
+      releaseReadiness();
+      await loaded;
+      assert.equal(await dashboard.inputValue('#region'), 'Asia');
+      assert.match(dashboard.url(), /region=Asia#plot$/);
+      await dashboard.waitForFunction(() => window.__syncStatus?.state === 'saved');
+      // A second immediate disconnect must use manual recovery, not loop.
+      holdReadiness = false;
+      await dashboard.evaluate(() => {
+        document.dispatchEvent(new Event('shiny:disconnected'));
+        const marker = document.createElement('div'); marker.id = 'shiny-disconnected-overlay'; document.body.appendChild(marker);
+      });
+      await dashboard.locator('#shinyhub-status-overlay[role="dialog"]').waitFor();
+      assert.deepEqual(errors, []);
+      await dashboard.close();
+    }
   });
 
   console.log(`app switcher browser E2E passed; screenshots: ${artifactDir}`);
