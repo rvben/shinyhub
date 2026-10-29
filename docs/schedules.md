@@ -17,7 +17,8 @@ disk; the app reads it next time it serves traffic.
 
 `shinyhub schedule run --local NAME [dir]` executes a schedule from the local
 `shinyhub.toml`, using the same workspace, dependencies, environment, and data
-directory as `shinyhub dev`. No server or login is needed. Use `--app` and `-f`
+directory as `shinyhub dev`. No server or login is needed. Replace `NAME` with
+`--all-schedules` to run every enabled schedule. Use `--app` and `-f`
 for fleet selection. `shinyhub dev --seed` explicitly runs enabled deploy-trigger
 schedules before the initial app start. Use `--seed=missing` to reuse successful
 local initialization; fleet `[dev]` defaults also apply to local jobs. See [local data producers](local-development.md#local-data-producers)

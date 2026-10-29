@@ -8,9 +8,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var localScheduleFlagNames = []string{"file", "app", "all", "standalone", "env", "env-file", "data-dir", "state-dir", "no-sync", "fresh"}
+var localScheduleFlagNames = []string{"all-schedules", "file", "app", "all", "standalone", "env", "env-file", "data-dir", "state-dir", "no-sync", "fresh"}
 
 type localScheduleFlags struct {
+	allSchedules    bool
 	file            string
 	apps            []string
 	all, standalone bool
@@ -19,6 +20,7 @@ type localScheduleFlags struct {
 
 func configureLocalScheduleFlags(cmd *cobra.Command, f *localScheduleFlags, local *bool) {
 	cmd.Flags().BoolVar(local, "local", false, "Execute a manifest schedule locally without a server")
+	cmd.Flags().BoolVar(&f.allSchedules, "all-schedules", false, "Execute every enabled manifest schedule instead of a named one")
 	cmd.Flags().StringVarP(&f.file, "file", "f", defaultFleetManifest, "Local fleet manifest (auto-discovered)")
 	cmd.Flags().StringArrayVar(&f.apps, "app", nil, "Local fleet app (repeatable)")
 	cmd.Flags().BoolVar(&f.all, "all", false, "Require all fleet sources to be local")
@@ -32,21 +34,27 @@ func configureLocalScheduleFlags(cmd *cobra.Command, f *localScheduleFlags, loca
 }
 
 func runLocalSchedule(cmd *cobra.Command, args []string, f *localScheduleFlags) error {
-	if strings.TrimSpace(args[0]) == "" {
-		return validationErr("schedule name must not be empty", "name a schedule from shinyhub.toml")
+	// --all-schedules replaces the name, so its only positional is the dir.
+	name := ""
+	if !f.allSchedules {
+		name, args = args[0], args[1:]
+		if strings.TrimSpace(name) == "" {
+			return validationErr("schedule name must not be empty", "name a schedule from shinyhub.toml")
+		}
 	}
 	if err := rejectLocalRunGlobalFlags(cmd); err != nil {
 		return err
 	}
 	dir := "."
-	if len(args) > 1 {
-		dir = args[1]
+	if len(args) > 0 {
+		dir = args[0]
 	}
 	scope, err := resolveDevScope(dir, f.file, cmd.Flags().Changed("file"), f.standalone, f.all, f.apps)
 	if err != nil {
 		return err
 	}
-	f.run.scheduleName = args[0]
+	f.run.scheduleName = name
+	f.run.allSchedules = f.allSchedules
 	if !scope.fleet() {
 		slug, err := resolveLocalRunSlug(dir, "")
 		if err != nil {
@@ -67,7 +75,7 @@ func runLocalSchedule(cmd *cobra.Command, args []string, f *localScheduleFlags) 
 		}
 		if err := localrun.ValidateSchedule(localrun.Options{
 			BundleDir: target.Dir, ManifestPath: target.Manifest,
-			BundleInputs: target.BundleInputs, ScheduleName: args[0], Env: combined,
+			BundleInputs: target.BundleInputs, ScheduleName: name, AllSchedules: f.allSchedules, Env: combined,
 		}); err != nil {
 			return &ExitCodeError{Code: 1, Kind: KindValidation, Err: fmt.Errorf("%s: %w", target.Slug, err)}
 		}

@@ -69,7 +69,7 @@ func TestMissingSeedReusesManualSuccessAndInvalidatesFailedRefresh(t *testing.T)
 		if fail {
 			env = append(env, "FAIL=1")
 		}
-		return runSchedules(context.Background(), w, "sales", env, plan, name, mode, io.Discard, io.Discard)
+		return runSchedules(context.Background(), w, "sales", env, plan, scheduleSelection{name: name}, mode, io.Discard, io.Discard)
 	}
 	if err := run("fetch", "never", false); err != nil {
 		t.Fatal(err)
@@ -101,7 +101,7 @@ func TestMissingSeedCommandAndDataGenerationIdentity(t *testing.T) {
 	w, plan, count := seedTestWorkspace(t)
 	run := func() {
 		t.Helper()
-		if err := runSchedules(context.Background(), w, "sales", []string{"COUNT=" + count}, plan, "", "missing", io.Discard, io.Discard); err != nil {
+		if err := runSchedules(context.Background(), w, "sales", []string{"COUNT=" + count}, plan, scheduleSelection{}, "missing", io.Discard, io.Discard); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -127,7 +127,7 @@ func TestMissingSeedCommandAndDataGenerationIdentity(t *testing.T) {
 	if got := seedAttempts(t, count); got != 3 {
 		t.Fatalf("replacement data reused old success: %d", got)
 	}
-	if err := runSchedules(context.Background(), w, "other-app", []string{"COUNT=" + count}, plan, "", "missing", io.Discard, io.Discard); err != nil {
+	if err := runSchedules(context.Background(), w, "other-app", []string{"COUNT=" + count}, plan, scheduleSelection{}, "missing", io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if got := seedAttempts(t, count); got != 4 {
@@ -142,7 +142,7 @@ func TestMissingSeedInterruptedAttemptRepairsEveryProducer(t *testing.T) {
 	plan.Manifest.Schedules = append(plan.Manifest.Schedules, second)
 	run := func() {
 		t.Helper()
-		if err := runSchedules(context.Background(), w, "sales", []string{"COUNT=" + count}, plan, "", "missing", io.Discard, io.Discard); err != nil {
+		if err := runSchedules(context.Background(), w, "sales", []string{"COUNT=" + count}, plan, scheduleSelection{}, "missing", io.Discard, io.Discard); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -177,7 +177,7 @@ echo rebuilt > "$SHINYHUB_APP_DATA/result"
 		t.Fatal(err)
 	}
 	for range 2 {
-		if err := runSchedules(context.Background(), w, "sales", []string{"COUNT=" + count}, plan, "", "missing", io.Discard, io.Discard); err != nil {
+		if err := runSchedules(context.Background(), w, "sales", []string{"COUNT=" + count}, plan, scheduleSelection{}, "missing", io.Discard, io.Discard); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -203,7 +203,7 @@ func TestStartupSeedRejectsLaterProducerErasingEarlierGeneration(t *testing.T) {
 		t.Run(fmt.Sprint("skip-first-", skipFirst), func(t *testing.T) {
 			w, plan, count := seedTestWorkspace(t)
 			if skipFirst {
-				if err := runSchedules(context.Background(), w, "sales", []string{"COUNT=" + count}, plan, "", "missing", io.Discard, io.Discard); err != nil {
+				if err := runSchedules(context.Background(), w, "sales", []string{"COUNT=" + count}, plan, scheduleSelection{}, "missing", io.Discard, io.Discard); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -219,14 +219,14 @@ echo second > "$SHINYHUB_APP_DATA/second"
 			second.Name = "second"
 			second.Command = []string{"sh", "replace.sh"}
 			plan.Manifest.Schedules = append(plan.Manifest.Schedules, second)
-			err := runSchedules(context.Background(), w, "sales", []string{"COUNT=" + count}, plan, "", "missing", io.Discard, io.Discard)
+			err := runSchedules(context.Background(), w, "sales", []string{"COUNT=" + count}, plan, scheduleSelection{}, "missing", io.Discard, io.Discard)
 			var validation *ValidationError
 			if !errors.As(err, &validation) || !strings.Contains(err.Error(), "fetch") || !strings.Contains(err.Error(), "invalidated") {
 				t.Fatalf("startup admitted erased data: %v", err)
 			}
 			// The next missing run repairs the erased first producer and reuses the
 			// second producer's current-generation success, rather than looping.
-			if err := runSchedules(context.Background(), w, "sales", []string{"COUNT=" + count}, plan, "", "missing", io.Discard, io.Discard); err != nil {
+			if err := runSchedules(context.Background(), w, "sales", []string{"COUNT=" + count}, plan, scheduleSelection{}, "missing", io.Discard, io.Discard); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := os.Stat(filepath.Join(w.DataDir, "result")); err != nil {

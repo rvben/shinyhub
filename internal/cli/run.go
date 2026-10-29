@@ -82,6 +82,7 @@ type localRunFlags struct {
 	seed         string
 	baseEnv      []string
 	scheduleName string
+	allSchedules bool
 	port         int
 	noSync       bool
 	noReload     bool
@@ -140,6 +141,7 @@ func executeLocalRun(cmd *cobra.Command, dir, slug string, f *localRunFlags, con
 		BundleDir:    dir,
 		SeedMode:     f.seed,
 		ScheduleName: f.scheduleName,
+		AllSchedules: f.allSchedules,
 		Slug:         slug,
 		DataDir:      f.dataDir,
 		StateDir:     f.stateDir,

@@ -879,9 +879,12 @@ func newScheduleRunCmd() *cobra.Command {
 	f := &localScheduleFlags{}
 
 	runCmd := &cobra.Command{
-		Use:   "run <slug> <name> | run --local <name> [dir]",
+		Use:   "run <slug> <name> | run --local <name> [dir] | run --local --all-schedules [dir]",
 		Short: "Trigger a scheduled job immediately",
 		Args: func(cmd *cobra.Command, args []string) error {
+			if local && f.allSchedules {
+				return cobra.MaximumNArgs(1)(cmd, args)
+			}
 			if local {
 				return cobra.RangeArgs(1, 2)(cmd, args)
 			}

@@ -58,29 +58,59 @@ func acquireDataLock(dir string, exclusive bool) (*os.File, error) {
 	return f, nil
 }
 
-func selectSchedules(manifest *deploy.Manifest, name string) ([]deploy.ScheduleSpec, error) {
+// scheduleSelection names the manifest schedules a run executes. The zero
+// value selects the startup seed set: enabled deploy-trigger schedules.
+type scheduleSelection struct {
+	name string
+	all  bool
+}
+
+func selectionFor(o Options) scheduleSelection {
+	return scheduleSelection{name: o.ScheduleName, all: o.AllSchedules}
+}
+
+// explicit reports whether the run executes schedules on request rather than
+// seeding app data before a development boot.
+func (s scheduleSelection) explicit() bool { return s.name != "" || s.all }
+
+func selectSchedules(manifest *deploy.Manifest, sel scheduleSelection) ([]deploy.ScheduleSpec, error) {
 	var selected []deploy.ScheduleSpec
 	if manifest != nil {
 		for _, schedule := range manifest.Schedules {
-			if name != "" {
-				if schedule.Name == name {
+			switch {
+			case sel.name != "":
+				if schedule.Name == sel.name {
 					selected = append(selected, schedule)
 				}
-			} else if !schedule.Disabled && schedule.DeployTrigger != "never" {
+			case sel.all:
+				if !schedule.Disabled {
+					selected = append(selected, schedule)
+				}
+			case !schedule.Disabled && schedule.DeployTrigger != "never":
 				selected = append(selected, schedule)
 			}
 		}
 	}
-	if name != "" && len(selected) == 0 {
-		return nil, validationErrorf("schedule %q is not defined in shinyhub.toml", name)
+	if sel.name != "" && len(selected) == 0 {
+		return nil, validationErrorf("schedule %q is not defined in shinyhub.toml", sel.name)
+	}
+	if sel.all && len(selected) == 0 {
+		return nil, validationErrorf("no enabled schedules are defined in shinyhub.toml")
 	}
 	return selected, nil
 }
 
-func runSchedules(ctx context.Context, w *workspace, slug string, userEnv []string, plan *deploy.LaunchPlan, name string, seedMode string, stdout, stderr io.Writer) error {
-	selected, err := selectSchedules(plan.Manifest, name)
+func runSchedules(ctx context.Context, w *workspace, slug string, userEnv []string, plan *deploy.LaunchPlan, sel scheduleSelection, seedMode string, stdout, stderr io.Writer) error {
+	selected, err := selectSchedules(plan.Manifest, sel)
 	if err != nil {
 		return err
+	}
+	if sel.all {
+		for _, schedule := range plan.Manifest.Schedules {
+			if schedule.Disabled {
+				fmt.Fprintf(stderr, "note: schedule %q is disabled; skipped (name it to run it explicitly)\n", schedule.Name)
+			}
+		}
 	}
 	state, err := loadSeedState(w)
 	if err != nil {
@@ -100,7 +130,7 @@ func runSchedules(ctx context.Context, w *workspace, slug string, userEnv []stri
 			return err
 		}
 		key, owner := seedIdentity(slug, schedule)
-		if name == "" && seedMode == "missing" && state.Records[key].Generation == generation {
+		if !sel.explicit() && seedMode == "missing" && state.Records[key].Generation == generation {
 			fmt.Fprintf(stdout, "==> schedule %s: skipped; already initialized (use --seed=always to refresh)\n", schedule.Name)
 			continue
 		}
@@ -108,7 +138,7 @@ func runSchedules(ctx context.Context, w *workspace, slug string, userEnv []stri
 			fmt.Fprintf(stderr, "note: schedule %q is disabled; running explicitly\n", schedule.Name)
 		}
 		reason := "explicit refresh"
-		if name == "" {
+		if !sel.explicit() {
 			reason = "forced startup refresh"
 			if seedMode == "missing" {
 				reason = "initialization missing"
@@ -176,7 +206,10 @@ func runSchedules(ctx context.Context, w *workspace, slug string, userEnv []stri
 		}
 		fmt.Fprintf(stdout, "==> schedule %s: initialized successfully\n", schedule.Name)
 	}
-	if name == "" && len(selected) > 0 {
+	// Both startup seeding and an explicit batch must leave every selected
+	// producer's output in the current data generation. A later producer can
+	// replace the whole directory even though each command exits successfully.
+	if sel.name == "" && len(selected) > 0 {
 		generation, err := dataGeneration(w.DataDir)
 		if err != nil {
 			return err
@@ -184,7 +217,11 @@ func runSchedules(ctx context.Context, w *workspace, slug string, userEnv []stri
 		for _, schedule := range selected {
 			key, _ := seedIdentity(slug, schedule)
 			if state.Records[key].Generation != generation {
-				return validationErrorf("schedule %q initialization was invalidated by a later producer replacing app data; keep producer writes scoped to their own output directories and rerun --seed=missing", schedule.Name)
+				retry := "--seed=missing"
+				if sel.all {
+					retry = "--all-schedules"
+				}
+				return validationErrorf("schedule %q initialization was invalidated by a later producer replacing app data; keep producer writes scoped to their own output directories and rerun %s", schedule.Name, retry)
 			}
 		}
 	}
@@ -253,7 +290,7 @@ func (w *scheduleWriter) Write(p []byte) (int, error) {
 	return total, nil
 }
 
-// ValidateSchedule checks a named job's composed manifest and explicit environment
+// ValidateSchedule checks the selected jobs' composed manifest and explicit environment
 // without preparing dependencies, creating state, or executing app code.
 func ValidateSchedule(o Options) error {
 	if _, err := validateUserEnv(o.Env); err != nil {
@@ -283,6 +320,6 @@ func ValidateSchedule(o Options) error {
 			}
 		}
 	}
-	_, err = selectSchedules(manifest, o.ScheduleName)
+	_, err = selectSchedules(manifest, selectionFor(o))
 	return err
 }

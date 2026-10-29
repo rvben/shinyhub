@@ -212,6 +212,7 @@ manifest-defined job once, without a server or login:
 ```bash
 shinyhub schedule run --local fetch .
 shinyhub schedule run --local fetch -f fleet.toml --app sales
+shinyhub schedule run --local --all-schedules .
 ```
 
 The job runs in the same generated workspace and durable data directory as
@@ -221,7 +222,19 @@ exit code. At a fleet root the named schedule runs sequentially for each
 selected local-source app; `--app`, `--all`, and `--standalone` select the same
 scope as `dev`. All selected apps’ manifests, schedule names, and environment
 files are checked before the first producer runs. Explicit execution can run a
-disabled schedule and reports that choice. Cron timing and server-side replica activation are not applied locally.
+disabled schedule and reports that choice.
+
+`--all-schedules` replaces the schedule name and runs every enabled schedule in
+manifest order, sharing one workspace sync and dependency preparation. This lets
+scripts and CI refresh an app's data without knowing its schedule names.
+Disabled schedules are skipped with a note, the first failing job stops the
+run with its exit code, and an app with no enabled schedules is a validation
+error. Cron timing and server-side replica activation are not applied locally.
+
+Keep each job's writes scoped to its own output directory. If a later job
+replaces the app data directory and invalidates an earlier job's output,
+`--all-schedules` fails even when every command exited successfully. Fix the
+producer commands, then rerun `--all-schedules` to refresh the complete batch.
 
 To run enabled schedules whose `deploy_trigger` is `first_deploy` or
 `bundle_change` before starting the app, opt in on each invocation:

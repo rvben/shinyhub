@@ -69,6 +69,95 @@ printf 'first\nsecond\n'
 	}
 }
 
+func TestLocalAllSchedulesRunsEveryEnabledSchedule(t *testing.T) {
+	dir := scheduleFixture(t, `
+[[schedule]]
+name = "latest"
+cron = "*/5 * * * *"
+cmd = "sh -c 'echo latest >> $SHINYHUB_APP_DATA/ran'"
+
+[[schedule]]
+name = "history"
+cron = "0 3 * * *"
+deploy_trigger = "never"
+cmd = "sh -c 'echo history >> $SHINYHUB_APP_DATA/ran'"
+
+[[schedule]]
+name = "archive"
+cron = "0 4 * * *"
+disabled = true
+cmd = "sh -c 'echo archive >> $SHINYHUB_APP_DATA/ran'"
+`)
+	state := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	err := Run(context.Background(), Options{BundleDir: dir, StateDir: state, AllSchedules: true, NoSync: true}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("%v\n%s%s", err, &stdout, &stderr)
+	}
+	got, err := os.ReadFile(filepath.Join(state, "data", "ran"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "latest\nhistory\n" {
+		t.Fatalf("ran = %q, want manifest order without the disabled schedule", got)
+	}
+	if !strings.Contains(stdout.String(), "every enabled schedule") || !strings.Contains(stderr.String(), `schedule "archive" is disabled; skipped`) {
+		t.Fatalf("stdout=%s stderr=%s", &stdout, &stderr)
+	}
+}
+
+func TestLocalAllSchedulesStopsAtFirstFailure(t *testing.T) {
+	dir := scheduleFixture(t, `
+[[schedule]]
+name = "first"
+cron = "0 * * * *"
+cmd = "sh -c 'exit 6'"
+
+[[schedule]]
+name = "second"
+cron = "0 * * * *"
+cmd = "sh -c 'touch $SHINYHUB_APP_DATA/second'"
+`)
+	state := t.TempDir()
+	err := Run(context.Background(), Options{BundleDir: dir, StateDir: state, AllSchedules: true, NoSync: true}, io.Discard, io.Discard)
+	var jobErr *ScheduleError
+	if !errors.As(err, &jobErr) || jobErr.Name != "first" || jobErr.Code != 6 {
+		t.Fatalf("error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(state, "data", "second")); !os.IsNotExist(err) {
+		t.Fatalf("schedule after a failure ran: %v", err)
+	}
+}
+
+func TestLocalAllSchedulesRejectsInvalidSelections(t *testing.T) {
+	for name, tc := range map[string]struct {
+		schedules string
+		opts      Options
+		want      string
+	}{
+		"no-enabled": {
+			schedules: "\n[[schedule]]\nname = \"fetch\"\ncron = \"0 * * * *\"\ndisabled = true\ncmd = \"true\"\n",
+			opts:      Options{AllSchedules: true},
+			want:      "no enabled schedules",
+		},
+		"with-name": {
+			schedules: "\n[[schedule]]\nname = \"fetch\"\ncron = \"0 * * * *\"\ncmd = \"true\"\n",
+			opts:      Options{AllSchedules: true, ScheduleName: "fetch"},
+			want:      "mutually exclusive",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			o := tc.opts
+			o.BundleDir, o.StateDir, o.NoSync = scheduleFixture(t, tc.schedules), t.TempDir(), true
+			err := Run(context.Background(), o, io.Discard, io.Discard)
+			var validation *ValidationError
+			if !errors.As(err, &validation) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
+
 func TestLocalScheduleFailuresAndTimeout(t *testing.T) {
 	for _, tc := range []struct {
 		name, command string

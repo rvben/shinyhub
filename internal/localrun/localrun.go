@@ -36,6 +36,9 @@ type Options struct {
 
 	// ScheduleName executes one manifest schedule without starting the app.
 	ScheduleName string
+	// AllSchedules executes every enabled manifest schedule without starting
+	// the app. It is mutually exclusive with ScheduleName.
+	AllSchedules bool
 	// Seed runs enabled deploy-trigger schedules once before the initial boot.
 	Seed bool
 	// SeedMode is never (default), always, or missing. Seed is a compatibility alias for always.
@@ -171,6 +174,10 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) (runErr error
 	if o.Seed {
 		seedMode = "always"
 	}
+	if o.ScheduleName != "" && o.AllSchedules {
+		return validationErrorf("a schedule name and all schedules are mutually exclusive")
+	}
+	schedules := selectionFor(o)
 	sourceDir, err := filepath.Abs(o.BundleDir)
 	if err != nil {
 		return validationErrorf("resolve bundle dir: %v", err)
@@ -268,20 +275,22 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) (runErr error
 	defer releaseWorkspace()
 	// All local consumers share a data lock; writers require exclusive access,
 	// including when another workspace uses the same explicit data directory.
-	dataLock, err := acquireDataLock(w.DataDir, seedMode != "never" || o.ScheduleName != "")
+	dataLock, err := acquireDataLock(w.DataDir, seedMode != "never" || schedules.explicit())
 	if err != nil {
 		return &ValidationError{Err: err}
 	}
 	defer dataLock.Close()
 	w.dataLock = dataLock
 	heading := "Local development"
-	if o.ScheduleName != "" {
+	if schedules.explicit() {
 		heading = "Local schedule"
 	}
 	reloadDescription := "staged and readiness-checked"
 	if o.Check {
 		heading = "Local preflight"
 		reloadDescription = "off; exits after the first healthy start"
+	} else if schedules.all {
+		reloadDescription = "off; executes every enabled schedule once"
 	} else if o.ScheduleName != "" {
 		reloadDescription = "off; executes the named schedule once"
 	} else if o.NoReload {
@@ -292,7 +301,7 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) (runErr error
 	if manifestPath != "" {
 		fmt.Fprintf(stdout, "  Fleet manifest: %s\n", manifestPath)
 	}
-	if o.ScheduleName == "" {
+	if !schedules.explicit() {
 		fmt.Fprintf(stdout, "  Seed: %s\n", seedMode)
 	}
 	fmt.Fprintf(stdout, "  Source: %s\n", sourceDir)
@@ -317,12 +326,12 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) (runErr error
 		return err
 	}
 
-	if o.ScheduleName != "" {
+	if schedules.explicit() {
 		manifest, err := deploy.LoadManifest(w.BundleDir)
 		if err != nil {
 			return &ValidationError{Err: err}
 		}
-		if _, err := selectSchedules(manifest, o.ScheduleName); err != nil {
+		if _, err := selectSchedules(manifest, schedules); err != nil {
 			return err
 		}
 	}
@@ -332,9 +341,9 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) (runErr error
 		if err != nil {
 			return err
 		}
-		return runSchedules(runCtx, w, slug, userEnv, plan, o.ScheduleName, seedMode, stdout, stderr)
+		return runSchedules(runCtx, w, slug, userEnv, plan, schedules, seedMode, stdout, stderr)
 	}
-	if o.ScheduleName != "" {
+	if schedules.explicit() {
 		return runInitialSchedules(ctx)
 	}
 
