@@ -672,6 +672,26 @@ Create and update audit details include `on_success` and
 `min_roll_interval_seconds`, `roll_fallback`, and `max_defer_age_seconds`;
 enable/disable is recorded as `schedule_update`.
 
+A run outcome (`schedule_run_<status>`) is recorded exactly once per run, in
+the same transaction that stores the status, with the schedule ID as its
+resource ID. Its detail is JSON that names the schedule as it was when the run
+finished, so the event stays attributable after a rename or deletion:
+
+```json
+{"app": "sales-report", "schedule": "nightly-refresh", "schedule_id": 12,
+ "run_id": 3481, "trigger": "schedule", "exit_code": 1}
+```
+
+`exit_code` is always present and is `null` when no process exit was observed
+(an interrupted run, or one that failed before its command started).
+`trigger` is `schedule`, `missed`, `manual`, or `deploy`. A run that enqueued a
+serving-data activation also carries `activation_id` and `target_generation`.
+For a manual run, the audit event's user is the operator who started it.
+
+Each outcome is also logged as a `schedule_run_finished` line and counted in
+`shinyhub_schedule_runs_total`; see
+[alerting on schedule failures](metrics.md#alerting-on-schedule-failures).
+
 `schedule_activation_outcome` records the activation ID, source run, schedule
 snapshot, target generation, terminal status, last operational phase, and error.
 Admins can expand those details in **Audit Log**, or filter the API with

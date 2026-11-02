@@ -6,15 +6,20 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// ScheduleSample is the metrics-local view of one schedule's last-success
-// state. main.go adapts db.ScheduleFreshness into this so the metrics package
-// never imports db. OK is false for a schedule that has never succeeded, in
-// which case the collector emits no sample (absence = never succeeded).
+// ScheduleSample is the metrics-local view of one schedule's run health.
+// main.go adapts db.ScheduleFreshness into this so the metrics package never
+// imports db. OK is false for a schedule that has never succeeded, in which
+// case no last-success sample is emitted (absence = never succeeded); the
+// enabled gauge is what lets an alert tell that apart from a deleted schedule.
 type ScheduleSample struct {
 	Slug                  string
 	Name                  string
+	Enabled               bool
 	LastSuccessUnix       int64
 	OK                    bool
+	ConsecutiveFailures   int
+	LastFailureUnix       int64 // 0 when the schedule has no failed or timed_out run
+	LastInterruptedUnix   int64 // 0 when the schedule has no interrupted run
 	ActivationStatus      string
 	ActivationCreatedUnix int64
 	ActivationGeneration  int64
@@ -26,6 +31,36 @@ var scheduleLastSuccessDesc = prometheus.NewDesc(
 	"shinyhub_schedule_last_success_seconds",
 	"Unix timestamp of the last successful run of a schedule.",
 	[]string{"slug", "schedule"}, nil,
+)
+
+var scheduleEnabledDesc = prometheus.NewDesc(
+	"shinyhub_schedule_enabled",
+	"1 when a schedule is enabled, 0 when disabled or retired. Emitted for every schedule.",
+	[]string{"slug", "schedule"}, nil,
+)
+
+var scheduleConsecutiveFailuresDesc = prometheus.NewDesc(
+	"shinyhub_schedule_consecutive_failures",
+	"Failed or timed_out runs since the schedule's latest succeeded run, within retained run history. Emitted for every schedule.",
+	[]string{"slug", "schedule"}, nil,
+)
+
+var scheduleLastFailureDesc = prometheus.NewDesc(
+	"shinyhub_schedule_last_failure_seconds",
+	"Unix timestamp at which the schedule's newest failed or timed_out run finished. Absent when there is none.",
+	[]string{"slug", "schedule"}, nil,
+)
+
+var scheduleLastInterruptedDesc = prometheus.NewDesc(
+	"shinyhub_schedule_last_interrupted_seconds",
+	"Unix timestamp at which the schedule's newest interrupted run was closed. Absent when there is none.",
+	[]string{"slug", "schedule"}, nil,
+)
+
+var scheduleCollectorUpDesc = prometheus.NewDesc(
+	"shinyhub_schedule_collector_up",
+	"1 when the schedule metrics query succeeded on this scrape, 0 when it failed and every other schedule gauge is absent.",
+	nil, nil,
 )
 
 var scheduleActivationStatusDesc = prometheus.NewDesc(
@@ -57,9 +92,9 @@ var scheduleCapacityDeferredAgeDesc = prometheus.NewDesc(
 	[]string{"slug", "schedule"}, nil,
 )
 
-// scheduleFreshnessCollector emits one gauge per schedule that has ever
-// succeeded, querying the store live at scrape time so the value survives a
-// process restart (DB-backed, like apps_crashed).
+// scheduleFreshnessCollector emits per-schedule run-health gauges, querying the
+// store live at scrape time so the values survive a process restart (DB-backed,
+// like apps_crashed).
 type scheduleFreshnessCollector struct {
 	query func() ([]ScheduleSample, error)
 }
@@ -71,6 +106,11 @@ func NewScheduleFreshnessCollector(query func() ([]ScheduleSample, error)) prome
 
 func (c *scheduleFreshnessCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- scheduleLastSuccessDesc
+	ch <- scheduleEnabledDesc
+	ch <- scheduleConsecutiveFailuresDesc
+	ch <- scheduleLastFailureDesc
+	ch <- scheduleLastInterruptedDesc
+	ch <- scheduleCollectorUpDesc
 	ch <- scheduleActivationStatusDesc
 	ch <- scheduleActivationAgeDesc
 	ch <- scheduleActivationGenerationDesc
@@ -81,10 +121,31 @@ func (c *scheduleFreshnessCollector) Describe(ch chan<- *prometheus.Desc) {
 func (c *scheduleFreshnessCollector) Collect(ch chan<- prometheus.Metric) {
 	samples, err := c.query()
 	if err != nil {
-		return // a scrape-time DB error yields no samples rather than a broken scrape
+		// A scrape-time DB error yields no schedule samples rather than a broken
+		// scrape. The up gauge makes that gap visible: without it, every
+		// absent-series alert would read the outage as "no schedules".
+		ch <- prometheus.MustNewConstMetric(scheduleCollectorUpDesc, prometheus.GaugeValue, 0)
+		return
 	}
+	ch <- prometheus.MustNewConstMetric(scheduleCollectorUpDesc, prometheus.GaugeValue, 1)
 	now := time.Now().Unix()
 	for _, s := range samples {
+		enabled := 0.0
+		if s.Enabled {
+			enabled = 1
+		}
+		ch <- prometheus.MustNewConstMetric(scheduleEnabledDesc, prometheus.GaugeValue,
+			enabled, s.Slug, s.Name)
+		ch <- prometheus.MustNewConstMetric(scheduleConsecutiveFailuresDesc, prometheus.GaugeValue,
+			float64(s.ConsecutiveFailures), s.Slug, s.Name)
+		if s.LastFailureUnix > 0 {
+			ch <- prometheus.MustNewConstMetric(scheduleLastFailureDesc, prometheus.GaugeValue,
+				float64(s.LastFailureUnix), s.Slug, s.Name)
+		}
+		if s.LastInterruptedUnix > 0 {
+			ch <- prometheus.MustNewConstMetric(scheduleLastInterruptedDesc, prometheus.GaugeValue,
+				float64(s.LastInterruptedUnix), s.Slug, s.Name)
+		}
 		if s.OK {
 			ch <- prometheus.MustNewConstMetric(
 				scheduleLastSuccessDesc, prometheus.GaugeValue,

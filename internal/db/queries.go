@@ -4375,6 +4375,14 @@ func insertAuditEvent(exec func(string, ...any) (sql.Result, error), p AuditEven
 
 func (s *Store) recordAuditEvent(ctx context.Context, p AuditEventParams) error {
 	err := insertAuditEvent(func(query string, args ...any) (sql.Result, error) { return s.db.ExecContext(ctx, query, args...) }, p)
+	s.emitAuditLog(p, err)
+	return err
+}
+
+// emitAuditLog mirrors one attempted audit event to structured stdout. Writers
+// that insert the row inside a larger transaction call it after the commit, so
+// the log line never claims a row that was rolled back.
+func (s *Store) emitAuditLog(p AuditEventParams, err error) {
 	var userID any
 	if p.UserID != nil {
 		userID = *p.UserID
@@ -4397,12 +4405,18 @@ func (s *Store) recordAuditEvent(ctx context.Context, p AuditEventParams) error 
 		"persisted", err == nil,
 	)
 	if err != nil {
-		slog.Error("audit_log_write_failed", "action", p.Action, "err", err)
-		if s.auditErrHook != nil {
-			s.auditErrHook()
-		}
+		s.reportAuditWriteFailure(p.Action, err)
 	}
-	return err
+}
+
+// reportAuditWriteFailure is the one place an audit insert failure becomes
+// visible: an error log line and the audit-error hook (wired to
+// shinyhub_audit_write_errors_total).
+func (s *Store) reportAuditWriteFailure(action string, err error) {
+	slog.Error("audit_log_write_failed", "action", action, "err", err)
+	if s.auditErrHook != nil {
+		s.auditErrHook()
+	}
 }
 
 // AuditEventFilter narrows the audit stream for contextual UI destinations.

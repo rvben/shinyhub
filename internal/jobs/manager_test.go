@@ -1,10 +1,13 @@
 package jobs_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -314,7 +317,10 @@ func (f *fakeStore) FinishScheduleRun(p db.FinishScheduleRunParams) error {
 	return nil
 }
 
-func (f *fakeStore) CompleteScheduleRunAndEnqueueActivation(p db.CompleteScheduleRunParams) (*db.ScheduleActivation, error) {
+// CompleteScheduleRun mirrors the real store's contract: only the call that
+// finds the run still running moves it and returns a transition; completing an
+// already-terminal run is an idempotent no-op that reports nothing.
+func (f *fakeStore) CompleteScheduleRun(p db.CompleteScheduleRunParams) (*db.ScheduleRunCompletion, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.terminalAttempts++
@@ -326,6 +332,9 @@ func (f *fakeStore) CompleteScheduleRunAndEnqueueActivation(p db.CompleteSchedul
 	if !ok {
 		return nil, db.ErrNotFound
 	}
+	if r.Status != "running" {
+		return &db.ScheduleRunCompletion{}, nil
+	}
 	r.Status = p.Status
 	r.ExitCode = p.ExitCode
 	t := p.FinishedAt
@@ -333,7 +342,11 @@ func (f *fakeStore) CompleteScheduleRunAndEnqueueActivation(p db.CompleteSchedul
 	f.finishCalls = append(f.finishCalls, db.FinishScheduleRunParams{
 		RunID: p.RunID, Status: p.Status, ExitCode: p.ExitCode, FinishedAt: p.FinishedAt,
 	})
-	return nil, nil
+	return &db.ScheduleRunCompletion{Transition: &db.ScheduleRunTransition{
+		RunID: r.ID, ScheduleID: f.schedule.ID, ScheduleName: f.schedule.Name,
+		AppID: f.app.ID, AppSlug: f.app.Slug, Status: p.Status, Trigger: r.Trigger,
+		TriggeredByUserID: r.TriggeredByUserID, ExitCode: p.ExitCode,
+	}}, nil
 }
 
 func TestManager_RetriesTerminalPersistenceUntilStoreRecovers(t *testing.T) {
@@ -908,8 +921,6 @@ func TestManager_OrdinaryRunSnapshotsScheduleInsideProducerFence(t *testing.T) {
 		t.Fatalf("runtime command=%v, want declaration loaded after deploy fence", command)
 	}
 }
-
-func (f *fakeStore) LogAuditEvent(p db.AuditEventParams) {}
 
 // helpers
 
@@ -2485,3 +2496,164 @@ func TestManager_RequiredProducerAdmissionDoesNotBlockDispatcher(t *testing.T) {
 		t.Fatalf("busy admission inserted another run: %d", len(st.runs))
 	}
 }
+
+// noTransitionStore completes runs like fakeStore but reports, as the real
+// store does for a run that was already terminal, that this call made no
+// transition.
+type noTransitionStore struct{ *fakeStore }
+
+func (s noTransitionStore) CompleteScheduleRun(p db.CompleteScheduleRunParams) (*db.ScheduleRunCompletion, error) {
+	if _, err := s.fakeStore.CompleteScheduleRun(p); err != nil {
+		return nil, err
+	}
+	return &db.ScheduleRunCompletion{}, nil
+}
+
+// captureSlog routes the default logger to a JSON buffer for one test and
+// returns a function decoding every record carrying msg.
+func captureSlog(t *testing.T) func(msg string) []map[string]any {
+	t.Helper()
+	var mu sync.Mutex
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(lockedWriter{&mu, &buf}, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return func(msg string) []map[string]any {
+		mu.Lock()
+		defer mu.Unlock()
+		var out []map[string]any
+		for _, raw := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+			var rec map[string]any
+			if json.Unmarshal([]byte(raw), &rec) == nil && rec["msg"] == msg {
+				out = append(out, rec)
+			}
+		}
+		return out
+	}
+}
+
+type lockedWriter struct {
+	mu *sync.Mutex
+	w  io.Writer
+}
+
+func (l lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
+}
+
+// runToCompletion runs schedule 1 and returns once its goroutine, including
+// finishRun's reporting, has fully returned.
+func runToCompletion(t *testing.T, m *jobs.Manager, attempts func() int) {
+	t.Helper()
+	if _, err := m.Run(1, "schedule", nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for attempts() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("run never reached terminal persistence")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if !m.Stop(ctx) {
+		t.Fatal("manager did not join the run goroutine")
+	}
+}
+
+func (f *fakeStore) attempts() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.terminalAttempts
+}
+
+// A completion that made no transition (the run was already terminal) must
+// report nothing: the writer that did make it already reported the outcome.
+func TestManager_FinishRun_ReportsOnlyCommittedTransitions(t *testing.T) {
+	logs := captureSlog(t)
+	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 1}}
+	base := newFakeStore(makeSchedule("concurrent", 30), makeApp())
+	dir := t.TempDir()
+	m, err := jobs.NewManager(process.NewManager(dir, rt), nil, process.DefaultTier, noTransitionStore{base}, nil, dir, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := &fakeScheduleRecorder{}
+	m.SetScheduleMetrics(rec)
+
+	runToCompletion(t, m, base.attempts)
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.calls) != 0 {
+		t.Fatalf("RecordScheduleRun called without a transition: %+v", rec.calls)
+	}
+	if got := logs("schedule_run_finished"); len(got) != 0 {
+		t.Fatalf("schedule_run_finished logged without a transition: %v", got)
+	}
+}
+
+func TestManager_FinishRun_LogsNamedOutcome(t *testing.T) {
+	logs := captureSlog(t)
+	rt := &fakeRuntime{exitInfo: process.ExitInfo{Code: 7}}
+	st := newFakeStore(makeSchedule("concurrent", 30), makeApp())
+	m := newTestManager(t, rt, st)
+	rec := &fakeScheduleRecorder{}
+	m.SetScheduleMetrics(rec)
+
+	runToCompletion(t, m, st.attempts)
+
+	got := logs("schedule_run_finished")
+	if len(got) != 1 {
+		t.Fatalf("schedule_run_finished lines = %v, want exactly 1", got)
+	}
+	line := got[0]
+	if line["level"] != "WARN" || line["app"] != "test-app" || line["schedule"] != "test-schedule" ||
+		line["schedule_id"] != float64(1) || line["status"] != "failed" ||
+		line["exit_code"] != float64(7) || line["trigger"] != "schedule" {
+		t.Fatalf("schedule_run_finished = %v", line)
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.calls) != 1 || rec.calls[0] != (scheduleRunCall{"test-app", "test-schedule", "failed"}) {
+		t.Fatalf("RecordScheduleRun calls = %+v", rec.calls)
+	}
+}
+
+func TestManager_ReportScheduleRunTransitions_InheritedInterruptions(t *testing.T) {
+	logs := captureSlog(t)
+	m := newTestManager(t, &fakeRuntime{}, newFakeStore(makeSchedule("concurrent", 30), makeApp()))
+	rec := &fakeScheduleRecorder{}
+	m.SetScheduleMetrics(rec)
+
+	m.ReportScheduleRunTransitions(
+		db.ScheduleRunTransition{RunID: 41, ScheduleID: 5, ScheduleName: "extract", AppSlug: "app-a", Status: "interrupted", Trigger: "schedule"},
+		db.ScheduleRunTransition{RunID: 42, ScheduleID: 6, ScheduleName: "publish", AppSlug: "app-b", Status: "succeeded", Trigger: "manual", ExitCode: intPtrTest(0)},
+	)
+
+	got := logs("schedule_run_finished")
+	if len(got) != 2 {
+		t.Fatalf("schedule_run_finished lines = %v, want 2", got)
+	}
+	// interrupted needs an operator; succeeded does not.
+	if got[0]["level"] != "WARN" || got[0]["schedule"] != "extract" || got[0]["exit_code"] != nil {
+		t.Fatalf("interrupted line = %v", got[0])
+	}
+	if v, present := got[0]["exit_code"]; !present || v != nil {
+		t.Fatalf("interrupted exit_code must be logged as null, got present=%v value=%v", present, v)
+	}
+	if got[1]["level"] != "INFO" || got[1]["schedule"] != "publish" || got[1]["exit_code"] != float64(0) {
+		t.Fatalf("succeeded line = %v", got[1])
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	want := []scheduleRunCall{{"app-a", "extract", "interrupted"}, {"app-b", "publish", "succeeded"}}
+	if len(rec.calls) != 2 || rec.calls[0] != want[0] || rec.calls[1] != want[1] {
+		t.Fatalf("RecordScheduleRun calls = %+v, want %+v", rec.calls, want)
+	}
+}
+
+func intPtrTest(i int) *int { return &i }

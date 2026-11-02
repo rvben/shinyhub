@@ -626,6 +626,12 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// Series are keyed by schedule name, so a rename would otherwise leave the
+	// old name's counters exported forever. Forget them before the reload
+	// seeds the new name.
+	if s.metrics != nil && req.Name != nil && *req.Name != sc.Name {
+		s.metrics.ForgetSchedule(app.Slug, sc.Name)
+	}
 	postcommitWarning := ""
 	if err := s.reloadScheduler(id, app.Slug, sc.Name); err != nil {
 		postcommitWarning = "schedule was updated, but scheduler reload requires asynchronous repair: " + err.Error()

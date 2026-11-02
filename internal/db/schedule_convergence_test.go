@@ -199,9 +199,9 @@ func TestMarkRunningSchedulesInterrupted_MaterializesWriterUncertaintyAfterPrior
 	finishProducerRun(t, store, insertProducerRun(t, store, scheduleID, dep, `["producer"]`), "succeeded")
 	interruptedRun := insertProducerRun(t, store, scheduleID, dep, `["producer"]`)
 
-	count, err := store.MarkRunningSchedulesInterrupted()
-	if err != nil || count != 1 {
-		t.Fatalf("MarkRunningSchedulesInterrupted count=%d err=%v", count, err)
+	transitions, err := store.MarkRunningSchedulesInterrupted()
+	if err != nil || len(transitions) != 1 {
+		t.Fatalf("MarkRunningSchedulesInterrupted transitions=%+v err=%v", transitions, err)
 	}
 	run, err := store.GetScheduleRun(interruptedRun)
 	var sequence int64

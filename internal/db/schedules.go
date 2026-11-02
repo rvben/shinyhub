@@ -600,76 +600,107 @@ func (s *Store) GetScheduleRun(runID int64) (*ScheduleRun, error) {
 // orphan fencing. Every potential data writer is conservatively assigned a
 // physical write sequence, because a crashed owner cannot prove whether that
 // process reached its mutable-data command before disappearing.
-func (s *Store) MarkRunningSchedulesInterrupted() (int64, error) {
+//
+// It returns one transition per run it terminalized, with each run's
+// schedule_run_interrupted audit event committed in the same transaction, so
+// a run lost to a crash or restart is reported like any other outcome.
+func (s *Store) MarkRunningSchedulesInterrupted() ([]ScheduleRunTransition, error) {
 	ctx := context.Background()
 	tx, err := s.d.beginWrite(ctx, s.rawDB(), scheduleConvergenceLockKey)
 	if err != nil {
-		return 0, fmt.Errorf("mark interrupted: begin: %w", err)
+		return nil, fmt.Errorf("mark interrupted: begin: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
-	type inheritedWriter struct{ runID, appID int64 }
+	type inheritedRun struct {
+		transition ScheduleRunTransition
+		writer     bool
+	}
 	rows, err := tx.QueryContext(ctx, `
-		SELECT r.id, sc.app_id
-		FROM schedule_runs r JOIN app_schedules sc ON sc.id = r.schedule_id
-		WHERE r.status = 'running' AND r.publishes_data = 1
+		SELECT r.id, r.schedule_id, sc.name, sc.app_id, a.slug, r.trigger,
+		       r.triggered_by_user_id, r.publishes_data
+		FROM schedule_runs r
+		JOIN app_schedules sc ON sc.id = r.schedule_id
+		JOIN apps a ON a.id = sc.app_id
+		WHERE r.status = 'running'
 		ORDER BY sc.app_id, r.id`)
 	if err != nil {
-		return 0, fmt.Errorf("mark interrupted: list writers: %w", err)
+		return nil, fmt.Errorf("mark interrupted: list running: %w", err)
 	}
-	var writers []inheritedWriter
+	var inherited []inheritedRun
 	for rows.Next() {
-		var writer inheritedWriter
-		if err := rows.Scan(&writer.runID, &writer.appID); err != nil {
+		var run inheritedRun
+		var triggeredBy sql.NullInt64
+		var publishesData int
+		t := &run.transition
+		if err := rows.Scan(&t.RunID, &t.ScheduleID, &t.ScheduleName, &t.AppID, &t.AppSlug,
+			&t.Trigger, &triggeredBy, &publishesData); err != nil {
 			_ = rows.Close()
-			return 0, fmt.Errorf("mark interrupted: scan writer: %w", err)
+			return nil, fmt.Errorf("mark interrupted: scan run: %w", err)
 		}
-		writers = append(writers, writer)
+		t.Status = "interrupted"
+		if triggeredBy.Valid {
+			uid := triggeredBy.Int64
+			t.TriggeredByUserID = &uid
+		}
+		run.writer = publishesData != 0
+		inherited = append(inherited, run)
 	}
 	if err := rows.Close(); err != nil {
-		return 0, fmt.Errorf("mark interrupted: close writers: %w", err)
+		return nil, fmt.Errorf("mark interrupted: close running: %w", err)
 	}
-	for _, writer := range writers {
-		var sequence int64
-		if err := tx.QueryRowContext(ctx, `
-			UPDATE apps SET data_write_sequence = data_write_sequence + 1,
-			                updated_at = CURRENT_TIMESTAMP
-			WHERE id = ? RETURNING data_write_sequence`, writer.appID).Scan(&sequence); err != nil {
-			return 0, fmt.Errorf("mark interrupted: allocate app %d write sequence: %w", writer.appID, err)
+	transitions := make([]ScheduleRunTransition, 0, len(inherited))
+	audits := make([]AuditEventParams, 0, len(inherited))
+	for _, run := range inherited {
+		t := run.transition
+		sequence := int64(0)
+		if run.writer {
+			if err := tx.QueryRowContext(ctx, `
+				UPDATE apps SET data_write_sequence = data_write_sequence + 1,
+				                updated_at = CURRENT_TIMESTAMP
+				WHERE id = ? RETURNING data_write_sequence`, t.AppID).Scan(&sequence); err != nil {
+				return nil, fmt.Errorf("mark interrupted: allocate app %d write sequence: %w", t.AppID, err)
+			}
 		}
-		if _, err := tx.ExecContext(ctx, `
+		res, err := tx.ExecContext(ctx, `
 			UPDATE schedule_runs
 			SET status = 'interrupted', finished_at = CURRENT_TIMESTAMP,
-			    data_write_sequence = ?
-			WHERE id = ? AND status = 'running'`, sequence, writer.runID); err != nil {
-			return 0, fmt.Errorf("mark interrupted: terminalize writer %d: %w", writer.runID, err)
+			    data_write_sequence = CASE WHEN ? > 0 THEN ? ELSE data_write_sequence END
+			WHERE id = ? AND status = 'running'`, sequence, sequence, t.RunID)
+		if err != nil {
+			return nil, fmt.Errorf("mark interrupted: terminalize run %d: %w", t.RunID, err)
 		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO schedule_data_uncertainty
-				(schedule_id, data_write_sequence, schedule_run_id, status, recorded_at)
-			SELECT schedule_id, ?, id, 'interrupted', CURRENT_TIMESTAMP
-			FROM schedule_runs WHERE id = ?
-			ON CONFLICT(schedule_id) DO UPDATE SET
-				data_write_sequence = excluded.data_write_sequence,
-				schedule_run_id = excluded.schedule_run_id,
-				status = excluded.status,
-				recorded_at = excluded.recorded_at`, sequence, writer.runID); err != nil {
-			return 0, fmt.Errorf("mark interrupted: record writer %d uncertainty: %w", writer.runID, err)
+		if n, err := res.RowsAffected(); err != nil {
+			return nil, fmt.Errorf("mark interrupted: rows affected: %w", err)
+		} else if n != 1 {
+			return nil, fmt.Errorf("mark interrupted: run %d left running state concurrently", t.RunID)
 		}
-	}
-	res, err := tx.ExecContext(ctx, `
-		UPDATE schedule_runs SET status = 'interrupted', finished_at = CURRENT_TIMESTAMP
-		WHERE status = 'running'`)
-	if err != nil {
-		return 0, fmt.Errorf("mark interrupted: terminalize remaining rows: %w", err)
-	}
-	nonWriters, err := res.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("mark interrupted: rows affected: %w", err)
+		if run.writer {
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO schedule_data_uncertainty
+					(schedule_id, data_write_sequence, schedule_run_id, status, recorded_at)
+				VALUES (?, ?, ?, 'interrupted', CURRENT_TIMESTAMP)
+				ON CONFLICT(schedule_id) DO UPDATE SET
+					data_write_sequence = excluded.data_write_sequence,
+					schedule_run_id = excluded.schedule_run_id,
+					status = excluded.status,
+					recorded_at = excluded.recorded_at`, t.ScheduleID, sequence, t.RunID); err != nil {
+				return nil, fmt.Errorf("mark interrupted: record writer %d uncertainty: %w", t.RunID, err)
+			}
+		}
+		audit, err := s.insertScheduleRunAuditTx(ctx, tx, t)
+		if err != nil {
+			return nil, fmt.Errorf("mark interrupted: %w", err)
+		}
+		transitions = append(transitions, t)
+		audits = append(audits, audit)
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("mark interrupted: commit: %w", err)
+		return nil, fmt.Errorf("mark interrupted: commit: %w", err)
 	}
-	return int64(len(writers)) + nonWriters, nil
+	for _, audit := range audits {
+		s.emitAuditLog(audit, nil)
+	}
+	return transitions, nil
 }
 
 func (s *Store) CountLegacyUnfencedScheduleRuns() (int64, error) {
@@ -1377,6 +1408,19 @@ type ScheduleFreshness struct {
 
 	ActivationCapacityDeferredAt *time.Time
 	ActivationCapacityDeferrals  int
+
+	// ConsecutiveFailures counts failed and timed_out runs started after the
+	// latest succeeded run (in run-id order), within retained run history.
+	// interrupted, cancelled and superseded runs neither count nor reset it.
+	ConsecutiveFailures int
+	// LastFailureAt is finished_at of the newest failed or timed_out run,
+	// nil when the schedule has none in retained history.
+	LastFailureAt *time.Time
+	// LastInterruptedAt is finished_at of the newest interrupted run, nil
+	// when the schedule has none in retained history. Interruptions are most
+	// often recorded at startup, before any counter has been scraped, so this
+	// database-backed value is what makes them reliably alertable.
+	LastInterruptedAt *time.Time
 }
 
 // EffectiveLocation resolves this schedule's timezone against the server
@@ -1476,7 +1520,15 @@ func (s *Store) scheduleFreshness(where string, args ...any) ([]ScheduleFreshnes
 		     AND o.producer_command_json=sc.command_json ORDER BY o.id DESC LIMIT 1),
 		  sa.status, sa.phase, sa.created_at, sa.updated_at, sa.due_at, sa.target_generation,
 		  sa.capacity_deferred_at, sa.capacity_deferrals,
-		  CASE WHEN sa.last_error <> '' THEN sa.last_error ELSE sa.defer_reason END
+		  CASE WHEN sa.last_error <> '' THEN sa.last_error ELSE sa.defer_reason END,
+		  (SELECT COUNT(*) FROM schedule_runs fr
+		   WHERE fr.schedule_id=sc.id AND fr.status IN ('failed','timed_out')
+		     AND fr.id > COALESCE((SELECT MAX(ok.id) FROM schedule_runs ok
+		                           WHERE ok.schedule_id=sc.id AND ok.status='succeeded'), 0)),
+		  (SELECT finished_at FROM schedule_runs
+		   WHERE schedule_id=sc.id AND status IN ('failed','timed_out') ORDER BY id DESC LIMIT 1),
+		  (SELECT finished_at FROM schedule_runs
+		   WHERE schedule_id=sc.id AND status='interrupted' ORDER BY id DESC LIMIT 1)
 		FROM app_schedules sc JOIN apps a ON a.id = sc.app_id
 		LEFT JOIN schedule_activations sa ON sa.id = (
 			SELECT id FROM schedule_activations
@@ -1516,16 +1568,26 @@ func (s *Store) scheduleFreshness(where string, args ...any) ([]ScheduleFreshnes
 		var activationCreated, activationUpdated, activationDue sql.NullTime
 		var activationGeneration, activationCapacityDeferrals sql.NullInt64
 		var activationCapacityDeferred sql.NullTime
+		var lastFailure, lastInterrupted sql.NullTime
 		if err := rows.Scan(&fr.ScheduleID, &fr.Slug, &fr.Name, &enabled, &fr.CronExpr, &tz,
 			&fr.CreatedAt, &fr.TimeoutSeconds, &fr.DeployTrigger, &currentDeploymentID, &currentVersion, &currentDigest,
 			&lastRunID, &lastRunAt, &lastStatus, &lastSuccess, &producerDeploymentID, &producerVersion, &producerDigest,
 			&activeRunID, &activeRunAt, &activeRunDigest, &deploySatisfied, &producerRepairRequired,
 			&producerFingerprint, &producerPublishedAt, &obligationID, &convergenceStatus, &obligationRunID, &convergenceError,
 			&activationStatus, &activationPhase, &activationCreated,
-			&activationUpdated, &activationDue, &activationGeneration, &activationCapacityDeferred, &activationCapacityDeferrals, &activationError); err != nil {
+			&activationUpdated, &activationDue, &activationGeneration, &activationCapacityDeferred, &activationCapacityDeferrals, &activationError,
+			&fr.ConsecutiveFailures, &lastFailure, &lastInterrupted); err != nil {
 			return nil, err
 		}
 		fr.Enabled = enabled != 0
+		if lastFailure.Valid {
+			v := lastFailure.Time
+			fr.LastFailureAt = &v
+		}
+		if lastInterrupted.Valid {
+			v := lastInterrupted.Time
+			fr.LastInterruptedAt = &v
+		}
 		fr.DeployTriggerSatisfied = deploySatisfied != 0
 		fr.ProducerRepairRequired = producerRepairRequired != 0
 		fr.ProducerFingerprint = producerFingerprint.String

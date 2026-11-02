@@ -64,11 +64,30 @@ roll_fallback, max_defer_age_seconds, target_generation, status, phase, due_at, 
 capacity_deferrals, capacity_deferred_at, surge_index,
 next_slot, last_error, superseded_by_id, created_at, updated_at, started_at, finished_at`
 
-// CompleteScheduleRunAndEnqueueActivation is the transactional outbox boundary
-// between scheduled work and serving-data activation. A succeeded run and its
-// roll request either both commit or neither does. Repeating a completion is
-// idempotent and returns the original activation.
+// ScheduleRunCompletion is the result of terminalizing a schedule run.
+// Transition is nil when the run was already terminal: some other writer owns
+// that outcome and has already reported it.
+type ScheduleRunCompletion struct {
+	Activation *ScheduleActivation
+	Transition *ScheduleRunTransition
+}
+
+// CompleteScheduleRunAndEnqueueActivation is CompleteScheduleRun for callers
+// that only need the activation.
 func (s *Store) CompleteScheduleRunAndEnqueueActivation(p CompleteScheduleRunParams) (*ScheduleActivation, error) {
+	c, err := s.CompleteScheduleRun(p)
+	if err != nil {
+		return nil, err
+	}
+	return c.Activation, nil
+}
+
+// CompleteScheduleRun is the transactional outbox boundary between scheduled
+// work and serving-data activation. A succeeded run, its roll request and its
+// schedule_run_<status> audit event either all commit or none does. Repeating
+// a completion is idempotent: it returns the original activation and a nil
+// Transition, and records nothing new.
+func (s *Store) CompleteScheduleRun(p CompleteScheduleRunParams) (*ScheduleRunCompletion, error) {
 	ctx := context.Background()
 	tx, err := s.d.beginWrite(ctx, s.rawDB(), scheduleActivationLockKey)
 	if err != nil {
@@ -76,18 +95,22 @@ func (s *Store) CompleteScheduleRunAndEnqueueActivation(p CompleteScheduleRunPar
 	}
 	committed := false
 	var statusChange *producerStatusChange
+	var runAudit *AuditEventParams
 	defer func() {
 		if !committed {
 			_ = tx.Rollback()
 		} else {
 			statusChange.log()
+			if runAudit != nil {
+				s.emitAuditLog(*runAudit, nil)
+			}
 		}
 	}()
 
 	var currentStatus, action, appSlug, scheduleName, rollFallback, sourceDigest string
-	var sourceVersion, producerFingerprint, producerCommandJSON string
+	var sourceVersion, producerFingerprint, producerCommandJSON, trigger string
 	var scheduleID, appID int64
-	var sourceDeploymentID, deployObligationID sql.NullInt64
+	var sourceDeploymentID, deployObligationID, triggeredBy sql.NullInt64
 	var minInterval, maxDeferAge, publishesData int
 	err = tx.QueryRowContext(ctx, `
 		SELECT r.status, r.on_success, r.min_roll_interval_seconds,
@@ -95,7 +118,7 @@ func (s *Store) CompleteScheduleRunAndEnqueueActivation(p CompleteScheduleRunPar
 		       r.schedule_id, sc.name, sc.app_id, a.slug,
 		       r.deployment_id, r.app_version, r.content_digest,
 		       r.producer_fingerprint, r.producer_command_json, r.deploy_obligation_id,
-		       r.publishes_data
+		       r.publishes_data, r.trigger, r.triggered_by_user_id
 		FROM schedule_runs r
 		JOIN app_schedules sc ON sc.id = r.schedule_id
 		JOIN apps a ON a.id = sc.app_id
@@ -103,7 +126,8 @@ func (s *Store) CompleteScheduleRunAndEnqueueActivation(p CompleteScheduleRunPar
 		&currentStatus, &action, &minInterval, &rollFallback, &maxDeferAge,
 		&scheduleID, &scheduleName, &appID, &appSlug,
 		&sourceDeploymentID, &sourceVersion, &sourceDigest,
-		&producerFingerprint, &producerCommandJSON, &deployObligationID, &publishesData,
+		&producerFingerprint, &producerCommandJSON, &deployObligationID,
+		&publishesData, &trigger, &triggeredBy,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -121,7 +145,32 @@ func (s *Store) CompleteScheduleRunAndEnqueueActivation(p CompleteScheduleRunPar
 			return nil, fmt.Errorf("complete schedule run: commit idempotent read: %w", err)
 		}
 		committed = true
-		return activation, nil
+		return &ScheduleRunCompletion{Activation: activation}, nil
+	}
+
+	transition := ScheduleRunTransition{
+		RunID: p.RunID, ScheduleID: scheduleID, ScheduleName: scheduleName,
+		AppID: appID, AppSlug: appSlug, Status: p.Status, Trigger: trigger,
+		ExitCode: p.ExitCode,
+	}
+	if triggeredBy.Valid {
+		uid := triggeredBy.Int64
+		transition.TriggeredByUserID = &uid
+	}
+	// recordTransition writes the audit event as the transaction's last step,
+	// once the activation (if any) is known.
+	recordTransition := func(activation *ScheduleActivation) error {
+		if activation != nil {
+			id := activation.ID
+			transition.ActivationID = &id
+			transition.TargetGeneration = activation.TargetGeneration
+		}
+		audit, err := s.insertScheduleRunAuditTx(ctx, tx, transition)
+		if err != nil {
+			return fmt.Errorf("complete schedule run: %w", err)
+		}
+		runAudit = &audit
+		return nil
 	}
 
 	var ec sql.NullInt64
@@ -137,10 +186,19 @@ func (s *Store) CompleteScheduleRunAndEnqueueActivation(p CompleteScheduleRunPar
 			return nil, fmt.Errorf("complete schedule run: allocate physical write sequence: %w", err)
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE schedule_runs SET status = ?, exit_code = ?, finished_at = ?, data_write_sequence = ?
-		WHERE id = ? AND status = 'running'`, p.Status, ec, p.FinishedAt, dataWriteSequence, p.RunID); err != nil {
+		WHERE id = ? AND status = 'running'`, p.Status, ec, p.FinishedAt, dataWriteSequence, p.RunID)
+	if err != nil {
 		return nil, fmt.Errorf("complete schedule run: update terminal state: %w", err)
+	}
+	// Every status writer holds this transaction's lock, so the row read as
+	// running above is still running. Refuse rather than report a transition
+	// this writer did not make; a retry takes the idempotent path.
+	if n, err := res.RowsAffected(); err != nil {
+		return nil, fmt.Errorf("complete schedule run: rows affected: %w", err)
+	} else if n != 1 {
+		return nil, fmt.Errorf("complete schedule run %d: row left running state concurrently", p.RunID)
 	}
 	if dataWriteSequence > 0 {
 		if p.Status == "succeeded" {
@@ -320,11 +378,14 @@ func (s *Store) CompleteScheduleRunAndEnqueueActivation(p CompleteScheduleRunPar
 		}
 	}
 	if p.Status != "succeeded" || action != "roll" || sourceIsPending {
+		if err := recordTransition(nil); err != nil {
+			return nil, err
+		}
 		if err := tx.Commit(); err != nil {
 			return nil, fmt.Errorf("complete schedule run: commit: %w", err)
 		}
 		committed = true
-		return nil, nil
+		return &ScheduleRunCompletion{Transition: &transition}, nil
 	}
 
 	// Damping begins after the most recent completed activation. Queued work is
@@ -414,11 +475,14 @@ func (s *Store) CompleteScheduleRunAndEnqueueActivation(p CompleteScheduleRunPar
 	if err != nil {
 		return nil, err
 	}
+	if err := recordTransition(activation); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("complete schedule run: commit activation: %w", err)
 	}
 	committed = true
-	return activation, nil
+	return &ScheduleRunCompletion{Activation: activation, Transition: &transition}, nil
 }
 
 func (s *Store) GetScheduleActivation(id int64) (*ScheduleActivation, error) {

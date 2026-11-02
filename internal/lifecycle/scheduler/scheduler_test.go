@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ type fakeJobs struct {
 	mu       sync.Mutex
 	calls    []int64
 	triggers map[int64]string
+	err      error // returned by Run after recording the call
 }
 
 func (f *fakeJobs) Run(id int64, trigger string, userID *int64) (int64, error) {
@@ -25,6 +27,9 @@ func (f *fakeJobs) Run(id int64, trigger string, userID *int64) (int64, error) {
 		f.triggers = map[int64]string{}
 	}
 	f.triggers[id] = trigger
+	if f.err != nil {
+		return 0, f.err
+	}
 	return int64(len(f.calls)), nil
 }
 
@@ -74,6 +79,9 @@ func (s *fakeStore) GetSchedule(id int64) (*db.Schedule, error) {
 		}
 	}
 	return nil, db.ErrNotFound
+}
+func (s *fakeStore) GetAppByID(id int64) (*db.App, error) {
+	return &db.App{ID: id, Slug: fmt.Sprintf("app-%d", id)}, nil
 }
 func (s *fakeStore) LastSuccessfulRun(id int64) (*db.ScheduleRun, error) {
 	if r, ok := s.lastSucc[id]; ok {
