@@ -166,10 +166,7 @@ func (s *Store) mutateEntitlement(appID int64, audit AuditEventParams, change fu
 		audit.UserID, audit.Action, audit.ResourceType, audit.ResourceID, audit.Detail, audit.IPAddress,
 		audit.CredentialID, audit.CredentialType, audit.CredentialName)
 	if err != nil {
-		slog.Error("audit_log_write_failed", "action", audit.Action, "err", err)
-		if s.auditErrHook != nil {
-			s.auditErrHook()
-		}
+		s.reportAuditWriteFailure(audit.Action, err)
 		return fmt.Errorf("record entitlement audit: %w", err)
 	}
 	if err := tx.Commit(); err != nil {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/robfig/cron/v3"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/jobs"
 	"github.com/rvben/shinyhub/internal/schedulespec"
 )
 
@@ -44,12 +45,37 @@ type Jobs interface {
 type Store interface {
 	ListEnabledSchedules() ([]*db.Schedule, error)
 	GetSchedule(id int64) (*db.Schedule, error)
+	GetAppByID(id int64) (*db.App, error)
 	LastSuccessfulRun(id int64) (*db.ScheduleRun, error)
 	RecoverDeployObligations() error
 	ReconcileAllDeployObligations() error
 	ClaimNextDeployObligation() (*db.ScheduleDeployObligation, error)
 	ReleaseDeployObligation(id int64, cause error) error
 }
+
+// Metrics receives per-schedule series from the scheduler. Satisfied by
+// *metrics.Registry; a local interface keeps this package free of a metrics
+// import.
+type Metrics interface {
+	// SeedSchedule publishes a registered schedule's alertable counter series
+	// at zero, so the first failure is an increase from 0 rather than a
+	// series that appears already at 1.
+	SeedSchedule(slug, schedule string)
+	// RecordScheduleDispatchFailure counts a cron or catch-up dispatch that
+	// was rejected before a run row existed.
+	RecordScheduleDispatchFailure(slug, schedule, reason string)
+}
+
+// Dispatch rejection reasons, the bounded values of the reason label on
+// shinyhub_schedule_dispatch_failures_total.
+const (
+	DispatchRejectAppDeploying = "app_deploying"
+	DispatchRejectQuarantined  = "quarantined"
+	DispatchRejectError        = "error"
+)
+
+// DispatchRejectReasons lists every reason label value, for seeding.
+var DispatchRejectReasons = []string{DispatchRejectAppDeploying, DispatchRejectQuarantined, DispatchRejectError}
 
 // ErrNotStarted is returned by Reload when the scheduler's cron has not
 // been started yet (Start has not been called or the scheduler is between
@@ -62,6 +88,7 @@ var ErrNotStarted = errors.New("scheduler not started")
 type Scheduler struct {
 	jobs       Jobs
 	store      Store
+	metrics    Metrics
 	defaultLoc *time.Location // server-level default; never nil
 
 	mu      sync.Mutex
@@ -85,6 +112,10 @@ func New(jobs Jobs, store Store, defaultLoc *time.Location) *Scheduler {
 		entries:    map[int64]cron.EntryID{},
 	}
 }
+
+// SetMetrics wires per-schedule series. Nil-safe when unset. Must be called
+// before Start.
+func (s *Scheduler) SetMetrics(m Metrics) { s.metrics = m }
 
 // Start initialises the scheduler. It blocks only briefly during initial load —
 // the cron loop runs in a separate goroutine. Stop the scheduler by cancelling
@@ -223,19 +254,63 @@ func (s *Scheduler) register(sched *db.Schedule) error {
 		return ErrNotStarted
 	}
 	spec := s.prefixedSpec(sched)
-	schedID := sched.ID
-	id, err := c.AddFunc(spec, func() {
-		if _, err := s.jobs.Run(schedID, TriggerSchedule, nil); err != nil {
-			slog.Warn("scheduled run failed", "schedule", schedID, "err", err)
-		}
-	})
+	app, err := s.store.GetAppByID(sched.AppID)
+	if err != nil {
+		return fmt.Errorf("get app %d: %w", sched.AppID, err)
+	}
+	// A rename or app change reaches here through Reload, so the identity
+	// captured now is current for every dispatch of this entry.
+	target := dispatchTarget{scheduleID: sched.ID, name: sched.Name, slug: app.Slug}
+	id, err := c.AddFunc(spec, func() { s.dispatch(target, TriggerSchedule) })
 	if err != nil {
 		return fmt.Errorf("parse cron %q: %w", spec, err)
 	}
 	s.mu.Lock()
 	s.entries[sched.ID] = id
 	s.mu.Unlock()
+	if s.metrics != nil {
+		s.metrics.SeedSchedule(target.slug, target.name)
+	}
 	return nil
+}
+
+// dispatchTarget names the schedule a cron entry dispatches, so a rejected
+// dispatch is reported with the same identity as the runs it would have made.
+type dispatchTarget struct {
+	scheduleID int64
+	name       string
+	slug       string
+}
+
+// dispatch starts one cron or catch-up run. A rejection here leaves no run
+// row, audit event or run counter behind, so it is logged by name and counted
+// by reason; otherwise a schedule that never runs looks like one that is idle.
+func (s *Scheduler) dispatch(t dispatchTarget, trigger string) {
+	_, err := s.jobs.Run(t.scheduleID, trigger, nil)
+	if err == nil {
+		return
+	}
+	attrs := []any{
+		"app", t.slug, "schedule", t.name, "schedule_id", t.scheduleID,
+		"trigger", trigger, "err", err,
+	}
+	if errors.Is(err, jobs.ErrManagerStopped) {
+		// Shutdown, not a missed run: the next owner's missed-run policy
+		// decides whether this boundary is caught up.
+		slog.Info("schedule dispatch skipped: jobs manager stopped", attrs...)
+		return
+	}
+	reason := DispatchRejectError
+	switch {
+	case errors.Is(err, jobs.ErrAppDeploying):
+		reason = DispatchRejectAppDeploying
+	case errors.Is(err, jobs.ErrAppCompatibilityQuarantined):
+		reason = DispatchRejectQuarantined
+	}
+	slog.Warn("schedule_dispatch_rejected", append(attrs, "reason", reason)...)
+	if s.metrics != nil {
+		s.metrics.RecordScheduleDispatchFailure(t.slug, t.name, reason)
+	}
 }
 
 // dispatchMissedIfDue runs the schedule once immediately if more than one cron
@@ -257,11 +332,12 @@ func (s *Scheduler) dispatchMissedIfDue(sched *db.Schedule) {
 	}
 	next := schedule.Next(last.StartedAt)
 	if next.Before(time.Now()) {
-		go func(id int64) {
-			if _, err := s.jobs.Run(id, TriggerMissed, nil); err != nil {
-				slog.Warn("missed-run dispatch failed", "schedule", id, "err", err)
-			}
-		}(sched.ID)
+		app, err := s.store.GetAppByID(sched.AppID)
+		if err != nil {
+			slog.Warn("missed-run dispatch: get app", "schedule", sched.Name, "schedule_id", sched.ID, "err", err)
+			return
+		}
+		go s.dispatch(dispatchTarget{scheduleID: sched.ID, name: sched.Name, slug: app.Slug}, TriggerMissed)
 	}
 }
 

@@ -382,12 +382,12 @@ func TestScheduleRuns_MarkInterrupted(t *testing.T) {
 		ScheduleID: schedID, Status: "running", Trigger: "schedule",
 		StartedAt: time.Now().UTC(), LogPath: "x.log",
 	})
-	n, err := store.MarkRunningSchedulesInterrupted()
+	got, err := store.MarkRunningSchedulesInterrupted()
 	if err != nil {
 		t.Fatalf("mark interrupted: %v", err)
 	}
-	if n != 1 {
-		t.Fatalf("expected 1 row affected, got %d", n)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 transition, got %+v", got)
 	}
 	runs, _ := store.ListScheduleRuns(schedID, 10, 0)
 	if runs[0].Status != "interrupted" {

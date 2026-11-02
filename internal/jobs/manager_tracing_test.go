@@ -304,7 +304,7 @@ type terminalStore struct {
 	failed    chan struct{}
 }
 
-func (s *terminalStore) CompleteScheduleRunAndEnqueueActivation(p db.CompleteScheduleRunParams) (*db.ScheduleActivation, error) {
+func (s *terminalStore) CompleteScheduleRun(p db.CompleteScheduleRunParams) (*db.ScheduleRunCompletion, error) {
 	s.tmu.Lock()
 	fail := s.failures != 0
 	if s.failures > 0 {
@@ -318,7 +318,7 @@ func (s *terminalStore) CompleteScheduleRunAndEnqueueActivation(p db.CompleteSch
 		}
 		return nil, s.failErr
 	}
-	a, err := s.fakeStore.CompleteScheduleRunAndEnqueueActivation(p)
+	a, err := s.fakeStore.CompleteScheduleRun(p)
 	s.tmu.Lock()
 	s.successAt = time.Now()
 	s.tmu.Unlock()

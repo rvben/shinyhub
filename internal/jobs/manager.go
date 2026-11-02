@@ -892,7 +892,7 @@ func (m *Manager) runRequired(sched *db.Schedule, app *db.App, deployment *db.De
 	if err := m.commitAdmission(runID, app.ID, cancel, false); err != nil {
 		cancel()
 		admission.Unlock()
-		m.finishRun(sched, runID, "interrupted", nil, "deploy", nil, false)
+		m.finishRun(sched, runID, "interrupted", nil, false)
 		return runID, err
 	}
 	go func() {
@@ -906,16 +906,16 @@ func (m *Manager) runRequired(sched *db.Schedule, app *db.App, deployment *db.De
 		// Recheck after exclusive admission so a newly pending deployment cannot
 		// make this immutable old-bundle writer run inside a deploy barrier.
 		if pending, err := m.store.HasPendingDeployment(app.ID); err != nil || pending {
-			m.finishRun(sched, runID, "failed", nil, "deploy", nil, false)
+			m.finishRun(sched, runID, "failed", nil, false)
 			return
 		}
 		current, err := m.store.GetServingDeployment(app.ID)
 		if err != nil || !sameServingBundle(current, deployment) {
-			m.finishRun(sched, runID, "failed", nil, "deploy", nil, false)
+			m.finishRun(sched, runID, "failed", nil, false)
 			return
 		}
 		if ctx.Err() != nil {
-			m.finishRun(sched, runID, m.cancelStatus(runID), nil, "deploy", nil, false)
+			m.finishRun(sched, runID, m.cancelStatus(runID), nil, false)
 			return
 		}
 		m.execute(ctx, sched, app, deployment, runID, "deploy", nil, false)
@@ -968,7 +968,7 @@ func (m *Manager) runWithOwnedSlot(sched *db.Schedule, app *db.App, deployment *
 		cancel()
 		slot.unlock()
 		gate.RUnlock()
-		m.finishRun(sched, runID, "interrupted", nil, trigger, userID, false)
+		m.finishRun(sched, runID, "interrupted", nil, false)
 		return runID, err
 	}
 	go func() {
@@ -1021,7 +1021,7 @@ func (m *Manager) runWithQueue(sched *db.Schedule, app *db.App, deployment *db.D
 			cancel()
 			slot.unlock()
 			gate.RUnlock()
-			m.finishRun(sched, runID, "interrupted", nil, trigger, userID, false)
+			m.finishRun(sched, runID, "interrupted", nil, false)
 			return runID, err
 		}
 		go func() {
@@ -1055,7 +1055,7 @@ func (m *Manager) runWithQueue(sched *db.Schedule, app *db.App, deployment *db.D
 		cancel()
 		<-sem
 		gate.RUnlock()
-		m.finishRun(sched, runID, "interrupted", nil, trigger, userID, false)
+		m.finishRun(sched, runID, "interrupted", nil, false)
 		return runID, err
 	}
 	go func() {
@@ -1070,7 +1070,7 @@ func (m *Manager) runWithQueue(sched *db.Schedule, app *db.App, deployment *db.D
 			// then finalise as cancelled. We never acquired the slot,
 			// so do not call slot.unlock.
 			<-sem
-			m.finishRun(sched, runID, m.cancelStatus(runID), nil, trigger, userID, false)
+			m.finishRun(sched, runID, m.cancelStatus(runID), nil, false)
 			return
 		}
 		// Promoted from queued to active. Free the queue slot now —
@@ -1098,7 +1098,7 @@ func (m *Manager) runConcurrent(sched *db.Schedule, app *db.App, deployment *db.
 	if err := m.commitAdmission(runID, app.ID, cancel, false); err != nil {
 		cancel()
 		gate.RUnlock()
-		m.finishRun(sched, runID, "interrupted", nil, trigger, userID, false)
+		m.finishRun(sched, runID, "interrupted", nil, false)
 		return runID, err
 	}
 	go func() {
@@ -1116,7 +1116,7 @@ func (m *Manager) runConcurrent(sched *db.Schedule, app *db.App, deployment *db.
 // read gate to its goroutine. Required convergence takes the exclusive side.
 func (m *Manager) executeOrdinary(ctx context.Context, sched *db.Schedule, app *db.App, deployment *db.Deployment, runID int64, trigger string, userID *int64) {
 	if ctx.Err() != nil {
-		m.finishRun(sched, runID, m.cancelStatus(runID), nil, trigger, userID, false)
+		m.finishRun(sched, runID, m.cancelStatus(runID), nil, false)
 		return
 	}
 	m.execute(ctx, sched, app, deployment, runID, trigger, userID, false)
@@ -1515,7 +1515,7 @@ func (m *Manager) RunCandidateProducerLocked(sched *db.Schedule, app *db.App, de
 	ctx, cancel := m.buildRunContext()
 	if err := m.commitAdmission(runID, app.ID, cancel, true); err != nil {
 		cancel()
-		m.finishRun(&snapshot, runID, "interrupted", nil, "deploy", nil, false)
+		m.finishRun(&snapshot, runID, "interrupted", nil, false)
 		return runID, err
 	}
 	defer m.wg.Done()
@@ -1666,7 +1666,7 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	case m.globalSem <- struct{}{}:
 		defer func() { <-m.globalSem }()
 	case <-ctx.Done():
-		m.finishRun(sched, runID, m.cancelStatus(runID), nil, trigger, userID, false)
+		m.finishRun(sched, runID, m.cancelStatus(runID), nil, false)
 		return
 	}
 	releaseExecution, executionLifetimeFile, err := m.acquireJobExecution(ctx, app.ID)
@@ -1676,20 +1676,20 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 		if ctx.Err() != nil {
 			status = m.cancelStatus(runID)
 		}
-		m.finishRun(sched, runID, status, nil, trigger, userID, false)
+		m.finishRun(sched, runID, status, nil, false)
 		return
 	}
 	defer releaseExecution()
 	if ctx.Err() != nil {
-		m.finishRun(sched, runID, m.cancelStatus(runID), nil, trigger, userID, false)
+		m.finishRun(sched, runID, m.cancelStatus(runID), nil, false)
 		return
 	}
 	if run, err := m.store.GetScheduleRun(runID); err != nil || run.Status != "running" {
-		m.finishRun(sched, runID, "superseded", nil, trigger, userID, false)
+		m.finishRun(sched, runID, "superseded", nil, false)
 		return
 	}
 	if !candidate && !m.servingRunStillCurrent(sched, app, deployment, runID, trigger) {
-		m.finishRun(sched, runID, "superseded", nil, trigger, userID, false)
+		m.finishRun(sched, runID, "superseded", nil, false)
 		return
 	}
 	var publicationLifetimeFile, candidateConsumerFenceFile *os.File
@@ -1701,7 +1701,7 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 			if ctx.Err() != nil {
 				status = m.cancelStatus(runID)
 			}
-			m.finishRun(sched, runID, status, nil, trigger, userID, false)
+			m.finishRun(sched, runID, status, nil, false)
 			return
 		}
 		defer releasePublication()
@@ -1714,7 +1714,7 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 				if ctx.Err() != nil {
 					status = m.cancelStatus(runID)
 				}
-				m.finishRun(sched, runID, status, nil, trigger, userID, false)
+				m.finishRun(sched, runID, status, nil, false)
 				return
 			}
 			defer releaseConsumers()
@@ -1722,7 +1722,7 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 		}
 		select {
 		case <-ctx.Done():
-			m.finishRun(sched, runID, m.cancelStatus(runID), nil, trigger, userID, false)
+			m.finishRun(sched, runID, m.cancelStatus(runID), nil, false)
 			return
 		default:
 		}
@@ -1734,7 +1734,7 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 		// exception: they execute the exact pending deployment while its lifecycle
 		// handler owns the app operation fence.
 		if !candidate && !m.servingRunStillCurrent(sched, app, deployment, runID, trigger) {
-			m.finishRun(sched, runID, "superseded", nil, trigger, userID, false)
+			m.finishRun(sched, runID, "superseded", nil, false)
 			return
 		}
 	}
@@ -1748,14 +1748,14 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	// Build log file path and create directory.
 	logDir := filepath.Join(m.appsDir, app.Slug, "schedules", fmt.Sprintf("%d", sched.ID))
 	if err := os.MkdirAll(logDir, 0o750); err != nil {
-		m.finishRun(sched, runID, "failed", nil, trigger, userID, false)
+		m.finishRun(sched, runID, "failed", nil, false)
 		return
 	}
 	logPath := filepath.Join(logDir, fmt.Sprintf("run-%d.log", runID))
 
 	logFile, err := os.Create(logPath)
 	if err != nil {
-		m.finishRun(sched, runID, "failed", nil, trigger, userID, false)
+		m.finishRun(sched, runID, "failed", nil, false)
 		return
 	}
 	defer logFile.Close()
@@ -1772,20 +1772,20 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	// surfacing a key/rotation problem, and app startup fails closed the same way.
 	envVars, err := m.store.ListAppEnvVars(app.ID)
 	if err != nil {
-		m.finishRun(sched, runID, "failed", nil, trigger, userID, false)
+		m.finishRun(sched, runID, "failed", nil, false)
 		return
 	}
 	env, secretEnv, err := appenv.Resolve(envVars, m.secretsKey)
 	if err != nil {
 		fmt.Fprintf(logFile, "shinyhub: %v\n", err)
 		slog.Error("schedule run: secret decrypt failed", "schedule", sched.ID, "run", runID, "err", err)
-		m.finishRun(sched, runID, "failed", nil, trigger, userID, false)
+		m.finishRun(sched, runID, "failed", nil, false)
 		return
 	}
 	env, secretEnv, err = appenv.WithBundle(env, secretEnv, deployment.BundleDir)
 	if err != nil {
 		fmt.Fprintf(logFile, "shinyhub: resolve bundle env: %v\n", err)
-		m.finishRun(sched, runID, "failed", nil, trigger, userID, false)
+		m.finishRun(sched, runID, "failed", nil, false)
 		return
 	}
 	if v, ok := m.runSpans.Load(runID); ok {
@@ -1812,7 +1812,7 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	// Build shared mounts.
 	mounts, err := m.store.ListSharedDataSources(app.ID)
 	if err != nil {
-		m.finishRun(sched, runID, "failed", nil, trigger, userID, false)
+		m.finishRun(sched, runID, "failed", nil, false)
 		return
 	}
 	sharedMounts := make([]process.SharedMount, 0, len(mounts))
@@ -1826,14 +1826,14 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	// Parse command from JSON.
 	var cmd []string
 	if err := json.Unmarshal([]byte(sched.CommandJSON), &cmd); err != nil {
-		m.finishRun(sched, runID, "failed", nil, trigger, userID, false)
+		m.finishRun(sched, runID, "failed", nil, false)
 		return
 	}
 
 	// Build app data dir.
 	appDataPath := filepath.Join(m.appDataDir, app.Slug)
 	if err := os.MkdirAll(appDataPath, 0o750); err != nil {
-		m.finishRun(sched, runID, "failed", nil, trigger, userID, false)
+		m.finishRun(sched, runID, "failed", nil, false)
 		return
 	}
 
@@ -1846,7 +1846,7 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	assignments, err := process.ExpandPlacement(app.PlacementMap(), m.tierOrder, 1, m.defaultTier)
 	if err != nil {
 		fmt.Fprintf(logFile, "shinyhub: resolve job tier: %v\n", err)
-		m.finishRun(sched, runID, "failed", nil, trigger, userID, false)
+		m.finishRun(sched, runID, "failed", nil, false)
 		return
 	}
 	jobTier := m.defaultTier
@@ -1859,7 +1859,7 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 			m.traceCfg.AutoInstrumentExtraPackages, m.procMgr.HostPreparesDepsFor(jobTier))
 		if err != nil {
 			fmt.Fprintln(logFile, "shinyhub: resolve job instrumentation: invalid manifest")
-			m.finishRun(sched, runID, "failed", nil, trigger, userID, false)
+			m.finishRun(sched, runID, "failed", nil, false)
 			return
 		}
 	}
@@ -1870,7 +1870,7 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 		inheritor, ok := rt.(process.LifetimeFileInheritor)
 		if !ok || !inheritor.InheritsLifetimeFiles() {
 			fmt.Fprintf(logFile, "shinyhub: data-producing schedules need a local native tier whose processes inherit the server's publication and consumer-lifetime locks; tier %q does not\n", jobTier)
-			m.finishRun(sched, runID, "failed", nil, trigger, userID, false)
+			m.finishRun(sched, runID, "failed", nil, false)
 			return
 		}
 	}
@@ -1980,7 +1980,7 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 		exitCode = intPtr(info.Code)
 	}
 
-	m.finishRun(sched, runID, status, exitCode, trigger, userID, schedulePublishesData(sched, trigger))
+	m.finishRun(sched, runID, status, exitCode, schedulePublishesData(sched, trigger))
 	// A run can pin a deployment the app has since moved past; once it ends,
 	// that activation's cache may have no user left.
 	if cacheRoot, _ := m.procMgr.AppCache(); cacheRoot != "" {
@@ -2031,16 +2031,17 @@ func sameServingBundle(current, admitted *db.Deployment) bool {
 // nil pointer means "no observed exit" (an interrupted run).
 func intPtr(i int) *int { return &i }
 
-// finishRun updates the run row and logs an audit event. A nil exitCode is
+// finishRun persists the run's terminal status, which commits its audit event
+// in the same transaction, then reports the transition. A nil exitCode is
 // recorded as SQL NULL, used for a run that finished without observing a
 // process exit (interrupted by a service restart).
-func (m *Manager) finishRun(sched *db.Schedule, runID int64, status string, exitCode *int, trigger string, userID *int64, dataWriteAttempted bool) {
+func (m *Manager) finishRun(sched *db.Schedule, runID int64, status string, exitCode *int, dataWriteAttempted bool) {
 	finishedAt := time.Now().UTC()
-	var activation *db.ScheduleActivation
+	var completion *db.ScheduleRunCompletion
 	var err error
 	retryDelay := 50 * time.Millisecond
 	for {
-		activation, err = m.store.CompleteScheduleRunAndEnqueueActivation(db.CompleteScheduleRunParams{
+		completion, err = m.store.CompleteScheduleRun(db.CompleteScheduleRunParams{
 			RunID: runID, Status: status, ExitCode: exitCode, FinishedAt: finishedAt,
 			DataWriteAttempted: dataWriteAttempted,
 		})
@@ -2087,24 +2088,46 @@ func (m *Manager) finishRun(sched *db.Schedule, runID int64, status string, exit
 		}
 	}
 
-	if m.metrics != nil {
-		slug := ""
-		if app, err := m.store.GetAppByID(sched.AppID); err == nil {
-			slug = app.Slug
-		}
-		m.metrics.RecordScheduleRun(slug, sched.Name, status)
+	// Only the call that moved the row out of running reports it. A retry
+	// whose earlier attempt committed, or a run another writer already
+	// terminalized, carries no transition and reports nothing.
+	if completion != nil && completion.Transition != nil {
+		m.ReportScheduleRunTransitions(*completion.Transition)
 	}
+}
 
-	detail := fmt.Sprintf(`{"trigger":%q,"run_id":%d}`, trigger, runID)
-	if activation != nil {
-		detail = fmt.Sprintf(`{"trigger":%q,"run_id":%d,"activation_id":%d,"target_generation":%d}`,
-			trigger, runID, activation.ID, activation.TargetGeneration)
+// ReportScheduleRunTransitions emits the structured log line and the run
+// counter for committed run transitions. The audit event is not written here:
+// the store commits it together with the transition.
+func (m *Manager) ReportScheduleRunTransitions(transitions ...db.ScheduleRunTransition) {
+	for _, t := range transitions {
+		logScheduleRunFinished(t)
+		if m.metrics != nil {
+			m.metrics.RecordScheduleRun(t.AppSlug, t.ScheduleName, t.Status)
+		}
 	}
-	m.store.LogAuditEvent(db.AuditEventParams{
-		UserID:       userID,
-		Action:       "schedule_run_" + status,
-		ResourceType: "schedule",
-		ResourceID:   fmt.Sprintf("%d", sched.ID),
-		Detail:       detail,
-	})
+}
+
+// logScheduleRunFinished writes one schedule_run_finished line per run
+// outcome. Outcomes that need an operator (failed, timed_out, interrupted)
+// log at Warn so a level filter alone selects them.
+func logScheduleRunFinished(t db.ScheduleRunTransition) {
+	level := slog.LevelInfo
+	switch t.Status {
+	case "failed", "timed_out", "interrupted":
+		level = slog.LevelWarn
+	}
+	var exitCode any // nil logs as null: no process exit was observed
+	if t.ExitCode != nil {
+		exitCode = *t.ExitCode
+	}
+	slog.Log(context.Background(), level, "schedule_run_finished",
+		"app", t.AppSlug,
+		"schedule", t.ScheduleName,
+		"schedule_id", t.ScheduleID,
+		"run_id", t.RunID,
+		"status", t.Status,
+		"exit_code", exitCode,
+		"trigger", t.Trigger,
+	)
 }

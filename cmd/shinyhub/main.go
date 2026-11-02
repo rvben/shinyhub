@@ -1799,8 +1799,16 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 			out := make([]metrics.ScheduleSample, len(rows))
 			for i, fr := range rows {
 				s := metrics.ScheduleSample{
-					Slug: fr.Slug, Name: fr.Name, ActivationStatus: fr.ActivationStatus,
-					CapacityDeferrals: fr.ActivationCapacityDeferrals,
+					Slug: fr.Slug, Name: fr.Name, Enabled: fr.Enabled,
+					ConsecutiveFailures: fr.ConsecutiveFailures,
+					ActivationStatus:    fr.ActivationStatus,
+					CapacityDeferrals:   fr.ActivationCapacityDeferrals,
+				}
+				if fr.LastFailureAt != nil {
+					s.LastFailureUnix = fr.LastFailureAt.Unix()
+				}
+				if fr.LastInterruptedAt != nil {
+					s.LastInterruptedUnix = fr.LastInterruptedAt.Unix()
 				}
 				if fr.LastSuccessAt != nil {
 					s.LastSuccessUnix = fr.LastSuccessAt.Unix()
@@ -2506,6 +2514,9 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		jobsMgr.SetTracing(cfg.Tracing, tracer.Tracer())
 	}
 	sched := scheduler.New(jobsMgr, store, cfg.Scheduler.Location)
+	if metricsReg != nil {
+		sched.SetMetrics(metricsReg)
+	}
 	srv.SetJobs(jobsMgr, sched)
 	activationCoordinator := activation.New(store, srv, 2*time.Second)
 
@@ -2690,15 +2701,16 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		}()
 		// A previous owner may have completed while we waited for its physical
 		// writer lock. Only rows still running now are truly interrupted/uncertain.
-		var interruptedRuns int64
+		var interruptedRuns []db.ScheduleRunTransition
 		if !retryOwnerStep("terminalize inherited schedule runs", func() error {
 			var err error
 			interruptedRuns, err = store.MarkRunningSchedulesInterrupted()
 			return err
 		}) {
 			return
-		} else if interruptedRuns > 0 {
-			slog.Warn("terminalized inherited schedule runs", "count", interruptedRuns)
+		} else if len(interruptedRuns) > 0 {
+			slog.Warn("terminalized inherited schedule runs", "count", len(interruptedRuns))
+			jobsMgr.ReportScheduleRunTransitions(interruptedRuns...)
 		}
 		// Resolve interrupted deployments before recovery. Fail closed and retry:
 		// a candidate producer may already have published incompatible shared data,

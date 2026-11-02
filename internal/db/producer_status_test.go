@@ -254,8 +254,8 @@ func TestProducerStatusRecovery_InterruptedWriterAcrossRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	store = open()
-	if n, err := store.MarkRunningSchedulesInterrupted(); err != nil || n != 1 {
-		t.Fatalf("startup interruption count=%d err=%v", n, err)
+	if got, err := store.MarkRunningSchedulesInterrupted(); err != nil || len(got) != 1 {
+		t.Fatalf("startup interruption transitions=%+v err=%v", got, err)
 	}
 	if err := store.EnforceCompatibilityQuarantines(); err != nil {
 		t.Fatal(err)

@@ -281,12 +281,129 @@ alert; the retry and overflow results are useful early warnings.
 | `shinyhub_generation_drain_duration_seconds` | histogram | - | Time from cutover until the old route retired or cleanup was deferred. |
 | `shinyhub_app_state_transitions_total` | counter | `event` | App lifecycle transitions (`hibernate`, `wake`). |
 | `shinyhub_replica_restarts_total` | counter | - | Replica crash-restarts performed by the watchdog. A flapping app shows up as a rising restart rate. |
+| `shinyhub_schedule_runs_total` | counter | `slug`, `schedule`, `status` | Finished runs by terminal status: `succeeded`, `failed`, `timed_out`, `interrupted`, `cancelled`, or `superseded`. Counted once per run, by the writer that recorded the outcome. `succeeded`, `failed`, `timed_out` and `interrupted` are published at 0 as soon as a schedule is registered. Process-local: resets on restart and is recorded by the instance that runs the scheduler. |
+| `shinyhub_schedule_dispatch_failures_total` | counter | `slug`, `schedule`, `reason` | Cron and catch-up dispatches rejected before a run existed, so no run, audit event or `runs_total` sample records them. `reason` is `app_deploying`, `quarantined`, or `error`; all three are published at 0 per schedule. A shutdown is not counted. |
 | `shinyhub_schedule_last_success_seconds` | gauge | `slug`, `schedule` | Unix timestamp of the most recent successful command run; absent until the first success. |
+| `shinyhub_schedule_last_failure_seconds` | gauge | `slug`, `schedule` | Unix timestamp at which the newest `failed` or `timed_out` run finished; absent when there is none. |
+| `shinyhub_schedule_last_interrupted_seconds` | gauge | `slug`, `schedule` | Unix timestamp at which the newest `interrupted` run was closed; absent when there is none. |
+| `shinyhub_schedule_consecutive_failures` | gauge | `slug`, `schedule` | `failed` and `timed_out` runs since the latest `succeeded` run (or ever, for a schedule that has never succeeded), within retained run history. `interrupted` and `cancelled` runs neither count nor reset it. Present for every schedule. |
+| `shinyhub_schedule_enabled` | gauge | `slug`, `schedule` | 1 for an enabled schedule, 0 for a disabled or retired one. Present for every schedule. |
+| `shinyhub_schedule_collector_up` | gauge | - | 1 when the scrape-time schedule query succeeded, 0 when it failed. On 0 every other database-backed schedule gauge is absent for that scrape. |
 | `shinyhub_schedule_activation_status` | gauge | `slug`, `schedule`, `status` | Current durable serving-data activation state; the labeled state has value 1. Alert on `repairing`, `deferred_capacity`, `failed`, `cancelled`, or `blocked_unsupported` according to age and policy. |
 | `shinyhub_schedule_activation_age_seconds` | gauge | `slug`, `schedule` | Age of a nonterminal activation. Use with the status metric so ordinary interval damping is not mistaken for a fault. |
 | `shinyhub_schedule_activation_capacity_deferrals` | gauge | `slug`, `schedule` | Deferral count of the latest activation, retained across coalesced producer successes. Historical terminal activations retain their counts. |
 | `shinyhub_schedule_activation_capacity_deferred_age_seconds` | gauge | `slug`, `schedule` | Age since the first capacity deferral of outstanding work, retained across coalesced producer successes. Absent after completion or cancellation; alert on this age directly so new producer successes cannot reset the alert timer. |
 | `shinyhub_schedule_activation_target_generation` | gauge | `slug`, `schedule` | Target serving-data generation of the latest activation. |
+
+### Alerting on schedule failures
+
+Every schedule signal names the schedule: metrics carry `slug` and `schedule`
+labels, and the log lines and audit events below carry `app`, `schedule` and
+`schedule_id`. An alert can therefore say which schedule failed without a
+lookup.
+
+Which run statuses to alert on:
+
+- `failed` and `timed_out` are the default alert: the command ran and did not
+  finish successfully.
+- `interrupted` means the run never reached a verdict: ShinyHub shut down
+  while it was in progress, found it still marked running after a crash, or
+  could not complete its admission. It says nothing about the command itself,
+  so route it separately, typically at lower severity.
+- `cancelled` and `superseded` are deliberate outcomes (an operator cancel, a
+  newer deploy replacing the run) and should not page. Overlap skips
+  (`skipped_overlap`) are recorded as runs in the UI and API only; they produce
+  no metric and no audit event.
+
+The two kinds of schedule metric answer different questions:
+
+- **Database-backed gauges** (`shinyhub_schedule_consecutive_failures`,
+  `shinyhub_schedule_last_failure_seconds`,
+  `shinyhub_schedule_last_interrupted_seconds`,
+  `shinyhub_schedule_last_success_seconds`, `shinyhub_schedule_enabled`) are
+  read from the database on each scrape, so they survive restarts and agree on
+  every control-plane instance. Alert on run outcomes with these. In a
+  clustered deployment, aggregate them with `max by (slug, schedule) (...)` so
+  each schedule alerts once rather than once per instance.
+- **Counters** (`shinyhub_schedule_runs_total`,
+  `shinyhub_schedule_dispatch_failures_total`) are process-local and reset on
+  restart; query them with `increase(...)`, which tolerates resets. Every
+  alertable series is published at 0 when the schedule is registered, so the
+  first event after startup is a visible increase. `runs_total` suits
+  dashboards and rates rather than run-outcome alerts: an outcome counted just
+  before the process dies is lost if it was never scraped, and runs a crash
+  left behind are closed as `interrupted` during startup, before the new
+  process is first scraped. A rejected dispatch leaves no run in the
+  database, so `dispatch_failures_total` is the only signal for it.
+
+`shinyhub_schedule_last_success_seconds` alone cannot catch a schedule that has
+never succeeded, because the series is absent until the first success. Use
+`shinyhub_schedule_consecutive_failures`, which is present for every schedule,
+and `shinyhub_schedule_enabled` to tell a disabled schedule from a failing one.
+Alert on `shinyhub_schedule_collector_up == 0` so a database outage is not read
+as "no schedule is failing".
+
+The same outcomes are available as structured log lines for a log-based
+alerting pipeline:
+
+- `schedule_run_finished`, once per finished run, at `WARN` for `failed`,
+  `timed_out` and `interrupted` and `INFO` otherwise. Fields: `app`,
+  `schedule`, `schedule_id`, `run_id`, `status`, `exit_code` (null when no
+  process exit was observed), and `trigger`.
+- `schedule_dispatch_rejected`, at `WARN`, when a cron or catch-up dispatch is
+  rejected before a run starts. Fields: `app`, `schedule`, `schedule_id`,
+  `trigger`, `reason`, and `err`.
+
+Run outcomes are also written to the audit log; see
+[schedules audit log](schedules.md#audit-log).
+
+```yaml
+groups:
+  - name: shinyhub-schedules
+    rules:
+      - alert: ShinyHubScheduleFailed
+        # Fires for 15 minutes after each failed or timed_out run.
+        expr: time() - max by (slug, schedule) (shinyhub_schedule_last_failure_seconds) < 900
+        annotations:
+          summary: "Schedule {{ $labels.schedule }} on {{ $labels.slug }} failed or timed out"
+
+      - alert: ShinyHubScheduleFailingRepeatedly
+        expr: max by (slug, schedule) (shinyhub_schedule_consecutive_failures) >= 3
+          and on (slug, schedule) max by (slug, schedule) (shinyhub_schedule_enabled) == 1
+        annotations:
+          summary: "Schedule {{ $labels.schedule }} on {{ $labels.slug }} has failed {{ $value }} times in a row"
+
+      - alert: ShinyHubScheduleInterrupted
+        # Fires for an hour, including for runs closed at startup after a crash.
+        expr: time() - max by (slug, schedule) (shinyhub_schedule_last_interrupted_seconds) < 3600
+        labels:
+          severity: info
+        annotations:
+          summary: "A run of {{ $labels.schedule }} on {{ $labels.slug }} was interrupted"
+
+      - alert: ShinyHubScheduleNotDispatched
+        expr: sum by (slug, schedule, reason) (increase(shinyhub_schedule_dispatch_failures_total[1h])) > 0
+        annotations:
+          summary: "Schedule {{ $labels.schedule }} on {{ $labels.slug }} did not start ({{ $labels.reason }})"
+
+      - alert: ShinyHubScheduleStale
+        # Adjust the threshold to the schedule's cadence.
+        expr: time() - max by (slug, schedule) (shinyhub_schedule_last_success_seconds) > 2 * 86400
+          and on (slug, schedule) max by (slug, schedule) (shinyhub_schedule_enabled) == 1
+        annotations:
+          summary: "Schedule {{ $labels.schedule }} on {{ $labels.slug }} has not succeeded in 2 days"
+
+      - alert: ShinyHubScheduleMetricsUnavailable
+        expr: min(shinyhub_schedule_collector_up) == 0
+        for: 5m
+        annotations:
+          summary: "Schedule health gauges cannot be read from the database"
+
+      - alert: ShinyHubScheduleActivationStuck
+        expr: max by (slug, schedule) (shinyhub_schedule_activation_capacity_deferred_age_seconds) > 3600
+        annotations:
+          summary: "Serving data for {{ $labels.schedule }} on {{ $labels.slug }} has waited over 1h for capacity"
+```
 
 ### Application-log durability and delivery
 

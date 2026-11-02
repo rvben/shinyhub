@@ -1952,3 +1952,69 @@ func TestSchedules_DeleteForgetsOnlyItsOwnMetricsSeries(t *testing.T) {
 		t.Fatalf("sibling schedule's series must survive the delete:\n%s", body)
 	}
 }
+
+// TestSchedules_RenameForgetsOldNameSeries proves a rename drops the series
+// keyed by the old name. Otherwise the old name keeps exporting its last
+// counts forever and an alert on it can neither fire nor resolve.
+func TestSchedules_RenameForgetsOldNameSeries(t *testing.T) {
+	srv, store, _ := newManagerTestServer(t)
+	reg := metrics.New("test")
+	srv.SetMetrics(reg)
+
+	hash, _ := testHashPassword("pass")
+	if err := store.CreateUser(db.CreateUserParams{Username: "metrics-rename-owner", PasswordHash: hash, Role: "developer"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, _ := store.GetUserByUsername("metrics-rename-owner")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "metrics-rename", Name: "Metrics rename", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := store.GetAppBySlug("metrics-rename")
+	token, _ := auth.IssueJWT(owner.ID, owner.Username, owner.Role, "test-secret")
+	scheduleID, err := store.CreateSchedule(db.CreateScheduleParams{
+		AppID: app.ID, Name: "nightly", CronExpr: "0 * * * *", CommandJSON: `["true"]`,
+		Enabled: true, TimeoutSeconds: 60, OverlapPolicy: "skip", MissedPolicy: "skip", OnSuccess: "none",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg.RecordScheduleRun(app.Slug, "nightly", "failed")
+	reg.RecordScheduleDispatchFailure(app.Slug, "nightly", "error")
+	reg.RecordScheduleRun(app.Slug, "weekly", "succeeded")
+
+	scrape := func() string {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		reg.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+		return rec.Body.String()
+	}
+	if body := scrape(); !strings.Contains(body, `schedule="nightly"`) {
+		t.Fatalf("precondition: nightly series must exist before rename:\n%s", body)
+	}
+
+	path := fmt.Sprintf("/api/apps/metrics-rename/schedules/%d", scheduleID)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodPatch, path, []byte(`{"name":"nightly-v2"}`), token))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rename schedule status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	body := scrape()
+	if strings.Contains(body, `schedule="nightly"`) {
+		t.Fatalf("renamed schedule's old-name series must be forgotten:\n%s", body)
+	}
+	if !strings.Contains(body, `schedule="weekly"`) {
+		t.Fatalf("sibling schedule's series must survive the rename:\n%s", body)
+	}
+
+	// A PATCH that leaves the name alone must not reset its counters.
+	reg.RecordScheduleRun(app.Slug, "nightly-v2", "failed")
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodPatch, path, []byte(`{"name":"nightly-v2","timeout_seconds":90}`), token))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("same-name patch status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(scrape(), `shinyhub_schedule_runs_total{schedule="nightly-v2",slug="metrics-rename",status="failed"} 1`) {
+		t.Fatalf("same-name patch reset the schedule's counters:\n%s", scrape())
+	}
+}

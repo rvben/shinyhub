@@ -58,6 +58,7 @@ type Registry struct {
 	providerLogReads   *prometheus.CounterVec
 	providerLogLatency *prometheus.HistogramVec
 	runs               *prometheus.CounterVec
+	dispatchFailures   *prometheus.CounterVec
 }
 
 // New builds a Registry seeded with the Go runtime collector, the process
@@ -266,7 +267,11 @@ func New(version string) *Registry {
 		Name: "shinyhub_schedule_runs_total",
 		Help: "Total scheduled-job runs by app, schedule, and terminal status.",
 	}, []string{"slug", "schedule", "status"})
-	reg.MustRegister(runs)
+	dispatchFailures := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "shinyhub_schedule_dispatch_failures_total",
+		Help: "Cron and catch-up dispatches rejected before a run started, by app, schedule, and reason (app_deploying, quarantined, error).",
+	}, []string{"slug", "schedule", "reason"})
+	reg.MustRegister(runs, dispatchFailures)
 
 	r := &Registry{
 		reg:                     reg,
@@ -305,6 +310,7 @@ func New(version string) *Registry {
 		providerLogReads:   providerLogReads,
 		providerLogLatency: providerLogLatency,
 		runs:               runs,
+		dispatchFailures:   dispatchFailures,
 	}
 	seedBoundedSeries(r)
 	return r
@@ -349,11 +355,37 @@ func (r *Registry) EndGenerationDrain(remainingSessions int, elapsed time.Durati
 }
 
 // RecordScheduleRun increments the per-status counter for a terminal scheduled
-// run. Called from jobs.Manager.finishRun, which only ever passes terminal
-// statuses (succeeded, failed, timed_out, cancelled, interrupted,
-// skipped_overlap).
+// run. Called once per committed run transition (jobs.Manager), so statuses are
+// terminal: succeeded, failed, timed_out, cancelled, interrupted, superseded.
 func (r *Registry) RecordScheduleRun(slug, schedule, status string) {
 	r.runs.WithLabelValues(slug, schedule, status).Inc()
+}
+
+// seededScheduleRunStatuses are the run statuses published at zero for every
+// registered schedule. A CounterVec series otherwise first appears at 1, and
+// increase() over a window that starts with the series absent reads 0, so the
+// first failure of a schedule would never alert.
+var seededScheduleRunStatuses = []string{"succeeded", "failed", "timed_out", "interrupted"}
+
+// scheduleDispatchRejectReasons mirrors scheduler.DispatchRejectReasons; the
+// metrics package does not import the scheduler. A test pins the two together.
+var scheduleDispatchRejectReasons = []string{"app_deploying", "quarantined", "error"}
+
+// SeedSchedule publishes a schedule's alertable run and dispatch-failure
+// series at zero. Idempotent: an existing series keeps its value.
+func (r *Registry) SeedSchedule(slug, schedule string) {
+	for _, status := range seededScheduleRunStatuses {
+		r.runs.WithLabelValues(slug, schedule, status)
+	}
+	for _, reason := range scheduleDispatchRejectReasons {
+		r.dispatchFailures.WithLabelValues(slug, schedule, reason)
+	}
+}
+
+// RecordScheduleDispatchFailure counts a cron or catch-up dispatch rejected
+// before a run row existed.
+func (r *Registry) RecordScheduleDispatchFailure(slug, schedule, reason string) {
+	r.dispatchFailures.WithLabelValues(slug, schedule, reason).Inc()
 }
 
 // Register adds a custom collector to the registry. Used to wire the
@@ -501,14 +533,17 @@ func (r *Registry) RecordReject(slug, reason string) {
 func (r *Registry) ForgetApp(slug string) {
 	r.admissionRejects.DeletePartialMatch(prometheus.Labels{"slug": slug})
 	r.runs.DeletePartialMatch(prometheus.Labels{"slug": slug})
+	r.dispatchFailures.DeletePartialMatch(prometheus.Labels{"slug": slug})
 }
 
-// ForgetSchedule removes the retained shinyhub_schedule_runs_total series for
-// one schedule of an app, without touching the app's other schedules. Call
-// this when a single schedule is deleted but its app is not (app deletion
-// instead calls ForgetApp, which covers every schedule at once).
+// ForgetSchedule removes the retained run and dispatch-failure series for one
+// schedule name of an app, without touching the app's other schedules. Call it
+// when a single schedule is deleted or renamed (the old name's series would
+// otherwise stay forever); app deletion instead calls ForgetApp.
 func (r *Registry) ForgetSchedule(slug, schedule string) {
-	r.runs.DeletePartialMatch(prometheus.Labels{"slug": slug, "schedule": schedule})
+	labels := prometheus.Labels{"slug": slug, "schedule": schedule}
+	r.runs.DeletePartialMatch(labels)
+	r.dispatchFailures.DeletePartialMatch(labels)
 }
 
 // RecordRunTask satisfies fargate.FargateMetrics. result is "ok" or "error".
