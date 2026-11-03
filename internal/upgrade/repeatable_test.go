@@ -157,6 +157,13 @@ func TestRepeatableProcessHelper(t *testing.T) {
 	if repeat != nil {
 		repeat.RetireControlPlane()
 	}
+	// Upgrade's response can arrive before Shutdown closes the parent listener.
+	// Publish actual listener retirement so a strict follow-up upgrade request
+	// cannot be accepted, then dropped, by the retiring parent's HTTP server.
+	retired := os.Getenv("RELAY_TEST_PID") + ".retired." + strconv.Itoa(os.Getpid())
+	if err := os.WriteFile(retired, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
 	sessions.Wait()
 }
 func hasTestParent() bool { return os.Getenv(inheritedEnv) != "" }
@@ -260,6 +267,31 @@ func waitHarnessSuccessor(t *testing.T, client *http.Client, url string, parentP
 		// Shutdown. A final parent response does not mean takeover failed.
 		if !time.Now().Before(deadline) {
 			t.Fatal("successor did not take over")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func waitHarnessListenerRetirement(t *testing.T, process *exec.Cmd, pid int) {
+	t.Helper()
+	var marker string
+	for _, item := range process.Env {
+		if path, ok := strings.CutPrefix(item, "RELAY_TEST_PID="); ok {
+			marker = path + ".retired." + strconv.Itoa(pid)
+		}
+	}
+	if marker == "" {
+		t.Fatal("harness PID path is missing")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			return
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatal("parent listener did not retire")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -372,7 +404,7 @@ func TestRepeatableFirstUpgradeFromTableflip(t *testing.T) {
 	waitHarnessSuccessor(t, client, url, pid)
 }
 func TestRepeatableLegacyChildWaitsForParentExit(t *testing.T) {
-	url, client, _ := startUpgradeHarness(t, "child", false)
+	url, client, process := startUpgradeHarness(t, "child", false)
 	pid := readHarnessPID(t, client, url)
 	conn, reader := holdHarnessTunnel(t, url, pid)
 	resp, err := client.Get(url + "/upgrade")
@@ -385,6 +417,7 @@ func TestRepeatableLegacyChildWaitsForParentExit(t *testing.T) {
 	}
 	checkHarnessTunnel(t, conn, reader, pid)
 	// tableflip cannot upgrade again while its parent is still relaying.
+	waitHarnessListenerRetirement(t, process, pid)
 	resp2, err := client.Get(url + "/upgrade")
 	if err != nil {
 		t.Fatal(err)
