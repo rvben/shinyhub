@@ -1,0 +1,59 @@
+name: Review upd proposal
+
+on:
+  # The pinned observer checks trusted run provenance, artifact digests and exact
+  # GitHub blob changes; it never checks out or executes repository code.
+  workflow_run: # jactionlint ignore=dangerous-triggers
+    workflows: [Dependency health]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  actions: read
+  contents: read
+  # Required only to submit the verified commit-bound approval; no repository code runs.
+  pull-requests: write # jactionlint ignore=excessive-permissions
+
+# Distinct from the shared reviewer/publisher lock in the reusable workflow.
+concurrency:
+  group: upd-review-caller-${{ github.event.workflow_run.id }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    uses: rvben/upd/.github/workflows/review-dependencies.yml@c4c07ab66084ea6484dc76e9bc2f7875933d12fb # v0.18.3
+    with:
+      publisher-bot-id: 322216747
+      allowed-paths: >-
+        .github/workflows/*.yaml
+        .github/workflows/*.yml
+        cmd/shinyhub/example_app/pyproject.toml
+        deploy/cloudflare-demo/package-lock.json
+        deploy/cloudflare-demo/package.json
+        deploy/demo/apps/operations-dashboard/requirements.txt
+        examples/agent-chat-demo/requirements.txt
+        examples/agent-shiny-demo/requirements.txt
+        examples/bookmarking-demo/requirements.txt
+        examples/dash-demo/requirements.txt
+        examples/fastapi-demo/requirements.txt
+        examples/identity-demo/requirements.txt
+        examples/streamlit-demo/requirements.txt
+        go.mod
+        go.sum
+        loadtest/browser/app/requirements.txt
+        loadtest/browser/bookmarks/requirements.txt
+        loadtest/preload-memory/pyproject.toml
+        loadtest/production-runtime/python/requirements.txt
+        loadtest/python-runtime/pyproject.toml
+        loadtest/render/app/requirements.txt
+        loadtest/render/driver/package-lock.json
+        loadtest/render/driver/package.json
+        loadtest/update-capacity/app/requirements.txt
+        package-lock.json
+        package.json
+        packaging/python-agent/pyproject.toml
+        packaging/python-bookmarks/pyproject.toml
+        packaging/python-identity/pyproject.toml
+        packaging/python/pyproject.toml
+        packaging/vscode/package.json
+        skills/deploy-shinyhub/example-app/requirements.txt
