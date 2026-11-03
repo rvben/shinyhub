@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   update:
-    uses: rvben/upd/.github/workflows/dependency-health.yml@bda704ba2b2ea116c5ab8bbbbc2eabd79041587e # v0.17.3
+    uses: rvben/upd/.github/workflows/dependency-health.yml@b183939ff7dc62539afb00b3c555ffbfe3c5d58b # v0.18.2
     with:
       langs: go,node,python,actions
       lock: true
@@ -40,3 +40,39 @@ jobs:
       fail-on-blocked: false
       branch: deps/upd
       commit-message: "chore(deps): weekly dependency update"
+      auto-merge: true
+      merge-method: squash
+      allowed-paths: >-
+        .github/actions/setup-go/action.yml
+        .github/workflows/*.yaml
+        .github/workflows/*.yml
+        cmd/shinyhub/example_app/pyproject.toml
+        deploy/cloudflare-demo/package-lock.json
+        deploy/cloudflare-demo/package.json
+        deploy/demo/apps/operations-dashboard/requirements.txt
+        examples/agent-chat-demo/requirements.txt
+        examples/agent-shiny-demo/requirements.txt
+        examples/bookmarking-demo/requirements.txt
+        examples/dash-demo/requirements.txt
+        examples/fastapi-demo/requirements.txt
+        examples/identity-demo/requirements.txt
+        examples/streamlit-demo/requirements.txt
+        go.mod
+        go.sum
+        loadtest/browser/app/requirements.txt
+        loadtest/browser/bookmarks/requirements.txt
+        loadtest/preload-memory/pyproject.toml
+        loadtest/production-runtime/python/requirements.txt
+        loadtest/python-runtime/pyproject.toml
+        loadtest/render/app/requirements.txt
+        loadtest/render/driver/package-lock.json
+        loadtest/render/driver/package.json
+        loadtest/update-capacity/app/requirements.txt
+        package-lock.json
+        package.json
+        packaging/python-agent/pyproject.toml
+        packaging/python-bookmarks/pyproject.toml
+        packaging/python-identity/pyproject.toml
+        packaging/python/pyproject.toml
+        packaging/vscode/package.json
+        skills/deploy-shinyhub/example-app/requirements.txt
