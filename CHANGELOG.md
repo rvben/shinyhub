@@ -6,12 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.23.0](https://github.com/rvben/shinyhub/compare/v0.22.0...v0.23.0) - 2026-11-04
+
 ### Added
 
 - Give each app a consistent workspace header and contextual navigation, with focused settings pages for general information, environment, resources, scaling, access, and privacy.
 - Add real-backend acceptance journeys, responsive page and form checks in both themes, accessibility scans, and retained CI diagnostics.
 
 - Restore opted-in bookmarked dashboards after a lost session while preserving saved filters, and offer a quiet reconnect notice with a manual fallback. Requires the updated Python bookmark helper.
+- **ui**: unify dashboard workflows and add product acceptance ([ec97ffb](https://github.com/rvben/shinyhub/commit/ec97ffbb7685c47064c4b061f24b2589dee34b73))
+- **recovery**: preserve deployment and bookmarked session outcomes ([6a579b6](https://github.com/rvben/shinyhub/commit/6a579b672ebedb9bc1ac72d902056df5190e3f5b))
+- **schedules**: name the schedule and app in every run-outcome signal ([e55e7fa](https://github.com/rvben/shinyhub/commit/e55e7faea684fb9764eceff1e0fd7a8047255d2d))
 
 ### Changed
 
@@ -27,6 +32,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Protect shared-data unmounting while apps or scheduled jobs are using the mount, and preserve the source app's data.
 - Preserve announcement edits after uncertain saves and concurrent changes, and make retries idempotent.
 - Correct audit change counts, accessible control names, light-theme delete-action contrast, project deep links, and overview graph layout at intermediate widths.
+- **process**: confirm startup guard exits after a rejected signal ([54532c7](https://github.com/rvben/shinyhub/commit/54532c74c5e981c50d6ec2b69f33bfd3351ec031))
+- **demo**: allow the deployment progress module at the edge ([fd3729a](https://github.com/rvben/shinyhub/commit/fd3729a84f910392ab4707cfa86e99cbc26aced7))
+- **deps**: resolve security advisories and refresh dependencies ([d927a2e](https://github.com/rvben/shinyhub/commit/d927a2e22c885e4f164ec389482e7d19714d9034))
 
 ### Upgrade notice
 
