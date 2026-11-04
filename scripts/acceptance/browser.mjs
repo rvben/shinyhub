@@ -155,7 +155,7 @@ export async function runBrowserJourneys(f) {
       await page.unroute(deploymentURL);
     });
     await f.check('access refresh retains backend grants through a lost connection and recovers', async () => {
-      await f.json('/api/apps/forecast/members', { method: 'POST', body: { username: f.accounts.viewer.username } });
+      await f.json('/api/apps/forecast/members', { method: 'POST', body: { username: f.accounts.viewer.username } }, 204);
       await navigate('/apps/forecast/settings/access', '#members-list select');
       const role = page.getByRole('combobox', { name: `Role for ${f.accounts.viewer.username}`, exact: true });
       await role.waitFor();
