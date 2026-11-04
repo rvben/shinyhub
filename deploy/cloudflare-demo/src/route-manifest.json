@@ -681,6 +681,7 @@
     "views/data-ui.js",
     "views/deploy-commands.js",
     "views/deployment-row.js",
+    "views/deployment-upload.js",
     "views/detail-capacity.js",
     "views/direct-setting.js",
     "views/emoji-picker.js",
