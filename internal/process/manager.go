@@ -1393,7 +1393,10 @@ func (m *Manager) stopReplicaEntryImpl(slug, poolKey string, index int, expected
 		// A monitor that already finished without proof will never report
 		// this exit, and a signal that cannot be delivered may mean the
 		// process is simply gone, so ask the runtime before fencing.
-		if requireConfirmed && monitorDone(done) && m.awaitExitProof(rt, handle, done, e, grace) {
+		// Closing a startup guard also initiates an independent exit. On
+		// macOS its dying process group can reject SIGTERM before Wait has
+		// reaped the supervisor; give that monitor the same bounded grace.
+		if requireConfirmed && (startupGuard != nil || monitorDone(done)) && m.awaitExitProof(rt, handle, done, e, grace) {
 			m.finalizeConfirmedStop(rt, slug, poolKey, index, e)
 			return nil
 		}
