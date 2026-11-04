@@ -6,9 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.5.6](https://github.com/rvben/shinyhub/compare/shinyhub-bookmarks-v0.5.5...shinyhub-bookmarks-v0.5.6) - 2026-11-04
+
 ### Fixed
 
 - Distinguish a disconnected session from unsaved input changes so compatible ShinyHub servers can safely restore the last saved view. Older servers retain manual recovery.
+
+### Added
+
+- **recovery**: preserve deployment and bookmarked session outcomes ([6a579b6](https://github.com/rvben/shinyhub/commit/6a579b672ebedb9bc1ac72d902056df5190e3f5b))
 
 ## [0.5.5](https://github.com/rvben/shinyhub/compare/shinyhub-bookmarks-v0.5.4...shinyhub-bookmarks-v0.5.5) - 2026-10-26
 
