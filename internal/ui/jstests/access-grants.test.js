@@ -51,7 +51,7 @@ test('a delayed list cannot paint a different mounted app or supersede a newer r
   assert.equal(h2.doc.getElementById('group-access-list').textContent,'No groups added.');
 });
 test('member roles remain editable; failed changes restore the role and preserve removal', async () => {
-  const h=harness(async(_,options)=> options ? {ok:false,status:503} : response([{user_id:2,username:'analyst',role:'viewer'}]));
+  const h=harness(async(_,options)=> options?.method ? {ok:false,status:503} : response([{user_id:2,username:'analyst',role:'viewer'}]));
   await h.refreshMemberList();
   const select=h.doc.querySelector('#members-list select');
   select.value='manager';select.dispatchEvent(new h.doc.defaultView.Event('change'));await settle();
@@ -60,7 +60,7 @@ test('member roles remain editable; failed changes restore the role and preserve
   assert.match(h.doc.getElementById('grant-error').textContent,/Could not update/);
 });
 test('failed group removal keeps the grant visible and explains how to recover', async () => {
-  const h=harness(async(_,options)=>options ? {ok:false,status:503} : response([{group:'research',role:'manager',source:'manual'}]));
+  const h=harness(async(_,options)=>options?.method ? {ok:false,status:503} : response([{group:'research',role:'manager',source:'manual'}]));
   await h.refreshGroupAccessList();h.doc.querySelector('#group-access-list button').click();await settle();
   assert.match(h.doc.getElementById('group-access-list').textContent,/research/);
   assert.match(h.doc.getElementById('group-access-error').textContent,/Could not remove research/);
@@ -68,14 +68,14 @@ test('failed group removal keeps the grant visible and explains how to recover',
 });
 test('removing the last grant reveals an explicit empty state and returns focus', async () => {
   let removed=false;
-  const h=harness(async(_,options)=> {if(options){removed=true;return {ok:true,status:204};}return response(removed?[]:[{user_id:2,username:'analyst',role:'viewer'}]);});
+  const h=harness(async(_,options)=> {if(options?.method){removed=true;return {ok:true,status:204};}return response(removed?[]:[{user_id:2,username:'analyst',role:'viewer'}]);});
   await h.refreshMemberList();h.doc.querySelector('#members-list button').click();await settle();
   assert.equal(h.doc.getElementById('members-list').textContent,'No members added.');
   assert.equal(h.doc.activeElement,h.doc.querySelector('#member-add summary'));
 });
 test('adding an existing member preserves their server role and reports no assumed viewer role', async () => {
   let payload;
-  const h=harness(async(_,options)=>{if(options){payload=JSON.parse(options.body);return {ok:true,status:204};}return response([{user_id:2,username:'analyst',role:'manager'}]);});
+  const h=harness(async(_,options)=>{if(options?.method){payload=JSON.parse(options.body);return {ok:true,status:204};}return response([{user_id:2,username:'analyst',role:'manager'}]);});
   h.doc.getElementById('member-add').open=true;
   h.doc.getElementById('grant-username').value='analyst';await h.addMember(submit);
   assert.deepEqual(payload,{username:'analyst'});
@@ -84,7 +84,7 @@ test('adding an existing member preserves their server role and reports no assum
   assert.doesNotMatch(h.messages.join(' '),/as viewer/);
 });
 test('a delayed group add preserves a newer draft and cannot clear a different app', async () => {
-  const pending=deferred(); const h=harness(async(_,options)=>options?pending.promise:response([]));
+  const pending=deferred(); const h=harness(async(_,options)=>options?.method?pending.promise:response([]));
   const input=h.doc.getElementById('group-access-name'); input.value='first';
   h.doc.getElementById('group-add').open=true;
   const save=h.addGroupAccess(submit);input.value='next';
@@ -199,4 +199,47 @@ test('access loading, empty and error states have one announcement and accessibl
   assert.equal(row.hasAttribute('aria-hidden'),false);
   assert.equal(row.querySelector('span').getAttribute('aria-hidden'),'true');
   assert.equal(row.querySelector('button').getAttribute('aria-hidden'),null);
+});
+
+
+test('failed refresh preserves known grants and retry keeps keyboard context',async()=>{
+  let fail=false;const h=harness(async()=>{if(fail)throw Error('offline');return response([{user_id:2,username:'analyst',role:'viewer'}]);});
+  await h.refreshMemberList();h.doc.querySelector('#members-list select').focus();fail=true;await h.refreshMemberList();
+  assert.equal(h.doc.querySelector('#members-list select').value,'viewer');
+  assert.match(h.doc.getElementById('members-status').textContent,/last known entries/);
+  fail=false;await h.refreshMemberList();assert.equal(h.doc.activeElement.dataset.focusKey,'member-role:2');
+});
+
+test('a successful role mutation invalidates an older pending list response',async()=>{
+  const pending=deferred();let reads=0;
+  const h=harness(async(_,options)=>options?.method?{ok:true,status:204}:(++reads===2?pending.promise:response([{user_id:2,username:'analyst',role:'viewer'}])));
+  await h.refreshMemberList();const late=h.refreshMemberList();const select=h.doc.querySelector('#members-list select');
+  select.value='manager';select.dispatchEvent(new h.doc.defaultView.Event('change'));await settle();
+  pending.resolve(response([{user_id:2,username:'analyst',role:'viewer'}]));await late;
+  assert.equal(h.doc.querySelector('#members-list select').value,'manager');
+  assert.equal(h.doc.getElementById('members-list').getAttribute('aria-busy'),'false');
+});
+
+test('refresh cannot overwrite a pending write; another app still loads independently',async()=>{
+  const pending=deferred();let reads=0;
+  const h=harness(async(_,options)=>{if(options?.method)return pending.promise;reads++;return response([{user_id:2,username:'analyst',role:'viewer'}]);});
+  await h.refreshMemberList();const select=h.doc.querySelector('#members-list select');select.value='manager';select.dispatchEvent(new h.doc.defaultView.Event('change'));
+  await h.refreshMemberList();assert.equal(reads,1);assert.equal(select.disabled,true);
+  h.switchApp('b');await h.refreshMemberList();assert.equal(reads,2);
+  pending.resolve({ok:true,status:204});await settle();assert.equal(h.doc.querySelector('#members-list select').value,'viewer');
+});
+
+test('an A to B to A round trip invalidates old reads and detached actions',async()=>{
+  const pending=deferred();let calls=0;
+  const h=harness(async()=>++calls===2?pending.promise:response([{user_id:2,username:'current',role:'viewer'}]));
+  await h.refreshMemberList();const removed=h.doc.querySelector('#members-list button');const late=h.refreshMemberList();
+  h.switchApp('b');h.switchApp('a');await h.refreshMemberList();removed.click();await settle();assert.equal(calls,3);
+  pending.resolve(response([{user_id:3,username:'outdated',role:'viewer'}]));await late;
+  assert.doesNotMatch(h.doc.querySelector('#members-list').textContent,/outdated/);
+});
+
+test('access reads and writes have bounded request signals',async()=>{
+  const signals=[];const h=harness(async(_,options)=>{signals.push(options?.signal);return options?.method?{ok:false,status:503}:response([{user_id:2,username:'analyst',role:'viewer'}]);});
+  await h.refreshMemberList();const select=h.doc.querySelector('#members-list select');select.value='manager';select.dispatchEvent(new h.doc.defaultView.Event('change'));await settle();
+  assert.equal(signals.length,2);assert.ok(signals.every(signal=>signal instanceof AbortSignal));
 });

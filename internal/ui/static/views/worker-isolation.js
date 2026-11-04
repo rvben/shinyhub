@@ -32,19 +32,6 @@ export function workerCapacityLine(mode, groupedSize, maxWorkers, memMB) {
   return '';
 }
 
-// Hide inapplicable controls without clearing their saved values. Switching
-// modes can reveal the operator's earlier choices again before they save.
-export function syncWorkerControls(doc, mode) {
-  const grouped = mode === 'grouped';
-  const isolated = grouped || mode === 'per_session';
-  for (const [id, shown] of [
-    ['worker-grouped-size', grouped], ['worker-max-workers', isolated], ['worker-warm-spares', isolated],
-  ]) {
-    const row = doc.getElementById(id)?.closest('label');
-    if (row) row.hidden = !shown;
-  }
-}
-
 // keepWarmInertNote returns the advisory shown beneath the Keep warm field
 // when a positive keep-warm floor cannot take effect: min_warm_replicas keeps
 // multiplex replicas running through idle hibernation, but an elastic pool

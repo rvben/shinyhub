@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
+import { uploadDeployment, deploymentOutcome } from '../static/views/deployment-upload.js';
 import { deployCommands, cliSetupCommands } from '../static/views/deploy-commands.js';
 import { formatManifestSummary, renderDeployResult } from '../static/deploy-summary.js';
 
@@ -27,7 +28,7 @@ function harness(t, options = {}) {
     isInFlight:el=>pending.has(el),
     runInFlight:async(el,fn)=>{pending.add(el);try{await fn();}finally{pending.delete(el);el.disabled=false;}},
     handleUnauthorized:async()=>{},
-    deployCommands,cliSetupCommands,formatManifestSummary,renderDeployResult,
+    deployCommands,cliSetupCommands,formatManifestSummary,renderDeployResult,deploymentOutcome,
     router:{navigate:path=>navigations.push(path)}, openLogs:slug=>logs.push(slug),
     bindDropzoneEvents(){},
     uploadBundle:options.upload || (async()=>({})),
@@ -114,12 +115,22 @@ test('rejected archives offer a replacement instead of retrying invalid input or
   assert.equal(attempts,2);assert.equal(h.state().completed,true);
 });
 
-test('closing a deploy and opening another isolates the late result',async t=>{
+test('a hidden deployment keeps its progress and prevents a competing upload',async t=>{
   let finish;const upload=new Promise(r=>finish=r);const h=harness(t,{upload:()=>upload});
   h.deploy({slug:'sales'});h.select();h.field('deploy-submit').disabled=false;h.field('deploy-submit').click();await settle();
-  h.close();h.deploy({slug:'other'});finish({});await settle();
-  assert.equal(h.refreshes(),1,'A completed deployment refreshes the app list even after its viewer closes');
-  assert.equal(h.state().slug,'other');assert.equal(h.field('deploy-result').hidden,true);assert.equal(h.field('deploy-submit').disabled,true);
+  h.close();assert.equal(h.field('deploy-modal').hidden,true);assert.equal(h.field('deploy-monitor').hidden,false);
+  h.deploy({slug:'other'});assert.equal(h.state().slug,'sales');assert.equal(h.field('deploy-modal').hidden,false);
+  h.close();finish({status:'running'});await settle();
+  assert.equal(h.refreshes(),1);assert.equal(h.state().completed,true);
+  h.field('deploy-monitor-open').click();assert.equal(h.field('deploy-modal').hidden,false);
+  assert.equal(h.field('deploy-submit').textContent,'View app');
+});
+
+test('an uncertain deployment goes to history instead of uploading the bundle again',async t=>{
+  let attempts=0;const h=harness(t,{upload:async()=>{attempts++;throw Object.assign(Error('Check deployment history before deploying again.'),{uncertain:true});}});
+  h.deploy({slug:'sales'});h.select();h.field('deploy-submit').disabled=false;h.field('deploy-submit').click();await settle();
+  assert.equal(h.field('deploy-submit').textContent,'Check deployment');
+  h.field('deploy-submit').click();await settle();assert.equal(attempts,1);assert.equal(h.navigations.at(-1),'/apps/sales/deployments');
 });
 
 test('no-result filtering offers recovery without pretending this is first use',t=>{
@@ -136,21 +147,23 @@ test('no-result filtering offers recovery without pretending this is first use',
   assert.match(message(new TypeError('Failed to fetch')),/may still be deploying/);
  });
 
- test('upload completion means startup is pending; stale upload events cannot paint a new dialog',async t=>{
+test('upload completion and streamed server phases update the current deployment only',async t=>{
   const dom=new JSDOM(html);t.after(()=>dom.window.close());const doc=dom.window.document;
-  let xhr;
+  let xhr;const upload={};
   class XHR {
     constructor(){xhr=this;this.events={};this.upload={events:{},addEventListener:(type,fn)=>this.upload.events[type]=fn};}
     open(){} setRequestHeader(){} send(){} addEventListener(type,fn){this.events[type]=fn;}
+    getResponseHeader(){return 'application/json';}
   }
-  const run=new Function('XMLHttpRequest','FormData','readCookie','deployProgressBar','deployProgressText',`let deployState={};${section('  function uploadBundle(', "  deploySubmit.addEventListener('click'")}return {start:uploadBundle,detach:()=>deployState=null};`)(XHR,dom.window.FormData,()=>'',doc.getElementById('deploy-progress-bar'),doc.getElementById('deploy-progress-text'));
-  const uploading=run.start('sales',new dom.window.Blob(['app.py']));
+  const transfer=options=>uploadDeployment({...options,createXHR:()=>new XHR()});
+  const run=new Function('uploadDeployment','readCookie','deployProgressBar','deployProgressText',`let deployState=arguments[4]; const updateDeployMonitor=()=>{}; ${section('  function uploadBundle(', "  deploySubmit.addEventListener('click'")}return {start:uploadBundle,detach:()=>deployState=null};`)(transfer,()=>'',doc.getElementById('deploy-progress-bar'),doc.getElementById('deploy-progress-text'),upload);
+  const uploading=run.start('sales',new Blob(['app.py']));
   xhr.upload.events.progress({lengthComputable:true,loaded:50,total:100});assert.equal(doc.getElementById('deploy-progress-bar').value,50);
   xhr.upload.events.load();assert.equal(doc.getElementById('deploy-progress-bar').hasAttribute('value'),false);
   assert.match(doc.getElementById('deploy-progress-text').textContent,/Upload complete/);
   run.detach();xhr.upload.events.progress({lengthComputable:true,loaded:75,total:100});assert.equal(doc.getElementById('deploy-progress-bar').hasAttribute('value'),false);
-  xhr.status=200;xhr.responseText='{}';xhr.events.load();assert.deepEqual(await uploading,{});
- });
+  xhr.status=200;xhr.responseText='{}';xhr.events.load();assert.deepEqual(await uploading,{progress_warnings:[]});
+});
 
 for(const [body,heading,description] of [
   [{kept_stopped:true,app:{status:'stopped'}},/App is stopped/,/Start the app/],

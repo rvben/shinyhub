@@ -447,6 +447,7 @@ export function mountAppDetail(ctx) {
       title: app.name,
       update,
       unmount() {
+        ctx.setSettingsSlug?.(null);
         overviewManualRevision++;
         if (tabCleanup) { tabCleanup(); tabCleanup = null; }
         // Abandon any in-flight revalidation: its result belongs to a page the

@@ -37,6 +37,7 @@ export function uploadDeployment({ slug, blob, csrf, onUpload = () => {}, onPhas
     } else if (event.type === 'error') {
       terminalError = Object.assign(new Error(event.message || 'Deployment failed. Review the app logs for details.'), {
         status: event.status_code,
+        deployment: event,
         uncertain: published || ['commit', 'configuration'].includes(event.phase),
       });
       if (terminalError.uncertain) terminalError.message += ' Check deployment history before deploying again.';
@@ -67,7 +68,8 @@ export function uploadDeployment({ slug, blob, csrf, onUpload = () => {}, onPhas
       if (xhr.status < 200 || xhr.status >= 300) {
         let message = `Deployment request failed (${xhr.status}).`;
         try { message = JSON.parse(xhr.responseText).error || message; } catch {}
-        finish(Object.assign(new Error(message), { status: xhr.status, uncertain: xhr.status >= 500 }));
+        let deployment; try { deployment = JSON.parse(xhr.responseText); } catch {}
+        finish(Object.assign(new Error(message), { status: xhr.status, deployment, uncertain: xhr.status >= 500 }));
       } else if (streaming()) {
         read(true);
         if (terminalError) finish(terminalError);

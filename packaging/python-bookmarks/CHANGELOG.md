@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+
+- Distinguish a disconnected session from unsaved input changes so compatible ShinyHub servers can safely restore the last saved view. Older servers retain manual recovery.
+
 ## [0.5.5](https://github.com/rvben/shinyhub/compare/shinyhub-bookmarks-v0.5.4...shinyhub-bookmarks-v0.5.5) - 2026-10-26
 
 ### Fixed

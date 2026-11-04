@@ -74,3 +74,10 @@ test('outcomes disclose stopped, sleeping, skipped setup and session handoff', (
   assert.match(outcome.details.join(' '), /30 seconds/);
   assert.match(outcome.details.join(' '), /prepare: scheduled setup is pending/);
 });
+
+
+test('streamed capacity errors preserve structured failure details for recoverable UI feedback', async () => {
+  const t = transfer();
+  t.xhr.chunk(record({type:'error',phase:'capacity',failure_kind:'capacity',status_code:409,message:'Not enough capacity'}));t.xhr.emit('load');
+  await assert.rejects(t.promise,error=>error.status===409 && error.deployment.failure_kind==='capacity' && !error.uncertain);
+});

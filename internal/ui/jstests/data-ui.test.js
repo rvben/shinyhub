@@ -219,7 +219,7 @@ test('413 uses backend quota keys and keeps the chosen destination for correctio
   assert.equal(h.calls.length, 2);
 });
 
-for (const failure of ['onerror', 'ontimeout', 'status0', 'invalid-success']) {
+for (const failure of ['onerror', 'ontimeout', 'onabort', 'status0', 'invalid-success']) {
   test(`upload ${failure} keeps the draft and asks for a refresh before retry`, async t => {
     const h = harness(t); await settle(); h.choose(); h.input('data-dest-input', 'keep.csv'); h.submit('data-upload-form');
     const xhr = h.uploads[0];

@@ -89,7 +89,7 @@ export function createDataViewer({panel, app, api, canManage = false, onUnauthor
     const current = () => alive && filesRequest === request && !request.signal.aborted;
     el('data-retry').disabled = true;
     try {
-      const response = await api(`${base}/data`, {signal: request.signal});
+      const response = await api(`${base}/data`, {signal: AbortSignal.any([request.signal, AbortSignal.timeout(20000)])});
       if (!current()) return;
       if (response.status === 401) { onUnauthorized(); return; }
       const body = await bodyOf(response);
@@ -147,7 +147,7 @@ export function createDataViewer({panel, app, api, canManage = false, onUnauthor
     const current = () => alive && mountsRequest === request && !request.signal.aborted;
     el('data-mount-retry').disabled = true;
     try {
-      const response = await api(`${base}/shared-data`, {signal: request.signal});
+      const response = await api(`${base}/shared-data`, {signal: AbortSignal.any([request.signal, AbortSignal.timeout(20000)])});
       if (!current()) return;
       if (response.status === 401) { onUnauthorized(); return; }
       const body = await bodyOf(response);
@@ -194,7 +194,7 @@ export function createDataViewer({panel, app, api, canManage = false, onUnauthor
     const report = message => errorID.endsWith('form-status') ? status(errorID, message, true) : feedback(errorID, message);
     report('');
     try {
-      const response = await api(url, {...options, signal: controller.signal});
+      const response = await api(url, {...options, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(20000)])});
       if (!alive) return;
       if (response.status === 401) { onUnauthorized(); return; }
       const body = await bodyOf(response);
@@ -242,6 +242,7 @@ export function createDataViewer({panel, app, api, canManage = false, onUnauthor
     setUploading(true); el('data-progress').value = 0; status('data-upload-status', 'Uploading…');
     request.open('PUT', `${base}/data/${encodePath(path)}${restart ? '?restart=true' : ''}`);
     request.withCredentials = true;
+    request.timeout = 300000;
     request.setRequestHeader('Content-Type', 'application/octet-stream');
     request.setRequestHeader('X-CSRF-Token', cookie('csrf_token'));
     request.upload.addEventListener('progress', event => {

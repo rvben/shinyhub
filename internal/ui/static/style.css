@@ -9101,3 +9101,14 @@ a.lp-tile:hover .lp-tile-go { color: var(--cyan-bright); transform: translateX(3
 @media (forced-colors: active) {
   .trend-point, .trend-cursor { background: CanvasText; }
 }
+
+.deploy-monitor { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem; padding: .75rem 1rem; border: 1px solid var(--line-2); border-radius: var(--radius); background: var(--surface); }
+.deploy-monitor[hidden] { display: none; }
+.deploy-monitor span { flex: 1 1 14rem; overflow-wrap: anywhere; }
+.lp-stale { margin-block: 1rem; }
+.deploy-progress { flex-wrap: wrap; }
+.deploy-progress progress { min-width: 8rem; }
+#deploy-progress-text { flex: 1 1 12rem; text-align: start; }
+
+.access-section-heading { display: flex; align-items: center; justify-content: space-between; gap: .75rem; flex-wrap: wrap; }
+.access-section-heading .settings-block-title { margin: 0; }

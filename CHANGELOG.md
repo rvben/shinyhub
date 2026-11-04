@@ -11,12 +11,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Give each app a consistent workspace header and contextual navigation, with focused settings pages for general information, environment, resources, scaling, access, and privacy.
 - Add real-backend acceptance journeys, responsive page and form checks in both themes, accessibility scans, and retained CI diagnostics.
 
+- Restore opted-in bookmarked dashboards after a lost session while preserving saved filters, and offer a quiet reconnect notice with a manual fallback. Requires the updated Python bookmark helper.
+
 ### Changed
 
 - Refine the Apps list and deployment journey, app overview and resource history, Logs, Traces, Usage, Schedules, and Data pages.
 - Streamline Identity, Workers, Audit Log, personal tokens, announcements, profile editing, and account, administration, and help navigation.
 
 ### Fixed
+
+- Keep deployment progress available after hiding the dialog, distinguish uncertain outcomes from failed deployments, and check deployment history before retrying.
+- Preserve viewer Apps and Access lists during failed refreshes, retain keyboard focus, and ignore stale responses after navigation or access changes.
 
 - Reject damaged ZIP uploads with a recoverable validation error, and allow choosing another bundle without restarting app creation.
 - Protect shared-data unmounting while apps or scheduled jobs are using the mount, and preserve the source app's data.

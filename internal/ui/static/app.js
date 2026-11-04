@@ -1,3 +1,4 @@
+import { uploadDeployment, deploymentOutcome } from '/static/views/deployment-upload.js';
 import { installSidebarAccount } from '/static/views/sidebar-account.js';
 import { installPasswordVisibility, profileFieldErrors, setProfileFieldError } from '/static/views/auth-fields.js';
 import { installAppContextNavigation } from '/static/views/app-context-nav.js';
@@ -1063,6 +1064,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function showLoggedOut() {
     sessionVersion += 1;
+    resetDeployModal();
     state.sessionIdentity = {};
     closeNewTokenModal(true);
     closeNewAppModal(true);
@@ -2844,6 +2846,7 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('group-access-error').hidden = true;
     document.getElementById('member-add').open = false;
     document.getElementById('group-add').open = false;
+    for (const id of ['members-refresh', 'groups-refresh']) document.getElementById(id).disabled = false;
     for (const [id, text] of [['grant-btn', 'Add member'], ['group-access-add-btn', 'Add group']]) {
       const button = document.getElementById(id);
       button.disabled = false; button.textContent = text;
@@ -4428,13 +4431,46 @@ document.addEventListener('DOMContentLoaded', () => {
   let accessPanelRevision = 0;
   let memberListRequest = 0;
   let groupListRequest = 0;
+  const accessWrites = new Map();
+
+  function beginAccessWrite(kind, slug, revision) {
+    const key = `${revision}:${kind}`;
+    accessWrites.set(key, (accessWrites.get(key) || 0) + 1);
+    const refresh = document.getElementById(kind === 'members' ? 'members-refresh' : 'groups-refresh');
+    if (refresh) refresh.disabled = true;
+    const invalidate = () => {
+      if (!accessRequestCurrent(slug, revision)) return;
+      if (kind === 'members') memberListRequest++; else groupListRequest++;
+      const list = document.getElementById(kind === 'members' ? 'members-list' : 'group-access-list');
+      list.setAttribute('aria-busy', 'false');
+      list.querySelector('.access-list-state')?.remove();
+    };
+    invalidate();
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const remaining = accessWrites.get(key) - 1;
+      if (remaining) accessWrites.set(key, remaining); else accessWrites.delete(key);
+      if (accessRequestCurrent(slug, revision) && refresh) refresh.disabled = remaining > 0;
+      invalidate();
+    };
+  }
+
+  function restoreAccessFocus(list, key) {
+    if (!key) return;
+    const target = [...list.querySelectorAll('[data-focus-key]')].find(node => node.dataset.focusKey === key && !node.disabled);
+    (target || document.querySelector(list.id === 'members-list' ? '#member-add > summary' : '#group-add > summary'))?.focus();
+  }
 
   function accessRequestCurrent(slug, revision) {
     return slug === settingsSlug && revision === accessPanelRevision;
   }
 
-  function accessListState(list, message, retry) {
-    list.replaceChildren();
+  function accessListState(list, message, retry, preserve = false) {
+    const ownedFocus = list.contains(document.activeElement);
+    if (preserve) list.querySelector('.access-list-state')?.remove();
+    else list.replaceChildren();
     const status = document.getElementById(list.id === 'members-list' ? 'members-status' : 'groups-status');
     status.textContent = retry ? `${message} Try again using the button below.` : message;
     const li = document.createElement('li');
@@ -4453,18 +4489,22 @@ document.addEventListener('DOMContentLoaded', () => {
       button.addEventListener('click', retry);
       li.appendChild(button);
     }
-    list.appendChild(li);
+    list.prepend(li);
+    if (ownedFocus && document.activeElement === document.body) {
+      if (retry) li.querySelector('button').focus();
+      else { list.tabIndex = -1; list.focus(); }
+    }
   }
 
   async function refreshMemberList() {
     const slug = settingsSlug, revision = accessPanelRevision, request = ++memberListRequest;
-    if (!slug) return;
+    if (!slug || accessWrites.has(`${revision}:members`)) return;
     const list = document.getElementById('members-list');
     const current = () => accessRequestCurrent(slug, revision) && request === memberListRequest;
     list.setAttribute('aria-busy', 'true');
-    accessListState(list, 'Loading members…');
+    accessListState(list, 'Loading members…', null, true);
     try {
-      const resp = await api(`/api/apps/${slug}/members`);
+      const resp = await api(`/api/apps/${encodeURIComponent(slug)}/members`, { signal: AbortSignal.timeout(20000) });
       if (!current()) return;
       if (resp.status === 401) { await handleUnauthorized(); return; }
       if (!resp.ok) throw new Error('request failed');
@@ -4472,6 +4512,8 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!current()) return;
       const members = Array.isArray(body) ? body : body?.items;
       if (!Array.isArray(members)) throw new Error('invalid response');
+      const focused = list.contains(document.activeElement) ? document.activeElement?.dataset.focusKey : null;
+      const listFocused = document.activeElement === list;
       list.replaceChildren();
       if (!members.length) accessListState(list, 'No members added.');
       else document.getElementById('members-status').textContent = `${members.length} ${members.length === 1 ? 'member' : 'members'} loaded.`;
@@ -4492,31 +4534,35 @@ document.addEventListener('DOMContentLoaded', () => {
           roleSelect.appendChild(opt);
         }
         roleSelect.dataset.previous = m.role;
+        roleSelect.dataset.focusKey = `member-role:${m.user_id}`;
         roleSelect.addEventListener('change', () => updateMemberRole(m.user_id, m.username, roleSelect));
         const revokeBtn = document.createElement('button');
         revokeBtn.type = 'button';
+        revokeBtn.dataset.focusKey = `member-remove:${m.user_id}`;
         revokeBtn.className = 'access-remove';
         revokeBtn.textContent = 'Remove';
         revokeBtn.setAttribute('aria-label', `Remove member ${m.username}`);
         revokeBtn.addEventListener('click', () => runInFlight(revokeBtn, async () => {
-          if (!accessRequestCurrent(slug, revision)) return;
+          if (!accessRequestCurrent(slug, revision) || !revokeBtn.isConnected) return;
+          const finishWrite = beginAccessWrite('members', slug, revision);
           const error = document.getElementById('grant-error');
           setError(error, '');
           roleSelect.disabled = true;
           try {
-            const r = await api(`/api/apps/${slug}/members`, {
-              method: 'DELETE', body: JSON.stringify({ user_id: m.user_id }),
+            const r = await api(`/api/apps/${encodeURIComponent(slug)}/members`, {
+              method: 'DELETE', signal: AbortSignal.timeout(20000), body: JSON.stringify({ user_id: m.user_id }),
             });
             if (!accessRequestCurrent(slug, revision)) return;
             if (r.status === 401) { await handleUnauthorized(); return; }
             if (!r.ok) throw new Error('request failed');
+            finishWrite();
             await refreshMemberList();
             if (!accessRequestCurrent(slug, revision)) return;
             flashToast(`Removed ${m.username} from members`, 'success');
             document.querySelector('#member-add > summary').focus();
           } catch {
             if (accessRequestCurrent(slug, revision)) setError(error, `Could not remove ${m.username}. Refresh to check their access, then try again.`);
-          } finally { roleSelect.disabled = false; }
+          } finally { finishWrite(); roleSelect.disabled = false; }
         }));
         if (ownMembership) {
           roleSelect.disabled = true; revokeBtn.disabled = true;
@@ -4530,20 +4576,21 @@ document.addEventListener('DOMContentLoaded', () => {
         } else li.append(nameSpan, roleSelect, revokeBtn);
         list.appendChild(li);
       }
+      restoreAccessFocus(list, focused || (listFocused ? '__list' : null));
     } catch {
-      if (current()) accessListState(list, 'Could not load members.', refreshMemberList);
+      if (current()) accessListState(list, `Could not load members.${list.querySelector('.member-name') ? ' Showing the last known entries.' : ''}`, refreshMemberList, true);
     } finally { if (current()) list.setAttribute('aria-busy', 'false'); }
   }
 
   async function refreshGroupAccessList() {
     const slug = settingsSlug, revision = accessPanelRevision, request = ++groupListRequest;
-    if (!slug) return;
+    if (!slug || accessWrites.has(`${revision}:group-access`)) return;
     const list = document.getElementById('group-access-list');
     const current = () => accessRequestCurrent(slug, revision) && request === groupListRequest;
     list.setAttribute('aria-busy', 'true');
-    accessListState(list, 'Loading groups…');
+    accessListState(list, 'Loading groups…', null, true);
     try {
-      const resp = await api(`/api/apps/${slug}/group-access`);
+      const resp = await api(`/api/apps/${encodeURIComponent(slug)}/group-access`, { signal: AbortSignal.timeout(20000) });
       if (!current()) return;
       if (resp.status === 401) { await handleUnauthorized(); return; }
       if (!resp.ok) throw new Error('request failed');
@@ -4551,6 +4598,8 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!current()) return;
       const rules = Array.isArray(body) ? body : body?.items;
       if (!Array.isArray(rules)) throw new Error('invalid response');
+      const focused = list.contains(document.activeElement) ? document.activeElement?.dataset.focusKey : null;
+      const listFocused = document.activeElement === list;
       list.replaceChildren();
       if (!rules.length) accessListState(list, 'No groups added.');
       else document.getElementById('groups-status').textContent = `${rules.length} ${rules.length === 1 ? 'group' : 'groups'} loaded.`;
@@ -4579,23 +4628,27 @@ document.addEventListener('DOMContentLoaded', () => {
             option.selected = rule.role === role; roleSelect.appendChild(option);
           }
           roleSelect.dataset.previous = rule.role;
+          roleSelect.dataset.focusKey = `group-role:${rule.group}`;
           roleSelect.addEventListener('change', () => updateGroupRole(rule.group, roleSelect));
           roleSpan.replaceWith(roleSelect);
           const removeBtn = document.createElement('button');
           removeBtn.type = 'button';
+          removeBtn.dataset.focusKey = `group-remove:${rule.group}`;
           removeBtn.className = 'access-remove';
           removeBtn.textContent = 'Remove';
           removeBtn.setAttribute('aria-label', `Remove group grant for ${rule.group}`);
           removeBtn.addEventListener('click', () => runInFlight(removeBtn, async () => {
-            if (!accessRequestCurrent(slug, revision)) return;
+            if (!accessRequestCurrent(slug, revision) || !removeBtn.isConnected) return;
+            const finishWrite = beginAccessWrite('group-access', slug, revision);
             const error = document.getElementById('group-access-error');
             setError(error, '');
             roleSelect.disabled = true;
             try {
-              const r = await api(`/api/apps/${slug}/group-access/${encodeURIComponent(rule.group)}`, { method: 'DELETE' });
+              const r = await api(`/api/apps/${encodeURIComponent(slug)}/group-access/${encodeURIComponent(rule.group)}`, { method: 'DELETE', signal: AbortSignal.timeout(20000) });
               if (!accessRequestCurrent(slug, revision)) return;
               if (r.status === 401) { await handleUnauthorized(); return; }
               if (!r.ok) throw new Error('request failed');
+              finishWrite();
               if (!await reconcileGroupPermissions(slug, revision)) return;
               await refreshGroupAccessList();
               if (!accessRequestCurrent(slug, revision)) return;
@@ -4603,14 +4656,15 @@ document.addEventListener('DOMContentLoaded', () => {
               document.querySelector('#group-add > summary').focus();
             } catch {
               if (accessRequestCurrent(slug, revision)) setError(error, `Could not remove ${rule.group}. Refresh to check the group’s access, then try again.`);
-            } finally { roleSelect.disabled = false; }
+            } finally { finishWrite(); roleSelect.disabled = false; }
           }));
           li.appendChild(removeBtn);
         }
         list.appendChild(li);
       }
+      restoreAccessFocus(list, focused || (listFocused ? '__list' : null));
     } catch {
-      if (current()) accessListState(list, 'Could not load groups.', refreshGroupAccessList);
+      if (current()) accessListState(list, `Could not load groups.${list.querySelector('.member-name') ? ' Showing the last known entries.' : ''}`, refreshGroupAccessList, true);
     } finally { if (current()) list.setAttribute('aria-busy', 'false'); }
   }
 
@@ -4650,15 +4704,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function updateGroupRole(group, selectEl) {
     const slug = settingsSlug, revision = accessPanelRevision;
-    if (!slug) return;
+    if (!slug || !selectEl.isConnected || selectEl.disabled) return;
+    const finishWrite = beginAccessWrite('group-access', slug, revision);
     const role = selectEl.value, previous = selectEl.dataset.previous;
     const error = document.getElementById('group-access-error');
     const removeBtn = selectEl.closest('li').querySelector('.access-remove');
     setError(error, '');
     selectEl.disabled = removeBtn.disabled = true;
     try {
-      const resp = await api(`/api/apps/${slug}/group-access`, {
-        method: 'POST', body: JSON.stringify({ group, role }),
+      const resp = await api(`/api/apps/${encodeURIComponent(slug)}/group-access`, {
+        method: 'POST', signal: AbortSignal.timeout(20000), body: JSON.stringify({ group, role }),
       });
       if (!accessRequestCurrent(slug, revision)) return;
       if (resp.status === 401) { await handleUnauthorized(); return; }
@@ -4669,12 +4724,13 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch {
       selectEl.value = previous;
       if (accessRequestCurrent(slug, revision)) setError(error, `Could not update the role for ${group}. Refresh to check its role, then try again.`);
-    } finally { selectEl.disabled = removeBtn.disabled = false; }
+    } finally { finishWrite(); selectEl.disabled = removeBtn.disabled = false; }
   }
 
   async function updateMemberRole(userId, username, selectEl) {
     const slug = settingsSlug, revision = accessPanelRevision;
-    if (!slug) return;
+    if (!slug || !selectEl.isConnected || selectEl.disabled) return;
+    const finishWrite = beginAccessWrite('members', slug, revision);
     const newRole = selectEl.value;
     const previous = selectEl.dataset.previous || '';
     const error = document.getElementById('grant-error');
@@ -4684,17 +4740,19 @@ document.addEventListener('DOMContentLoaded', () => {
     removeBtn.disabled = true;
     let resp;
     try {
-      resp = await api(`/api/apps/${slug}/members/${userId}`, {
-        method: 'PATCH',
+      resp = await api(`/api/apps/${encodeURIComponent(slug)}/members/${userId}`, {
+        method: 'PATCH', signal: AbortSignal.timeout(20000),
         body: JSON.stringify({ role: newRole }),
       });
     } catch {
+      finishWrite();
       selectEl.disabled = false;
       removeBtn.disabled = false;
       if (previous) selectEl.value = previous;
       if (accessRequestCurrent(slug, revision)) setError(error, `Could not update the role for ${username}. Check your connection and try again.`);
       return;
     }
+    finishWrite();
     selectEl.disabled = false;
     removeBtn.disabled = false;
     if (!accessRequestCurrent(slug, revision)) return;
@@ -5108,12 +5166,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const errEl = document.getElementById('grant-error');
     setError(errEl, '');
     if (!username) { setError(errEl, 'Enter a username.'); nameEl.focus(); return; }
+    const finishWrite = beginAccessWrite('members', slug, revision);
     grantBtn.disabled = true;
     grantBtn.textContent = 'Adding…';
     try {
       // Omit role: additive POST preserves an existing manager's role.
-      const resp = await api(`/api/apps/${slug}/members`, {
-        method: 'POST', body: JSON.stringify({ username }),
+      const resp = await api(`/api/apps/${encodeURIComponent(slug)}/members`, {
+        method: 'POST', signal: AbortSignal.timeout(20000), body: JSON.stringify({ username }),
       });
       if (!accessRequestCurrent(slug, revision)) return;
       if (resp.status === 401) { await handleUnauthorized(); return; }
@@ -5127,17 +5186,21 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('member-add').open = false;
         document.querySelector('#member-add > summary').focus();
       }
+      finishWrite();
       await refreshMemberList();
       if (accessRequestCurrent(slug, revision)) flashToast(`Added ${username} to members`, 'success');
     } catch {
-      if (accessRequestCurrent(slug, revision)) setError(errEl, 'Could not add this member. Check your connection and try again.');
+      if (accessRequestCurrent(slug, revision)) setError(errEl, 'Could not add this member. Refresh to check its access before trying again.');
     } finally {
+      finishWrite();
       if (accessRequestCurrent(slug, revision)) {
         grantBtn.disabled = false;
         grantBtn.textContent = 'Add member';
       }
     }
   }
+  document.getElementById('members-refresh').addEventListener('click', refreshMemberList);
+  document.getElementById('groups-refresh').addEventListener('click', refreshGroupAccessList);
   document.getElementById('member-add-form').addEventListener('submit', addMember);
 
   async function addGroupAccess(event) {
@@ -5158,11 +5221,12 @@ document.addEventListener('DOMContentLoaded', () => {
       roleSelect?.focus();
       return;
     }
+    const finishWrite = beginAccessWrite('group-access', slug, revision);
     button.disabled = true;
     button.textContent = 'Adding…';
     try {
-      const resp = await api(`/api/apps/${slug}/group-access`, {
-        method: 'POST', body: JSON.stringify({ group, role }),
+      const resp = await api(`/api/apps/${encodeURIComponent(slug)}/group-access`, {
+        method: 'POST', signal: AbortSignal.timeout(20000), body: JSON.stringify({ group, role }),
       });
       if (!accessRequestCurrent(slug, revision)) return;
       if (resp.status === 401) { await handleUnauthorized(); return; }
@@ -5173,6 +5237,7 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('group-add').open = false;
         document.querySelector('#group-add > summary').focus();
       }
+      finishWrite();
       if (!await reconcileGroupPermissions(slug, revision)) return;
       await refreshGroupAccessList();
       if (!accessRequestCurrent(slug, revision)) return;
@@ -5180,8 +5245,9 @@ document.addEventListener('DOMContentLoaded', () => {
       const warn = resp.headers.get('X-ShinyHub-Warning');
       if (warn) flashToast(warn, 'info');
     } catch {
-      if (accessRequestCurrent(slug, revision)) setError(errEl, 'Could not add this group. Check your connection and try again.');
+      if (accessRequestCurrent(slug, revision)) setError(errEl, 'Could not add this group. Refresh to check its access before trying again.');
     } finally {
+      finishWrite();
       if (accessRequestCurrent(slug, revision)) {
         button.disabled = false;
         button.textContent = 'Add group';
@@ -5362,6 +5428,8 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function resetDeployModal() {
+    document.getElementById('deploy-monitor').hidden = true;
+    deployModalClose.setAttribute('aria-label', 'Close deploy modal');
     document.getElementById('deploy-cli-setup').open = false;
     document.getElementById('deploy-cli-setup-copy').textContent = 'Copy setup commands';
     document.getElementById('deploy-cli-setup-status').textContent = '';
@@ -5396,7 +5464,24 @@ document.addEventListener('DOMContentLoaded', () => {
     deployState = null;
   }
 
+  function updateDeployMonitor(message) {
+    const monitor = document.getElementById('deploy-monitor');
+    monitor.hidden = !deployState;
+    document.getElementById('deploy-monitor-text').textContent = deployState ? `${deployState.appName || deployState.slug}: ${message}` : '';
+  }
+
+  function revealDeployModal() {
+    deployModal.hidden = false;
+    modalTrap(deployModal).activate();
+    (deployState?.uploading ? deployCancel : deploySubmit).focus();
+  }
+  document.getElementById('deploy-monitor-open').addEventListener('click', revealDeployModal);
+
   function openDeployModal(app, { firstDeploy = false } = {}) {
+    if (deployState?.uploading) {
+      revealDeployModal();
+      return;
+    }
     resetDeployModal();
     deployState = { slug: app.slug, appName: app.name, blob: null, fileCount: 0, rejections: new Map(), xhr: null };
     deployAppName.textContent = app.name ? `: ${app.name}` : '';
@@ -5415,7 +5500,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function closeDeployModal() {
-    resetDeployModal();
+    if (!deployState?.uploading) resetDeployModal();
     deployModal.hidden = true;
     modalTrap(deployModal).release();
   }
@@ -5428,6 +5513,7 @@ document.addEventListener('DOMContentLoaded', () => {
     selection.blob = null;
     selection.completed = false;
     selection.needsNewBundle = false;
+    selection.uncertain = false;
     document.getElementById('deploy-upload-state').hidden = false;
     document.querySelector('.deploy-cli-guide').hidden = true;
     document.getElementById('deploy-cli-setup').hidden = true;
@@ -5726,6 +5812,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function deployErrorMessage(error) {
+    if (error.uncertain) return error.message;
     if (/bundle rejected.*(?:valid ZIP|damaged)|upload a valid ZIP bundle/i.test(error.message || '')) {
       return 'This ZIP bundle is invalid or damaged. Choose a new ZIP file or upload the app folder, then deploy again.';
     }
@@ -5743,64 +5830,36 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function uploadBundle(slug, blob) {
-    return new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      const form = new FormData();
-      form.append('bundle', blob, 'bundle.zip');
-
-      xhr.open('POST', `/api/apps/${encodeURIComponent(slug)}/deploy`, true);
-      xhr.withCredentials = true;
-      xhr.setRequestHeader('X-Shinyhub-Deploy-Channel', 'dashboard');
-      const csrf = readCookie('csrf_token');
-      if (csrf) xhr.setRequestHeader('X-CSRF-Token', csrf);
-
-      xhr.upload.addEventListener('progress', (e) => {
-        if (deployState?.xhr !== xhr || !e.lengthComputable) return;
-        const pct = Math.floor((e.loaded / e.total) * 100);
-        deployProgressBar.value = pct;
-        deployProgressText.textContent = `Uploading · ${pct}%`;
-      });
-      xhr.upload.addEventListener('load', () => {
-        if (deployState?.xhr !== xhr) return;
+    const upload = deployState;
+    const transfer = uploadDeployment({ slug, blob, csrf: readCookie('csrf_token'),
+      onUpload: percent => {
+        if (deployState !== upload || upload.serverPhase) return;
+        deployProgressBar.value = percent;
+        deployProgressText.textContent = `Uploading · ${percent}%`;
+      },
+      onPhase: event => {
+        if (deployState !== upload) return;
+        upload.serverPhase = true;
         deployProgressBar.removeAttribute('value');
         deployProgressBar.setAttribute('aria-label', 'Deployment progress');
-        deployProgressText.textContent = 'Upload complete. Deployment is continuing; you can close this window.';
-      });
-      xhr.addEventListener('load', () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          let body = {};
-          try { body = JSON.parse(xhr.responseText) || {}; }
-          catch { /* keep empty body; callers treat as no manifest */ }
-          resolve(body);
-        } else {
-          let msg = 'Deploy failed';
-          let deployment = null;
-          try {
-            const body = JSON.parse(xhr.responseText);
-            if (body && body.error) msg = body.error;
-            deployment = body;
-          } catch { /* non-JSON; keep default */ }
-          const err = new Error(msg);
-          err.status = xhr.status;
-          err.deployment = deployment;
-          reject(err);
+        if (event.message) {
+          deployProgressText.textContent = event.message;
+          updateDeployMonitor(event.message);
         }
-      });
-      xhr.addEventListener('error',  () => reject(new Error('Network error during upload')));
-      xhr.addEventListener('abort',  () => {
-        const err = new Error('Upload cancelled');
-        err.code = 'UPLOAD_CANCELLED';
-        reject(err);
-      });
-      xhr.addEventListener('timeout',() => reject(new Error('Upload timed out')));
-
-      deployState.xhr = xhr;
-      xhr.send(form);
+      },
     });
+    upload.xhr = transfer.xhr;
+    return transfer.promise;
   }
 
   deploySubmit.addEventListener('click', async () => {
     if (!deployState || !deployState.blob || deployState.uploading) return;
+    if (deployState.uncertain) {
+      const slug = deployState.slug;
+      closeDeployModal();
+      router.navigate(`/apps/${encodeURIComponent(slug)}/deployments`);
+      return;
+    }
     if (deployState.needsNewBundle) {
       deployFileInput.click();
       return;
@@ -5818,7 +5877,8 @@ document.addEventListener('DOMContentLoaded', () => {
     deploySubmit.disabled = true;
     deploySubmit.textContent = 'Deploying…';
     deployErrorLogs.hidden = true;
-    deployCancel.textContent = 'Close';
+    deployCancel.textContent = 'Hide progress';
+    deployModalClose.setAttribute('aria-label', 'Hide deployment progress');
     deployProgressWrap.hidden = false;
     deployProgressBar.value = 0;
     deployProgressBar.setAttribute('aria-label', 'Upload progress');
@@ -5829,6 +5889,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const selectionVersion = upload.selectionVersion;
     const version = sessionVersion;
     upload.uploading = true;
+    upload.serverPhase = false;
+    updateDeployMonitor('Uploading…');
     deployPick.disabled = deployFileInput.disabled = true;
 
     let body;
@@ -5840,30 +5902,34 @@ document.addEventListener('DOMContentLoaded', () => {
         return; // closeDeployModal resets state
       }
       if (err.status === 401) { await handleUnauthorized(); return; }
+      upload.uncertain = !!err.uncertain;
       setError(deployError, deployErrorMessage(err));
+      updateDeployMonitor(upload.uncertain ? 'Deployment needs checking.' : 'Deployment did not complete.');
       upload.needsNewBundle = [400, 413, 422].includes(err.status) && /bundle|entrypoint/i.test(err.message || '');
       deployErrorLogs.hidden = upload.needsNewBundle || err.status === 403 || err.deployment?.failure_kind === 'capacity' || /no app entrypoint found/i.test(err.message || '');
       deployProgressWrap.hidden = true;
       deploySubmit.disabled = false;
-      deploySubmit.textContent = upload.needsNewBundle ? 'Choose another bundle' : 'Retry deployment';
-      deploySubmit.focus();
+      deploySubmit.textContent = upload.uncertain ? 'Check deployment' : upload.needsNewBundle ? 'Choose another bundle' : 'Retry deployment';
+      if (!deployModal.hidden) deploySubmit.focus();
       deployCancel.textContent = 'Close';
-      await loadApps();
+      if (version === sessionVersion) await loadApps().catch(() => {});
       return;
     } finally {
       if (deployState === upload) {
         upload.uploading = false;
+        upload.xhr = null;
+        deployModalClose.setAttribute('aria-label', 'Close deploy modal');
         deployPick.disabled = deployFileInput.disabled = false;
       }
     }
     if (version !== sessionVersion) return;
     // A closed viewer still owns a real deployment. Refresh the index when it
     // finishes so a first-deploy card becomes usable without a manual reload.
-    await loadApps();
+    await loadApps().catch(() => {});
     if (deployState !== upload || upload.selectionVersion !== selectionVersion) return;
     deployProgressText.textContent = 'Deployed';
 
-    const summaryLines = formatManifestSummary(body && body.manifest);
+    const summaryLines = [...deploymentOutcome(body).details.filter(line => line !== body.warning), ...formatManifestSummary(body && body.manifest)];
     renderDeployResult(deployResult, deployResultList, summaryLines);
     const resultHeading = deployResult.querySelector('.deploy-result-heading');
     const resultDescription = document.getElementById('deploy-result-description');
@@ -5894,7 +5960,8 @@ document.addEventListener('DOMContentLoaded', () => {
     deploySubmit.disabled = false;
     deploySubmit.textContent = 'View app';
     document.getElementById('deploy-success-logs').hidden = false;
-    resultHeading.focus();
+    updateDeployMonitor(resultHeading.textContent);
+    if (!deployModal.hidden) resultHeading.focus();
   });
 
   document.getElementById('deploy-success-logs').addEventListener('click', () => {
@@ -6345,7 +6412,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function showRouteError(err) {
     console.error('route mount failed', err);
     for (const s of document.querySelectorAll('main > section')) s.hidden = true;
-    if (routeErrorView) routeErrorView.hidden = false;
+    if (routeErrorView) { routeErrorView.hidden = false; document.getElementById('route-error-heading')?.focus({ preventScroll: true }); }
   }
   function clearRouteError() {
     if (routeErrorView) routeErrorView.hidden = true;
@@ -6371,7 +6438,7 @@ document.addEventListener('DOMContentLoaded', () => {
   appContextNavigation = installAppContextNavigation({ document, navigate: (path) => router.navigate(path) });
   router.setNavGuard(confirmDiscardIfDirty);
   window.addEventListener('beforeunload', (e) => {
-    if (!suppressUnloadGuard && (anySettingsDirty() || (!profileModal.hidden && (profileHasChanges() || profileSaving || photoPreparing)) || announcementEditor?.isDirty() || announcementEditor?.isPending() || tokenManager.isPending() || tokenManager.needsSave())) { e.preventDefault(); e.returnValue = ''; }
+    if (!suppressUnloadGuard && (anySettingsDirty() || (!profileModal.hidden && (profileHasChanges() || profileSaving || photoPreparing)) || announcementEditor?.isDirty() || announcementEditor?.isPending() || tokenManager.isPending() || tokenManager.needsSave() || deployState?.uploading)) { e.preventDefault(); e.returnValue = ''; }
   });
 
   function updateActiveNav(pathname) {
@@ -6421,7 +6488,7 @@ document.addEventListener('DOMContentLoaded', () => {
     showError: (m) => { if (appError) setError(appError, m); },
     updateActiveNav,
     syncSidebar,
-    setSettingsSlug: (slug) => { if (settingsSlug !== slug) settingsRevision++; settingsSlug = slug; },
+    setSettingsSlug: (slug) => { if (settingsSlug !== slug) { settingsRevision++; accessPanelRevision++; } settingsSlug = slug; },
     clearSettingsDrafts: () => { closeEnvForm(true); clearSettingsDirty(); settingsSlug = null; settingsRevision++; },
     populateGeneralTab,
     populateAutoscaleTab,

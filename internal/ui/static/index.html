@@ -197,6 +197,10 @@
 
     <div class="app-content">
   <main>
+    <div id="deploy-monitor" class="deploy-monitor" hidden>
+      <span id="deploy-monitor-text" role="status"></span>
+      <button type="button" id="deploy-monitor-open" class="env-btn-secondary">View deployment</button>
+    </div>
     <section id="support-session-recovery" class="support-session-recovery" hidden
              role="region" aria-labelledby="support-session-recovery-heading">
       <svg class="support-session-recovery-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -236,7 +240,7 @@
 
     <section id="route-error-view" hidden aria-labelledby="route-error-heading">
       <div class="login-box">
-        <h1 id="route-error-heading">Something went wrong</h1>
+        <h1 id="route-error-heading" tabindex="-1">Something went wrong</h1>
         <p>This page failed to load. The rest of ShinyHub is unaffected.</p>
         <button type="button" id="route-error-reload">Reload</button>
       </div>
@@ -1121,7 +1125,7 @@
           </fieldset>
 
           <section class="settings-block access-grants" aria-labelledby="members-title">
-            <h2 id="members-title" class="settings-block-title">Members</h2>
+            <div class="access-section-heading"><h2 id="members-title" class="settings-block-title">Members</h2><button id="members-refresh" type="button" class="env-btn-secondary" aria-controls="members-list">Refresh members</button></div>
             <p class="settings-block-desc">Viewers can open the app. Managers can also deploy, change settings and manage access.</p>
             <div class="settings-block-body">
               <p id="members-timing" class="access-help-text">Role changes and removals apply immediately.</p>
@@ -1143,7 +1147,7 @@
           </section>
 
           <section class="settings-block access-grants" aria-labelledby="group-access-title">
-            <h2 id="group-access-title" class="settings-block-title">Group access</h2>
+            <div class="access-section-heading"><h2 id="group-access-title" class="settings-block-title">Group access</h2><button id="groups-refresh" type="button" class="env-btn-secondary" aria-controls="group-access-list">Refresh groups</button></div>
             <p class="settings-block-desc">Give everyone in an identity-provider group the same role.</p>
             <div class="settings-block-body">
               <p id="group-access-sso-warning" class="settings-block-warning" hidden></p>

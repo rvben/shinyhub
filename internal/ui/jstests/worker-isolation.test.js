@@ -89,16 +89,3 @@ test('keepWarmInertNote names the mode and Warm workers for grouped and per_sess
   // Numeric strings from an <input> count as a floor too.
   assert.notEqual(keepWarmInertNote('1', 'grouped'), '');
 });
-
-test('only applicable worker controls are revealed and mode changes preserve values', async () => {
-  const { JSDOM } = await import('jsdom');
-  const { syncWorkerControls } = await import('../static/views/worker-isolation.js');
-  const dom = new JSDOM('<label><input id="worker-grouped-size" value="4"></label><label><input id="worker-max-workers" value="8"></label><label><input id="worker-warm-spares" value="2"></label>');
-  const doc = dom.window.document;
-  const rows = [...doc.querySelectorAll('label')];
-  syncWorkerControls(doc, 'multiplex'); assert.deepEqual(rows.map(r => r.hidden), [true, true, true]);
-  syncWorkerControls(doc, 'per_session'); assert.deepEqual(rows.map(r => r.hidden), [true, false, false]);
-  syncWorkerControls(doc, 'grouped'); assert.deepEqual(rows.map(r => r.hidden), [false, false, false]);
-  assert.deepEqual([...doc.querySelectorAll('input')].map(input => input.value), ['4', '8', '2']);
-  dom.window.close();
-});
