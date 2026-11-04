@@ -129,30 +129,29 @@ export async function runBrowserJourneys(f) {
       const choice = page.waitForEvent('filechooser');
       await page.getByRole('button', { name: 'Choose another bundle', exact: true }).click();
       await (await choice).setFiles(f.bundle);
-      let release, received, failed;
-      const responseGate = new Promise(resolve => { release = resolve; });
-      const serverFinished = new Promise((resolve, reject) => { received = resolve; failed = reject; });
+      let release;
+      const uploadGate = new Promise(resolve => { release = resolve; });
       const deploymentURL = '**/api/apps/browser-created/deploy';
       await page.route(deploymentURL, async route => {
-        try {
-          const response = await route.fetch({ timeout: 120_000 });
-          received();
-          await responseGate;
-          await route.fulfill({ response });
-        } catch (error) { failed(error); }
+        // Continue the browser's original multipart upload rather than
+        // rebuilding and replaying a binary request through the test client.
+        await uploadGate;
+        await route.continue();
       });
-      await page.getByRole('button', { name: 'Deploy', exact: true }).click();
-      await page.getByRole('button', { name: 'Hide progress', exact: true }).click();
-      await page.locator('#deploy-monitor').waitFor();
-      assert.equal(await page.locator('#deploy-modal').isVisible(), false);
-      await serverFinished;
-      await page.getByRole('button', { name: 'View deployment', exact: true }).click();
-      release();
-      await page.getByRole('button', { name: 'View app', exact: true }).waitFor({ timeout: 120_000 });
+      try {
+        const started = page.waitForRequest(deploymentURL);
+        await page.getByRole('button', { name: 'Deploy', exact: true }).click();
+        await started;
+        await page.getByRole('button', { name: 'Hide progress', exact: true }).click();
+        await page.locator('#deploy-monitor').waitFor();
+        assert.equal(await page.locator('#deploy-modal').isVisible(), false);
+        await page.getByRole('button', { name: 'View deployment', exact: true }).click();
+        release();
+        await page.getByRole('button', { name: 'View app', exact: true }).waitFor({ timeout: 120_000 });
+      } finally { release(); await page.unroute(deploymentURL); }
       await page.getByRole('button', { name: 'View app', exact: true }).click();
       await page.getByRole('heading', { name: 'Browser acceptance', exact: true }).waitFor();
       assert.equal((await f.json('/api/apps/browser-created')).app.status, 'running');
-      await page.unroute(deploymentURL);
     });
     await f.check('access refresh retains backend grants through a lost connection and recovers', async () => {
       await f.json('/api/apps/forecast/members', { method: 'POST', body: { username: f.accounts.viewer.username } }, 204);
