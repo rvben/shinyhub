@@ -143,7 +143,7 @@ test('buildOverviewModel: crashed/degraded/failed-deploy apps drive a critical v
   assert.equal(m.verdict.tone, 'critical');
   assert.equal(m.verdict.headline, '3 apps need attention');
   assert.equal(m.attention.length, 3);
-  assert.equal(m.counts.idle, 1); // the intentionally-stopped app
+  assert.equal(m.counts.stopped, 1); // the intentionally-stopped app
   assert.equal(m.attention.find((a) => a.slug === 'boom').reason, 'Crashed on startup');
   assert.equal(m.attention.find((a) => a.slug === 'flop').reason, 'First deployment failed');
   assert.equal(m.attention.find((a) => a.slug === 'lost').reason, 'Replicas lost');
@@ -523,4 +523,37 @@ test('startup and active deployments are working rather than idle or already run
   assert.equal(model.attention.length, 0);
   assert.match(model.verdict.detail, /3 working/);
   assert.doesNotMatch(model.verdict.detail, /running/);
+});
+
+
+test('stopped, undeployed, and unknown apps cannot produce a green all-clear', () => {
+  const model = buildOverviewModel([
+    { slug: 'new', status: 'stopped', deploy_count: 0 },
+    { slug: 'paused', status: 'stopped', deploy_count: 2 },
+    { slug: 'sleep', status: 'hibernated', deploy_count: 1 },
+  ], {});
+  assert.equal(model.counts.awaiting, 1);
+  assert.equal(model.counts.stopped, 1);
+  assert.equal(model.counts.idle, 0);
+  assert.equal(model.verdict.tone, 'neutral');
+  assert.equal(model.verdict.headline, 'No apps are running');
+  assert.match(model.verdict.detail, /1 stopped · 1 awaiting deployment/);
+  const unknown = buildOverviewModel([{ slug: 'unknown', status: 'unrecognized' }], {});
+  assert.equal(unknown.counts.unknown, 1);
+  assert.equal(unknown.verdict.tone, 'warning');
+});
+
+test('durable releases remain deployed when the deploy counter is missing', () => {
+  const model = buildOverviewModel([
+    { slug: 'released', status: 'stopped', deploy_count: 0, release_number: 3 },
+    { slug: 'succeeded', status: 'hibernated', deploy_count: 0, last_deployment_status: 'succeeded' },
+    { slug: 'first-failed', status: 'stopped', deploy_count: 0, last_deployment_status: 'failed' },
+    { slug: 'later-failed', status: 'running', deploy_count: 0, release_number: 2, last_deployment_status: 'failed' },
+  ], {});
+  assert.equal(model.counts.awaiting, 0);
+  assert.equal(model.counts.stopped, 1);
+  assert.equal(model.counts.sleeping, 1);
+  assert.equal(model.attention[0].reason, 'First deployment failed');
+  assert.equal(model.attention[1].reason, 'Last deployment failed');
+  assert.equal(model.attention[1].inspection.page, 'deployments');
 });

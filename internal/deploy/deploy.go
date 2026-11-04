@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"archive/zip"
+	"compress/flate"
 	"context"
 	"errors"
 	"fmt"
@@ -2395,6 +2396,9 @@ func ExtractBundle(src, destDir string) error {
 func ExtractBundleWithLimits(src, destDir string, maxEntrySize, maxTotalSize int64) error {
 	r, err := zip.OpenReader(src)
 	if err != nil {
+		if invalidArchiveError(err) {
+			return fmt.Errorf("%w: upload a valid ZIP bundle; the archive is invalid or damaged", ErrBundleRejected)
+		}
 		return sanitizeFSError("open uploaded bundle", err)
 	}
 	defer r.Close()
@@ -2484,6 +2488,14 @@ func ExtractBundleWithLimits(src, destDir string, maxEntrySize, maxTotalSize int
 	return nil
 }
 
+// Archive failures are input validation errors. Filesystem failures still need
+// their original classification so operators can distinguish storage trouble.
+func invalidArchiveError(err error) bool {
+	var corrupt flate.CorruptInputError
+	return errors.Is(err, zip.ErrFormat) || errors.Is(err, zip.ErrAlgorithm) ||
+		errors.Is(err, zip.ErrChecksum) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.As(err, &corrupt)
+}
+
 // extractFile streams f into dest, capped at maxEntrySize bytes. Returns the
 // number of bytes written. If the entry produces more bytes than the cap, the
 // copy is aborted and ErrBundleTooLarge is returned; the partially-written
@@ -2495,10 +2507,10 @@ func extractFile(f *zip.File, dest string, maxEntrySize int64) (int64, error) {
 	}
 	rc, err := f.Open()
 	if err != nil {
-		// f.Open reads the entry out of the zip archive itself; any failure
-		// here is about the archive's internal structure, not the host
-		// filesystem, so there is no path to sanitize.
-		return 0, err
+		if invalidArchiveError(err) {
+			return 0, fmt.Errorf("%w: bundle entry %q cannot be read; upload a valid ZIP bundle", ErrBundleRejected, f.Name)
+		}
+		return 0, sanitizeFSError(fmt.Sprintf("read bundle entry %q", f.Name), err)
 	}
 	defer rc.Close()
 	out, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, safeFileMode(f.Mode()))
@@ -2515,6 +2527,9 @@ func extractFile(f *zip.File, dest string, maxEntrySize int64) (int64, error) {
 	closeErr := out.Close()
 	if copyErr != nil {
 		os.Remove(dest)
+		if invalidArchiveError(copyErr) {
+			return 0, fmt.Errorf("%w: bundle entry %q is damaged; upload a valid ZIP bundle", ErrBundleRejected, f.Name)
+		}
 		return 0, sanitizeFSError(entryLabel, copyErr)
 	}
 	if closeErr != nil {

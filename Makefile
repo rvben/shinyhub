@@ -281,6 +281,17 @@ test-browser-lifecycle-e2e:
 	cd loadtest/render/driver && npx --no-install playwright install chromium
 	PYTHON_VERSION='$(PYTHON_VERSION)' node scripts/browser-lifecycle-e2e.mjs
 
+.PHONY: test-acceptance
+
+# Real native backend, public API journeys and responsive dashboard checks.
+# Always creates its own hub; never points at an existing development server.
+test-acceptance:
+	@command -v uv >/dev/null 2>&1 || { echo "uv is required"; exit 1; }
+	@if [ ! -d node_modules/axe-core ]; then npm ci --ignore-scripts --no-audit --no-fund; fi
+	cd loadtest/render/driver && npm ci --ignore-scripts --no-audit --no-fund
+	cd loadtest/render/driver && npx --no-install playwright install chromium
+	PYTHON_VERSION='$(PYTHON_VERSION)' npm run test:acceptance
+
 .PHONY: test-browser-session-relays-e2e test-browser-reload-producers-e2e test-browser-update-capacity-e2e
 
 # Real Shiny reload relay, admission, revocation and bookmark restore contract.

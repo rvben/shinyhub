@@ -632,7 +632,27 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	app.ProducerRepairSchedules = producer.RepairProducers
 	app.RunningDataProducers = producer.RunningProducers
 
+	defaultMemory, defaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)
+	defaultTimezone := "UTC"
+	if s.cfg.Scheduler.Location != nil {
+		defaultTimezone = s.cfg.Scheduler.Location.String()
+	}
+	// Return defaults separately from effective values: an explicit override
+	// must not be presented as the value that choosing inheritance would use.
+	configurationDefaults := map[string]any{
+		"hibernate_timeout_minutes": s.cfg.Lifecycle.HibernateTimeout.Minutes(),
+		"max_sessions_per_replica":  s.cfg.Runtime.DefaultMaxSessionsPerReplica,
+		"autoscale_target":          s.cfg.Runtime.Autoscale.DefaultTarget,
+		"worker_isolation":          deploy.ResolveWorkerIsolation("", s.cfg.Runtime.DefaultWorkerIsolation),
+		"memory_limit_mb":           defaultMemory,
+		"cpu_quota_percent":         defaultCPU,
+		"schedule_timezone":         defaultTimezone,
+	}
 	envelope := map[string]any{
+		"configuration_defaults":              configurationDefaults,
+		"configuration_sources":               s.configurationSources(app),
+		"configuration_host_cpu_cores":        s.configurationHostCPUCores(app),
+		"configuration_capacity_scope":        "per_host",
 		"app":                                 app,
 		"resource_revision":                   resourceRevision,
 		"replicas_status":                     replicas,
@@ -714,6 +734,9 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 			"websocket_ok":       everConnected,
 			"serving_without_ws": servingWithoutWS,
 		}
+	}
+	if s.configurationUsesLocalHost(app) {
+		envelope["configuration_capacity_scope"] = "local"
 	}
 	// worker_pool is the live per-worker capacity view for elastic
 	// (grouped/per_session) apps: which workers exist, their routing status,
@@ -1395,6 +1418,13 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	// Capture old worker values before the update so the audit record can include
 	// old/new pairs, consistent with how memory_limit_mb and cpu_quota_percent are
 	// recorded. The app object still holds the pre-update state at this point.
+	metadataChanges := map[string]any{}
+	if setName && newName != app.Name {
+		metadataChanges["name"] = map[string]any{"old": app.Name, "new": newName}
+	}
+	if setDescription && newDescription != app.Description {
+		metadataChanges["description"] = map[string]any{"old": app.Description, "new": newDescription}
+	}
 	oldWorkerIsolation := app.WorkerIsolation
 	oldWorkerGroupedSize := app.WorkerGroupedSize
 	oldWorkerMaxWorkers := app.WorkerMaxWorkers
@@ -1741,7 +1771,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			setUsageIdentityMode, oldUsageIdentityMode, newUsageIdentityMode,
 			replicasChanged, priorReplicas, newReplicas,
 			placementChanged, oldPlacementMap, newPlacementMap,
-			maxSessionsChanged, oldMaxSessions, newMaxSessions)
+			maxSessionsChanged, oldMaxSessions, newMaxSessions, metadataChanges)
 		s.logAuditEvent(r, db.AuditEventParams{
 			UserID: &u.ID, Action: "update_app", ResourceType: "app",
 			ResourceID: slug, Detail: detail, IPAddress: s.ClientIP(r), RunID: s.knownFleetRunID(r),
@@ -1868,8 +1898,14 @@ func patchAppAuditDetail(
 	replicasChanged bool, oldReplicas, newReplicas int,
 	placementChanged bool, oldPlacement, newPlacement map[string]int,
 	maxSessionsChanged bool, oldMaxSessions, newMaxSessions int,
+	metadataChanges ...map[string]any,
 ) string {
 	d := map[string]any{}
+	for _, fields := range metadataChanges {
+		for key, value := range fields {
+			d[key] = value
+		}
+	}
 	if setMinWarmReplicas {
 		d["min_warm_replicas"] = minWarmReplicas
 	}

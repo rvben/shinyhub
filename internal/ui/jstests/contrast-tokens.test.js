@@ -62,6 +62,18 @@ const light = { ...dark, ...themeTokens(':root[data-theme="light"] {') };
 const SURFACES = ['surface', 'surface-2', 'surface-3'];
 const AA_BODY = 4.5;
 
+test('light-mode controls, selection and primary actions retain contrast', () => {
+  for (const surface of ['surface', 'surface-2', 'bg']) {
+    const ratio = contrast(light['control-border'], light[surface]);
+    assert.ok(ratio >= 3, `control edge on ${surface}: ${ratio.toFixed(2)}:1, below 3:1`);
+  }
+  for (const fill of ['brand-primary', 'primary-hover']) {
+    assert.ok(contrast(light.surface, light[fill]) >= AA_BODY, `white primary label on ${fill}`);
+  }
+  assert.ok(contrast(light['cyan-bright'], light['selection-bg']) >= AA_BODY,
+    'selected navigation text must remain readable against its blue fill');
+});
+
 // colourTokenOf reads the token a rule paints its text with, so the test tracks
 // the stylesheet rather than restating it. A rule recoloured to a different
 // token is then checked as the new token, and a rule given a literal colour

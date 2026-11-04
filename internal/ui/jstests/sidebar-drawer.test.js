@@ -86,3 +86,17 @@ test('toggle opens then closes', () => {
   drawer.toggle();
   assert.equal(drawer.isOpen(), false);
 });
+
+test('app drawer opens at the current destination and falls back to Back to apps', () => {
+  const { doc, drawer } = setup();
+  const nav = doc.createElement('nav');
+  nav.id = 'app-context-nav';
+  nav.innerHTML = '<a class="app-context-back" href="/apps">Back to apps</a><a href="/apps/report/settings/access" aria-current="page">Access</a>';
+  doc.getElementById('sidebar').prepend(nav);
+  drawer.open();
+  assert.equal(doc.activeElement, nav.querySelector('[aria-current]'));
+  drawer.close();
+  nav.querySelector('[aria-current]').removeAttribute('aria-current');
+  drawer.open();
+  assert.equal(doc.activeElement, nav.querySelector('.app-context-back'));
+});

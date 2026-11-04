@@ -15,6 +15,6 @@ export function mountUsers(ctx) {
     // said Users, which is the old name for a page that now also covers
     // service accounts.
     title: 'Identity',
-    unmount() { view.hidden = true; },
+    unmount() { ctx.clearUsers?.(); view.hidden = true; },
   };
 }

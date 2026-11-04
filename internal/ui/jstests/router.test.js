@@ -384,3 +384,55 @@ test('the document title survives a tab switch', async () => {
   assert.equal(global.document.title, afterMount, 'a tab switch must keep the page title');
   assert.match(afterMount, /^demo · /);
 });
+
+
+test('navigation guards receive the destination for settings drafts, including Back', async () => {
+  const dom = withDom('/apps/demo/settings/resources');
+  const router = createRouter();
+  const mounted = [];
+  router.register('/apps/:slug/settings/:section', p => { mounted.push(p.section); return {}; });
+  router.register('/apps', () => { mounted.push('catalog'); return {}; });
+  await router.start();
+  const destinations = [];
+  router.setNavGuard(path => { destinations.push(path); return path.startsWith('/apps/demo/settings/'); });
+  await router.navigate('/apps/demo/settings/scaling');
+  await router.navigate('/apps');
+  assert.equal(location.pathname, '/apps/demo/settings/scaling');
+  assert.deepEqual(mounted, ['resources', 'scaling']);
+  assert.deepEqual(destinations, ['/apps/demo/settings/scaling', '/apps']);
+  dom.window.history.back();
+  await waitFor(() => mounted.length === 3, 'settings history to mount');
+  assert.equal(destinations.at(-1), '/apps/demo/settings/resources');
+  assert.equal(location.pathname, '/apps/demo/settings/resources');
+  dom.window.close();
+});
+
+
+test('session reset unmounts once and starts the same URL with fresh state', async () => {
+  const dom = withDom('/apps/demo');
+  let mounts = 0, unmounts = 0, updates = 0;
+  const router = createRouter();
+  router.register('/apps/:slug', () => { mounts++; return {unmount() {unmounts++;}, update() {updates++;}}; }, {key:p => p.slug});
+  await router.start();
+  router.reset();
+  router.reset();
+  await router.start();
+  assert.equal(mounts, 2);
+  assert.equal(unmounts, 1);
+  assert.equal(updates, 0, 'a different session cannot update the previous account’s view');
+  dom.window.close();
+});
+
+test('session reset rejects a pending authenticated mount', async () => {
+  const dom = withDom('/private');
+  let finish, unmounts = 0, mounted = 0;
+  const router = createRouter({onMounted: () => mounted++});
+  router.register('/private', () => new Promise(resolve => { finish = () => resolve({unmount() {unmounts++;}}); }));
+  const pending = router.start();
+  router.reset();
+  finish();
+  await pending;
+  assert.equal(mounted, 0);
+  assert.equal(unmounts, 1, 'late authenticated views are torn down');
+  dom.window.close();
+});

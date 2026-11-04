@@ -335,6 +335,12 @@ func (s *Server) maybeRestartForChange(r *http.Request, app *db.App, slug string
 	if fetchErr != nil {
 		return false, fetchErr
 	}
+	return s.restartForChangeLocked(r, app, slug, false)
+}
+
+// restartForChangeLocked requires the app-operation lock. Mount revocation
+// reuses it after confirming the old pool dead and removing its grant.
+func (s *Server) restartForChangeLocked(r *http.Request, app *db.App, slug string, reusePrepared bool) (bool, error) {
 	if err := s.guardActivationLifecycle(app.ID, "restart after environment change "+slug); err != nil {
 		return false, err
 	}
@@ -382,6 +388,9 @@ func (s *Server) maybeRestartForChange(r *http.Request, app *db.App, slug string
 		DeploymentID:          current.ID,
 		AppVersion:            current.Version,
 	}, app)
+	if reusePrepared {
+		restartParams.Preparation = deploy.ActivationPreparation(current.Prepared)
+	}
 	restartParams = s.guardDeploymentConsumerStart(app, current, restartParams)
 	restartParams = s.traceDeploy(r.Context(), restartParams)
 	result, runErr := s.deployRun(restartParams)

@@ -13,6 +13,10 @@ import (
 // last admin instead.
 var ErrLastAdmin = errors.New("operation would remove the last admin")
 
+// ErrRolePreviewChanged prevents a reviewed automatic role being replaced by
+// different access when group rules change before the operator saves.
+var ErrRolePreviewChanged = errors.New("automatic role changed since preview")
+
 // ErrUserOwnsApps is returned by DeleteUser when the target user still owns one
 // or more apps. The apps.owner_id foreign key would otherwise reject the delete
 // with an opaque database error; this lets the API surface a clear 409 telling
@@ -206,6 +210,13 @@ func (s *Store) SetManualRole(userID int64, role string) error {
 // from the current group snapshot (else defaultRole). Returns ErrLastAdmin if
 // that would demote the last admin.
 func (s *Store) ClearManualRole(userID int64, mappings []auth.GroupRoleMapping, defaultRole string) error {
+	return s.ClearManualRoleExpected(userID, mappings, defaultRole, "")
+}
+
+// ClearManualRoleExpected checks the reviewed result inside the same write
+// transaction that removes the override. An empty expectation keeps the
+// existing API behavior for callers without a preview.
+func (s *Store) ClearManualRoleExpected(userID int64, mappings []auth.GroupRoleMapping, defaultRole, expectedRole string) error {
 	ctx := context.Background()
 	tx, err := s.d.beginWrite(ctx, s.rawDB(), roleMutationLockKey)
 	if err != nil {
@@ -228,6 +239,9 @@ func (s *Store) ClearManualRole(userID int64, mappings []auth.GroupRoleMapping, 
 	newRole, source := defaultRole, "default"
 	if r, matched := auth.ResolveGlobalRole(groups, mappings, defaultRole); matched {
 		newRole, source = r, "sso"
+	}
+	if expectedRole != "" && newRole != expectedRole {
+		return ErrRolePreviewChanged
 	}
 	// applyEffectiveRoleTx runs before the NULL write so a rejected clear leaves
 	// manual_role intact (the tx rolls back regardless, but this ordering is clearest).

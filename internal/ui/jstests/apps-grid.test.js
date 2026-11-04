@@ -70,3 +70,15 @@ test('a 401 delegates to onUnauthorized and does not raise an error banner', asy
   assert.equal(unauth, 1);
   assert.equal(errors.filter((e) => e).length, 0, 'a 401 is an auth redirect, not an error banner');
 });
+
+for (const body of [null, {}, {items:null}]) test(`invalid app list is an error, never an empty fleet: ${JSON.stringify(body)}`, async () => {
+  fixture();let rendered=false;
+  const {ctx,errors}=baseCtx({state:{apps:[{slug:'retained'}]},api:async()=>({ok:true,status:200,json:async()=>body}),applyGridFilters:()=>{rendered=true;}});
+  await mountAppsGrid(ctx);
+  assert.equal(rendered,false);assert.equal(ctx.state.apps[0].slug,'retained');assert.match(errors.at(-1),/retry/);
+});
+
+test('a JSON decoding failure preserves the existing list and offers a retry', async () => {
+  fixture();const {ctx,errors}=baseCtx({state:{apps:[{slug:'retained'}]},api:async()=>({ok:true,status:200,json:async()=>{throw new SyntaxError('truncated');}})});
+  await mountAppsGrid(ctx);assert.match(errors.at(-1),/Refresh/);assert.equal(ctx.state.apps[0].slug,'retained');
+});

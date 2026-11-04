@@ -7,6 +7,8 @@
 // Turns a detail object's key into a table-friendly label: snake_case and
 // dotted keys become capitalized words ("old_role" -> "Old role").
 function humanizeDetailKey(key) {
+  const labels = {memory_limit_mb: 'Memory limit', cpu_quota_percent: 'CPU limit', ip_address: 'IP address', user_id: 'User ID', run_id: 'Run ID'};
+  if (labels[key]) return labels[key];
   const words = key.replace(/[._]+/g, ' ').trim();
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
@@ -17,14 +19,21 @@ function formatDetailValue(value) {
   return String(value);
 }
 
+function isRecordedChange(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) && ('old' in value || 'new' in value);
+}
+
 // Most update_app fields are recorded as {old, new} pairs rather than a bare
 // new value (see patchAppAuditDetail in internal/api/apps.go), so a change
 // reads as "before -> after" instead of only the after side.
-function formatDetailField(value) {
-  if (value && typeof value === 'object' && !Array.isArray(value) && ('old' in value || 'new' in value)) {
-    return `${formatDetailValue(value.old)} → ${formatDetailValue(value.new)}`;
+function formatDetailField(value, key) {
+  const resourceUnit = key === 'memory_limit_mb' ? ' MiB' : key === 'cpu_quota_percent' ? '%' : null;
+  const format = item => resourceUnit !== null && (typeof item === 'number' || item === null)
+    ? item === null ? 'Server default' : item === 0 ? 'No limit' : `${item}${resourceUnit}` : formatDetailValue(item);
+  if (isRecordedChange(value)) {
+    return `${format(value.old)} → ${format(value.new)}`;
   }
-  return formatDetailValue(value);
+  return format(value);
 }
 
 const KEYVALUE_PATTERN = /^(\w+=\S+)(\s+\w+=\S+)*$/;
@@ -33,33 +42,29 @@ export function auditDetailEntries(event) {
   if (!event || !event.detail) return [];
   const raw = event.detail;
 
-  if (['schedule_activation_outcome', 'support_session.start', 'support_session.stop'].includes(event.action)) {
-    return structuredAuditDetailEntries(event);
-  }
-
-  // Every other action stores detail either as a flat JSON object (the
-  // common case: update_app, set_access, env.set, autoscale events, ...) or
-  // as a plain "key=value key2=value2" string (grant_access, revoke_access,
-  // set_member_role, grant_group_access, create_token, ...). Render both
-  // generically so a new action needs no new case here.
   let parsed;
   try {
     parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
   } catch {
     parsed = null;
   }
+  // AuditDetail replaces the entire object on an encoding failure. Check
+  // before action-specific allowlists so failure never looks like no detail.
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && 'detail_error' in parsed) {
+    return [{label: 'Detail unavailable', value: formatDetailValue(parsed.detail_error), isError: true}];
+  }
+  if (['schedule_activation_outcome', 'support_session.start', 'support_session.stop'].includes(event.action)) {
+    return structuredAuditDetailEntries(event, parsed);
+  }
+
+  // Other actions use a flat JSON object or a plain key=value string.
   if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-    // detail_error (db.AuditDetail, internal/db/audit_detail.go) means the
-    // server meant to record detail and failed to encode it. It replaces the
-    // whole object rather than sitting alongside real fields, so nothing else
-    // in the row can be trusted either; surface it as the one entry, flagged,
-    // so the renderer can show it as a problem rather than ordinary data.
-    if ('detail_error' in parsed) {
-      return [{label: 'Detail unavailable', value: formatDetailValue(parsed.detail_error), isError: true}];
-    }
     return Object.entries(parsed)
       .filter(([, value]) => value !== null && value !== undefined && !(typeof value === 'string' && value.trim() === ''))
-      .map(([key, value]) => ({label: humanizeDetailKey(key), value: formatDetailField(value)}));
+      .map(([key, value]) => ({label: humanizeDetailKey(key), value: formatDetailField(value, key),
+        // Older events also record unchanged fields submitted by a form.
+        // Keep that detail available without calling it a change in the row.
+        ...(isRecordedChange(value) && JSON.stringify(value.old) !== JSON.stringify(value.new) ? {isChange: true} : {})}));
   }
 
   if (typeof raw === 'string' && raw.trim() !== '') {
@@ -82,14 +87,8 @@ export function auditDetailEntries(event) {
 // Small, action-aware audit detail model. Audit detail is persisted JSON, but
 // the browser renders only explicitly allowed fields as text so malformed or
 // unexpected payloads cannot become markup or an accidental secret dump.
-function structuredAuditDetailEntries(event) {
+function structuredAuditDetailEntries(event, detail) {
 	if (!event || !['schedule_activation_outcome', 'support_session.start', 'support_session.stop'].includes(event.action)) return [];
-	let detail;
-	try {
-		detail = typeof event.detail === 'string' ? JSON.parse(event.detail) : event.detail;
-	} catch {
-		return [];
-	}
 	if (!detail || typeof detail !== 'object' || Array.isArray(detail)) return [];
 	const support = event.action.startsWith('support_session.');
 	const fields = support ? [

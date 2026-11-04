@@ -525,9 +525,18 @@ func (r *DockerRuntime) streamLogs(id string, w io.Writer) {
 }
 
 func (r *DockerRuntime) streamLogsContext(ctx context.Context, id string, w io.Writer) {
-	attachURL := fmt.Sprintf("%s/containers/%s/attach?stream=1&stdout=1&stderr=1&logs=1",
-		r.client.base, url.PathEscape(id))
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, attachURL, nil)
+	r.streamContainerOutput(ctx, id, w, http.MethodPost, "attach?stream=1&stdout=1&stderr=1&logs=1")
+}
+
+// The logs endpoint replays persisted output even when a one-shot process has
+// already exited before the request arrives. Attach may return no data then.
+func (r *DockerRuntime) streamRunLogsContext(ctx context.Context, id string, w io.Writer) {
+	r.streamContainerOutput(ctx, id, w, http.MethodGet, "logs?follow=1&stdout=1&stderr=1")
+}
+
+func (r *DockerRuntime) streamContainerOutput(ctx context.Context, id string, w io.Writer, method, endpoint string) {
+	streamURL := fmt.Sprintf("%s/containers/%s/%s", r.client.base, url.PathEscape(id), endpoint)
+	req, err := http.NewRequestWithContext(ctx, method, streamURL, nil)
 	if err != nil {
 		return
 	}
@@ -636,7 +645,7 @@ func (r *DockerRuntime) RunOnce(ctx context.Context, p StartParams, logWriter io
 	logsDone := make(chan struct{})
 	go func() {
 		defer close(logsDone)
-		r.streamLogsContext(logCtx, id, logWriter)
+		r.streamRunLogsContext(logCtx, id, logWriter)
 	}()
 	defer func() {
 		// Normally attach reaches EOF on exit. Bound draining when the daemon

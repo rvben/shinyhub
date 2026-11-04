@@ -354,6 +354,15 @@ func TestBrandingRoutes(t *testing.T) {
 		paths := []string{
 			"/apps/replica-smoke",
 			"/apps/replica-smoke/logs",
+			"/apps/replica-smoke/settings/general",
+			"/apps/replica-smoke/settings/environment",
+			"/apps/replica-smoke/settings/resources",
+			"/apps/replica-smoke/settings/scaling",
+			"/apps/replica-smoke/settings/access",
+			"/apps/replica-smoke/settings/privacy",
+			"/apps/replica-smoke/schedules/1",
+			"/projects/team-dashboards",
+			"/projects/team-dashboards/",
 			"/identity",
 			"/users",
 			"/workers",
@@ -384,6 +393,11 @@ func TestBrandingRoutes(t *testing.T) {
 		paths := []string{
 			"/nope",
 			"/apps/",
+			"/apps/replica-smoke/settings/privacy/extra",
+			"/apps/replica-smoke/schedules/not-a-run",
+			"/projects/",
+			"/projects/INVALID",
+			"/projects/team-dashboards/extra",
 		}
 		for _, path := range paths {
 			t.Run(path, func(t *testing.T) {

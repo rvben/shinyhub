@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
+import { installPopoverStub } from './popover-stub.js';
 import { buildOverviewModel } from '../static/views/overview-model.js';
 import {
   renderResourcePressure,
@@ -14,6 +15,7 @@ let dom;
 
 beforeEach(() => {
   dom = new JSDOM('<!doctype html><body></body>');
+  installPopoverStub(dom.window);
   globalThis.window = dom.window;
   globalThis.document = dom.window.document;
 });
@@ -62,10 +64,12 @@ test('2 GB of app limits remains distinct from a 64 GB host and offers a coverag
   assert.equal(node.querySelectorAll('.ov-resource-values')[1].querySelector('dd').textContent, '640 MB');
   assert.match(node.querySelectorAll('.ov-resource-values')[1].textContent, /Host capacity · OS total64\.0 GB/);
   const details = node.querySelector('.ov-measurement-details');
-  assert.equal(details.hidden, true);
-  assert.match(details.textContent, /25% of combined app limits/);
+  assert.equal(node.querySelector('[data-disclosure-key="capacity:help"]').getAttribute('aria-expanded'), 'false');
+  assert.doesNotMatch(details.textContent, /combined app limits/);
+  assert.match(node.querySelectorAll('.ov-app-limit-reading')[1].textContent, /25% of combined app limits/);
+  assert.equal(node.querySelector('.ov-app-limit-reading').closest('[popover]'), null);
   node.querySelector('[data-disclosure-key="capacity:help"]').click();
-  assert.equal(details.hidden, false);
+  assert.equal(details.dataset.testPopoverOpen, 'true');
   const gap = node.querySelector('.ov-coverage-row');
   assert.match(gap.textContent, /Free app.*No limit set.*CPU: 1 replica · Memory: 1 replica/);
   assert.equal(gap.querySelector('a').getAttribute('href'), '/apps/free/configuration');
@@ -78,11 +82,36 @@ test('container and configured capacity identify the source and the setting to c
       a: { replicas: [unlimited(0, 10, 128)] },
     }, { memory_mb: 2048, memory_source: source });
     const node = renderResourcePressure(resources);
-    assert.match(node.textContent, source === 'config'
-      ? /Configured capacity2\.0 GB.*server.host_capacity_memory_mb/
-      : /Container \/ service capacity2\.0 GB.*restricted by a container or service/);
+    assert.match(node.querySelectorAll('.ov-resource-values')[1].textContent, source === 'config'
+      ? /Configured capacity2\.0 GB/
+      : /Container \/ service capacity2\.0 GB/);
+    assert.match(node.querySelector('[popover]').textContent, source === 'config'
+      ? /server.host_capacity_memory_mb/
+      : /restricted by a container or service/);
     assert.doesNotMatch(node.textContent, /OS total/);
   }
+});
+
+test('idle measurement help pairs every label with content without empty metric sections or app-limit claims', () => {
+  const node = renderResourcePressure(resourcesFor([], {}, {
+    cores: 12, cores_source: 'affinity', memory_mb: 16384, memory_source: 'host-total',
+  }));
+  const toggle = node.querySelector('[data-disclosure-key="capacity:help"]');
+  assert.equal(toggle.getAttribute('aria-label'), 'About these metrics');
+  toggle.click();
+  const details = node.querySelector('.ov-measurement-details');
+  assert.equal(details.dataset.testPopoverOpen, 'true');
+  assert.equal(details.querySelector('h3').textContent, 'About these metrics');
+  assert.deepEqual([...details.querySelectorAll('dt')].map((term) => term.textContent),
+    ['Measured usage', 'CPU capacity', 'Memory capacity', 'Memory (RSS)']);
+  for (const row of details.querySelector('dl').children) {
+    assert.equal(row.firstElementChild.tagName, 'DT');
+    assert.equal(row.lastElementChild.tagName, 'DD');
+    assert.ok(row.lastElementChild.textContent.trim());
+  }
+  assert.match(details.textContent, /not free memory or idle CPU/);
+  assert.match(details.textContent, /Shared memory pages may be counted more than once/);
+  assert.doesNotMatch(details.textContent, /replicas checked|Trend unavailable/);
 });
 
 test('missing measurements lead to app inspection without suggesting a limit change', () => {
@@ -267,7 +296,7 @@ test('hotspot rows name severity, metric, replica, and inspection target', () =>
   assert.match(node.textContent, /Critical/);
   assert.match(node.textContent, /Replica 2/);
   const link = node.querySelector('.ov-hotspot-name');
-  assert.equal(link.getAttribute('href'), '/apps/forecast');
+  assert.equal(link.getAttribute('href'), '/apps/forecast/overview');
   assert.equal(link.dataset.focusKey, 'pressure:forecast:memory');
   assert.match(node.querySelector('.ov-hotspot-row meter').getAttribute('aria-label'), /98 percent, critical/);
 });
@@ -308,7 +337,7 @@ test('a fleet with no limits is measured against the host, not reported as immea
   const node = renderResourcePressure(resources);
   assert.match(node.textContent, /App resource usage/);
   assert.match(node.querySelector('.ov-res-scope').textContent, /Reporting apps only. Other host processes are excluded/);
-  assert.match(node.textContent, /1\.5 coresAvailable CPU cores4\.0 cores/);
+  assert.match(node.textContent, /1\.5 coresCPU capacity · Allowed cores4\.0 cores/);
   assert.match(node.textContent, /2\.0 GBHost capacity · OS total8\.0 GB/);
   assert.match(node.textContent, /1 of 1 replicas reporting/);
   assert.doesNotMatch(node.textContent, /Capacity unavailable/);
@@ -317,7 +346,7 @@ test('a fleet with no limits is measured against the host, not reported as immea
 
   const meters = node.querySelectorAll('meter');
   assert.equal(meters.length, 2);
-  assert.match(meters[0].getAttribute('aria-label'), /CPU reported app usage, 38% of available cpu cores/);
+  assert.match(meters[0].getAttribute('aria-label'), /CPU reported app usage, 38% of cpu capacity · allowed cores/);
   assert.equal(Number(meters[1].value.toFixed(2)), 0.25);
 });
 
@@ -348,7 +377,7 @@ test('a no-limit fleet attributes its usage to the apps behind it', () => {
   assert.match(node.textContent, /Top memory consumers/);
   const rows = [...node.querySelectorAll('.ov-consumer-row')];
   assert.equal(rows.length, 3);
-  assert.equal(rows[0].querySelector('a').getAttribute('href'), '/apps/alpha');
+  assert.equal(rows[0].querySelector('a').getAttribute('href'), '/apps/alpha/overview');
   assert.match(rows[0].textContent, /400 MB/);
   assert.match(rows[0].textContent, /40% of measured usage/);
   // Attribution, not alarm: no pressure alerts and no all-clear about limits
@@ -442,4 +471,42 @@ test('live announcement identifies a changed secondary hotspot, not the unchange
   const summary = resourceLiveSummary(second, first);
   assert.match(summary, /Gamma, cpu, replica 2, critical/);
   assert.doesNotMatch(summary, /Alpha/);
+});
+
+
+test('metrics help close returns focus and native dismissal keeps the trigger state in sync', () => {
+  const node = renderResourcePressure(resourcesFor([], {}));
+  document.body.appendChild(node);
+  const toggle = node.querySelector('[data-focus-key="capacity:help"]');
+  const help = node.querySelector('[popover]');
+  toggle.click();
+  const close = help.querySelector('button');
+  close.focus();
+  close.click();
+  assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+  assert.equal(document.activeElement, toggle);
+  toggle.click();
+  help.hidePopover(); // Native Escape or light-dismiss fires the same event.
+  assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+});
+
+test('browsers without popovers get a working documentation link', () => {
+  delete dom.window.HTMLElement.prototype.showPopover;
+  const node = renderResourcePressure(resourcesFor([], {}));
+  const link = node.querySelector('.ov-metrics-help-link');
+  assert.equal(link.textContent, 'About these metrics');
+  assert.equal(link.href, 'https://shinyhub.dev/configuration/#host-capacity');
+  assert.equal(node.querySelector('[popover]'), null);
+});
+
+
+test('tiny measured CPU stays nonzero and units remain secondary', () => {
+  const resources = resourcesFor([{ slug: 'small', status: 'running' }], {
+    small: { status: 'running', replicas: [unlimited(0, 0.138, 14)] },
+  }, { cores: 12, memory_mb: 16384 });
+  const node = renderResourcePressure(resources);
+  const value = node.querySelector('.ov-capacity-value');
+  assert.equal(value.textContent, '<0.01 cores');
+  assert.equal(value.querySelector('.metric-number').textContent, '<0.01');
+  assert.equal(value.querySelector('.metric-unit').textContent, ' cores');
 });

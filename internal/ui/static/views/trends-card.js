@@ -5,6 +5,7 @@
 
 import { renderSparkline } from './sparkline.js';
 import { formatBytes, formatCoreCount } from './stat-format.js';
+import { setMetricValue } from './metric-value.js';
 
 // At least two samples are needed to draw a meaningful trend; below that the
 // card shows a Collecting placeholder.
@@ -18,8 +19,8 @@ function formatWindow(seconds) {
   return `${s}s`;
 }
 
-function fmtPercent(v) {
-  return `${(Number(v) || 0).toFixed(1)}%`;
+function fmtCores(v) {
+  return formatCoreCount(v).replace(/\.0 cores$/, ' cores').replace(/^1 cores$/, '1 core');
 }
 
 function fmtInt(v) {
@@ -37,7 +38,7 @@ function normalizeSamples(values) {
   return values.map((value) => {
     if (value === null || value === undefined) return null;
     const numeric = Number(value);
-    return Number.isFinite(numeric) ? numeric : null;
+    return Number.isFinite(numeric) && numeric >= 0 ? numeric : null;
   });
 }
 
@@ -90,9 +91,7 @@ export function renderTrendsCard(document, history, capacityCores = null) {
 
   const heading = document.createElement('h2');
   heading.id = 'trends-heading';
-  heading.textContent = windowSeconds
-    ? `Trends (last ${formatWindow(windowSeconds)})`
-    : 'Trends';
+  heading.textContent = 'Resource history';
 
   const intervalSeconds = Number(history && history.interval_seconds) || 0;
   const header = document.createElement('div');
@@ -101,7 +100,7 @@ export function renderTrendsCard(document, history, capacityCores = null) {
   if (intervalSeconds > 0) {
     const cadence = document.createElement('span');
     cadence.className = 'trends-cadence';
-    cadence.textContent = `Every ${formatWindow(intervalSeconds)}`;
+    cadence.textContent = `Last ${formatWindow(windowSeconds)} · every ${formatWindow(intervalSeconds)}`;
     header.appendChild(cadence);
   }
   section.setAttribute('aria-labelledby', heading.id);
@@ -117,25 +116,40 @@ export function renderTrendsCard(document, history, capacityCores = null) {
   if (count < MIN_POINTS) {
     const placeholder = document.createElement('p');
     placeholder.className = 'trends-empty';
-    placeholder.textContent = 'Collecting...';
+    placeholder.textContent = 'Collecting history. Charts appear after two measurements.';
     section.appendChild(placeholder);
     return section;
   }
 
   const rows = [
-    { key: 'cpu', label: 'CPU', values: cpu, format: fmtPercent, step: false, integer: false,
-      capacity: Number.isFinite(capacityCores) && capacityCores > 0 ? capacityCores * 100 : null },
+    { key: 'cpu', label: 'CPU', values: normalizeSamples(cpu).map(v => v == null ? null : v / 100), format: fmtCores, step: false, integer: false,
+      capacity: Number.isFinite(capacityCores) && capacityCores > 0 ? capacityCores : null },
     { key: 'memory', label: 'Memory', values: rss, format: formatBytes, step: false, scale: niceMemoryMax },
     { key: 'sessions', label: 'Sessions', values: sessions, format: fmtInt, step: false, integer: true },
-    { key: 'instances', label: 'Instances', values: instances, format: fmtInt, step: true, integer: true },
+    { key: 'instances', label: 'Replicas', values: instances, format: fmtInt, step: true, integer: true },
   ];
   const grid = document.createElement('div');
   grid.className = 'trends-grid';
   const coverage = formatCoverage(timestamps, windowSeconds);
-  for (const row of rows) {
-    grid.appendChild(renderTrendRow(document, row, coverage));
-  }
+  const timeline = timestamps.length === count && timestamps.every((ts, i) => Number.isFinite(ts)
+    && Number.isFinite(new Date(ts * 1000).getTime()) && (i === 0 || ts > timestamps[i - 1])) ? timestamps : null;
+  const charts = rows.map(row => {
+    row.values = Array.from({length: count}, (_, i) => row.values[i] ?? null);
+    const chart = renderTrendRow(document, row, coverage, timeline, intervalSeconds);
+    grid.appendChild(chart.wrap);
+    return chart;
+  });
   section.appendChild(grid);
+  const capacity = rows[0].capacity;
+  if (capacity) {
+    const note = document.createElement('p'); note.className = 'trends-capacity-note';
+    note.textContent = `Current CPU capacity: ${fmtCores(capacity)}`;
+    const explanation = document.createElement('span'); explanation.className = 'sr-only';
+    explanation.textContent = '. Dashed line; capacity may have changed during this window.';
+    note.append(explanation); note.title = 'Dashed line; capacity may have changed during this window.';
+    section.append(note);
+  }
+  addHistoryInspector(document, section, charts, timeline, count);
   // Clip the table inside a block: a table's intrinsic width can otherwise
   // escape a width:1px visually-hidden rule and widen narrow viewports.
   const dataTwin = document.createElement('div');
@@ -179,14 +193,16 @@ export function renderTrendsCard(document, history, capacityCores = null) {
   return section;
 }
 
-function renderTrendRow(document, row, coverage) {
+function renderTrendRow(document, row, coverage, timestamps, intervalSeconds) {
   const samples = normalizeSamples(row.values);
   const latestSample = samples.length > 0 ? samples[samples.length - 1] : null;
   const latestAvailable = latestSample !== null;
   const valueText = latestAvailable ? row.format(latestSample) : 'No sample';
   const availableCount = samples.filter((sample) => sample !== null).length;
   const missingCount = samples.length - availableCount;
-  const scaleMax = Math.max(row.scale ? row.scale(samples) : niceMax(samples, row.integer), row.capacity ? row.capacity * 1.05 : 0);
+  const elapsedGaps = timestamps && intervalSeconds > 0
+    ? timestamps.filter((ts, i) => i > 0 && ts - timestamps[i - 1] > intervalSeconds * 1.5).length : 0;
+  const scaleMax = Math.max(row.scale ? row.scale(samples) : niceMax(samples, row.integer), row.capacity ? niceMax([row.capacity], false) : 0);
   const scaleMaxText = row.format(scaleMax);
 
   const wrap = document.createElement('figure');
@@ -202,7 +218,7 @@ function renderTrendRow(document, row, coverage) {
 
   const value = document.createElement('span');
   value.className = 'trend-value';
-  value.textContent = valueText;
+  setMetricValue(value, valueText);
   if (!latestAvailable) {
     value.classList.add('is-missing');
     value.title = 'No measurement in the latest sample';
@@ -210,12 +226,6 @@ function renderTrendRow(document, row, coverage) {
 
   caption.appendChild(label);
   caption.appendChild(value);
-  if (row.key === 'cpu') {
-    const unitNote = document.createElement('span');
-    unitNote.className = 'trend-capacity-label';
-    unitNote.textContent = '100% = one core';
-    caption.appendChild(unitNote);
-  }
 
   const plot = document.createElement('div');
   plot.className = 'trend-plot';
@@ -224,7 +234,7 @@ function renderTrendRow(document, row, coverage) {
   yAxis.className = 'trend-y-axis';
   yAxis.setAttribute('aria-hidden', 'true');
   const yMax = document.createElement('span');
-  yMax.textContent = scaleMaxText;
+  yMax.textContent = row.key === 'cpu' ? String(Number(scaleMax.toPrecision(3))) : scaleMaxText;
   // The axis floor is always zero, and zero needs no unit: formatting it
   // through row.format would print "0 KB" under a "256 MB" ceiling on the
   // same axis, a unit mismatch that formatBytes' KB/MB switch makes visible
@@ -244,56 +254,180 @@ function renderTrendRow(document, row, coverage) {
   const missingDescription = missingCount > 0
     ? ` ${missingCount} of ${samples.length} samples unavailable.`
     : '';
+  const collectionDescription = elapsedGaps ? ` ${elapsedGaps} collection gaps.` : '';
   const spark = renderSparkline(document, samples, {
-    width: 160,
-    height: 54,
+    width: 480,
+    height: 96,
+    timestamps,
+    gapThreshold: intervalSeconds > 0 ? intervalSeconds * 1.5 : Infinity,
     step: row.step,
     domainMin: 0,
     domainMax: scaleMax,
     grid: true,
-    endPoint: true,
-    ariaLabel: `${row.label} over ${coverage}. ${currentDescription} ${direction ? `${direction} from ${row.format(firstAvailable)}. ` : ''}Scale 0 to ${scaleMaxText}.${missingDescription}`,
+    endPoint: false,
+    ariaLabel: `${row.label} over ${coverage}. ${currentDescription} ${direction ? `${direction} from ${row.format(firstAvailable)}. ` : ''}Scale 0 to ${scaleMaxText}.${missingDescription}${collectionDescription}`,
     className: `sparkline sparkline-${row.key}`,
   });
   if (row.capacity) {
     const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-    const y = 54 - row.capacity / scaleMax * 54;
+    const y = 96 - row.capacity / scaleMax * 96;
     line.setAttribute('class', 'trend-capacity-line');
     line.setAttribute('x1', '0');
-    line.setAttribute('x2', '160');
+    line.setAttribute('x2', '480');
     line.setAttribute('y1', String(y));
     line.setAttribute('y2', String(y));
     line.setAttribute('vector-effect', 'non-scaling-stroke');
     spark.appendChild(line);
     spark.setAttribute('aria-label', `${spark.getAttribute('aria-label')} Current capacity ${row.format(row.capacity)}; capacity may have differed during this history.`);
-    const ceiling = document.createElement('span');
-    ceiling.className = 'trend-capacity-label';
-    const cores = row.capacity / 100;
-    ceiling.textContent = `Current capacity: ${Number.isInteger(cores) ? cores + (cores === 1 ? ' core' : ' cores') : formatCoreCount(cores)} (dashed; may have changed)`;
-    caption.appendChild(ceiling);
+
   }
 
   const xAxis = document.createElement('div');
   xAxis.className = 'trend-x-axis';
   xAxis.setAttribute('aria-hidden', 'true');
   const xStart = document.createElement('span');
-  xStart.textContent = `${coverage} ago`;
+  xStart.textContent = timestamps ? timeLabel(timestamps[0]) : 'Sample 1';
   const gapNote = document.createElement('span');
   gapNote.className = 'trend-gap-note';
   if (missingCount > 0) {
     gapNote.textContent = `${missingCount} ${missingCount === 1 ? 'sample' : 'samples'} missing`;
     gapNote.title = `${missingCount} of ${samples.length} samples unavailable`;
   }
+  if (elapsedGaps) gapNote.textContent += `${missingCount ? ' · ' : ''}${elapsedGaps} collection ${elapsedGaps === 1 ? 'gap' : 'gaps'}`;
   const xEnd = document.createElement('span');
-  xEnd.textContent = 'Now';
+  xEnd.textContent = timestamps ? timeLabel(timestamps[timestamps.length - 1]) : `Sample ${samples.length}`;
   xAxis.appendChild(xStart);
   xAxis.appendChild(gapNote);
   xAxis.appendChild(xEnd);
 
   plot.appendChild(yAxis);
-  plot.appendChild(spark);
+  const canvas = document.createElement('div'); canvas.className = 'trend-canvas';
+  const cursor = document.createElement('span'); cursor.className = 'trend-cursor'; cursor.hidden = true;
+  const point = document.createElement('span'); point.className = 'trend-point'; point.hidden = !latestAvailable;
+  point.style.left = '100%';
+  if (latestAvailable) point.style.top = `${(1 - latestSample / scaleMax) * 100}%`;
+  canvas.append(spark, cursor, point);
+  plot.appendChild(canvas);
   plot.appendChild(xAxis);
   wrap.appendChild(caption);
   wrap.appendChild(plot);
-  return wrap;
+  return {wrap, canvas, cursor, point, value, samples, scaleMax, key: row.key, format: row.format, label: row.label};
+}
+
+
+function timeLabel(timestamp, seconds = false) {
+  return new Date(timestamp * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', ...(seconds ? {second:'2-digit'} : {})});
+}
+
+// Inspect real samples directly on any plot; the shared cursor keeps all
+// readings at the same instant. No document listeners survive a card refresh.
+function addHistoryInspector(document, section, charts, timestamps, count) {
+  const readout = document.createElement('div'); readout.className = 'trends-readout';
+  const time = document.createElement('span'); time.className = 'trends-inspect-time';
+  const hint = document.createElement('span'); hint.className = 'trends-inspect-hint';
+  const pointerHint = document.createElement('span'); pointerHint.className = 'trends-pointer-hint'; pointerHint.textContent = 'Hover or drag to compare';
+  const touchHint = document.createElement('span'); touchHint.className = 'trends-touch-hint'; touchHint.textContent = 'Drag a chart to compare';
+  hint.append(pointerHint, touchHint);
+  const latest = document.createElement('button'); latest.type = 'button'; latest.className = 'trends-latest';
+  latest.textContent = 'Latest'; latest.setAttribute('aria-label', 'Return to latest measurements'); latest.hidden = true;
+  const help = document.createElement('p'); help.className = 'sr-only'; help.id = 'trends-inspect-help';
+  help.textContent = 'Compare all four readings at the same time. Use Left and Right arrow keys to move between samples, Home and End to reach the first and last sample, and Escape to return to latest.';
+  readout.append(time, hint, latest, help);
+  section.insertBefore(readout, section.querySelector('.trends-grid'));
+  let selected = count - 1, mode = 'idle', dragging = null, suppressFocus = false;
+  let focusChart = charts[0].canvas;
+
+  function inspect(index, active = true) {
+    selected = Math.max(0, Math.min(count - 1, Math.round(index)));
+    const stamp = timestamps ? timeLabel(timestamps[selected], true) : `Sample ${selected + 1}`;
+    time.textContent = `${active ? 'At' : 'Latest sample ·'} ${stamp}`;
+    latest.hidden = !active;
+    hint.hidden = active;
+    section.dataset.inspectActive = String(active);
+    section.dataset.inspectIndex = String(selected);
+    section.dataset.inspectTimestamp = active && timestamps ? String(timestamps[selected]) : '';
+    const x = timestamps ? (timestamps[selected] - timestamps[0]) / (timestamps[count - 1] - timestamps[0]) * 100 : selected / (count - 1) * 100;
+    const summary = charts.map(chart => {
+      const sample = chart.samples[selected];
+      const text = sample == null ? 'No sample' : chart.format(sample);
+      setMetricValue(chart.value, text); chart.value.classList.toggle('is-missing', sample == null);
+      chart.value.title = active ? `At ${stamp}` : sample == null ? 'No measurement in the latest sample' : 'Latest sample';
+      chart.cursor.hidden = !active; chart.cursor.style.left = `${x}%`;
+      chart.point.hidden = sample == null; chart.point.style.left = `${x}%`;
+      if (sample != null) chart.point.style.top = `${(1 - sample / chart.scaleMax) * 100}%`;
+      return `${chart.label}: ${text}`;
+    });
+    for (const {canvas} of charts) {
+      canvas.setAttribute('aria-valuenow', String(selected));
+      canvas.setAttribute('aria-valuetext', `${active ? '' : 'Latest sample. '}${stamp}. ${summary.join('. ')}`);
+    }
+  }
+  function finish() { mode = 'idle'; dragging = null; inspect(count - 1, false); }
+  function nearest(fraction) {
+    if (!timestamps) return Math.round(fraction * (count - 1));
+    const target = timestamps[0] + fraction * (timestamps[count - 1] - timestamps[0]);
+    return timestamps.reduce((best, ts, i) => Math.abs(ts - target) < Math.abs(timestamps[best] - target) ? i : best, 0);
+  }
+  function insideControls(target) { return target === latest || charts.some(chart => chart.canvas === target); }
+  function blur(event) { if (!insideControls(event.relatedTarget)) finish(); }
+  for (const chart of charts) {
+    const {canvas} = chart;
+    canvas.tabIndex = 0; canvas.dataset.historyChart = chart.key;
+    canvas.setAttribute('role', 'slider'); canvas.setAttribute('aria-label', `${chart.label} history`);
+    canvas.setAttribute('aria-valuemin', '0'); canvas.setAttribute('aria-valuemax', String(count - 1));
+    canvas.setAttribute('aria-orientation', 'horizontal'); canvas.setAttribute('aria-describedby', help.id);
+    function pointAt(event) {
+      const bounds = canvas.getBoundingClientRect();
+      if (bounds.width) inspect(nearest(Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width))));
+    }
+    canvas.addEventListener('focus', () => {
+      focusChart = canvas;
+      latest.dataset.returnChart = chart.key;
+      if (!suppressFocus && !dragging) { mode = 'keyboard'; inspect(selected); }
+    });
+    canvas.addEventListener('blur', blur);
+    canvas.addEventListener('keydown', event => {
+      const steps = {ArrowLeft: -1, ArrowDown: -1, ArrowRight: 1, ArrowUp: 1, PageDown: -10, PageUp: 10};
+      if (event.key === 'Escape') { event.preventDefault(); finish(); return; }
+      if (!(event.key in steps) && event.key !== 'Home' && event.key !== 'End') return;
+      event.preventDefault(); mode = 'keyboard';
+      inspect(event.key === 'Home' ? 0 : event.key === 'End' ? count - 1 : selected + steps[event.key]);
+    });
+    canvas.addEventListener('pointerdown', event => {
+      if (event.button != null && event.button !== 0) return;
+      mode = event.pointerType === 'touch' ? 'touch' : 'pointer';
+      dragging = event.pointerId;
+      suppressFocus = true; canvas.focus({preventScroll: true}); suppressFocus = false;
+      canvas.setPointerCapture?.(event.pointerId);
+      pointAt(event);
+    });
+    canvas.addEventListener('pointermove', event => {
+      if (event.pointerType === 'touch' && dragging !== event.pointerId) return;
+      mode = event.pointerType === 'touch' ? 'touch' : 'pointer'; pointAt(event);
+    });
+    canvas.addEventListener('pointerup', event => {
+      if (dragging !== event.pointerId) return;
+      dragging = null;
+      if (event.pointerType !== 'touch') {
+        const bounds = canvas.getBoundingClientRect();
+        if (event.clientX < bounds.left || event.clientX > bounds.left + bounds.width || event.clientY < bounds.top || event.clientY > bounds.bottom) finish();
+      }
+    });
+    canvas.addEventListener('pointercancel', finish);
+    canvas.addEventListener('lostpointercapture', () => { if (dragging != null) finish(); });
+    canvas.addEventListener('pointerleave', () => { if (mode === 'pointer' && dragging == null) finish(); });
+  }
+  latest.addEventListener('blur', blur);
+  latest.addEventListener('click', () => {
+    suppressFocus = true; focusChart.focus({preventScroll: true}); suppressFocus = false;
+    finish();
+  });
+  section.inspectIndex = index => { mode = 'keyboard'; inspect(index); };
+  section.finishInspection = finish;
+  section.inspectTime = timestamp => {
+    if (!timestamps) return;
+    const fraction = (timestamp - timestamps[0]) / (timestamps[count - 1] - timestamps[0]);
+    mode = 'keyboard'; inspect(nearest(Math.max(0, Math.min(1, fraction))));
+  };
+  inspect(count - 1, false);
 }

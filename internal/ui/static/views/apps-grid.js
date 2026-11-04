@@ -33,9 +33,16 @@ export async function mountAppsGrid(ctx) {
   }
   if (resp.status === 401) { ctx.onUnauthorized(); return viewObject(); }
   if (!resp.ok) { showError(loadFailed); return viewObject(); }
-  const gridBody = (await resp.json()) || [];
+  let gridBody;
+  try {
+    gridBody = await resp.json();
+    if (!Array.isArray(gridBody) && !Array.isArray(gridBody?.items)) throw new Error('Invalid app list');
+  } catch {
+    showError(loadFailed);
+    return viewObject();
+  }
   // Standard {items,...} list envelope; tolerate a bare array for resilience.
-  const apps = Array.isArray(gridBody) ? gridBody : (Array.isArray(gridBody.items) ? gridBody.items : []);
+  const apps = Array.isArray(gridBody) ? gridBody : gridBody.items;
   showError('');
   ctx.state.apps = apps;
   // Use applyGridFilters when available so persisted search/sort apply on

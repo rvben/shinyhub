@@ -1328,6 +1328,17 @@ func sharedDataReaches(ctx context.Context, q sharedDataQuerier, startAppID, tar
 	return true, nil
 }
 
+// HasActiveAppScheduleRuns also covers inherited running rows not registered
+// in this owner's in-memory jobs manager. Call while new admissions are fenced.
+func (s *Store) HasActiveAppScheduleRuns(appID int64) (bool, error) {
+	var active bool
+	err := s.db.QueryRow(`SELECT EXISTS (
+		SELECT 1 FROM schedule_runs r JOIN app_schedules sc ON sc.id = r.schedule_id
+		WHERE sc.app_id = ? AND r.status = 'running'
+	)`, appID).Scan(&active)
+	return active, err
+}
+
 func (s *Store) RevokeSharedData(consumerAppID, sourceAppID int64) error {
 	res, err := s.db.Exec(`
 		DELETE FROM app_shared_data WHERE app_id = ? AND source_app_id = ?`,

@@ -10,7 +10,7 @@
 // (views/logs-ui.js) rather than reinvented:
 //   - Rendered lines are capped at MAX_RENDERED_LOG_ENTRIES using the same
 //     appendBoundedLogEntry helper, so both viewers bound memory identically.
-//   - onerror never closes the EventSource. The browser retries a dropped SSE
+//   - onerror never closes a live EventSource. The browser retries a dropped SSE
 //     connection on its own; closing it here would turn a transient network
 //     blip into a silently dead stream. Only a status line (a plain
 //     role="status" region, not a stream of appended lines) reflects the
@@ -40,6 +40,7 @@ export function createLogPane(opts) {
   };
 
   let es = null;
+  let completeListener = null;
   let lines = [];
   let trap = null;
 
@@ -75,6 +76,8 @@ export function createLogPane(opts) {
     es.onopen = null;
     es.onmessage = null;
     es.onerror = null;
+    if (completeListener) es.removeEventListener('complete', completeListener);
+    completeListener = null;
     es.close();
     es = null;
   }
@@ -100,9 +103,16 @@ export function createLogPane(opts) {
     es = withCredentials
       ? new EventSourceClass(url, { withCredentials: true })
       : new EventSourceClass(url);
-    es.onopen = () => setStatus('', '');
-    es.onmessage = (event) => appendLine(event.data);
-    es.onerror = () => setStatus('Log stream disconnected, reconnecting…', 'is-reconnecting');
+    const stream = es;
+    es.onopen = () => { if (es === stream) setStatus('', ''); };
+    es.onmessage = (event) => { if (es === stream) appendLine(event.data); };
+    es.onerror = () => { if (es === stream) setStatus('Log stream disconnected, reconnecting…', 'is-reconnecting'); };
+    completeListener = () => {
+      if (es !== stream) return;
+      stopStream();
+      setStatus(lines.length ? 'Run finished. Showing retained output.' : 'Run finished with no log output.', 'is-complete');
+    };
+    es.addEventListener('complete', completeListener);
   }
 
   function close() {

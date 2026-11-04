@@ -135,6 +135,7 @@ type Manager struct {
 	publicationLockDir string
 	active             map[int64]context.CancelFunc // in-flight run cancels, keyed by run ID
 	activeApps         map[int64]int64              // run ID -> app ID for app-scoped deletion drains
+	pausedApps         map[int64]int                // temporary app mount-mutation admission fences
 	blockedApps        map[int64]bool               // permanently closes admissions for an app being deleted
 	appActive          map[int64]int                // active/queued runs per app
 	appDrained         map[int64]chan struct{}      // closed when an app's active count reaches zero
@@ -226,6 +227,7 @@ func NewManager(procMgr *process.Manager, tierOrder []string, defaultTier string
 		active:             make(map[int64]context.CancelFunc),
 		activeApps:         make(map[int64]int64),
 		blockedApps:        make(map[int64]bool),
+		pausedApps:         make(map[int64]int),
 		appActive:          make(map[int64]int),
 		appDrained:         make(map[int64]chan struct{}),
 		operatorCancelled:  make(map[int64]bool),
@@ -405,7 +407,7 @@ func (m *Manager) ForgetApp(appID int64) {
 func (m *Manager) commitAdmission(runID, appID int64, cancel context.CancelFunc, admittedAppOperation bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.stopped || m.draining || (m.admissionPauses > 0 && !admittedAppOperation) || m.blockedApps[appID] {
+	if m.stopped || m.draining || (m.admissionPauses > 0 && !admittedAppOperation) || m.blockedApps[appID] || m.pausedApps[appID] > 0 {
 		return ErrManagerStopped
 	}
 	m.active[runID] = cancel
@@ -465,6 +467,50 @@ func (m *Manager) BlockAndDrainApp(ctx context.Context, appID int64) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// ErrAppRunsActive means a mount change must wait for queued/running jobs (or
+// an inherited physical job tree) to finish. No job is cancelled by this gate.
+var ErrAppRunsActive = errors.New("finish or cancel active scheduled jobs before changing shared mounts")
+
+// TryPauseAppRuns closes admission at the same mutex as commitAdmission and
+// holds the cross-owner physical execution fence. Even a pre-admitted launch
+// cannot start over a mount mutation, and an orphan native job prevents success.
+func (m *Manager) TryPauseAppRuns(appID int64) (func(), error) {
+	m.mu.Lock()
+	if m.stopped || m.draining || m.blockedApps[appID] {
+		m.mu.Unlock()
+		return nil, ErrManagerStopped
+	}
+	if m.appActive[appID] > 0 {
+		m.mu.Unlock()
+		return nil, ErrAppRunsActive
+	}
+	if m.pausedApps == nil {
+		m.pausedApps = make(map[int64]int)
+	}
+	m.pausedApps[appID]++
+	m.mu.Unlock()
+	unpause := func() {
+		m.mu.Lock()
+		m.pausedApps[appID]--
+		if m.pausedApps[appID] == 0 {
+			delete(m.pausedApps, appID)
+		}
+		m.mu.Unlock()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // one nonblocking attempt: a held lock yields context.Canceled
+	releaseFile, _, err := m.acquireJobExecutionFileLockContext(ctx, appID, unix.LOCK_EX)
+	if err != nil {
+		unpause()
+		if errors.Is(err, context.Canceled) {
+			return nil, ErrAppRunsActive
+		}
+		return nil, err
+	}
+	var once sync.Once
+	return func() { once.Do(func() { releaseFile(); unpause() }) }, nil
 }
 
 // Cancel signals an in-flight run to terminate. Returns nil even when the run

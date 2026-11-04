@@ -45,8 +45,10 @@ test('renderAppAttention builds a labelled recovery rail with safe links', () =>
     slug: 'sales & ops', name: 'Revenue <Pulse>', project_name: 'Commercial',
     status: 'crashed', deploy_count: 3, icon_emoji: '📉',
   }]);
-  assert.equal(section.querySelector('h2').textContent, 'Needs attention');
-  assert.equal(section.querySelector('.app-attention-count').textContent, '1');
+  assert.equal(section.querySelector('h2').textContent, '1 app needs attention');
+  assert.equal(section.tagName, 'DETAILS');
+  assert.equal(section.open, false);
+  assert.equal(section.querySelector('summary').textContent, '1 app needs attention');
   assert.equal(section.querySelector('.app-attention-name').textContent, 'Revenue <Pulse>');
   assert.equal(section.querySelector('.app-attention-avatar').textContent, '📉');
   assert.equal(section.querySelector('.app-attention-action').getAttribute('href'), '/apps/sales%20%26%20ops');

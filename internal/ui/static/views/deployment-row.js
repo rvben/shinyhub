@@ -45,7 +45,7 @@ export function deploymentTimeModel(value, now = Date.now()) {
 export function deploymentRowModel(d, { isCurrent = false, now = Date.now() } = {}) {
   const version = String(d.version);
   const status = d.status || 'succeeded';
-  const releaseNumber = typeof d.release_number === 'number' ? d.release_number : null;
+  const releaseNumber = status === 'succeeded' && typeof d.release_number === 'number' ? d.release_number : null;
   const created = d.created_at ? new Date(d.created_at) : null;
   const createdValid = created && Number.isFinite(created.getTime());
   const source = provenanceModel(d.provenance);
@@ -58,6 +58,7 @@ export function deploymentRowModel(d, { isCurrent = false, now = Date.now() } = 
     failureReason: d.failure_reason || '',
     isCurrent,
     canRollback: status === 'succeeded' && !isCurrent,
+    time: deploymentTimeModel(d.created_at, now),
     relWhen: createdValid ? relativeTime(created, now) : '',
     absWhen: createdValid ? created.toLocaleString() : '',
     source,

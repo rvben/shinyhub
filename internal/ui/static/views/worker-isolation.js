@@ -16,7 +16,7 @@ export function workerCapacityLine(mode, groupedSize, maxWorkers, memMB) {
 
   if (mode === 'grouped') {
     const g = Number(groupedSize) || 1;
-    return `Up to ${w} workers x ${g} clients = ${w * g} sessions`;
+    return `Up to ${w} workers x ${g} clients = ${w * g} browser clients`;
   }
 
   if (mode === 'per_session') {

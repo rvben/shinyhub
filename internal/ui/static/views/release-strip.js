@@ -13,7 +13,7 @@ export function releaseStripModel(app, now = Date.now()) {
     versionLabel: app.release_number ? `v${app.release_number}` : '',
     versionTitle: app.released_version ? `bundle ${app.released_version}` : '',
     verb: provenance.verb,
-    time: deploymentTimeModel(app.released_at || app.last_deployed_at, now),
+    time: deploymentTimeModel(app.released_at || (app.last_deployment_status !== 'failed' ? app.last_deployed_at : null), now),
     provenance,
     countLabel: `${count} deploy${count === 1 ? '' : 's'}`,
     historyHref: `/apps/${encodeURIComponent(app.slug)}/deployments`,
@@ -87,11 +87,10 @@ export function renderReleaseStrip(doc, host, model, { markFor } = {}) {
   if (model.time) {
     const time = doc.createElement('time');
     time.dateTime = model.time.datetime;
-    time.textContent = model.time.absolute;
-    const age = doc.createElement('span');
-    age.className = 'release-age';
-    age.textContent = `(${model.time.relative})`;
-    summary.append(' ', time, ' ', age);
+    time.textContent = model.time.relative;
+    time.title = model.time.absolute;
+    time.setAttribute('aria-label', `${model.time.relative}, ${model.time.absolute}`);
+    summary.append(' ', time);
   }
   const source = sourceGroup(doc, model.provenance, markFor);
   if (source) summary.append(' ', source);
@@ -101,6 +100,7 @@ export function renderReleaseStrip(doc, host, model, { markFor } = {}) {
   history.className = 'release-history';
   history.href = model.historyHref;
   history.setAttribute('data-nav', '');
-  history.textContent = `${model.countLabel} · History`;
+  history.textContent = 'Deployments';
+  history.title = model.countLabel;
   host.append(history);
 }

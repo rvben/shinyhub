@@ -13,11 +13,159 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/deploy"
 )
 
 // maxAppIconBytes caps an uploaded app icon. Icons are small glyphs, not
 // artwork; 512 KiB is generous for a crisp PNG/WebP and tiny for an SVG.
 const maxAppIconBytes = 512 << 10
+
+// Base64 adds one third to the image size; the remainder holds metadata.
+const maxAppIconStateBytes = ((maxAppIconBytes + 2) / 3 * 4) + 2048
+
+type appIconState struct {
+	AppID    int64  `json:"app_id"`
+	Mime     string `json:"mime"`
+	Data     []byte `json:"data"`
+	Emoji    string `json:"emoji"`
+	Revision string `json:"revision"`
+}
+
+func iconStateResponse(state db.AppIconState) appIconState {
+	// Hash a structured encoding to avoid concatenation ambiguity. Normalize no
+	// image bytes so NULL and an empty byte slice describe the same icon state.
+	data := state.Data
+	if len(data) == 0 {
+		data = nil
+	}
+	body := appIconState{AppID: state.AppID, Mime: state.Mime, Data: data, Emoji: state.Emoji}
+	encoded, _ := json.Marshal(body)
+	body.Revision = fmt.Sprintf("%x", sha256.Sum256(encoded))
+	return body
+}
+
+func (s *Server) handleGetAppIconState(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+	app, ok := s.requireManageApp(w, r, slug)
+	if !ok {
+		return
+	}
+	state, err := s.store.GetAppIconState(slug)
+	if errors.Is(err, db.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	if state.AppID != app.ID {
+		writeError(w, http.StatusConflict, "This app changed while loading its icon. Reload before changing it.")
+		return
+	}
+	w.Header().Set("Cache-Control", "private, no-store")
+	writeJSON(w, http.StatusOK, iconStateResponse(*state))
+}
+
+func (s *Server) handlePutAppIconState(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+	app, ok := s.requireManageApp(w, r, slug)
+	if !ok {
+		return
+	}
+	var request struct {
+		AppID    int64           `json:"app_id"`
+		Mime     *string         `json:"mime"`
+		Data     json.RawMessage `json:"data"`
+		Emoji    *string         `json:"emoji"`
+		Revision string          `json:"revision"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAppIconStateBytes))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "icon must be 512 KB or smaller")
+		} else {
+			writeError(w, http.StatusBadRequest, "invalid icon state; provide app_id, mime, base64 data, emoji and revision")
+		}
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "icon must be 512 KB or smaller")
+		} else {
+			writeError(w, http.StatusBadRequest, "provide one icon state object")
+		}
+		return
+	}
+	if request.AppID <= 0 || request.Revision == "" {
+		writeError(w, http.StatusBadRequest, "load the current icon state before changing it")
+		return
+	}
+	if request.Mime == nil || request.Emoji == nil || len(request.Data) == 0 {
+		writeError(w, http.StatusBadRequest, "provide the complete icon state: mime, data and emoji")
+		return
+	}
+	desired := appIconState{AppID: request.AppID, Mime: *request.Mime, Emoji: *request.Emoji, Revision: request.Revision}
+	if err := json.Unmarshal(request.Data, &desired.Data); err != nil {
+		writeError(w, http.StatusBadRequest, "icon data must be base64 image bytes or null")
+		return
+	}
+	if len(desired.Data) > maxAppIconBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "icon must be 512 KB or smaller")
+		return
+	}
+	if desired.Emoji != "" {
+		if err := deploy.ValidateIconEmoji(desired.Emoji); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if len(desired.Data) == 0 {
+		if desired.Mime != "" {
+			writeError(w, http.StatusBadRequest, "icon MIME requires image data")
+			return
+		}
+		desired.Data = nil
+	} else {
+		mime, err := classifyIcon(desired.Mime, desired.Data)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		desired.Mime = mime
+	}
+	expected, err := s.store.GetAppIconState(slug)
+	if errors.Is(err, db.ErrNotFound) {
+		writeError(w, http.StatusConflict, "This app or its icon changed. Reload before changing or undoing the icon.")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	if desired.AppID != app.ID || expected.AppID != app.ID || desired.Revision != iconStateResponse(*expected).Revision {
+		writeError(w, http.StatusConflict, "This app or its icon changed. Reload before changing or undoing the icon.")
+		return
+	}
+	next := db.AppIconState{AppID: desired.AppID, Mime: desired.Mime, Data: desired.Data, Emoji: desired.Emoji}
+	if err := s.store.CompareAndSwapAppIconState(slug, *expected, next); err != nil {
+		if errors.Is(err, db.ErrAppIconConflict) {
+			writeError(w, http.StatusConflict, "This app or its icon changed. Reload before changing or undoing the icon.")
+		} else {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+		}
+		return
+	}
+	action := db.AuditAppIconSet
+	if next.Mime == "" && next.Emoji == "" {
+		action = db.AuditAppIconCleared
+	}
+	s.auditIcon(r, action, slug, map[string]any{"restored_state": true, "mime": next.Mime, "size": len(next.Data), "emoji": next.Emoji})
+	writeJSON(w, http.StatusOK, map[string]any{"app_id": next.AppID, "icon_mime": next.Mime, "icon_emoji": next.Emoji, "revision": iconStateResponse(next).Revision})
+}
 
 // allowedRasterIconMIME is the set of raster types accepted on upload, keyed by
 // the value http.DetectContentType reports. The sniffed type (not the client's

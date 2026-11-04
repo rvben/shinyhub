@@ -112,11 +112,11 @@ export function createGroupDisclosure(doc, options) {
   name.title = label;
   toggle.appendChild(name);
 
-  const badge = doc.createElement('span');
-  badge.className = `${classPrefix}-group-count`;
-  badge.textContent = String(count);
-  badge.setAttribute('aria-hidden', 'true');
-  toggle.appendChild(badge);
+  const countSummary = doc.createElement('span');
+  countSummary.className = `${classPrefix}-group-count group-disclosure-count`;
+  countSummary.textContent = countLabel(count);
+  countSummary.setAttribute('aria-hidden', 'true');
+  toggle.appendChild(countSummary);
 
   heading.appendChild(toggle);
   header.appendChild(heading);

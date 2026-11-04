@@ -38,7 +38,7 @@ const ACTION_LABELS = new Map([
   ['autoscale_scale_down', 'Scaled down'],
 ]);
 
-export function buildActivityBrief(events, maxGroups = MAX_ACTIVITY_GROUPS, availableAppSlugs = null, sourceHasMore = false) {
+export function buildActivityBrief(events, maxGroups = MAX_ACTIVITY_GROUPS, availableAppSlugs = null, sourceHasMore = false, appNames = null) {
   const normalized = Array.isArray(events)
     ? events.map(normalizeEvent).filter(Boolean)
     : [];
@@ -78,7 +78,7 @@ export function buildActivityBrief(events, maxGroups = MAX_ACTIVITY_GROUPS, avai
       actorLabel: actorLabel(parent.username),
       resourceType: parent.resourceType,
       resourceTypeLabel: resourceTypeLabel(parent.resourceType),
-      target: parent.resourceID || parent.resourceType,
+      target: activityTarget(parent, appNames),
       targetHref: resourceHref(parent.resourceType, parent.resourceID, parent.action, availableAppSlugs),
       auditHref: auditHref(parent.id, bucket.runID),
       tone: isGroupedRun ? groupTone : actionTone(parent.action),
@@ -92,7 +92,7 @@ export function buildActivityBrief(events, maxGroups = MAX_ACTIVITY_GROUPS, avai
         actionLabel: actionLabel(event.action),
         actorLabel: actorLabel(event.username),
         resourceTypeLabel: resourceTypeLabel(event.resourceType),
-        target: event.resourceID || event.resourceType,
+        target: activityTarget(event, appNames),
         targetHref: resourceHref(event.resourceType, event.resourceID, event.action, availableAppSlugs),
         auditHref: auditHref(event.id),
         tone: actionTone(event.action),
@@ -142,6 +142,16 @@ export function activityTime(iso, nowMs = Date.now()) {
     relative: relativeTime(createdMs, nowMs),
     title,
   };
+}
+
+// Resolve only visible, current app names; audit-only/deleted targets retain
+// their recorded identifier rather than inheriting a replacement app's name.
+function activityTarget(event, appNames) {
+  if (event.resourceType === 'app' && event.action !== 'delete_app' && appNames instanceof Map) {
+    const name = stringValue(appNames.get(event.resourceID));
+    if (name) return name;
+  }
+  return event.resourceID || event.resourceType;
 }
 
 function normalizeEvent(raw, index) {

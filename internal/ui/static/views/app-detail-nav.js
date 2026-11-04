@@ -1,12 +1,9 @@
-// Pure routing/visibility decisions for the app-detail page. Kept DOM-free so it
-// can be unit-tested with node:test; the view (app-detail.js) applies the result
-// to the tab elements. These decisions used to live inline in mountAppDetail.
+// Routing and permission rules for the app detail and settings pages.
 
-// The tab order shown in the settings tab strip, and the tabs that require
-// manage rights on the app. Single source of truth for both app-detail.js and
-// this module's callers.
+// Internal renderer keys retained while the contextual sidebar exposes settings
+// as individual pages. Manager-only keys keep their existing access rules.
 export const TAB_ROUTES = ['overview', 'usage', 'logs', 'traces', 'deployments', 'schedules', 'configuration', 'data', 'access'];
-export const MANAGER_ONLY_TABS = new Set(['usage', 'configuration', 'data', 'access']);
+export const MANAGER_ONLY_TABS = new Set(['logs', 'usage', 'configuration', 'data', 'access']);
 
 // resolveDetailAccess decides which tab to render and whether the visitor must
 // be redirected away. Returns { tab, redirect } where redirect is null (allowed)
@@ -16,7 +13,7 @@ export const MANAGER_ONLY_TABS = new Set(['usage', 'configuration', 'data', 'acc
 //   1. An unknown requested tab falls back to 'overview'.
 //   2. A pure viewer (global role 'viewer') who does NOT manage this app has no
 //      business on the operator detail page — return to the canonical Apps page.
-//   3. A non-manager on a manager-only tab (configuration/data/access) is sent
+//   3. A non-manager on a manager-only tab (logs/usage/settings/data) is sent
 //      to the app root '/apps/<slug>'.
 // Rule 2 is checked before rule 3, so a pure viewer requesting a manager-only
 // tab is returned to '/apps', not to the app root.
@@ -32,35 +29,30 @@ export function resolveDetailAccess({ user, canManage, requestedTab, slug }) {
   return { tab, redirect: null };
 }
 
-// tabViewModels builds the per-tab render model for the settings tab strip, in
-// TAB_ROUTES order. The view applies each field to the matching tab element:
-//   hidden       — manager-only tabs are hidden from non-managers
-//   href         — overview keeps the bare /apps/<slug>; others carry the segment
-//                  (so middle-click / cmd-click open real URLs)
-//   active        — the current tab
-//   ariaSelected  — mirrors active for the tablist ARIA state
-//   tabindex      — roving tabindex: only the active tab is in the page Tab order
-//   ariaCurrent   — 'page' on the active tab, null otherwise
-export function tabViewModels(slug, activeTab, canManage) {
-  return TAB_ROUTES.map((route) => {
-    const active = route === activeTab;
-    return {
-      route,
-      hidden: !canManage && MANAGER_ONLY_TABS.has(route),
-      href: route === 'overview' ? `/apps/${slug}` : `/apps/${slug}/${route}`,
-      active,
-      ariaSelected: active,
-      tabindex: active ? '0' : '-1',
-      ariaCurrent: active ? 'page' : null,
-    };
-  });
+// Settings pages share one mounted form so moving between them keeps drafts.
+export const SETTINGS_PAGES = ['general', 'environment', 'resources', 'scaling', 'access', 'privacy'];
+
+export function settingsRouteParams(params = {}) {
+  const section = SETTINGS_PAGES.includes(params.section) ? params.section : 'general';
+  return { ...params, tab: section === 'access' ? 'access' : 'configuration', section };
 }
 
-// tabStripScrollTarget returns the horizontal scroll position that centers the
-// active tab without overscrolling either edge. Keeping the geometry pure makes
-// the phone-width deep-link behavior deterministic and unit-testable.
-export function tabStripScrollTarget({ clientWidth, scrollWidth, tabLeft, tabWidth }) {
-  const max = Math.max(0, scrollWidth - clientWidth);
-  const centered = tabLeft - (clientWidth - tabWidth) / 2;
-  return Math.max(0, Math.min(max, centered));
+// Router destinations are rooted internal paths. Decode the slug exactly once,
+// just as the router does, while ignoring query strings and fragment markers.
+export function isSameAppSettingsDestination(path, slug) {
+  if (typeof path !== 'string' || typeof slug !== 'string' || !slug || !path.startsWith('/') || path.startsWith('//') || path.includes('\\')) return false;
+  try {
+    const url = new URL(path, 'https://shinyhub.invalid');
+    if (url.origin !== 'https://shinyhub.invalid') return false;
+    const match = /^\/apps\/([^/]+)\/(?:settings\/([^/]+)|(configuration|access))$/.exec(url.pathname);
+    if (!match || decodeURIComponent(match[1]) !== slug) return false;
+    if (match[2] != null) {
+      const section = decodeURIComponent(match[2]);
+      // Unknown page names mount General; a nested path is not a settings page.
+      return !!section && !section.includes('/');
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }

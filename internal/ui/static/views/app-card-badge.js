@@ -39,6 +39,18 @@ export function appCardBadge(app, formatStatus) {
   return { cls: `badge badge-${state}`, text };
 }
 
+// Count the same states the cards show, including first-deploy and transient
+// states. A stopped, undeployed app is awaiting deployment, not a healthy app.
+export function appListSummary(apps, formatStatus) {
+  const counts = new Map();
+  for (const app of apps) {
+    const label = (appStatusView(app, formatStatus).text || 'Unknown').toLowerCase();
+    counts.set(label, (counts.get(label) || 0) + 1);
+  }
+  return [...counts].sort(([a], [b]) => a.localeCompare(b))
+    .map(([label, count]) => `${count} ${label}`).join(' · ');
+}
+
 // applyLiveStatus merges a freshly polled live view ({status, deploying,
 // last_deployment_status} from /metrics, or the row a lifecycle action just
 // returned) onto the app model, so a later re-render (search/sort/filter)

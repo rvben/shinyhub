@@ -169,3 +169,53 @@ func TestShare_Rm_PropagatesServerError(t *testing.T) {
 		t.Fatal("expected error for 404, got nil")
 	}
 }
+
+func TestShareRmRestartConsentAndPartialSuccess(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		failure    bool
+	}{
+		{"restarted", `{"unmounted":true,"restarted":true,"app_status":"running"}`, false},
+		{"restart failed", `{"unmounted":true,"restarted":false,"app_status":"stopped","restart_error":"Worker unavailable"}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, reqs, setResp := setupCLITest(t)
+			setResp(200, tc.body)
+			cmd := newShareCmd()
+			var out bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetErr(new(bytes.Buffer))
+			cmd.SetArgs([]string{"rm", "demo", "fetcher", "--restart"})
+			err := cmd.Execute()
+			if (err != nil) != tc.failure {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(*reqs) != 1 || (*reqs)[0].Query != "restart=true" {
+				t.Fatalf("missing restart consent: %+v", *reqs)
+			}
+			var receipt map[string]any
+			if err := json.NewDecoder(&out).Decode(&receipt); err != nil || receipt["unmounted"] != true || receipt["restarted"] != !tc.failure {
+				t.Fatalf("removal outcome lost: %+v %v", receipt, err)
+			}
+			if tc.failure && !strings.Contains(err.Error(), "mount removed, but app restart failed") {
+				t.Fatalf("partial outcome lost: %v", err)
+			}
+		})
+	}
+}
+
+func TestShareRmDoesNotClaimSuccessWithoutReceipt(t *testing.T) {
+	_, _, setResp := setupCLITest(t)
+	setResp(200, `{}`)
+	cmd := newShareCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"rm", "demo", "fetcher", "--restart"})
+	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "could not be confirmed") {
+		t.Fatalf("unconfirmed receipt: %v", err)
+	}
+	if strings.Contains(out.String(), "removed shared-data mount") {
+		t.Fatalf("false success: %s", out.String())
+	}
+}

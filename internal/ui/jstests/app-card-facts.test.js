@@ -4,10 +4,8 @@ import { appCardFacts } from '../static/views/app-card-facts.js';
 
 const now = Date.parse('2026-08-14T12:00:00Z');
 
-test('a never-deployed card states the missing prerequisite once', () => {
-  assert.deepEqual(appCardFacts({ deploy_count: 0 }, null, now), [
-    { text: 'Not deployed yet', tone: 'attention', title: '' },
-  ]);
+test('a never-deployed card accurately fills its release metadata row', () => {
+  assert.equal(appCardFacts({ deploy_count: 0 }, null, now)[0].text, 'No releases yet');
 });
 
 test('a failed first deployment is surfaced as an exception', () => {
@@ -73,4 +71,10 @@ test('operational readiness remains visible for fleet-managed apps', () => {
 test('invalid release timestamps do not create misleading recency', () => {
   const facts = appCardFacts({ release_number: 2, released_at: 'not-a-date' }, null, now);
   assert.deepEqual(facts.map(item => item.text), ['v2']);
+});
+
+test('a first deployment in progress does not ask the user to deploy again', () => {
+  assert.deepEqual(appCardFacts({ deploy_count: 0, deploying: true }), [
+    { text: 'Preparing the first release', tone: 'setup', title: '' },
+  ]);
 });

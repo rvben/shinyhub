@@ -1,9 +1,12 @@
 package api
 
 import (
+	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"sync"
@@ -150,110 +153,64 @@ func (s *Server) handleSaveAnnouncement(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	var req announcementRequest
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
+	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 16<<10))
+	if err != nil {
 		writeError(w, 400, "invalid announcement request")
 		return
 	}
-	if err := dec.Decode(&struct{}{}); err != io.EOF {
-		writeError(w, 400, "expected a single JSON object")
-		return
+	var receipt *db.AnnouncementReceipt
+	if values, supplied := r.Header["Idempotency-Key"]; supplied {
+		key := r.Header.Get("Idempotency-Key")
+		valid := len(values) == 1 && len(key) >= 1 && len(key) <= 200
+		for _, char := range key {
+			if char < 33 || char > 126 {
+				valid = false
+			}
+		}
+		if !valid {
+			writeError(w, 400, "Idempotency-Key must be 1 to 200 printable ASCII characters without spaces")
+			return
+		}
+		credentialType, credentialName := "", ""
+		credentialID := int64(0)
+		if c := auth.CredentialInfoFromContext(r.Context()); c != nil {
+			credentialType, credentialID = c.Type, c.ID
+			if c.ID == 0 {
+				credentialName = c.Name
+			}
+		}
+		scope, _ := json.Marshal([]any{u.ID, u.LocalAnnouncements, credentialType, credentialID, credentialName, r.Method, chi.URLParam(r, "id")})
+		receipt = &db.AnnouncementReceipt{Scope: string(scope), Key: key, Fingerprint: fmt.Sprintf("%x", sha256.Sum256(data))}
 	}
-	now := time.Now().UTC()
+	var req announcementRequest
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var requestErr error
+	if err := dec.Decode(&req); err != nil {
+		requestErr = announcementRequestError("invalid announcement request")
+	} else if err := dec.Decode(&struct{}{}); err != io.EOF {
+		requestErr = announcementRequestError("expected a single JSON object")
+	}
 	a := db.Announcement{ID: rand.Text(), Severity: "information", Publication: "draft", Dismissible: true}
 	expected := int64(0)
 	creating := r.Method == http.MethodPost
 	if !creating {
 		if req.ExpectedRevision == nil || *req.ExpectedRevision < 1 {
-			writeError(w, 400, "expected_revision is required")
-			return
-		}
-		expected = *req.ExpectedRevision
-		var err error
-		a, err = s.store.GetAnnouncement(chi.URLParam(r, "id"))
-		if err != nil {
-			s.announcementError(w, err)
-			return
-		}
-		if a.Revision != expected {
-			s.announcementError(w, db.ErrAnnouncementConflict)
-			return
-		}
-	} else if req.ExpectedRevision != nil {
-		writeError(w, 400, "expected_revision is only used when editing")
-		return
-	}
-	prior := a.Publication
-	if req.Title != nil {
-		a.Title = *req.Title
-	}
-	if req.Message != nil {
-		a.Message = *req.Message
-	}
-	if req.DetailsURL != nil {
-		a.DetailsURL = *req.DetailsURL
-	}
-	if req.Severity != nil {
-		a.Severity = *req.Severity
-	}
-	if req.Publication != nil {
-		a.Publication = *req.Publication
-	}
-	if req.Dismissible != nil {
-		a.Dismissible = *req.Dismissible
-	} else if creating && a.Severity == "critical" {
-		a.Dismissible = false
-	}
-	for _, field := range []struct {
-		raw    json.RawMessage
-		target **time.Time
-	}{{req.StartsAt, &a.StartsAt}, {req.EndsAt, &a.EndsAt}} {
-		if len(field.raw) > 0 {
-			var t *time.Time
-			if err := json.Unmarshal(field.raw, &t); err != nil {
-				writeError(w, 400, "dates must be RFC3339 timestamps with a timezone, or null")
-				return
+			if requestErr == nil {
+				requestErr = announcementRequestError("expected_revision is required")
 			}
-			if t != nil {
-				utc := t.UTC()
-				t = &utc
-			}
-			*field.target = t
+		} else if requestErr == nil {
+			expected = *req.ExpectedRevision
 		}
+		a.ID = chi.URLParam(r, "id")
+	} else if req.ExpectedRevision != nil && requestErr == nil {
+		requestErr = announcementRequestError("expected_revision is only used when editing")
 	}
-	if prior == "archived" && a.Publication != "archived" {
-		writeError(w, 400, "archived announcements cannot be republished")
-		return
-	}
-	if a.Publication == "published" {
-		if a.StartsAt == nil {
-			a.StartsAt = &now
-		}
-		if a.PublishedAt == nil || prior != "published" {
-			a.PublishedAt = &now
-		}
-	}
-	if u.LocalAnnouncements && a.Publication == "published" {
-		if a.EndsAt == nil {
-			writeError(w, 400, "host-local announcement publication requires ends_at")
-			return
-		}
-		if a.EndsAt.After(now.Add(auth.LocalNoticeMaxWindow)) {
-			writeError(w, 400, "host-local announcements must end within 24 hours of publication or update")
-			return
-		}
-	}
-	if err := a.Validate(); err != nil {
-		writeError(w, 400, err.Error())
-		return
-	}
+
 	var actor *int64
 	if !u.LocalAnnouncements {
 		actor = &u.ID
 	}
-	a.UpdatedBy = actor
 	audit := db.AuditEventParams{UserID: actor, IPAddress: s.ClientIP(r)}
 	if c := auth.CredentialInfoFromContext(r.Context()); c != nil {
 		if c.ID != 0 {
@@ -262,7 +219,73 @@ func (s *Server) handleSaveAnnouncement(w http.ResponseWriter, r *http.Request) 
 		audit.CredentialType = c.Type
 		audit.CredentialName = c.Name
 	}
-	saved, err := s.store.SaveAnnouncement(a, expected, audit)
+	saved, err := s.store.SaveAnnouncementIdempotent(a, expected, audit, receipt, func(a db.Announcement) (db.Announcement, error) {
+		if requestErr != nil {
+			return a, requestErr
+		}
+		now := time.Now().UTC()
+		prior := a.Publication
+		if req.Title != nil {
+			a.Title = *req.Title
+		}
+		if req.Message != nil {
+			a.Message = *req.Message
+		}
+		if req.DetailsURL != nil {
+			a.DetailsURL = *req.DetailsURL
+		}
+		if req.Severity != nil {
+			a.Severity = *req.Severity
+		}
+		if req.Publication != nil {
+			a.Publication = *req.Publication
+		}
+		if req.Dismissible != nil {
+			a.Dismissible = *req.Dismissible
+		} else if creating && a.Severity == "critical" {
+			a.Dismissible = false
+		}
+		for _, field := range []struct {
+			raw    json.RawMessage
+			target **time.Time
+		}{{req.StartsAt, &a.StartsAt}, {req.EndsAt, &a.EndsAt}} {
+			if len(field.raw) > 0 {
+				var t *time.Time
+				if err := json.Unmarshal(field.raw, &t); err != nil {
+					return a, announcementRequestError("dates must be RFC3339 timestamps with a timezone, or null")
+				}
+				if t != nil {
+					utc := t.UTC()
+					t = &utc
+				}
+				*field.target = t
+			}
+		}
+		if prior == "archived" && a.Publication != "archived" {
+			return a, announcementRequestError("archived announcements cannot be republished")
+		}
+		if a.Publication == "published" {
+			if a.StartsAt == nil {
+				a.StartsAt = &now
+			}
+			if a.PublishedAt == nil || prior != "published" {
+				a.PublishedAt = &now
+			}
+		}
+		if u.LocalAnnouncements && a.Publication == "published" {
+			if a.EndsAt == nil {
+				return a, announcementRequestError("host-local announcement publication requires ends_at")
+			}
+			if a.EndsAt.After(now.Add(auth.LocalNoticeMaxWindow)) {
+				return a, announcementRequestError("host-local announcements must end within 24 hours of publication or update")
+			}
+		}
+		if err := a.Validate(); err != nil {
+			return a, announcementRequestError(err.Error())
+		}
+		a.UpdatedBy = actor
+		return a, nil
+	})
 	if err != nil {
 		s.announcementError(w, err)
 		return
@@ -273,10 +296,23 @@ func (s *Server) handleSaveAnnouncement(w http.ResponseWriter, r *http.Request) 
 	if creating {
 		status = http.StatusCreated
 	}
-	writeJSON(w, status, managed(saved))
+	if saved.Replayed {
+		w.Header().Set("Idempotency-Replayed", "true")
+	}
+	writeJSON(w, status, saved)
 }
+
+type announcementRequestError string
+
+func (e announcementRequestError) Error() string { return string(e) }
+
 func (s *Server) announcementError(w http.ResponseWriter, err error) {
+	var invalid announcementRequestError
 	switch {
+	case errors.As(err, &invalid):
+		writeError(w, 400, invalid.Error())
+	case errors.Is(err, db.ErrAnnouncementIdempotencyConflict):
+		writeJSON(w, 409, map[string]string{"error": err.Error(), "code": "idempotency_key_conflict"})
 	case errors.Is(err, db.ErrNotFound):
 		writeError(w, 404, "announcement not found")
 	case errors.Is(err, db.ErrAnnouncementConflict):

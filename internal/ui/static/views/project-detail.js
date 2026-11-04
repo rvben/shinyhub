@@ -1,6 +1,7 @@
 // Project detail page. The project and app APIs are intentionally fetched
 // together: project metadata is access-scoped by the server, while the app
 // index supplies the same operational card data used on the Apps page.
+import {createListState} from './page-components.js';
 
 function listItems(body) {
   if (Array.isArray(body)) return body;
@@ -67,6 +68,7 @@ export function mountProjectDetail(ctx) {
     const add = document.getElementById('project-detail-add');
     const emptyAdd = document.getElementById('project-detail-empty-add');
     const refresh = document.getElementById('project-detail-refresh');
+    const list = createListState({content:grid,loading,error,empty,busy:view});
     const requestedSlug = String(params && params.slug || '');
     let disposed = false;
     let currentModel = null;
@@ -98,11 +100,8 @@ export function mountProjectDetail(ctx) {
 
     async function load({ announce = false } = {}) {
       const version = ++loadVersion;
-      view.setAttribute('aria-busy', 'true');
+      list.pending({retain:!!currentModel,clearError:true,message:announce ? 'Refreshing project…' : 'Loading project…'});
       loading.hidden = false;
-      loading.textContent = announce ? 'Refreshing project…' : 'Loading project…';
-      error.hidden = true;
-      error.textContent = '';
       empty.hidden = true;
       if (!currentModel) grid.replaceChildren();
       refresh.disabled = true;
@@ -144,8 +143,7 @@ export function mountProjectDetail(ctx) {
       if (disposed || version !== loadVersion) return;
       const project = listItems(projectBody).find((item) => item && item.slug === requestedSlug);
       const model = projectDetailModel(project, listItems(appsBody));
-      loading.hidden = true;
-      view.setAttribute('aria-busy', 'false');
+      list.finish();
       if (!model) {
         currentModel = null;
         grid.replaceChildren();
@@ -179,6 +177,7 @@ export function mountProjectDetail(ctx) {
       ctx.state.apps = listItems(appsBody);
       if (typeof ctx.syncSidebar === 'function') ctx.syncSidebar();
       ctx.metrics.setTargets(model.apps.map((app) => app.slug));
+      list.results({total:model.apps.length});
 
       if (model.apps.length === 0) {
         grid.replaceChildren();
@@ -193,10 +192,7 @@ export function mountProjectDetail(ctx) {
     }
 
     function showError(message) {
-      loading.hidden = true;
-      view.setAttribute('aria-busy', 'false');
-      error.textContent = message;
-      error.hidden = false;
+      list.fail(message,{retain:!!currentModel});
       if (currentModel) {
         empty.hidden = currentModel.apps.length !== 0;
         ctx.metrics.setTargets(currentModel.apps.map((app) => app.slug));

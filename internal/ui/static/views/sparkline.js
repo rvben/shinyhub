@@ -30,6 +30,8 @@ export function sparklineSegments(values, opts = {}) {
     step = false,
     domainMin,
     domainMax,
+    timestamps,
+    gapThreshold = Infinity,
   } = opts;
   const vals = values.map((v) =>
     v === null || v === undefined ? null : Number.isFinite(v) ? v : 0,
@@ -44,6 +46,9 @@ export function sparklineSegments(values, opts = {}) {
   if (drawn.length === 0) return [];
 
   const stepX = n > 1 ? width / (n - 1) : 0;
+  const timed = Array.isArray(timestamps) && timestamps.length === n
+    && timestamps.every((t, i) => Number.isFinite(t) && (i === 0 || t > timestamps[i - 1]));
+  const timeSpan = timed && n > 1 ? timestamps[n - 1] - timestamps[0] : 0;
 
   let min = Infinity;
   let max = -Infinity;
@@ -55,7 +60,7 @@ export function sparklineSegments(values, opts = {}) {
   if (Number.isFinite(domainMax)) max = domainMax;
   const span = max - min;
   const coord = (i) => {
-    const x = i * stepX;
+    const x = timed && timeSpan > 0 ? (timestamps[i] - timestamps[0]) / timeSpan * width : i * stepX;
     const y = span === 0 ? height / 2 : height - ((vals[i] - min) / span) * height;
     return [x, y];
   };
@@ -69,6 +74,9 @@ export function sparklineSegments(values, opts = {}) {
       continue;
     }
 
+    if (timed && i > 0 && timestamps[i] - timestamps[i - 1] > gapThreshold && segment.length) {
+      segments.push(segment); segment = [];
+    }
     const [x, y] = coord(i);
     if (step && segment.length > 0) {
       const [, yPrev] = coord(i - 1);
@@ -124,7 +132,7 @@ export function renderSparkline(document, values, opts = {}) {
     }
   }
 
-  const segments = sparklineSegments(values, { width, height, step, domainMin, domainMax });
+  const segments = sparklineSegments(values, { width, height, step, domainMin, domainMax, timestamps: opts.timestamps, gapThreshold: opts.gapThreshold });
   for (const pts of segments) {
     if (pts.length === 1) {
       const [x, y] = pts[0].split(',');

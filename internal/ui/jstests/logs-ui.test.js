@@ -668,7 +668,8 @@ test('selected source downloads its complete retained run while all scope export
     url: 'https://shinyhub.test/apps/demo/logs?log_source=old-run',
     pretendToBeVisual: true,
   });
-  class FakeEventSource { close() {} }
+  const streams = [];
+  class FakeEventSource { constructor() { streams.push(this); } close() {} }
   const requested = [];
   const api = async (url) => {
     requested.push(url);
@@ -704,6 +705,9 @@ test('selected source downloads its complete retained run while all scope export
   source.value = 'all';
   source.dispatchEvent(new dom.window.Event('change'));
   assert.equal(download.textContent, 'Download visible');
+  assert.equal(download.disabled, true, 'no visible output cannot be exported');
+  streams.at(-1).onmessage({ data: 'current visible line' });
+  await waitUntil(() => !download.disabled);
   const requestsBeforeVisibleExport = requested.length;
   download.click();
   await tick();
@@ -752,7 +756,7 @@ test('viewer merges live replicas, identifies every line, and loads ended logs o
   // of gambling on a single fixed-delay tick.
   await waitUntil(() => panel.querySelectorAll('.log-entry-source').length === 4);
 
-  assert.match(panel.querySelector('#logs-source').textContent, /All current replicas \(2 live, 3 total\)/);
+  assert.match(panel.querySelector('#logs-source').textContent, /All current replicas \(2 live\)/);
   assert.deepEqual(
     [...panel.querySelectorAll('.log-entry-source')].map((el) => el.textContent),
     ['#4', '#4', '#0', '#1'],
@@ -1140,4 +1144,279 @@ test("journal handoffs only copy commands for isolated worker units", () => {
  const source = {external_logs: {provider: "systemd_journal", resource: "shinyhub-isolated-1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.service"}};
  assert.equal(externalLogsCommand(source), "journalctl --unit='shinyhub-isolated-1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.service'");
  assert.equal(externalLogsCommand({external_logs: {provider: "systemd_journal", resource: "shinyhub.service; malicious"}}), "");
+});
+
+test('pause freezes search and visible exports while incoming lines continue buffering', async (t) => {
+  const dom = new JSDOM('<section id="panel"></section>', { url: 'https://shinyhub.test/apps/demo/logs', pretendToBeVisual: true });
+  const panel = dom.window.document.querySelector('#panel');
+  const streams = [];
+  class Stream { constructor() { streams.push(this); } close() {} }
+  const copied = [], saved = [];
+  Object.defineProperty(dom.window.navigator, 'clipboard', { value: { writeText: async text => copied.push(text) } });
+  dom.window.URL.createObjectURL = blob => { saved.push(blob); return 'blob:test'; };
+  dom.window.URL.revokeObjectURL = () => {};
+  dom.window.HTMLAnchorElement.prototype.click = () => {};
+  const cleanup = createLogsViewer({ panel, app: { slug: 'demo' }, EventSourceClass: Stream, refreshEveryMs: 60000,
+    api: async () => ({ ok: true, json: async () => ({ sources: [{ replica: 0, status: 'running', has_log: true }] }) }) });
+  t.after(() => { cleanup(); dom.window.close(); });
+  await waitUntil(() => streams.length);
+  streams[0].onopen();
+  streams[0].onmessage({ data: 'visible <error> line' });
+  await waitUntil(() => panel.querySelector('.log-entry-message'));
+  panel.querySelector('#logs-pause').click();
+  streams[0].onmessage({ data: 'unseen error line' });
+  const search = panel.querySelector('#logs-search');
+  search.value = 'error';
+  search.dispatchEvent(new dom.window.Event('input'));
+  await waitUntil(() => panel.querySelector('mark'));
+  assert.equal(panel.querySelector('mark').textContent, 'error');
+  assert.equal(panel.querySelector('error'), null, 'log content is text, never markup');
+  assert.doesNotMatch(panel.querySelector('#detail-logs-body').textContent, /unseen/);
+  assert.match(panel.querySelector('.logs-status-text').textContent, /^Paused.*1 new line received/);
+  panel.querySelector('#logs-copy').click();
+  panel.querySelector('#logs-download').click();
+  await waitUntil(() => copied.length && saved.length);
+  assert.equal(copied[0], '#0  visible <error> line');
+  const reader = new dom.window.FileReader();
+  const text = new Promise(resolve => { reader.onload = () => resolve(reader.result); });
+  reader.readAsText(saved[0]);
+  assert.equal(await text, '#0  visible <error> line\n');
+  panel.querySelector('#logs-clear-search').click();
+  await waitUntil(() => search.value === '' && !panel.querySelector('mark'));
+  assert.equal(dom.window.document.activeElement, search);
+  search.value = '#0';
+  search.dispatchEvent(new dom.window.Event('input'));
+  await waitUntil(() => panel.querySelector('.log-entry-source mark'));
+  assert.equal(panel.querySelector('.log-entry-source mark').textContent, '#0');
+  panel.querySelector('#logs-clear-search').click();
+  panel.querySelector('#logs-pause').click();
+  await waitUntil(() => /unseen/.test(panel.querySelector('#detail-logs-body').textContent));
+});
+
+test('log presentation preserves raw text and exports while highlighting across presentation tokens', async (t) => {
+  const dom = new JSDOM('<section id="panel"></section>', { url: 'https://shinyhub.test/apps/demo/logs', pretendToBeVisual: true });
+  const panel = dom.window.document.querySelector('#panel');
+  const streams = [], copied = [], saved = [];
+  class Stream { constructor() { streams.push(this); } close() {} }
+  Object.defineProperty(dom.window.navigator, 'clipboard', { value: { writeText: async text => copied.push(text) } });
+  dom.window.URL.createObjectURL = blob => { saved.push(blob); return 'blob:test'; };
+  dom.window.URL.revokeObjectURL = () => {};
+  dom.window.HTMLAnchorElement.prototype.click = () => {};
+  const cleanup = createLogsViewer({ panel, app: { slug: 'demo' }, EventSourceClass: Stream, refreshEveryMs: 60000,
+    api: async () => ({ ok: true, json: async () => ({ sources: [{ replica: 0, status: 'running', has_log: true }] }) }) });
+  t.after(() => { cleanup(); dom.window.close(); });
+  await waitUntil(() => streams.length);
+  const timestamp = '2026-11-02T20:15:14.123+01:00';
+  const recognized = `${timestamp}\t ERROR  <tag>\tkeep  spacing  `;
+  const rawFallbacks = [
+    'custom-prefix ERROR <tag>  unchanged',
+    '  ERROR indented continuation\t',
+    `  ${timestamp} ERROR indented timestamp`,
+    `${timestamp} ERROR first line\n    at handler (<tag>:2)\r\n\tERROR continuation`,
+  ];
+  const lines = [recognized, ...rawFallbacks];
+  for (const line of lines) streams[0].onmessage({ data: line });
+  await waitUntil(() => panel.querySelectorAll('.log-entry-message').length === lines.length);
+  const messages = [...panel.querySelectorAll('.log-entry-message')];
+  assert.deepEqual(messages.map(message => message.textContent), lines);
+  assert.equal(messages[0].querySelector('.log-entry-timestamp').textContent, timestamp);
+  assert.equal(messages[0].querySelector('.log-entry-level.log-level-error').textContent, 'ERROR');
+  for (const message of messages.slice(1)) {
+    assert.equal(message.querySelector('.log-entry-timestamp, .log-entry-level'), null,
+      'unknown, indented, and multiline text must not acquire inferred tokens');
+  }
+  assert.equal(panel.querySelector('tag'), null, 'application text is never interpreted as markup');
+
+  panel.querySelector('#logs-pause').click();
+  streams[0].onmessage({ data: `${timestamp} ERROR not yet displayed` });
+  const search = panel.querySelector('#logs-search');
+  for (const query of ['+01:00\t ERROR', 'ERROR  <tag>']) {
+    search.value = query;
+    search.dispatchEvent(new dom.window.Event('input'));
+    await waitUntil(() => panel.querySelectorAll('.log-entry-message').length === 1 &&
+      [...panel.querySelectorAll('.log-entry-message mark')].map(mark => mark.textContent).join('') === query);
+    const message = panel.querySelector('.log-entry-message');
+    assert.equal(message.textContent, recognized);
+    assert.equal([...message.querySelectorAll('mark')].map(mark => mark.textContent).join(''), query,
+      'a matching phrase remains highlighted across timestamp, level, whitespace, and message spans');
+    assert.equal(panel.querySelector('tag'), null);
+  }
+  panel.querySelector('#logs-clear-search').click();
+  await waitUntil(() => panel.querySelectorAll('.log-entry-message').length === lines.length);
+  panel.querySelector('#logs-copy').click();
+  panel.querySelector('#logs-download').click();
+  await waitUntil(() => copied.length && saved.length);
+  const expected = lines.map(line => `#0  ${line}`).join('\n');
+  assert.equal(copied[0], expected, 'copy uses the unchanged paused entries, including original whitespace');
+  const reader = new dom.window.FileReader();
+  const downloaded = new Promise(resolve => { reader.onload = () => resolve(reader.result); });
+  reader.readAsText(saved[0]);
+  assert.equal(await downloaded, `${expected}\n`, 'download retains the raw lines rather than tokenized DOM text');
+});
+
+test('combined logs preserve source arrival order despite reverse timestamps and explain their ordering', async (t) => {
+  const dom = new JSDOM('<section id="panel"></section>', { url: 'https://shinyhub.test/apps/demo/logs', pretendToBeVisual: true });
+  const panel = dom.window.document.querySelector('#panel');
+  const streams = [], copied = [];
+  class Stream { constructor(url) { this.url = url; streams.push(this); } close() {} }
+  Object.defineProperty(dom.window.navigator, 'clipboard', { value: { writeText: async text => copied.push(text) } });
+  const sources = [0, 1].map(replica => ({ replica, status: 'running', has_log: true }));
+  const cleanup = createLogsViewer({ panel, app: { slug: 'demo' }, EventSourceClass: Stream, refreshEveryMs: 60000,
+    api: async () => ({ ok: true, json: async () => ({ sources }) }) });
+  t.after(() => { cleanup(); dom.window.close(); });
+  await waitUntil(() => streams.length === 2);
+  const later = '2026-11-02 20:15:18 ERROR arrived first';
+  const earlier = '2026-11-02 20:15:02 INFO arrived second';
+  streams[0].onmessage({ data: later });
+  streams[1].onmessage({ data: earlier });
+  await waitUntil(() => panel.querySelectorAll('.log-entry-message').length === 2);
+  assert.deepEqual([...panel.querySelectorAll('.log-entry-message')].map(message => message.textContent), [later, earlier]);
+  assert.deepEqual([...panel.querySelectorAll('.log-entry-source')].map(source => source.textContent), ['#0', '#1']);
+  const order = panel.querySelector('#logs-order');
+  assert.equal(order.hidden, false);
+  assert.match(order.textContent, /combined output.*not globally time-sorted/i);
+  panel.querySelector('#logs-copy').click();
+  await waitUntil(() => copied.length);
+  assert.equal(copied[0], `#0  ${later}\n#1  ${earlier}`);
+  const select = panel.querySelector('#logs-source');
+  select.value = 'replica-0';
+  select.dispatchEvent(new dom.window.Event('change'));
+  await waitUntil(() => order.hidden);
+  select.value = 'all';
+  select.dispatchEvent(new dom.window.Event('change'));
+  await waitUntil(() => !order.hidden);
+});
+
+test('an external destination does not count as a second inline source for the ordering caption', async (t) => {
+  const dom = new JSDOM('<section id="panel"></section>', { url: 'https://shinyhub.test/apps/demo/logs', pretendToBeVisual: true });
+  const panel = dom.window.document.querySelector('#panel');
+  const streams = [];
+  class Stream { constructor() { streams.push(this); } close() {} }
+  const sources = [
+    { replica: 0, status: 'running', has_log: true },
+    { replica: 1, status: 'running', stream_available: false, inline_available: false },
+  ];
+  const cleanup = createLogsViewer({ panel, app: { slug: 'demo' }, EventSourceClass: Stream, refreshEveryMs: 60000,
+    api: async () => ({ ok: true, json: async () => ({ sources }) }) });
+  t.after(() => { cleanup(); dom.window.close(); });
+  await waitUntil(() => streams.length === 1);
+  streams[0].onmessage({ data: 'one inline source' });
+  await waitUntil(() => panel.querySelector('.log-entry-message'));
+  assert.equal(panel.querySelector('#logs-order').hidden, true);
+});
+
+test('a paused live run can still resume after its final output is retained', async (t) => {
+  const dom = new JSDOM('<section id="panel"></section>', { url: 'https://shinyhub.test/apps/demo/logs', pretendToBeVisual: true });
+  const panel = dom.window.document.querySelector('#panel');
+  const streams = [];
+  class Stream { constructor() { streams.push(this); } close() {} }
+  let stopped = false;
+  const source = { source_id: 'run', run_id: 'run', replica: 0, status: 'running', current: true, has_log: true };
+  const cleanup = createLogsViewer({ panel, app: { slug: 'demo' }, EventSourceClass: Stream, refreshEveryMs: 15,
+    api: async url => url.includes('/sources')
+      ? { ok: true, json: async () => ({ sources: [{ ...source, status: stopped ? 'stopped' : 'running' }] }) }
+      : { ok: true, text: async () => 'initial\nfinal output\n' } });
+  t.after(() => { cleanup(); dom.window.close(); });
+  await waitUntil(() => streams.length);
+  streams[0].onmessage({ data: 'initial' });
+  await waitUntil(() => /initial/.test(panel.querySelector('#detail-logs-body').textContent));
+  const pause = panel.querySelector('#logs-pause');
+  pause.click();
+  stopped = true;
+  await waitUntil(() => /Resume \(/.test(pause.textContent));
+  assert.equal(pause.disabled, false);
+  assert.doesNotMatch(panel.querySelector('#detail-logs-body').textContent, /final output/);
+  pause.click();
+  await waitUntil(() => /final output/.test(panel.querySelector('#detail-logs-body').textContent));
+  assert.equal(pause.disabled, true);
+});
+
+test('failed discovery stays an error and Retry recovers without a page reload', async (t) => {
+  const dom = new JSDOM('<section id="panel"></section>', { url: 'https://shinyhub.test/apps/demo/logs', pretendToBeVisual: true });
+  const panel = dom.window.document.querySelector('#panel');
+  let failed = true;
+  const cleanup = createLogsViewer({ panel, app: { slug: 'demo' }, refreshEveryMs: 60000,
+    api: async url => url.includes('/sources')
+      ? failed ? { ok: false, status: 503 } : { ok: true, json: async () => ({ sources: [{ replica: 0, status: 'stopped', current: true, has_log: true }] }) }
+      : { ok: true, text: async () => 'recovered output\n' } });
+  t.after(() => { cleanup(); dom.window.close(); });
+  await waitUntil(() => !panel.querySelector('#logs-error').hidden);
+  assert.match(panel.querySelector('.logs-status-text').textContent, /Could not discover/);
+  assert.doesNotMatch(panel.querySelector('#detail-logs-body').textContent, /No retained log sources/);
+  assert.equal(panel.querySelector('#logs-copy').disabled, true);
+  assert.equal(panel.querySelector('#logs-download').disabled, true);
+  failed = false;
+  panel.querySelector('#logs-retry').click();
+  await waitUntil(() => /recovered output/.test(panel.querySelector('#detail-logs-body').textContent));
+  assert.equal(panel.querySelector('#logs-error').hidden, true);
+  assert.equal(panel.querySelector('#logs-copy').disabled, false);
+});
+
+test('retained output failure retries the exact run and older-history retries do not duplicate output', async (t) => {
+  const dom = new JSDOM('<section id="panel"></section>', { url: 'https://shinyhub.test/apps/demo/logs?log_source=old', pretendToBeVisual: true });
+  const panel = dom.window.document.querySelector('#panel');
+  let failed = true;
+  const requested = [];
+  const cleanup = createLogsViewer({ panel, app: { slug: 'demo' }, refreshEveryMs: 60000,
+    api: async url => {
+      if (url.includes('/sources')) return { ok: true, json: async () => ({ sources: [{ source_id: 'old', run_id: 'old', replica: 3, status: 'stopped', current: false, has_log: true }] }) };
+      requested.push(url);
+      if (failed) return { ok: false, status: 503 };
+      return { ok: true, text: async () => Array.from({ length: url.includes('tail=1000') ? 300 : 200 }, (_, i) => `line ${i}`).join('\n') + '\n' };
+    } });
+  t.after(() => { cleanup(); dom.window.close(); });
+  await waitUntil(() => !panel.querySelector('#logs-error').hidden);
+  failed = false;
+  panel.querySelector('#logs-retry').click();
+  await waitUntil(() => panel.querySelectorAll('.log-entry').length === 200);
+  assert.match(requested.at(-1), /replica=3&run=old&tail=200/);
+  failed = true;
+  panel.querySelector('#logs-load-more').click();
+  await waitUntil(() => !panel.querySelector('#logs-error').hidden);
+  assert.equal(panel.querySelectorAll('.log-entry').length, 200);
+  failed = false;
+  panel.querySelector('#logs-retry').click();
+  await waitUntil(() => panel.querySelectorAll('.log-entry').length === 300);
+  assert.match(requested.at(-1), /tail=1000/);
+  assert.equal(panel.querySelector('#logs-error').hidden, true);
+});
+
+test('empty and fully loaded zero-output runs do not offer empty exports or wait for future output', async (t) => {
+  const dom = new JSDOM('<section id="panel"></section>', { url: 'https://shinyhub.test/apps/demo/logs', pretendToBeVisual: true });
+  const panel = dom.window.document.querySelector('#panel');
+  const cleanup = createLogsViewer({ panel, app: { slug: 'demo' }, refreshEveryMs: 60000,
+    api: async () => ({ ok: true, json: async () => ({ sources: [] }) }) });
+  t.after(() => { cleanup(); dom.window.close(); });
+  await waitUntil(() => /No retained log sources/.test(panel.querySelector('#detail-logs-body').textContent));
+  assert.equal(panel.querySelector('#logs-source').disabled, true);
+  assert.equal(panel.querySelector('#logs-copy').disabled, true);
+  assert.equal(panel.querySelector('#logs-download').disabled, true);
+  cleanup();
+  const cleanupEmptyRun = createLogsViewer({ panel, app: { slug: 'demo' }, refreshEveryMs: 60000,
+    api: async url => url.includes('/sources') ? { ok: true, json: async () => ({ sources: [{ replica: 0, status: 'stopped', has_log: true }] }) }
+      : { ok: true, text: async () => '' } });
+  t.after(cleanupEmptyRun);
+  await waitUntil(() => /No output was recorded/.test(panel.querySelector('#detail-logs-body').textContent));
+});
+
+test('older-history loading waits for the initial retained read to avoid duplicate lines', async (t) => {
+  const dom = new JSDOM('<section id="panel"></section>', { url: 'https://shinyhub.test/apps/demo/logs?log_source=old', pretendToBeVisual: true });
+  const panel = dom.window.document.querySelector('#panel');
+  let finish;
+  const requests = [];
+  const cleanup = createLogsViewer({ panel, app: { slug: 'demo' }, refreshEveryMs: 60000,
+    api: async url => {
+      if (url.includes('/sources')) return { ok: true, json: async () => ({ sources: [{ source_id: 'old', run_id: 'old', replica: 0, status: 'stopped', current: false, has_log: true }] }) };
+      requests.push(url);
+      return { ok: true, text: () => new Promise(resolve => { finish = resolve; }) };
+    } });
+  t.after(() => { cleanup(); dom.window.close(); });
+  await waitUntil(() => finish);
+  const more = panel.querySelector('#logs-load-more');
+  assert.equal(more.disabled, true);
+  more.click();
+  assert.equal(requests.length, 1);
+  finish(Array.from({ length: 200 }, (_, i) => `line ${i}`).join('\n') + '\n');
+  await waitUntil(() => panel.querySelectorAll('.log-entry').length === 200);
+  assert.equal(more.disabled, false);
 });

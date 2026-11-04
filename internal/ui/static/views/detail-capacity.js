@@ -1,3 +1,4 @@
+import { setMetricValue } from './metric-value.js';
 import { headerStats } from './stat-format.js';
 import { renderReplicaHeat, updateCPUMeter } from './cpu-capacity.js';
 import { renderAutoscaleVisual } from './autoscale-visual.js';
@@ -5,7 +6,8 @@ import { renderAutoscaleVisual } from './autoscale-visual.js';
 const write = (doc, id, value) => {
   const el = doc.getElementById(id);
   if (!el) return;
-  if (el.textContent !== value) el.textContent = value;
+  if (el.classList.contains('stat-value')) setMetricValue(el, value);
+  else if (el.textContent !== value) el.textContent = value;
   el.classList.toggle('is-empty', value === '—');
 };
 
@@ -55,15 +57,15 @@ export function renderDetailCapacity(doc, metrics, configured, autoscale, now = 
   const updated = doc.getElementById('app-detail-metrics-updated');
   updated.hidden = false;
   updated.textContent = `Updated ${new Date(now).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
-  const unavailableNote = 'Live CPU/memory unavailable for this backend. Check the worker host or CloudWatch.';
+  const unavailableNote = 'Live CPU and memory measurements are unavailable on this backend. Check host or provider monitoring.';
   for (const [id, value] of [['cpu', stats.cpu], ['ram', stats.ram], ['sessions', stats.sessions], ['replicas', String(stats.runningCount)]]) {
     write(doc, `app-detail-${id}`, value);
     doc.getElementById(`app-detail-${id}`).title = ['cpu', 'ram'].includes(id)
-      ? stats.metricsTransient ? stats.cpuContext : !stats.metricsAvailable ? unavailableNote : '' : '';
+      ? stats.metricsTransient ? stats.cpuContext : stats.running && !stats.metricsAvailable ? unavailableNote : '' : '';
   }
   write(doc, 'app-detail-capacity-label', stats.capacityLabel);
   write(doc, 'app-detail-cpu-context', stats.cpuContext || (stats.running && !stats.metricsAvailable
-    ? 'Live CPU/memory are unavailable on this backend. Check worker monitoring or CloudWatch.'
+    ? unavailableNote
     : stats.running && stats.cpu === '—' ? 'Waiting for a complete CPU sample.' : ''));
   const meter = doc.getElementById('app-detail-cpu-meter');
   meter.hidden = stats.cpuFraction === null;

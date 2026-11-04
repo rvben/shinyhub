@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -12,6 +13,23 @@ import (
 )
 
 var ErrAnnouncementConflict = errors.New("announcement changed; reload before saving")
+var ErrAnnouncementIdempotencyConflict = errors.New("idempotency key already used with a different request; start a new save")
+
+// AnnouncementReceipt identifies one exact request within its authenticated
+// actor/credential and method/resource scope. Keys are never shared across scopes.
+type AnnouncementReceipt struct {
+	Scope       string
+	Key         string
+	Fingerprint string
+}
+
+// AnnouncementSaveResult retains the original response, including lifecycle
+// status at save time, so replay does not change when a schedule boundary passes.
+type AnnouncementSaveResult struct {
+	Announcement
+	Status   string `json:"status"`
+	Replayed bool   `json:"-"`
+}
 
 type Announcement struct {
 	ID              string     `json:"id"`
@@ -176,14 +194,65 @@ func (s *Store) ActiveAnnouncements(now time.Time) (AnnouncementSnapshot, error)
 // SaveAnnouncement serializes read/edit, checks the expected revision, and
 // commits the mutation and its audit record together on either dialect.
 func (s *Store) SaveAnnouncement(a Announcement, expected int64, audit AuditEventParams) (Announcement, error) {
-	if err := a.Validate(); err != nil {
-		return a, err
-	}
+	result, err := s.SaveAnnouncementIdempotent(a, expected, audit, nil, nil)
+	return result.Announcement, err
+}
+
+// SaveAnnouncementIdempotent claims a durable receipt before checking revisions
+// or applying request fields. prepare runs inside the write transaction and must
+// not perform store/database calls. A failed prepare, mutation, or audit rolls
+// back the receipt too. A duplicate claim waits for the first writer on either
+// database backend, then reads its committed response instead of mutating again.
+func (s *Store) SaveAnnouncementIdempotent(a Announcement, expected int64, audit AuditEventParams, receipt *AnnouncementReceipt, prepare func(Announcement) (Announcement, error)) (AnnouncementSaveResult, error) {
+	result := AnnouncementSaveResult{Announcement: a}
 	tx, err := s.d.beginWrite(context.Background(), s.db.real, 0)
 	if err != nil {
-		return a, err
+		return result, err
 	}
 	defer tx.Rollback() //nolint:errcheck
+	if receipt != nil {
+		_, err = tx.Exec(`INSERT INTO announcement_save_receipts (scope,request_key,fingerprint) VALUES (?,?,?) ON CONFLICT (scope,request_key) DO NOTHING`, receipt.Scope, receipt.Key, receipt.Fingerprint)
+		if err != nil {
+			return result, err
+		}
+		var fingerprint string
+		var response sql.NullString
+		if err = tx.QueryRow(`SELECT fingerprint,response FROM announcement_save_receipts WHERE scope=? AND request_key=?`, receipt.Scope, receipt.Key).Scan(&fingerprint, &response); err != nil {
+			return result, err
+		}
+		if fingerprint != receipt.Fingerprint {
+			return result, ErrAnnouncementIdempotencyConflict
+		}
+		if response.Valid {
+			if err = json.Unmarshal([]byte(response.String), &result); err != nil {
+				return result, fmt.Errorf("decode announcement receipt: %w", err)
+			}
+			result.Replayed = true
+			return result, nil
+		}
+	}
+	var old Announcement
+	if expected != 0 {
+		old, err = scanAnnouncement(tx.QueryRow(`SELECT `+announcementColumns+` FROM announcements WHERE id=?`, a.ID))
+		if err != nil {
+			return result, err
+		}
+		if old.Revision != expected {
+			return result, ErrAnnouncementConflict
+		}
+		if prepare != nil {
+			a = old
+		}
+	}
+	if prepare != nil {
+		a, err = prepare(a)
+		if err != nil {
+			return result, err
+		}
+	}
+	if err = a.Validate(); err != nil {
+		return result, err
+	}
 	now := time.Now().UTC()
 	action := "announcement.create"
 	if expected == 0 {
@@ -193,15 +262,8 @@ func (s *Store) SaveAnnouncement(a Announcement, expected int64, audit AuditEven
 		a.CreatedBy = a.UpdatedBy
 		_, err = tx.Exec(`INSERT INTO announcements (`+announcementColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, a.ID, a.Title, a.Message, a.DetailsURL, a.Severity, a.Publication, announcementBool(a.Dismissible), announcementMillis(a.StartsAt), announcementMillis(a.EndsAt), announcementMillis(a.PublishedAt), now.UnixMilli(), now.UnixMilli(), a.CreatedBy, a.UpdatedBy, a.Revision, a.DisplayRevision)
 	} else {
-		old, e := scanAnnouncement(tx.QueryRow(`SELECT `+announcementColumns+` FROM announcements WHERE id=?`, a.ID))
-		if e != nil {
-			return a, e
-		}
-		if old.Revision != expected {
-			return a, ErrAnnouncementConflict
-		}
 		if old.Publication == "archived" && a.Publication != "archived" {
-			return a, errors.New("archived announcements cannot be republished")
+			return result, errors.New("archived announcements cannot be republished")
 		}
 		a.CreatedAt = old.CreatedAt
 		a.CreatedBy = old.CreatedBy
@@ -216,27 +278,37 @@ func (s *Store) SaveAnnouncement(a Announcement, expected int64, audit AuditEven
 		}
 		res, e := tx.Exec(`UPDATE announcements SET title=?,message=?,details_url=?,severity=?,publication=?,dismissible=?,starts_at=?,ends_at=?,published_at=?,updated_at=?,updated_by=?,revision=?,display_revision=? WHERE id=? AND revision=?`, a.Title, a.Message, a.DetailsURL, a.Severity, a.Publication, announcementBool(a.Dismissible), announcementMillis(a.StartsAt), announcementMillis(a.EndsAt), announcementMillis(a.PublishedAt), now.UnixMilli(), a.UpdatedBy, a.Revision, a.DisplayRevision, a.ID, expected)
 		if e != nil {
-			return a, e
+			return result, e
 		}
 		n, e := res.RowsAffected()
 		if e != nil {
-			return a, e
+			return result, e
 		}
 		if n != 1 {
-			return a, ErrAnnouncementConflict
+			return result, ErrAnnouncementConflict
 		}
 	}
 	if err != nil {
-		return a, fmt.Errorf("save announcement: %w", err)
+		return result, fmt.Errorf("save announcement: %w", err)
 	}
 	if _, err = tx.Exec(`INSERT INTO audit_events (user_id,action,resource_type,resource_id,detail,ip_address,credential_id,credential_type,credential_name) VALUES (?,?,'announcement',?,?,?,?,?,?)`, audit.UserID, action, a.ID, AuditDetail(map[string]any{"title": a.Title, "publication": a.Publication, "revision": a.Revision, "severity": a.Severity}), audit.IPAddress, audit.CredentialID, audit.CredentialType, audit.CredentialName); err != nil {
-		return a, err
-	}
-	if err = tx.Commit(); err != nil {
-		return a, err
+		return result, err
 	}
 	a.UpdatedAt = now
-	return a, nil
+	result = AnnouncementSaveResult{Announcement: a, Status: a.Status(now)}
+	if receipt != nil {
+		response, err := json.Marshal(result)
+		if err != nil {
+			return result, err
+		}
+		if _, err = tx.Exec(`UPDATE announcement_save_receipts SET response=? WHERE scope=? AND request_key=?`, string(response), receipt.Scope, receipt.Key); err != nil {
+			return result, err
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return result, err
+	}
+	return result, nil
 }
 func sameAnnouncementTime(a, b *time.Time) bool {
 	if a == nil || b == nil {

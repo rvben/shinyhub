@@ -86,3 +86,19 @@ test('release() detaches the keydown handler', () => {
   const { prevented } = tab(doc);
   assert.equal(prevented, false); // handler gone → not trapped
 });
+
+
+test('closed disclosures expose their summary, but skip hidden upload controls', () => {
+  const doc = fixture();
+  const modal = doc.getElementById('modal');
+  modal.insertAdjacentHTML('beforeend', '<details><summary id="fallback">Upload fallback</summary><button id="pick">Pick a file</button></details>');
+  assert.deepEqual(focusableElements(modal).map(el => el.id), ['first', 'mid', 'last', 'fallback']);
+  const trap = createFocusTrap(modal, doc);
+  trap.activate();
+  doc.getElementById('fallback').focus();
+  assert.equal(tab(doc).prevented, true);
+  assert.equal(doc.activeElement.id, 'first');
+  modal.querySelector('details').open = true;
+  assert.deepEqual(focusableElements(modal).map(el => el.id), ['first', 'mid', 'last', 'fallback', 'pick']);
+  trap.release();
+});

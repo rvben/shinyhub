@@ -3915,7 +3915,8 @@ func registerBrandingRoutes(mux *http.ServeMux, cfg *config.Config, srv *api.Ser
 	for _, route := range ui.ExactUIRoutes() {
 		mux.Handle(route, spa)
 	}
-	mux.Handle("/apps/", spa) // prefix: /apps/<slug> and /apps/<slug>/<tab>
+	mux.Handle("/apps/", spa)     // prefix: /apps/<slug> and /apps/<slug>/<tab>
+	mux.Handle("/projects/", spa) // prefix: /projects/<slug>
 
 	if brandingActive && len(resolved) > 0 {
 		mux.Handle("/branding/", ui.BrandingAssetHandler(resolved))

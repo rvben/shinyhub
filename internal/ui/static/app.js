@@ -1,13 +1,18 @@
-import { uploadDeployment, deploymentOutcome } from '/static/views/deployment-upload.js';
-import { createAccessLists } from '/static/views/access-lists.js';
+import { installSidebarAccount } from '/static/views/sidebar-account.js';
+import { installPasswordVisibility, profileFieldErrors, setProfileFieldError } from '/static/views/auth-fields.js';
+import { installAppContextNavigation } from '/static/views/app-context-nav.js';
+import { settingsRouteParams, isSameAppSettingsDestination } from '/static/views/app-detail-nav.js';
+import { directSettings, populateDirectSetting, installDirectSetting, refreshDirectSetting, readDirectSetting } from '/static/views/direct-setting.js';
+import { applyConfigurationContext, markConfigurationBehaviorStale, updateConfigurationDirty, updateWorkerFields, switchWorkerFields, usageModeLabel, environmentEditValue } from '/static/views/configuration-context.js';
+import { installMobileDisclosures } from '/static/views/mobile-disclosure.js';
+import { enhancePageHeaders, bindFilterBar, setFeedback } from '/static/views/page-components.js';
+import { deployCommands, cliSetupCommands } from '/static/views/deploy-commands.js';
 import { mountAnnouncements } from '/static/views/announcements.js';
 import { createSessionController } from '/static/views/session-controller.js';
-import { createPersonActions } from '/static/views/person-actions.js';
+import { createPeopleDirectory } from '/static/views/people-directory.js';
 import { scalingSettingsSnapshot, scalingSettingsPatch } from '/static/views/scaling-settings.js';
 import { resourceSettingsPatch } from '/static/views/resource-settings.js';
-import { applyPeopleOnboarding, createInvitationList } from '/static/views/people-onboarding.js';
 import { createNewPersonController } from '/static/views/new-person.js';
-import { createSupportSessionAction } from '/static/views/support-session-settings.js';
 import { createRouter } from '/static/router.js';
 import { startAuthenticatedRouter } from '/static/auth-navigation.js';
 import { logoutTarget, reconnectForwardAuth } from '/static/views/logout-navigation.js';
@@ -19,8 +24,8 @@ import { mountLaunchpad } from '/static/views/launchpad.js';
 import { renderAppAvatar, avatarView } from '/static/views/app-avatar.js';
 import { isSingleEmoji, renderEmojiPicker } from '/static/views/emoji-picker.js';
 import { mountUsers } from '/static/views/users.js';
-import { tokenListModels, renderTokenList } from '/static/views/tokens.js';
-import { mountWorkers, workerDisplay } from '/static/views/workers.js';
+import { createTokenManager } from '/static/views/token-manager.js';
+import { mountWorkers } from '/static/views/workers.js';
 import { createGETCoalescer } from '/static/views/request-coalesce.js';
 import { createBootPrefetch } from '/static/views/boot-prefetch.js';
 import {
@@ -29,19 +34,11 @@ import {
   summariseFleetHealth,
 } from '/static/views/fleet-health.js';
 import { createFocusTrap } from '/static/views/focus-trap.js';
-import {
-  AUDIT_ACTIONS,
-  auditActionLabel,
-  auditEmptyMessage,
-  auditListPath,
-  auditLoadError,
-  auditLoadingMessage,
-  auditRangeSuffix,
-  createLatestRequestGate,
-  mountAuditLog,
-} from '/static/views/audit-log.js';
+import { installSelectPickerGuard } from '/static/views/select-picker.js';
+import { mountAuditLog } from '/static/views/audit-log.js';
+import { createAuditExplorer } from '/static/views/audit-explorer.js';
 import { mountAppDetail, refreshFleetSurfaces } from '/static/views/app-detail.js';
-import { appCardBadge, applyLiveStatus, paintCardStatusBadge, updateStatusPill } from '/static/views/app-card-badge.js';
+import { appCardBadge, appListSummary, applyLiveStatus, paintCardStatusBadge, updateStatusPill } from '/static/views/app-card-badge.js';
 import {
   appsSurfaceForSession,
   homeSurfaceForSession,
@@ -80,11 +77,12 @@ import {
   scheduleState,
   scheduleDetailSignature,
   scheduleSummary,
+  scheduleTimingLabel,
+  createScheduleRequestGate,
   producerCompatibilityState,
 } from '/static/views/schedule-ui.js';
-import { auditDetailEntries } from '/static/views/audit-detail.js';
 import { readAutoscaleForm, parseReplicaBound, renderAutoscaleSummary, summariseAutoscale } from '/static/views/autoscale.js';
-import { workerCapacityLine, keepWarmInertNote, syncWorkerControls } from '/static/views/worker-isolation.js';
+import { workerCapacityLine, keepWarmInertNote } from '/static/views/worker-isolation.js';
 import { parseRenderSeconds, renderPacingAdvice } from '/static/views/render-pacing.js';
 import { isInFlight, runInFlight } from '/static/views/in-flight.js';
 import { initTheme, getThemePreference, setThemePreference } from '/static/views/theme.js';
@@ -103,7 +101,6 @@ import {
 } from '/static/views/support-session-modal.js';
 import { createSupportSessionRecovery } from '/static/views/support-session-recovery.js';
 import { shouldShowAppIsolationBanner, wireAppIsolationBanner } from '/static/views/app-isolation-banner.js';
-import { userRowCaps, userRolePresentation, RESERVED_USER_HINT } from '/static/views/user-row.js';
 import { identityModel } from '/static/views/user-identity.js';
 import { renderUserAvatar, prepareUserAvatar, avatarPickerColor } from '/static/views/user-avatar.js';
 import { createServerInfoLoader, renderAbout } from '/static/views/about.js';
@@ -113,20 +110,13 @@ import { createGroupDisclosure } from '/static/views/group-disclosure.js';
 import { focusedKey, restoreFocus, siblingKey } from '/static/views/focus-restore.js';
 import { wireKebab } from '/static/views/kebab-menu.js';
 import { buildProjectPatchBody } from '/static/views/project-edit-body.js';
-import {
-  cliConnectDeviceLabel,
-  legacyCLIConnectLinkDetected,
-  normalizeCLIUserCode,
-  validCLIUserCode,
-} from '/static/views/cli-connect.js';
 
 function setHidden(element, hidden) {
   element.hidden = hidden;
 }
 
 function setError(element, message) {
-  element.textContent = message || '';
-  element.hidden = !message;
+  setFeedback(element,message,{error:true});
 }
 
 // Per-modal focus traps, created lazily and keyed by the overlay element. A
@@ -211,6 +201,9 @@ const kebabControls = new WeakMap();
 // voice. Badges no longer use `text-transform: uppercase`, so casing matters.
 
 document.addEventListener('DOMContentLoaded', () => {
+  enhancePageHeaders(document);
+  installSelectPickerGuard(document);
+  installMobileDisclosures(document, window);
   // Branding: server injects window.__SHINYHUB_BRANDING__ (see
   // internal/ui/branding.go RenderIndex). Absent/empty in zero-branding mode.
   // Applied to every .brand slot (sidebar, mobile top bar, boot splash, and the
@@ -222,9 +215,6 @@ document.addEventListener('DOMContentLoaded', () => {
     user: null,
     sessionIdentity: {},
     apps: [],
-    auditPage: 0,
-    auditHasMore: false,
-    auditSelection: { event: '', run: '', action: '', since: '', until: '' },
     canCreateApps: false,
     canManageApps: false,
     resetPwTargetId: null,
@@ -232,7 +222,6 @@ document.addEventListener('DOMContentLoaded', () => {
     supportSessions: { enabled: false, duration_seconds: 900 },
     supportTarget: null,
   };
-  const auditRequests = createLatestRequestGate();
 
   // Project rows from GET /api/projects, keyed by slug. The grid group objects
   // carry only what an app row can carry (slug, name, icon), so the edit modal
@@ -253,6 +242,9 @@ document.addEventListener('DOMContentLoaded', () => {
   const appsView = document.getElementById('apps-view');
   const projectDetailView = document.getElementById('project-detail-view');
   const appDetailView = document.getElementById('app-detail-view');
+  const passwordVisibility = installPasswordVisibility(document);
+  const sidebarAccount = installSidebarAccount(document, window);
+  let loginPending = false;
   const loginForm = document.getElementById('login-form');
   const usernameInput = document.getElementById('login-username');
   const passwordInput = document.getElementById('login-password');
@@ -305,7 +297,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const projectDetailGrid = document.getElementById('project-detail-grid');
   const emptyState = document.getElementById('empty-state');
   const emptyStateHeading = document.getElementById('empty-state-heading');
-  const emptyStateEyebrow = document.getElementById('empty-state-eyebrow');
   const emptyStateLead    = document.getElementById('empty-state-lead');
   const emptyStateActions = document.getElementById('empty-state-actions');
   const emptyStateCTA     = document.getElementById('empty-state-cta');
@@ -326,20 +317,6 @@ document.addEventListener('DOMContentLoaded', () => {
     setHidden,
   });
   const auditView   = document.getElementById('audit-view');
-  const auditError  = document.getElementById('audit-error');
-  const auditBody   = document.getElementById('audit-body');
-  const auditEmpty  = document.getElementById('audit-empty');
-  const auditLoading = document.getElementById('audit-loading');
-  const auditPrev   = document.getElementById('audit-prev');
-  const auditNext   = document.getElementById('audit-next');
-  const auditRange  = document.getElementById('audit-range');
-  const auditContext = document.getElementById('audit-context');
-  const auditContextCopy = document.getElementById('audit-context-copy');
-  const auditPagination = document.getElementById('audit-pagination');
-  const auditActionFilter = document.getElementById('audit-action-filter');
-  const auditSince = document.getElementById('audit-since');
-  const auditUntil = document.getElementById('audit-until');
-  const auditRangeClear = document.getElementById('audit-range-clear');
   const tabAudit    = document.getElementById('tab-audit');
   const tabUsers    = document.getElementById('tab-users');
   const tabWorkers  = document.getElementById('tab-workers');
@@ -347,13 +324,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const tabApps     = document.getElementById('tab-apps');
   let   sidebarDrawer = null; // mobile off-canvas drawer controller (wired below)
   const workersView    = document.getElementById('workers-view');
-  const workersError   = document.getElementById('workers-error');
-  const workersEmpty   = document.getElementById('workers-empty');
-  const workersTable   = document.getElementById('workers-table');
-  const workersBody    = document.getElementById('workers-body');
   const usersView   = document.getElementById('users-view');
-  const usersError  = document.getElementById('users-error');
-  const usersBody   = document.getElementById('users-body');
   const usersRefresh   = document.getElementById('users-refresh');
   const newUserButton  = document.getElementById('new-user-button');
   const newUserModal   = document.getElementById('new-user-modal');
@@ -387,31 +358,11 @@ document.addEventListener('DOMContentLoaded', () => {
   let serviceCredentialAccountKey = 'deployment';
   let serviceCredentialSecretRevealed = false;
   let serviceCredentialRotation = null;
-  // API tokens page + new-token modal
-  const tokensView      = document.getElementById('tokens-view');
-  const tokensList      = document.getElementById('tokens-list');
-  const tokensError     = document.getElementById('tokens-error');
-  const tokensRefresh   = document.getElementById('tokens-refresh');
-  const newTokenButton  = document.getElementById('new-token-button');
-  const newTokenModal   = document.getElementById('new-token-modal');
-  const newTokenClose   = document.getElementById('new-token-close');
-  const newTokenCancel  = document.getElementById('new-token-cancel');
-  const newTokenForm    = document.getElementById('new-token-form');
-  const newTokenSubmit  = document.getElementById('new-token-submit');
-  const newTokenName    = document.getElementById('new-token-name');
-  const newTokenError   = document.getElementById('new-token-error');
-  const tokenReveal     = document.getElementById('token-reveal');
-  const tokenRevealValue = document.getElementById('token-reveal-value');
-  const tokenRevealCopy = document.getElementById('token-reveal-copy');
-  const tokenRevealDone = document.getElementById('token-reveal-done');
-  const tokenRevealStatus = document.getElementById('token-reveal-status');
+  const tokensView = document.getElementById('tokens-view');
+  const newTokenButton = document.getElementById('new-token-button');
+  const newTokenModal = document.getElementById('new-token-modal');
   const profileTokensLink = document.getElementById('profile-tokens-link');
-  const cliConnectPanel     = document.getElementById('cli-connect-panel');
-  const cliConnectCodeInput = document.getElementById('cli-connect-code-input');
-  const cliConnectError     = document.getElementById('cli-connect-error');
-  const cliConnectSuccess   = document.getElementById('cli-connect-success');
-  const cliConnectApprove   = document.getElementById('cli-connect-approve');
-  const cliConnectLegacyNotice = document.getElementById('cli-connect-legacy-notice');
+  const cliConnectPanel = document.getElementById('cli-connect-panel');
   const resetPwModal    = document.getElementById('reset-password-modal');
   const resetPwClose    = document.getElementById('reset-password-close');
   const resetPwCancel   = document.getElementById('reset-password-cancel');
@@ -452,12 +403,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const newAppProject      = document.getElementById('new-app-project');
   const newAppOptional     = newAppProject.closest('details');
   const newAppError        = document.getElementById('new-app-error');
-  const newAppHandoff      = document.getElementById('new-app-handoff');
-  const newAppSnippet      = document.getElementById('new-app-snippet');
-  const newAppSnippetLabel = document.getElementById('new-app-snippet-label');
-  const newAppSnippetCopy  = document.getElementById('new-app-snippet-copy');
-  const newAppDone         = document.getElementById('new-app-done');
-  const newAppDeployNow    = document.getElementById('new-app-deploy-now');
   const newAppSubmit       = document.getElementById('new-app-submit');
 
   const projectEditModal    = document.getElementById('project-edit-modal');
@@ -604,15 +549,22 @@ document.addEventListener('DOMContentLoaded', () => {
     return fallback;
   }
 
-  function renderEmptyStateCopy() {
+  function renderEmptyStateCopy({ filtered = false } = {}) {
+    const clear = document.getElementById('empty-state-clear');
+    clear.hidden = !filtered;
+    emptyStateCTA.hidden = filtered;
+    if (filtered) {
+      emptyStateHeading.textContent = 'No apps match your filters';
+      emptyStateLead.textContent = 'Try another name or slug, or clear your filters to see all apps.';
+      emptyStateActions.hidden = false;
+      return;
+    }
     if (state.canCreateApps) {
-      emptyStateEyebrow.textContent = 'Ready when you are';
       emptyStateHeading.innerHTML = 'Deploy your <strong>first Shiny app</strong>.';
       emptyStateLead.textContent =
-        'Name it, upload a folder or .zip, and ShinyHub will take you straight to the live logs. You can use the CLI instead whenever you prefer.';
+        'Create an app, then deploy your code from the CLI. Browser upload is available when you need it.';
       emptyStateActions.hidden = false;
     } else {
-      emptyStateEyebrow.textContent = 'Nothing here yet';
       emptyStateHeading.innerHTML = 'No apps are visible to you.';
       emptyStateLead.textContent =
         'Apps shared with you will appear here once the owner deploys them. Check back soon.';
@@ -644,7 +596,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (current && next && current.dataset.signature === next.dataset.signature) return;
 
     const keepFocus = current ? focusedKey(current) : '';
-    if (current && next) current.replaceWith(next);
+    if (current && next) { next.open = current.open; current.replaceWith(next); }
     else if (current) current.remove();
     else if (next) gridEl.prepend(next);
     if (keepFocus && (!next || !restoreFocus(next, keepFocus))) {
@@ -681,13 +633,29 @@ document.addEventListener('DOMContentLoaded', () => {
       applyLiveStatus(app, live);
     }
     const grid = !projectDetailView.hidden ? projectDetailGrid : appGrid;
-    paintCardStatusBadge(grid.querySelector(`.app-header .badge[data-slug="${slug}"]`), app, formatStatus);
+    const card = grid.querySelector(`.app-card[data-slug="${slug}"]`);
+    if (card) card.dataset.launchable = String(['running', 'idle', 'hibernated', 'degraded'].includes(app.status));
+    paintCardStatusBadge(grid.querySelector(`.app-card .badge[data-slug="${slug}"]`), app, formatStatus);
     const kebabEl = grid.querySelector(`.kebab-menu[data-slug="${slug}"]`);
     if (kebabEl) syncCardActions(kebabEl, appCardActions(app, canManageApp(state.user, app)));
+    if (card) syncCardPrimaryActions(card, app);
     const factsEl = grid.querySelector(`.app-card-facts[data-slug="${slug}"]`);
     if (factsEl) renderCardFacts(factsEl, app, live);
     refreshAttentionRail();
+    updateAppsResults();
     return app;
+  }
+
+  function syncCardPrimaryActions(card, app) {
+    const acts = appCardActions(app, canManageApp(state.user, app));
+    const focusWasPrimary = card.querySelector('.app-actions > [data-card-primary]:focus');
+    for (const [key, visible] of [['open', acts.showOpen], ['start', acts.startIsPrimary], ['overview', acts.showOverview]]) {
+      const control = card.querySelector(`[data-card-primary="${key}"]`);
+      if (control) control.hidden = !visible;
+    }
+    if (focusWasPrimary?.hidden) {
+      card.querySelector('.app-actions > [data-card-primary]:not([hidden])')?.focus();
+    }
   }
 
   function applyRestartFeedbackToCard(slug, card, control) {
@@ -702,7 +670,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const menuButton = card.querySelector('.kebab-menu > button');
     if (menuButton) menuButton.disabled = !!pending;
 
-    const badge = card.querySelector('.app-header .badge');
+    const badge = card.querySelector('.badge[data-slug]');
     const app = state.apps.find((item) => item.slug === slug);
     if (!badge || !app) return;
     if (pending) {
@@ -752,7 +720,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const visibleApps = groups.flatMap((group) => group.apps);
     const empty = total === 0;
     emptyEl.hidden = !empty;
-    if (empty) renderEmptyStateCopy();
+    if (empty) renderEmptyStateCopy(options);
     else mountAttentionRail(gridEl, visibleApps);
 
     // A lone ungrouped group needs no heading: it would label the whole grid
@@ -822,6 +790,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const card = document.createElement('div');
       card.className = 'app-card';
       card.dataset.slug = app.slug;
+      card.dataset.launchable = String(['running', 'idle', 'hibernated', 'degraded'].includes(app.status));
 
       const header = document.createElement('div');
       header.className = 'app-header';
@@ -837,12 +806,10 @@ document.addEventListener('DOMContentLoaded', () => {
       titleLink.setAttribute('data-nav', '');
       titleLink.className = 'app-card-title';
       titleLink.dataset.focusKey = `app:${app.slug}:title`;
-      titleLink.setAttribute('aria-label', canManageApp(state.user, app)
-        ? `Manage ${app.name}`
-        : `View ${app.name}`);
+      titleLink.setAttribute('aria-label', `View app ${app.name}`);
       const name = document.createElement('strong');
       name.textContent = app.name;
-      titleLink.appendChild(name);
+      titleLink.append(name);
       const slug = document.createElement('div');
       slug.className = 'app-card-slug';
       slug.textContent = `/${app.slug}`;
@@ -850,14 +817,10 @@ document.addEventListener('DOMContentLoaded', () => {
       heading.appendChild(identity);
       header.appendChild(heading);
 
-      // Every badge goes in one wrapping container rather than straight into
-      // the header row. The header is a nowrap flex row inside a ~310px grid
-      // column and .app-card is overflow:visible (so the kebab dropdown can
-      // escape), so a badge appended directly to it has nothing to stop it
-      // rendering out past the card border.
+      // The status shares a consistent footer with the available actions.
+      // Keep its own container so long labels can wrap independently.
       const badges = document.createElement('div');
       badges.className = 'app-header-badges';
-      header.appendChild(badges);
 
       const badgeInfo = appCardBadge(app, formatStatus);
       const badge = document.createElement('span');
@@ -903,19 +866,38 @@ document.addEventListener('DOMContentLoaded', () => {
       const canManage = canManageApp(state.user, app);
       const cardActions = appCardActions(app, canManage);
 
-      if (cardActions.showOpen) {
+      {
         const openLink = document.createElement('a');
         openLink.href = `/app/${app.slug}/`;
         openLink.target = '_blank';
         openLink.rel = 'noopener noreferrer';
         openLink.dataset.focusKey = `app:${app.slug}:open`;
+        openLink.dataset.cardPrimary = 'open';
         openLink.append(document.createTextNode('Open app'));
         const externalArrow = document.createElement('span');
         externalArrow.setAttribute('aria-hidden', 'true');
         externalArrow.textContent = '↗';
         openLink.appendChild(externalArrow);
-        openLink.setAttribute('aria-label', `Open ${app.name} in a new tab`);
+        openLink.setAttribute('aria-label', `Open app ${app.name} in a new tab`);
         actions.appendChild(openLink);
+
+        const startButton = document.createElement('button');
+        startButton.type = 'button';
+        startButton.textContent = 'Start app';
+        startButton.dataset.cardPrimary = 'start';
+        startButton.dataset.focusKey = `app:${app.slug}:start`;
+        startButton.setAttribute('aria-label', `Start app ${app.name}`);
+        startButton.addEventListener('click', () => startApp(app.slug, startButton));
+        actions.appendChild(startButton);
+
+        const overviewLink = document.createElement('a');
+        overviewLink.href = `/apps/${app.slug}`;
+        overviewLink.setAttribute('data-nav', '');
+        overviewLink.dataset.cardPrimary = 'overview';
+        overviewLink.dataset.focusKey = `app:${app.slug}:overview`;
+        overviewLink.textContent = 'View app';
+        overviewLink.setAttribute('aria-label', `View app overview for ${app.name}`);
+        actions.appendChild(overviewLink);
       }
 
       if (canManage) {
@@ -925,22 +907,22 @@ document.addEventListener('DOMContentLoaded', () => {
         if (cardActions.deployIsPrimary) {
           const deployButton = document.createElement('button');
           deployButton.type = 'button';
-          deployButton.textContent = 'Deploy';
+          deployButton.textContent = 'Deploy code';
           deployButton.className = 'btn-primary';
           deployButton.dataset.focusKey = `app:${app.slug}:deploy`;
-          deployButton.setAttribute('aria-label', `Deploy first bundle to ${app.name}`);
+          deployButton.setAttribute('aria-label', `Deploy code for ${app.name}`);
           deployButton.addEventListener('click', () => openDeployModal(app));
           actions.appendChild(deployButton);
         }
 
         // The menu lists whichever lifecycle actions apply to this app right
-        // now, so a stopped app still gets a menu (holding Start) where a
-        // running one holds Restart, Sleep and Stop. All four rows are always
+        // now. Start stays on the card when it is the primary action; a
+        // running app's menu holds Restart, Sleep and Stop. All rows are always
         // rendered and hidden per state rather than built from the current
         // state, so the metrics poller can re-sync them in place when an app
         // hibernates or wakes between grid loads.
         const lifecycleItems = [
-          ['redeploy', 'Deploy new bundle', () => openDeployModal(app)],
+          ['redeploy', 'Deploy code', () => openDeployModal(app)],
           ['restart', 'Restart', restart],
           ['sleep', 'Sleep', sleepApp],
           ['stop', 'Stop', stopApp],
@@ -971,12 +953,16 @@ document.addEventListener('DOMContentLoaded', () => {
         syncCardActions(kebab, cardActions);
       }
 
-      card.appendChild(header);
-      if (description) card.appendChild(description);
-      card.appendChild(facts);
-      if (governance) card.appendChild(governance);
-      card.appendChild(lifecycleControl.root);
-      card.appendChild(actions);
+      const body = document.createElement('div');
+      body.className = 'app-card-body';
+      body.appendChild(facts);
+      if (description) body.appendChild(description);
+      if (governance) body.appendChild(governance);
+      const footer = document.createElement('div');
+      footer.className = 'app-card-footer';
+      footer.append(badges, actions);
+      card.append(header, body, lifecycleControl.root, footer);
+      syncCardPrimaryActions(card, app);
       applyRestartFeedbackToCard(app.slug, card, lifecycleControl);
       cardHost.appendChild(card);
     }
@@ -1004,11 +990,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  function renderApps() {
+  function appsMatchingFilters() {
     const searchEl = document.getElementById('apps-search');
-    const sortEl   = document.getElementById('apps-sort');
-    const resultsStatus = document.getElementById('apps-results-status');
-
     let apps = state.apps.slice();
 
     // Filter by search query.
@@ -1022,12 +1005,30 @@ document.addEventListener('DOMContentLoaded', () => {
     // Filter by fleet management segment.
     const segEl = document.getElementById('apps-segment');
     apps = segmentApps(apps, segEl ? segEl.value : 'all');
+    return { apps, q, segEl };
+  }
+
+  function updateAppsResults(matches = appsMatchingFilters()) {
+    const { apps, q, segEl } = matches;
+    const resultsStatus = document.getElementById('apps-results-status');
+    document.querySelector('#apps-view .apps-filters').hidden = state.apps.length === 0;
+    document.querySelector('#apps-view .apps-results').hidden = state.apps.length === 0;
+    document.getElementById('apps-clear-filters').hidden = !q && (!segEl || segEl.value === 'all');
     if (resultsStatus) {
       const filtered = !!q || !!(segEl && segEl.value !== 'all');
-      resultsStatus.textContent = filtered
-        ? `${apps.length} ${apps.length === 1 ? 'app' : 'apps'} shown.`
-        : '';
+      const count = filtered
+        ? `${apps.length} of ${state.apps.length} ${state.apps.length === 1 ? 'app' : 'apps'}`
+        : `${apps.length} ${apps.length === 1 ? 'app' : 'apps'}`;
+      const text = [count, appListSummary(apps, formatStatus)].filter(Boolean).join(' · ');
+      if (resultsStatus.textContent !== text) resultsStatus.textContent = text;
     }
+  }
+
+  function renderApps() {
+    const matches = appsMatchingFilters();
+    const { apps, q, segEl } = matches;
+    const sortEl = document.getElementById('apps-sort');
+    updateAppsResults(matches);
 
     // Sort is applied WITHIN each project group, using the same comparators as
     // before (they now live in app-grid-groups.js). Groups themselves keep the
@@ -1039,7 +1040,7 @@ document.addEventListener('DOMContentLoaded', () => {
       groupAppsForGrid(apps, { sortKey }),
       appGrid,
       emptyState,
-      { forceExpanded: !!q },
+      { forceExpanded: !!q, filtered: !!q || !!(segEl && segEl.value !== 'all') },
     );
   }
 
@@ -1065,36 +1066,28 @@ document.addEventListener('DOMContentLoaded', () => {
     state.sessionIdentity = {};
     closeNewTokenModal(true);
     closeNewAppModal(true);
-    resetDeployModal();
     closeDeployModal();
     sessionController.stop();
-    workersLoadVersion += 1;
-    tokensLoadVersion += 1;
-    workersLoaded = false;
-    tokensLoaded = false;
-    workersBody.replaceChildren();
-    tokensList.replaceChildren();
-    workersTable.hidden = true;
-    workersEmpty.hidden = true;
-    document.getElementById('workers-summary').hidden = true;
-    document.getElementById('workers-loading').hidden = true;
-    document.getElementById('tokens-loading').hidden = true;
-    workersBody.removeAttribute('aria-busy');
-    tokensList.removeAttribute('aria-busy');
-    document.getElementById('workers-refresh').disabled = false;
-    tokensRefresh.disabled = false;
+    tokenManager.stop();
     closeLogs();
     metrics.setTargets([]);
     state.user = null;
+    router.reset();
+    detailApp = null;
+    appContextNavigation?.clear();
+    closeEnvForm(true);
+    clearSettingsDirty();
+    settingsSlug = null;
+    settingsRevision++;
+    envApplyStates.clear();
     state.apps = [];
-    state.auditPage = 0;
-    state.auditHasMore = false;
-    state.auditSelection = { event: '', run: '', action: '', since: '', until: '' };
-    auditRequests.invalidate();
+    auditExplorer.stop();
     state.canCreateApps = false;
     state.canManageApps = false;
     state.canManageAnnouncements = false;
     document.getElementById('tab-announcements').hidden = true;
+    sidebarAccount.close();
+    document.getElementById('administration-nav').hidden = true;
     document.getElementById('announcements-view').hidden = true;
     state.appIsolationWarning = false;
     if (appIsolationBanner) appIsolationBanner.hidden = true;
@@ -1103,7 +1096,9 @@ document.addEventListener('DOMContentLoaded', () => {
     appCardLifecycleControls.clear();
     appLiveViews.clear();
     newAppButton.hidden = true;
-    closeProfileModal();
+    closeProfileModal(true);
+    passwordVisibility.reset(loginForm);
+    passwordInput.value = '';
     renderIdentity(null);
     setHidden(logoutButton, true);
     setHidden(loginView, false);
@@ -1147,13 +1142,16 @@ document.addEventListener('DOMContentLoaded', () => {
     tabApps.hidden = false;
     newAppButton.hidden = !state.canCreateApps;
     document.getElementById('tab-announcements').hidden = !state.canManageAnnouncements;
+    document.getElementById('administration-nav').hidden = payload.user.role !== 'admin' && !state.canReadAudit && !state.canManageAnnouncements;
     if (appIsolationBanner) {
       appIsolationBanner.hidden = !shouldShowAppIsolationBanner(state.appIsolationWarning);
     }
     const selfService = payload.user.can_manage_self !== false;
+    document.getElementById('account-tokens-link').hidden = !selfService;
     if (newTokenButton) newTokenButton.hidden = !selfService;
     if (cliConnectPanel) cliConnectPanel.hidden = !selfService;
     syncSidebar();
+    document.dispatchEvent(new Event('session-capabilities-change'));
   }
 
   function showLoggedIn(payload) {
@@ -1191,7 +1189,6 @@ document.addEventListener('DOMContentLoaded', () => {
     renderUserAvatar(identityAvatar, user);
     identityName.textContent = m.name;
     identityRole.textContent = m.roleLabel;
-    identityCard.setAttribute('aria-label', user ? `Open your profile, ${m.name}` : 'Open your profile');
   }
 
   function profilePreviewUser() {
@@ -1214,6 +1211,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const dirty = profileHasChanges();
     const hadSaveFocus = document.activeElement === profileSubmit;
     profileSubmit.disabled = profileSaving || photoPreparing || !dirty;
+    profileForm.setAttribute('aria-busy', String(profileSaving || photoPreparing));
+    if (profileCancel) profileCancel.textContent = dirty ? 'Discard changes' : 'Close';
     if (!dirty && !profileSaving && !photoPreparing && hadSaveFocus && profileCancel) profileCancel.focus({ preventScroll: true });
     if (profilePhotoStatus) {
       profilePhotoStatus.textContent = !profileError.hidden && !photoPreparing ? '' :
@@ -1240,6 +1239,9 @@ document.addEventListener('DOMContentLoaded', () => {
     pendingAvatarColor = undefined;
     syncProfileColor();
     photoPreparing = false;
+    passwordVisibility.reset(profileForm);
+    document.getElementById('profile-initials').open = false;
+    for (const field of ['name', 'current', 'new']) setProfileFieldError(document, field);
     if (profilePwSection) profilePwSection.open = false;
     if (profilePhotoStatus) profilePhotoStatus.textContent = '';
     if (profilePhotoFile) profilePhotoFile.value = '';
@@ -1273,7 +1275,6 @@ document.addEventListener('DOMContentLoaded', () => {
     profileNewPw.value = '';
     setError(profileError, '');
     syncProfileSave();
-    if (profileCancel) profileCancel.textContent = selfService ? 'Cancel' : 'Close';
     setHidden(profileSuccess, true);
     reflectThemeRadios();
     profileModal.hidden = false;
@@ -1292,13 +1293,21 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  function closeProfileModal() {
-    if (!profileModal || profileModal.hidden) return;
+  function closeProfileModal(force = false) {
+    if (!profileModal || profileModal.hidden) return true;
+    if (force !== true) {
+      if (profileSaving) { setError(profileError, 'Wait for your changes to finish saving.'); return false; }
+      if ((profileHasChanges() || photoPreparing) && !window.confirm('Discard your unsaved profile changes? Appearance changes have already been applied.')) return false;
+    }
     profileModal.hidden = true;
+    profileCurrentPw.value = '';
+    profileNewPw.value = '';
+    passwordVisibility.reset(profileForm);
     photoGeneration++;
     modalTrap(profileModal).release();
     setError(profileError, '');
     setHidden(profileSuccess, true);
+    return true;
   }
 
   // openAboutModal paints from the cached server info when there is one, so a
@@ -1329,17 +1338,18 @@ document.addEventListener('DOMContentLoaded', () => {
     setError(profileError, '');
     setHidden(profileSuccess, true);
 
+    const errors = canSetPw ? profileFieldErrors(profileDisplayName.value, profileCurrentPw.value, profileNewPw.value) : {};
+    for (const field of ['name', 'current', 'new']) setProfileFieldError(document, field, errors[field]);
+    if (Object.keys(errors).length) {
+      profileForm.querySelector('[aria-invalid="true"]').focus();
+      return;
+    }
     const body = canSetPw ? { display_name: profileDisplayName.value.trim() } : {};
     if (pendingAvatar !== undefined) body.avatar = pendingAvatar;
     if (pendingAvatarColor !== undefined) body.avatar_color = pendingAvatarColor;
     const wantsPwChange = canSetPw &&
       (profileNewPw.value.length > 0 || profileCurrentPw.value.length > 0);
     if (wantsPwChange) {
-      if (profileNewPw.value.length < 15) {
-        setError(profileError, 'New password must be at least 15 characters');
-        syncProfileSave();
-        return;
-      }
       body.current_password = profileCurrentPw.value;
       body.new_password = profileNewPw.value;
     }
@@ -1357,44 +1367,44 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
           resp = await api('/api/auth/me', { method: 'PATCH', body: JSON.stringify(body) });
         } catch {
-          setError(profileError, 'Network error');
+          setError(profileError, wantsPwChange ? 'The save could not be confirmed. Your password may have changed. Check your connection; if saving again fails, sign in with your new password.' : 'The save could not be confirmed. Your edits are still here. Check your connection and save again.');
           return;
         }
-        if (resp.status === 401) { await handleUnauthorized(); return; }
         if (!resp.ok) {
-          let msg = 'Failed to save profile';
+          let msg = 'Your changes could not be saved. Try again.';
           try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch {}
-          setError(profileError, msg);
+          if (resp.status === 401 && msg === 'current password is incorrect') {
+            setProfileFieldError(document, 'current', 'Your current password is incorrect. Try again.');
+            profileCurrentPw.disabled = false;
+            profileCurrentPw.focus();
+          } else if (resp.status === 401) { await handleUnauthorized(); }
+          else setError(profileError, resp.status === 429 ? 'Too many profile changes. Wait a minute and save again. Your edits are still here.' : msg);
           return;
         }
         let data = null;
         try { data = await resp.json(); } catch {}
-        if (data && data.user) {
-          state.user = data.user;
-          renderIdentity(data.user);
-          // Reopening during a save discards the draft. Refresh that view too,
-          // so it cannot show the old photo after the sidebar has updated.
-          if (generation === photoGeneration || (pendingAvatar === undefined && pendingAvatarColor === undefined)) {
-            pendingAvatar = undefined;
-            pendingAvatarColor = undefined;
-            renderProfileAvatar();
-            syncProfileColor();
-            // Text fields are disabled during saves, including after reopening.
-            // Keep the reopened form aligned with the committed name too.
-            profileDisplayName.value = data.user.display_name || '';
-            const identity = identityModel(data.user);
-            profileUsername.textContent = identity.name;
-            profileLogin.textContent = identity.secondary ? `@${identity.secondary}` : '';
-            setHidden(profilePhotoRemove, !data.user.avatar_url);
-          }
-          if (generation === photoGeneration) {
-            profileUsername.textContent = identityModel(data.user).name;
-            if (profilePhotoStatus) profilePhotoStatus.textContent = '';
-          }
+        if (!data?.user) {
+          setError(profileError, 'The save could not be confirmed. Your changes may have been saved. Reopen your profile to check before trying again.');
+          return;
         }
-        if (generation !== photoGeneration) return;
+        // A late response must never restore an account after sign-out or
+        // overwrite a different person's profile after an account switch.
+        if (generation !== photoGeneration || state.user?.id !== data.user.id) return;
+        state.user = data.user;
+        renderIdentity(data.user);
+        pendingAvatar = undefined;
+        pendingAvatarColor = undefined;
+        renderProfileAvatar();
+        syncProfileColor();
+        profileDisplayName.value = data.user.display_name || '';
+        const identity = identityModel(data.user);
+        profileUsername.textContent = identity.name;
+        profileLogin.textContent = identity.secondary ? `@${identity.secondary}` : '';
+        setHidden(profilePhotoRemove, !data.user.avatar_url);
+        if (profilePhotoStatus) profilePhotoStatus.textContent = '';
         profileCurrentPw.value = '';
         profileNewPw.value = '';
+        passwordVisibility.reset(profileForm);
         if (wantsPwChange && profilePwSection) profilePwSection.open = false;
         profileSuccess.textContent = wantsPwChange ? 'Profile and password updated' : 'Changes saved';
         setHidden(profileSuccess, false);
@@ -1458,6 +1468,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function renderFleetHealth(s) {
     if (!fleetHealthEl) return;
+    // App readiness is reported by the list's status counts. This aggregate
+    // banner is reserved for incidents, not a blanket claim that every app is ready.
+    if (s.statusLabel === 'healthy') { fleetHealthEl.hidden = true; return; }
     fleetHealthEl.textContent = '';
     fleetHealthEl.className = `fleet-health fleet-health-${s.statusClass}`;
 
@@ -1508,6 +1521,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function loadApps() {
+    const version = sessionVersion;
     setError(appError, '');
 
     // Show a loading placeholder only on the first paint (empty grid), so
@@ -1533,9 +1547,10 @@ document.addEventListener('DOMContentLoaded', () => {
       response = await api('/api/apps');
     } catch {
       clearGridLoading();
-      setError(appError, 'Network error');
+      if (version === sessionVersion) setError(appError, 'Could not refresh apps. Check your connection and use Refresh to retry.');
       return;
     }
+    if (version !== sessionVersion) return;
 
     if (response.status === 401) {
       clearGridLoading();
@@ -1544,14 +1559,23 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (!response.ok) {
       clearGridLoading();
-      setError(appError, 'Failed to load apps');
+      setError(appError, 'Could not refresh apps. Use Refresh to retry.');
       return;
     }
 
     {
       // Standard {items,...} list envelope; tolerate a bare array for resilience.
-      const gridBody = (await response.json()) || [];
-      state.apps = Array.isArray(gridBody) ? gridBody : (Array.isArray(gridBody.items) ? gridBody.items : []);
+      let gridBody;
+      try {
+        gridBody = await response.json();
+        if (!Array.isArray(gridBody) && !Array.isArray(gridBody?.items)) throw new Error('Invalid app list');
+      } catch {
+        clearGridLoading();
+        setError(appError, 'Could not read the app list. Use Refresh to retry.');
+        return;
+      }
+      if (version !== sessionVersion) return;
+      state.apps = Array.isArray(gridBody) ? gridBody : gridBody.items;
       const visibleSlugs = new Set(state.apps.map((app) => app.slug));
       for (const slug of appRestartFeedback.keys()) {
         if (!visibleSlugs.has(slug)) appRestartFeedback.delete(slug);
@@ -1708,7 +1732,15 @@ document.addEventListener('DOMContentLoaded', () => {
     return !!u && (u.role === 'admin' || u.role === 'operator');
   }
 
+  let appContextNavigation = null;
+  function syncAppContext(path = location.pathname) {
+    if (!appContextNavigation) return;
+    if (!state.user || !detailApp || !(path === `/apps/${encodeURIComponent(detailApp.slug)}` || path.startsWith(`/apps/${encodeURIComponent(detailApp.slug)}/`))) { appContextNavigation.clear(); return; }
+    appContextNavigation.update({ app: detailApp, apps: state.apps, canManage: canManageApp(state.user, detailApp), path });
+  }
+
   function syncSidebar() {
+    syncAppContext();
     const el = document.getElementById('sidebar-apps');
     if (!el) return;
     const role = state.user && state.user.role;
@@ -1746,567 +1778,20 @@ document.addEventListener('DOMContentLoaded', () => {
     syncSidebar();
   }
 
-  let workersLoadVersion = 0;
-  let workersLoaded = false;
-  async function loadWorkers() {
-    const version = ++workersLoadVersion;
-    const owner = state.user?.id;
-    const current = () => version === workersLoadVersion && owner === state.user?.id;
-    const refresh = document.getElementById('workers-refresh');
-    const loading = document.getElementById('workers-loading');
-    const summary = document.getElementById('workers-summary');
-    refresh.disabled = true;
-    loading.hidden = false;
-    workersBody.setAttribute('aria-busy', 'true');
-    setError(workersError, '');
-    try {
-      const resp = await api('/api/workers');
-      if (!current()) return;
-      if (resp.status === 401) { await handleUnauthorized(); return; }
-      if (resp.status === 403) {
-        workersBody.replaceChildren();
-        workersTable.hidden = true;
-        workersEmpty.hidden = true;
-        summary.hidden = true;
-        workersLoaded = false;
-        setError(workersError, 'Administrator access is required to view workers.');
-        return;
-      }
-      if (!resp.ok) throw new Error('request failed');
-      const workers = await resp.json();
-      if (!current()) return;
-      if (!Array.isArray(workers)) throw new Error('invalid response');
-      renderWorkers(workers);
-      workersLoaded = true;
-      const available = workers.filter(w => w.status === 'up' && !w.revoked).length;
-      summary.textContent = `${workers.length} ${workers.length === 1 ? 'worker' : 'workers'} registered · ${available} available`;
-      summary.hidden = false;
-    } catch {
-      if (!current()) return;
-      workersEmpty.hidden = true;
-      summary.hidden = true;
-      setError(workersError, workersLoaded
-        ? 'Could not refresh workers. Showing the last loaded list. Select Refresh to try again.'
-        : 'Could not load workers. Check your connection and select Refresh to try again.');
-    } finally {
-      if (current()) {
-        refresh.disabled = false;
-        loading.hidden = true;
-        workersBody.removeAttribute('aria-busy');
-      }
-    }
-  }
-
-  function renderWorkers(workers) {
-    workersBody.textContent = '';
-    if (workersEmpty) workersEmpty.hidden = workers.length !== 0;
-    if (workersTable) workersTable.hidden = workers.length === 0;
-    for (const w of workers) {
-      const d = workerDisplay(w);
-      const tr = document.createElement('tr');
-
-      const node = document.createElement('td');
-      const name = document.createElement('strong');
-      name.className = 'worker-name';
-      name.textContent = w.name || w.node_id || 'Unknown worker';
-      node.appendChild(name);
-      if (w.name && w.node_id) {
-        const id = document.createElement('span');
-        id.className = 'worker-node';
-        id.textContent = w.node_id;
-        node.appendChild(id);
-      }
-      tr.appendChild(node);
-
-      const tier = document.createElement('td');
-      tier.textContent = d.tier;
-      tr.appendChild(tier);
-
-      const status = document.createElement('td');
-      const badge = document.createElement('span');
-      badge.className = `badge badge-${d.statusClass}`;
-      badge.textContent = d.statusText;
-      status.appendChild(badge);
-      tr.appendChild(status);
-
-      const version = document.createElement('td');
-      version.textContent = d.version;
-      tr.appendChild(version);
-
-      const hb = document.createElement('td');
-      let hbText = 'never';
-      if (w.last_heartbeat) {
-        const dt = new Date(w.last_heartbeat);
-        hbText = isNaN(dt.getTime()) ? String(w.last_heartbeat) : relativeTime(dt);
-        if (!isNaN(dt.getTime())) hb.title = dt.toLocaleString();
-      }
-      hb.textContent = hbText;
-      tr.appendChild(hb);
-
-      workersBody.appendChild(tr);
-    }
-  }
-
-  async function loadAuditEvents(page, selection = state.auditSelection) {
-    const requestID = auditRequests.begin();
-    setError(auditError, '');
-    state.auditSelection = selection;
-    updateAuditContext(selection);
-    if (auditLoading) {
-      auditLoading.textContent = auditLoadingMessage(selection);
-      auditLoading.hidden = false;
-    }
-    if (auditPagination) auditPagination.hidden = true;
-    auditBody.textContent = '';
-    if (auditEmpty) auditEmpty.hidden = true;
-    const auditTable = document.getElementById('audit-table');
-    if (auditTable) {
-      auditTable.hidden = false;
-      auditTable.setAttribute('aria-busy', 'true');
-    }
-    let resp;
-    try {
-      resp = await api(auditListPath(page, selection));
-    } catch {
-      if (!auditRequests.isCurrent(requestID)) return;
-      if (auditLoading) auditLoading.hidden = true;
-      if (auditTable) { auditTable.removeAttribute('aria-busy'); auditTable.hidden = true; }
-      setError(auditError, auditLoadError(selection));
-      return;
-    }
-    if (!auditRequests.isCurrent(requestID)) return;
-    if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (resp.status === 403) {
-      // A genuine access loss (role changed, or operator_audit_access turned
-      // off, mid-session), not a load failure: rendering the audit chrome
-      // with an error banner would leave a now-unprivileged visitor sitting
-      // on a page they can no longer use. Leave the same way a direct-URL
-      // visit by a non-privileged role would have been kept out in the first
-      // place (see resolveAuditLogAccess).
-      router.navigate('/', { replace: true });
-      return;
-    }
-    if (!resp.ok) {
-      if (auditLoading) auditLoading.hidden = true;
-      if (auditTable) { auditTable.removeAttribute('aria-busy'); auditTable.hidden = true; }
-      setError(auditError, auditLoadError(selection));
-      return;
-    }
-
-    let body;
-    try {
-      body = await resp.json();
-    } catch {
-      if (!auditRequests.isCurrent(requestID)) return;
-      if (auditLoading) auditLoading.hidden = true;
-      if (auditTable) { auditTable.removeAttribute('aria-busy'); auditTable.hidden = true; }
-      setError(auditError, auditLoadError(selection));
-      return;
-    }
-    if (!auditRequests.isCurrent(requestID)) return;
-    // Server returns {events, total, has_more}; legacy callers may still get
-    // a bare array if anything reverts the API, so be defensive.
-    const events = Array.isArray(body) ? body : (body.events || []);
-    state.auditHasMore = Array.isArray(body)
-      ? events.length === 100
-      : !!body.has_more;
-    state.auditTotal = Array.isArray(body) ? null : (body.total ?? null);
-    state.auditPage = page;
-    renderAuditEvents(events);
-  }
-
-  function renderAuditEvents(events) {
-    if (auditLoading) auditLoading.hidden = true;
-    auditBody.textContent = '';
-    const noEvents = events.length === 0;
-    if (auditEmpty) {
-      auditEmpty.textContent = auditEmptyMessage(state.auditSelection);
-      auditEmpty.hidden = !noEvents;
-    }
-    const auditTable = document.getElementById('audit-table');
-    if (auditTable) {
-      auditTable.removeAttribute('aria-busy');
-      auditTable.hidden = noEvents;
-    }
-
-    for (const e of events) {
-      const tr = document.createElement('tr');
-      tr.id = `audit-event-${e.id}`;
-      const selectedEvent = state.auditSelection.event === String(e.id);
-      if (selectedEvent) {
-        tr.className = 'audit-event-selected';
-        tr.tabIndex = -1;
-        tr.setAttribute('aria-label', `Selected audit event ${e.id}`);
-      }
-
-      // Time
-      const timeCell = document.createElement('td');
-      const ts = new Date(e.created_at);
-      timeCell.textContent = relativeTime(ts);
-      timeCell.title = ts.toISOString();
-      tr.appendChild(timeCell);
-
-      // User
-      const userCell = document.createElement('td');
-      userCell.textContent = e.username || '—';
-      tr.appendChild(userCell);
-
-      // Action badge
-      const actionCell = document.createElement('td');
-      const badge = document.createElement('span');
-      // badge-action-default is the base, not the fallback: .badge itself
-      // carries no colours, so an action that is on the known list but has no
-      // colour rule of its own would otherwise render as bare text on the row
-      // background. Every badge starts neutral and a per-action rule, when the
-      // stylesheet has one, paints over it (the default rule is declared before
-      // them, so the specific colour wins the equal-specificity tie).
-      // Dots become hyphens so the class name is valid CSS and matches the
-      // stylesheet's .badge-action-env-set etc. selectors.
-      const actionClass = AUDIT_ACTIONS.includes(e.action)
-        ? ` badge-action-${e.action.replace(/\./g, '-')}`
-        : '';
-      badge.className = `badge badge-action-default${actionClass}`;
-      badge.textContent = auditActionLabel(e.action);
-      badge.title = e.action;
-      actionCell.appendChild(badge);
-      tr.appendChild(actionCell);
-
-      // Resource
-      const resourceCell = document.createElement('td');
-      const parts = [e.resource_type, e.resource_id].filter(Boolean);
-      resourceCell.textContent = parts.length ? parts.join(' ') : '—';
-      tr.appendChild(resourceCell);
-
-			// Action-specific durable attribution. Only allowlisted fields become
-			// text nodes; arbitrary audit JSON is never interpreted as markup.
-			const detailCell = document.createElement('td');
-			const detailEntries = auditDetailEntries(e);
-			if (detailEntries.length === 0) {
-				detailCell.textContent = '—';
-			} else if (detailEntries.length === 1 && detailEntries[0].isError) {
-				// A detail_error entry means the server failed to encode what it
-				// meant to record. Show it inline as a visible problem instead of
-				// behind the same "View outcome" expander normal fields use, where
-				// it would read as one more ordinary fact.
-				const warning = document.createElement('span');
-				warning.className = 'audit-detail-error';
-				warning.textContent = `Recording failed: ${detailEntries[0].value}`;
-				detailCell.appendChild(warning);
-			} else {
-				const details = document.createElement('details');
-				details.className = 'audit-details';
-				const summary = document.createElement('summary');
-				summary.textContent = e.action.startsWith('support_session.') ? 'View session' : 'View outcome';
-				const facts = document.createElement('dl');
-				for (const entry of detailEntries) {
-					const term = document.createElement('dt');
-					term.textContent = entry.label;
-					const value = document.createElement('dd');
-					value.textContent = entry.value;
-					facts.append(term, value);
-				}
-				details.append(summary, facts);
-				detailCell.appendChild(details);
-			}
-			tr.appendChild(detailCell);
-
-      // IP
-      const ipCell = document.createElement('td');
-      ipCell.textContent = e.ip_address || '—';
-      tr.appendChild(ipCell);
-
-      auditBody.appendChild(tr);
-    }
-
-    const selection = state.auditSelection;
-    updateAuditContext(selection);
-    if (auditPagination) auditPagination.hidden = !!selection.event;
-
-    const start = state.auditPage * 100 + 1;
-    const end   = state.auditPage * 100 + events.length;
-    if (events.length === 0) {
-      auditRange.textContent = 'No events';
-    } else if (state.auditTotal != null) {
-      auditRange.textContent = `Showing ${start}-${end} of ${state.auditTotal}`;
-    } else {
-      auditRange.textContent = `Showing ${start}-${end}`;
-    }
-    auditPrev.disabled = state.auditPage === 0;
-    auditNext.disabled = !state.auditHasMore;
-    const selectedRow = state.auditSelection.event
-      ? document.getElementById(`audit-event-${state.auditSelection.event}`)
-      : null;
-    if (selectedRow) selectedRow.focus({ preventScroll: false });
-  }
-
-  function updateAuditContext(selection) {
-    const range = auditRangeSuffix(selection);
-    const filtered = !!(selection.event || selection.run || selection.action || range);
-    if (auditContext && auditContextCopy) {
-      auditContext.hidden = !filtered;
-      if (selection.event) auditContextCopy.textContent = `Showing audit event ${selection.event}.`;
-      else if (selection.run) auditContextCopy.textContent = `Showing events from run ${selection.run}.`;
-      else if (selection.action) auditContextCopy.textContent = `Showing ${selection.action} events${range}.`;
-      else if (range) auditContextCopy.textContent = `Showing events${range}.`;
-      else auditContextCopy.textContent = '';
-    }
-    // Keep the filter controls in sync with the active selection, including
-    // when it changes from outside them (a deep link with ?action= or ?since=,
-    // or the "View all events" link clearing everything).
-    if (auditActionFilter) auditActionFilter.value = selection.action || '';
-    // A deep link into one event or run replaces the browsing filters, so the
-    // date inputs show nothing rather than a range that is not being applied.
-    const rangeActive = !selection.event && !selection.run;
-    if (auditSince) auditSince.value = rangeActive ? (selection.since || '') : '';
-    if (auditUntil) auditUntil.value = rangeActive ? (selection.until || '') : '';
-    // An empty end bound would otherwise let the picker offer a date that
-    // inverts the range, which the server rejects.
-    if (auditSince && auditUntil) {
-      auditSince.max = auditUntil.value || '';
-      auditUntil.min = auditSince.value || '';
-    }
-    if (auditRangeClear) auditRangeClear.hidden = !(auditSince?.value || auditUntil?.value);
-  }
-
-  // Re-runs the listing from the current filter controls, from page 0: a date
-  // range narrows the result set, so the old offset would land the operator on
-  // a page that no longer exists and read as an empty log.
-  function applyAuditFilters() {
-    loadAuditEvents(0, {
-      event: '',
-      run: '',
-      action: auditActionFilter ? auditActionFilter.value : '',
-      since: auditSince ? auditSince.value : '',
-      until: auditUntil ? auditUntil.value : '',
-    });
-  }
-
-  let peopleInventory = [];
-  let personActionMenus = [];
-  let peopleOnboarding = null;
-  const invitationList = createInvitationList({
-    document, api, onUnauthorized: handleUnauthorized,
-    confirm: message => window.confirm(message),
-    announce: message => flashToast(message, 'success'),
-    onReplaced: result => newPerson.showInvitation(result, true),
-    canInvite: () => peopleOnboarding?.local === true,
+  const auditExplorer = createAuditExplorer({
+    document, state, api, navigate: (path, options) => router.navigate(path, options),
+    onUnauthorized: handleUnauthorized, copy: text => navigator.clipboard.writeText(text), origin: window.location.origin,
   });
 
-  async function loadUsers() {
-    personActionMenus.forEach(menu => menu.close());
-    peopleInventory = [];
-    document.getElementById('people-count').textContent = 'Loading people…';
-    document.getElementById('people-search').disabled = true;
-    document.getElementById('people-role-filter').disabled = true;
-    setError(usersError, '');
-    state.supportSessions = { enabled: null };
-    peopleOnboarding = null;
-    applyPeopleOnboarding(document, null);
-
-    const showLoading = usersBody.childElementCount === 0;
-    if (showLoading) {
-      usersBody.setAttribute('aria-busy', 'true');
-      const tr = document.createElement('tr');
-      const td = document.createElement('td');
-      td.colSpan = 4;
-      td.className = 'grid-loading';
-      td.setAttribute('role', 'status');
-      td.textContent = 'Loading people…';
-      tr.appendChild(td);
-      usersBody.appendChild(tr);
-    }
-    const clearUsersLoading = () => {
-      document.getElementById('people-count').textContent = '';
-      document.getElementById('people-search').disabled = false;
-      document.getElementById('people-role-filter').disabled = false;
-      usersBody.removeAttribute('aria-busy');
-    };
-
-    let resp;
-    try {
-      resp = await api('/api/users');
-    } catch {
-      clearUsersLoading();
-      usersBody.textContent = '';
-      setError(usersError, 'Network error');
-      return;
-    }
-    if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (resp.status === 403) { clearUsersLoading(); usersBody.textContent = ''; setError(usersError, 'Admin only'); return; }
-    if (!resp.ok) { clearUsersLoading(); usersBody.textContent = ''; setError(usersError, 'Failed to load users'); return; }
-    let users = [];
-    try {
-      const uBody = (await resp.json()) || [];
-      // Standard {items,...} list envelope; tolerate a bare array for resilience.
-      users = Array.isArray(uBody) ? uBody : (Array.isArray(uBody.items) ? uBody.items : []);
-      peopleOnboarding = uBody.onboarding || null;
-      applyPeopleOnboarding(document, peopleOnboarding, identityPeoplePanel.hidden);
-      invitationList.load();
-      if (!Array.isArray(uBody) && uBody.support_sessions) {
-        state.supportSessions = uBody.support_sessions;
-      }
-    }
-    catch { clearUsersLoading(); usersBody.textContent = ''; setError(usersError, 'Invalid response'); return; }
-    clearUsersLoading();
-    renderUsers(users.filter(u => u.principal_type !== 'service_account'));
-  }
-
-  function renderUsers(users) {
-    personActionMenus.forEach(menu => menu.close());
-    personActionMenus = [];
-    peopleInventory = users;
-    const query = document.getElementById('people-search').value.trim().toLocaleLowerCase();
-    const roleFilter = document.getElementById('people-role-filter').value;
-    const filtered = users.filter(user => (!roleFilter || user.role === roleFilter)
-      && `${user.username} ${user.display_name || ''}`.toLocaleLowerCase().includes(query));
-    document.getElementById('people-count').textContent = query || roleFilter
-      ? `${filtered.length} of ${users.length} people` : `${users.length} ${users.length === 1 ? 'person' : 'people'}`;
-    usersBody.textContent = '';
-    if (!filtered.length) {
-      const row = usersBody.insertRow();
-      const cell = row.insertCell();
-      cell.colSpan = 4;
-      cell.textContent = users.length ? 'No people match. Try another name or choose All roles.' : 'No people yet. Invite someone or share your sign-in link to get started.';
-    }
-    const selfId = state.user ? state.user.id : null;
-
-    for (const u of filtered) {
-      const tr = document.createElement('tr');
-      const caps = userRowCaps(u, selfId);
-
-      // Username
-      const nameCell = document.createElement('td');
-      nameCell.className = 'users-username';
-      const usernameText = document.createElement('span');
-      usernameText.textContent = u.username;
-      nameCell.appendChild(usernameText);
-      if (caps.isSelf) {
-        const tag = document.createElement('span');
-        tag.className = 'users-self-tag';
-        tag.textContent = 'you';
-        nameCell.appendChild(tag);
-      }
-      if (caps.reserved) {
-        const tag = document.createElement('span');
-        tag.className = 'users-reserved-tag';
-        tag.textContent = 'token';
-        tag.title = RESERVED_USER_HINT;
-        nameCell.appendChild(tag);
-      }
-      nameCell.appendChild(makeCopyButton(u.username, `Copy username ${u.username}`));
-      if (typeof u.has_local_password === 'boolean') {
-        const signIn = document.createElement('span');
-        signIn.className = 'users-display-name';
-        signIn.textContent = u.has_local_password ? (peopleOnboarding?.local === false ? 'Password sign-in disabled' : 'Password sign-in') : 'Single sign-on';
-        nameCell.appendChild(signIn);
-      }
-      // Friendly display name (when set) as a subtitle under the username.
-      if (u.display_name) {
-        const dn = document.createElement('span');
-        dn.className = 'users-display-name';
-        dn.textContent = u.display_name;
-        nameCell.appendChild(dn);
-      }
-      tr.appendChild(nameCell);
-
-      // Role (editable select; disabled for self)
-      const roleCell = document.createElement('td');
-      const select = document.createElement('select');
-      select.className = 'users-row-role';
-      const rolePresentation = userRolePresentation(u);
-      select.setAttribute('aria-label', `Role for ${u.username}`);
-      const automatic = document.createElement('option');
-      automatic.value = '';
-      automatic.textContent = rolePresentation.automaticLabel;
-      select.appendChild(automatic);
-      for (const r of ['viewer', 'developer', 'operator', 'admin']) {
-        const opt = document.createElement('option');
-        opt.value = r;
-        opt.textContent = r.charAt(0).toUpperCase() + r.slice(1);
-        select.appendChild(opt);
-      }
-      select.value = rolePresentation.selected;
-      select.dataset.previous = rolePresentation.selected;
-      if (!caps.canChangeRole) {
-        select.disabled = true;
-        if (caps.roleHint) select.title = caps.roleHint;
-      } else {
-        select.addEventListener('change', () => updateUserRole(u.id, u.username, select));
-      }
-      roleCell.appendChild(select);
-      const roleSource = document.createElement('span');
-      roleSource.className = 'users-display-name';
-      roleSource.textContent = caps.isSelf ? `${rolePresentation.sourceLabel} · Your role can be changed by another admin.` : rolePresentation.sourceLabel;
-      roleCell.appendChild(roleSource);
-      tr.appendChild(roleCell);
-
-      // Created
-      const createdCell = document.createElement('td');
-      createdCell.className = 'users-created';
-      const ts = new Date(u.created_at);
-      createdCell.textContent = relativeTime(ts);
-      createdCell.title = ts.toISOString();
-      tr.appendChild(createdCell);
-
-      // Actions
-      const actionsCell = document.createElement('td');
-      const actions = document.createElement('div');
-      actions.className = 'users-row-actions';
-
-      const supportAction = createSupportSessionAction({
-        document, user: u, selfId, enabled: state.supportSessions.enabled,
-        onStart: () => openSupportSessionModal(u),
-      });
-      if (supportAction) actions.appendChild(supportAction);
-
-      const resetBtn = document.createElement('button');
-      resetBtn.type = 'button';
-      resetBtn.className = 'btn-row';
-      resetBtn.textContent = 'Reset password';
-      resetBtn.setAttribute('aria-label', `Reset password for ${u.username}`);
-      if (!caps.canResetPassword || u.has_local_password === false || peopleOnboarding?.local === false) {
-        resetBtn.disabled = true;
-        resetBtn.title = caps.reserved ? RESERVED_USER_HINT : 'Password is managed by the sign-in provider';
-        resetBtn.hidden = !caps.reserved;
-      } else {
-        resetBtn.addEventListener('click', () => openResetPasswordModal(u));
-      }
-      actions.appendChild(resetBtn);
-
-      const revokeBtn = document.createElement('button');
-      revokeBtn.type = 'button';
-      revokeBtn.className = 'btn-row btn-row-warn';
-      revokeBtn.textContent = 'Sign out everywhere';
-      revokeBtn.setAttribute('aria-label', `Sign out ${u.username} everywhere`);
-      if (!caps.canRevokeSessions) {
-        revokeBtn.disabled = true;
-        if (caps.revokeSessionsHint) revokeBtn.title = caps.revokeSessionsHint;
-      } else {
-        revokeBtn.addEventListener('click', () => revokeUserSessions(u.id, u.username, revokeBtn));
-      }
-      actions.appendChild(revokeBtn);
-
-      const delBtn = document.createElement('button');
-      delBtn.type = 'button';
-      delBtn.className = 'btn-row btn-row-danger';
-      delBtn.textContent = 'Delete person';
-      delBtn.setAttribute('aria-label', `Delete user ${u.username}`);
-      if (!caps.canDelete) {
-        delBtn.disabled = true;
-        if (caps.deleteHint) delBtn.title = caps.deleteHint;
-      } else {
-        delBtn.addEventListener('click', () => deleteUser(u.id, u.username, delBtn));
-      }
-      actions.appendChild(delBtn);
-
-      const personMenu = createPersonActions(document, u.username, [...actions.children]);
-      personActionMenus.push(personMenu);
-      actionsCell.appendChild(personMenu.element);
-      tr.appendChild(actionsCell);
-
-      usersBody.appendChild(tr);
-    }
-  }
+  const peopleDirectory = createPeopleDirectory({
+    document, state, api, onUnauthorized: handleUnauthorized,
+    navigate: (path, options) => router.navigate(path, options), flashToast,
+    confirm: message => window.confirm(message), makeCopyButton,
+    openResetPasswordModal, openSupportSessionModal,
+    onReplaced: result => newPerson.showInvitation(result, true),
+    onAccessLost: () => clearIdentityServices(),
+  });
+  function loadUsers() { return peopleDirectory.load(); }
 
   function showIdentityPanel(kind) {
     const services = kind === 'services';
@@ -2316,12 +1801,25 @@ document.addEventListener('DOMContentLoaded', () => {
     identityServicesTab.setAttribute('aria-selected', String(services));
 	identityPeopleTab.tabIndex = services ? -1 : 0;
 	identityServicesTab.tabIndex = services ? 0 : -1;
-    applyPeopleOnboarding(document, peopleOnboarding, services);
+    peopleDirectory.applyOnboarding(services);
     if (services) loadServiceAccounts();
   }
 
+  let serviceLoadGeneration = 0;
+  function clearIdentityServices() {
+    serviceLoadGeneration++;
+    newPerson.reset();
+    if (serviceCredentialModal && !serviceCredentialModal.hidden) {
+      serviceCredentialSecretRevealed = false; closeServiceCredentialModal();
+    }
+    if (resetPwModal && !resetPwModal.hidden) closeResetPasswordModal();
+    serviceAccountsList?.replaceChildren(); serviceAccountsList?.removeAttribute('aria-busy');
+    if (serviceAccountsStatus) serviceAccountsStatus.textContent = '';
+    setError(serviceAccountsError, '');
+  }
   async function loadServiceAccounts() {
-    if (!serviceAccountsList) return;
+    if (!serviceAccountsList || !peopleDirectory.current()) return;
+    const generation = ++serviceLoadGeneration;
     setError(serviceAccountsError, '');
     const hadInventory = Boolean(serviceAccountsList.querySelector('.service-account-card'));
     serviceAccountsList.setAttribute('aria-busy', 'true');
@@ -2331,14 +1829,16 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     let accountsResp;
     try {
-      accountsResp = await api('/api/service-accounts');
+      accountsResp = await peopleDirectory.request('/api/service-accounts');
     } catch {
+      if (!peopleDirectory.current() || generation !== serviceLoadGeneration) return;
       serviceAccountsList.removeAttribute('aria-busy');
       if (!hadInventory) serviceAccountsList.textContent = '';
       setError(serviceAccountsError, 'Service accounts could not be loaded. Check your connection and try again.');
       serviceAccountsStatus.textContent = 'Service accounts could not be loaded.';
       return;
     }
+    if (!peopleDirectory.current() || generation !== serviceLoadGeneration) return;
     if (accountsResp.status === 401) { await handleUnauthorized(); return; }
     if (!accountsResp.ok) {
       serviceAccountsList.removeAttribute('aria-busy');
@@ -2347,16 +1847,23 @@ document.addEventListener('DOMContentLoaded', () => {
       serviceAccountsStatus.textContent = 'Service accounts could not be loaded.';
       return;
     }
-    const accountBody = await accountsResp.json();
-    const accounts = Array.isArray(accountBody?.items) ? accountBody.items : [];
+    let accountBody;
+    try { accountBody = await accountsResp.json(); if (!Array.isArray(accountBody?.items)) throw new Error(); }
+    catch {
+      if (!peopleDirectory.current() || generation !== serviceLoadGeneration) return;
+      serviceAccountsList.removeAttribute('aria-busy');
+      setError(serviceAccountsError, 'Could not read service accounts. Select Refresh to try again.'); return;
+    }
+    const accounts = accountBody.items;
     const hydrated = await Promise.all(accounts.map(async account => {
       try {
-        const response = await api(`/api/service-accounts/${encodeURIComponent(account.key)}/credentials`);
+        const response = await peopleDirectory.request(`/api/service-accounts/${encodeURIComponent(account.key)}/credentials`);
         if (!response.ok) return {...account, credentials: [], credentialsError: true};
         const body = await response.json();
         return {...account, credentials: Array.isArray(body?.items) ? body.items : []};
       } catch { return {...account, credentials: [], credentialsError: true}; }
     }));
+    if (!peopleDirectory.current() || generation !== serviceLoadGeneration) return;
     renderServiceAccounts(hydrated);
     serviceAccountsList.removeAttribute('aria-busy');
     serviceAccountsStatus.textContent = hydrated.some(account => account.credentialsError)
@@ -2422,9 +1929,9 @@ document.addEventListener('DOMContentLoaded', () => {
         ? `<div class="service-credential-tools"><label><span class="sr-only">Search credentials</span><input type="search" placeholder="Search credentials" data-service-search-input></label><label><span class="sr-only">Filter credential status</span><select data-service-state-filter><option value="all">All statuses</option><option value="active">Active</option><option value="expired">Expired</option></select></label><span class="service-filter-status" role="status" data-service-filter-status>${credentials.length} credentials</span></div>`
         : '';
       return `<article class="service-account-card">
-        <header><div><h3>${escapeHtml(account.name)}</h3><p>Compatibility username <code>${escapeHtml(account.username)}</code> · Platform-managed</p></div><button type="button" class="btn-primary" data-service-create="${escapeHtml(account.key)}">New credential</button></header>
+        <header><div><h3>${escapeHtml(account.name)}</h3><p>Platform-managed account</p></div><button type="button" class="btn-primary" data-service-create="${escapeHtml(account.key)}">New credential</button></header>
         ${tools}
-        <div class="service-credential-table"><table role="table"><thead role="rowgroup"><tr role="row"><th role="columnheader" scope="col" id="${headers.credential}">Credential</th><th role="columnheader" scope="col" id="${headers.role}">Role</th><th role="columnheader" scope="col" id="${headers.apps}">Apps</th><th role="columnheader" scope="col" id="${headers.expires}">Expires</th><th role="columnheader" scope="col" id="${headers.used}">Last used</th><th role="columnheader" scope="col" id="${headers.action}"><span class="sr-only">Action</span></th></tr></thead><tbody role="rowgroup">${body}</tbody></table></div>
+        ${!credentials.length && !account.credentialsError ? '<p class="service-credential-empty">No credentials yet. Create one for your first team or pipeline.</p>' : `<div class="service-credential-table"><table role="table"><thead role="rowgroup"><tr role="row"><th role="columnheader" scope="col" id="${headers.credential}">Credential</th><th role="columnheader" scope="col" id="${headers.role}">Role</th><th role="columnheader" scope="col" id="${headers.apps}">Apps</th><th role="columnheader" scope="col" id="${headers.expires}">Expires</th><th role="columnheader" scope="col" id="${headers.used}">Last used</th><th role="columnheader" scope="col" id="${headers.action}"><span class="sr-only">Action</span></th></tr></thead><tbody role="rowgroup">${body}</tbody></table></div>`}
       </article>`;
     }).join('');
   }
@@ -2546,21 +2053,24 @@ document.addEventListener('DOMContentLoaded', () => {
     const submit = document.getElementById('service-credential-submit');
     submit.disabled = true;
     submit.textContent = 'Creating…';
+    const generation = serviceLoadGeneration;
     serviceCredentialForm.setAttribute('aria-busy', 'true');
     let response;
     try {
-      response = await api(`/api/service-accounts/${encodeURIComponent(serviceCredentialAccountKey)}/credentials`, {method: 'POST', body: JSON.stringify({
+      response = await peopleDirectory.request(`/api/service-accounts/${encodeURIComponent(serviceCredentialAccountKey)}/credentials`, {method: 'POST', body: JSON.stringify({
         name: credentialName, role: serviceCredentialRole.value,
         apps: scope === 'apps' ? apps : [], unrestricted: scope === 'all',
         expires_in_days: Number(serviceCredentialExpiry.value),
       })});
     } catch {
-      setError(serviceCredentialError, 'Network error. The credential was not created.');
+      if (!peopleDirectory.current() || generation !== serviceLoadGeneration) return;
+      setError(serviceCredentialError, 'Could not confirm credential creation. Refresh the credential list before trying again.');
       submit.disabled = false;
       submit.textContent = 'Create credential';
       serviceCredentialForm.removeAttribute('aria-busy');
       return;
     }
+    if (!peopleDirectory.current() || generation !== serviceLoadGeneration) return;
     submit.disabled = false;
     submit.textContent = 'Create credential';
     serviceCredentialForm.removeAttribute('aria-busy');
@@ -2569,7 +2079,16 @@ document.addEventListener('DOMContentLoaded', () => {
       setError(serviceCredentialError, body.error || 'Credential could not be created.');
       return;
     }
-    const credential = await response.json();
+    let credential;
+    try {
+      credential = await response.json();
+      if (typeof credential?.token !== 'string' || !credential.token) throw new Error();
+    } catch {
+      if (peopleDirectory.current() && generation === serviceLoadGeneration)
+        setError(serviceCredentialError, 'Could not confirm credential creation. Refresh the credential list before trying again.');
+      return;
+    }
+    if (!peopleDirectory.current() || generation !== serviceLoadGeneration) return;
     serviceCredentialToken.textContent = credential.token;
     const scopeSummary = credential.unrestricted ? 'All apps' : (credential.apps || []).join(', ');
     const expirySummary = credential.expires_at
@@ -2623,72 +2142,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     const status = card.querySelector('[data-service-filter-status]');
     if (status) status.textContent = `${shown} of ${rows.length} credentials shown`;
-  }
-
-  async function updateUserRole(id, username, selectEl) {
-    const newRole = selectEl.value;
-    const previous = selectEl.dataset.previous || '';
-    selectEl.disabled = true;
-    let resp;
-    try {
-      resp = await api(`/api/users/${id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({role: newRole}),
-      });
-    } catch {
-      selectEl.value = previous;
-      setError(usersError, `Could not change the role for ${username}. Check your connection and try again.`);
-      selectEl.disabled = false;
-      return;
-    }
-    selectEl.disabled = false;
-    if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (!resp.ok) {
-      setError(usersError, `Failed to update role for ${username}`);
-      selectEl.value = previous;
-      return;
-    }
-    setError(usersError, '');
-    flashToast(`Role updated for ${username}.`, 'success');
-    loadUsers();
-  }
-
-  async function revokeUserSessions(id, username, btn) {
-    if (!confirm(`Sign out "${username}" everywhere? Every active session ends immediately; they will need to log in again.`)) return;
-    if (btn) btn.disabled = true;
-    let resp;
-    try {
-      resp = await api(`/api/users/${id}/revoke-sessions`, {method: 'POST'});
-    } catch {
-      setError(usersError, 'Network error');
-      return;
-    } finally {
-      if (btn) btn.disabled = false;
-    }
-    if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (!resp.ok) { setError(usersError, `Failed to sign out ${username}`); return; }
-    setError(usersError, '');
-    flashToast(`${username} signed out everywhere.`, 'success');
-  }
-
-  async function deleteUser(id, username, btn) {
-    if (!confirm(`Delete person "${username}"? This cannot be undone.`)) return;
-    if (btn) btn.disabled = true;
-    let resp;
-    try {
-      resp = await api(`/api/users/${id}`, {method: 'DELETE'});
-    } catch {
-      setError(usersError, 'Network error');
-      return;
-    } finally {
-      if (btn) btn.disabled = false;
-    }
-    if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (!resp.ok) { setError(usersError, `Failed to delete ${username}`); return; }
-    setError(usersError, '');
-    flashToast(`${username} deleted.`, 'success');
-    await loadUsers();
-    document.getElementById('users-refresh').focus();
   }
 
   function openResetPasswordModal(user) {
@@ -2952,10 +2405,10 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   const newPerson = createNewPersonController({
-    document, api, origin: window.location.origin,
+    document, api: peopleDirectory.request, origin: window.location.origin,
     activate: () => modalTrap(newUserModal).activate(),
     release: () => modalTrap(newUserModal).release(),
-    onCreated: () => invitationList.load(),
+    onCreated: () => peopleDirectory.refreshInvitations(),
     onUnauthorized: handleUnauthorized,
     copy: text => navigator.clipboard.writeText(text),
   });
@@ -2963,215 +2416,14 @@ document.addEventListener('DOMContentLoaded', () => {
   function closeNewUserModal() { newPerson.close(); }
   function submitNewUser(event) { return newPerson.submit(event); }
 
-  // ── API tokens (self-service, /tokens page) ────────────────────────────────
-  let tokensLoadVersion = 0;
-  let tokensLoaded = false;
-  async function loadTokens() {
-    if (!tokensList) return;
-    const version = ++tokensLoadVersion;
-    const owner = state.user?.id;
-    const current = () => version === tokensLoadVersion && owner === state.user?.id;
-    const loading = document.getElementById('tokens-loading');
-    tokensRefresh.disabled = true;
-    loading.hidden = false;
-    tokensList.setAttribute('aria-busy', 'true');
-    const selfService = !state.user || state.user.can_manage_self !== false;
-    if (newTokenButton) newTokenButton.hidden = !selfService;
-    setError(tokensError, '');
-    try {
-      const resp = await api('/api/tokens');
-      if (!current()) return;
-      if (resp.status === 401) { await handleUnauthorized(); return; }
-      if (resp.status === 403) {
-        tokensList.replaceChildren();
-        tokensLoaded = false;
-        setError(tokensError, 'This account does not have access to personal API tokens.');
-        return;
-      }
-      if (!resp.ok) throw new Error('request failed');
-      const body = await resp.json();
-      if (!current()) return;
-      const tokens = Array.isArray(body) ? body : body?.items;
-      if (!Array.isArray(tokens)) throw new Error('invalid response');
-      renderTokenList(tokensList, tokenListModels(tokens), document, {mutable: selfService});
-      tokensLoaded = true;
-    } catch {
-      if (!current()) return;
-      tokensList.querySelector('[data-tokens-empty]')?.remove();
-      setError(tokensError, tokensLoaded
-        ? 'Could not refresh tokens. Showing the last loaded list. Select Refresh to try again.'
-        : 'Could not load tokens. Check your connection and select Refresh to try again.');
-    } finally {
-      if (current()) {
-        tokensRefresh.disabled = false;
-        loading.hidden = true;
-        tokensList.removeAttribute('aria-busy');
-      }
-    }
-  }
-
-  // The code-entry form has no state carried on the URL or in storage: a
-  // person reads the code off their own terminal and types it here, so
-  // visiting /tokens always shows the same blank form regardless of how they
-  // arrived (including back from an SSO redirect). The one exception is the
-  // legacy-CLI notice below, which only checks whether an old-style link's
-  // query parameters are PRESENT; it never reads their values, so nothing in
-  // the URL can drive an approval.
-  function resetCLIConnectForm() {
-    if (!cliConnectPanel) return;
-    if (cliConnectCodeInput) cliConnectCodeInput.value = '';
-    setError(cliConnectError, '');
-    if (cliConnectSuccess) cliConnectSuccess.hidden = true;
-    if (cliConnectApprove) {
-      cliConnectApprove.disabled = false;
-      cliConnectApprove.textContent = 'Connect CLI';
-    }
-    if (cliConnectLegacyNotice) {
-      cliConnectLegacyNotice.hidden = !legacyCLIConnectLinkDetected(location.search);
-    }
-  }
-
-  async function approveCLIConnect() {
-    if (!cliConnectApprove) return;
-    const code = normalizeCLIUserCode(cliConnectCodeInput ? cliConnectCodeInput.value : '');
-    setError(cliConnectError, '');
-    if (!validCLIUserCode(code)) {
-      setError(cliConnectError, 'Enter the code exactly as shown in your terminal.');
-      return;
-    }
-    cliConnectApprove.disabled = true;
-    cliConnectApprove.textContent = 'Connecting…';
-    let resp;
-    try {
-      resp = await api('/api/auth/cli-connect/approve', {
-        method: 'POST',
-        body: JSON.stringify({ user_code: code }),
-      });
-    } catch {
-      setError(cliConnectError, 'Network error. The terminal is still waiting; try again.');
-      cliConnectApprove.disabled = false;
-      cliConnectApprove.textContent = 'Connect CLI';
-      return;
-    }
-    if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (!resp.ok) {
-      let message = 'Could not connect this CLI';
-      try { const body = await resp.json(); if (body && body.error) message = body.error; } catch {}
-      setError(cliConnectError, message);
-      cliConnectApprove.disabled = false;
-      cliConnectApprove.textContent = 'Connect CLI';
-      return;
-    }
-    let body = {};
-    try { body = await resp.json(); } catch {}
-    if (cliConnectCodeInput) cliConnectCodeInput.value = '';
-    if (cliConnectSuccess) {
-      cliConnectSuccess.textContent = `Connected as ${cliConnectDeviceLabel(body.name)}. You can return to your terminal.`;
-      cliConnectSuccess.hidden = false;
-    }
-    cliConnectApprove.disabled = false;
-    cliConnectApprove.textContent = 'Connect CLI';
-    loadTokens();
-  }
-
-  function openNewTokenModal() {
-    if (state.user?.can_manage_self === false) {
-      flashToast('This shared account is read-only.', 'error');
-      return;
-    }
-    newTokenForm.reset();
-    setError(newTokenError, '');
-    newTokenForm.hidden = false;
-    tokenReveal.hidden = true;
-    tokenRevealValue.textContent = '';
-    newTokenModal.hidden = false;
-    modalTrap(newTokenModal).activate();
-    newTokenName.focus();
-  }
-
-  function closeNewTokenModal(force = false) {
-    if (force !== true && isInFlight(newTokenSubmit)) return;
-    newTokenModal.hidden = true;
-    modalTrap(newTokenModal).release();
-    newTokenForm.reset();
-    setError(newTokenError, '');
-    // Clear the revealed secret so it never lingers in the DOM after close.
-    tokenRevealValue.textContent = '';
-    tokenReveal.hidden = true;
-    newTokenForm.hidden = false;
-  }
-
-  async function submitNewToken(event) {
-    event.preventDefault();
-    if (newTokenForm.hidden || isInFlight(newTokenSubmit)) return;
-    const name = newTokenName.value.trim();
-    if (!name) { setError(newTokenError, 'A token name is required'); return; }
-    await runInFlight(newTokenSubmit, async () => {
-      const version = sessionVersion;
-      const payload = { name };
-      const expiryDays = parseInt(document.getElementById('new-token-expiry').value, 10);
-      if (Number.isFinite(expiryDays)) payload.expires_in_days = expiryDays;
-      setError(newTokenError, '');
-      newTokenForm.setAttribute('aria-busy', 'true');
-      for (const control of newTokenForm.elements) control.disabled = true;
-      newTokenClose.disabled = true;
-      newTokenSubmit.textContent = 'Creating token…';
-      try {
-        let resp;
-        try {
-          resp = await api('/api/tokens', { method: 'POST', body: JSON.stringify(payload) });
-        } catch {
-          if (version === sessionVersion) setError(newTokenError, 'Could not create the token. Check your connection and try again.');
-          return;
-        }
-        if (version !== sessionVersion) return;
-        if (resp.status === 401) { await handleUnauthorized(); return; }
-        if (!resp.ok) {
-          let msg = 'Failed to create token';
-          if (resp.status === 409) {
-            msg = 'You already have a token with that name';
-          } else {
-            try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch {}
-          }
-          setError(newTokenError, msg);
-          return;
-        }
-        let body = {};
-        try { body = await resp.json(); } catch {}
-        if (version !== sessionVersion) return;
-        // Reveal the raw token ONCE: swap the form for the reveal panel. The value is
-        // never re-fetchable (only the hash is stored server-side).
-        newTokenForm.hidden = true;
-        tokenRevealValue.textContent = body.token || '';
-        tokenReveal.hidden = false;
-        if (tokenRevealDone) tokenRevealDone.focus();
-        loadTokens(); // refresh the list behind the modal
-      } finally {
-        newTokenForm.removeAttribute('aria-busy');
-        for (const control of newTokenForm.elements) control.disabled = false;
-        newTokenClose.disabled = false;
-        newTokenSubmit.textContent = 'Create token';
-      }
-    });
-  }
-
-  async function revokeToken(id, name, btn) {
-    if (!confirm(`Revoke token "${name}"? Any CLI or app using it will stop working immediately.`)) return;
-    if (btn) btn.disabled = true;
-    let resp;
-    try {
-      resp = await api(`/api/tokens/${id}`, { method: 'DELETE' });
-    } catch {
-      setError(tokensError, 'Network error');
-      return;
-    } finally {
-      if (btn) btn.disabled = false;
-    }
-    if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (!resp.ok) { setError(tokensError, `Failed to revoke ${name}`); return; }
-    setError(tokensError, '');
-    loadTokens();
-  }
+  const tokenManager = createTokenManager({
+    document, state, api, onUnauthorized:handleUnauthorized,
+    activate:() => modalTrap(newTokenModal).activate(),
+    release:() => modalTrap(newTokenModal).release(),
+    copy:text => navigator.clipboard.writeText(text),
+    search:() => location.search,
+  });
+  function closeNewTokenModal(force = false) { tokenManager.close(force); }
 
   async function performRestart(slug, btn, cardLocal = false) {
     if (cardLocal && appRestartFeedback.get(slug)?.phase === 'pending') return;
@@ -3189,7 +2441,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (result.kind === 'unauthorized') {
       if (cardLocal) clearRestartFeedback(slug);
       await handleUnauthorized();
-      return;
+      return result;
     }
 
     if (result.kind !== 'success') {
@@ -3203,7 +2455,7 @@ document.addEventListener('DOMContentLoaded', () => {
       } else {
         setError(appError, result.message);
       }
-      return;
+      return result;
     }
 
     // The restart endpoint answers with the app's new row. Merge it and repaint
@@ -3227,6 +2479,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const success = setRestartFeedback(slug, 'success');
       window.setTimeout(() => clearRestartFeedback(slug, success.version), 6000);
     }
+    return result;
   }
 
   // refreshApp re-reads one app and folds it back into the model and its card.
@@ -3266,7 +2519,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const app = state.apps.find((item) => item.slug === slug);
     const copy = restartConfirmationCopy(app ? app.name : slug);
     if (!window.confirm(`${copy.title}\n\n${copy.message}`)) return;
-    await performRestart(slug, btn, false);
+    return await performRestart(slug, btn, false);
   }
 
   // lifecycleAction is the shared POST path behind Sleep, Stop and Start. It
@@ -3363,29 +2616,41 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   let settingsSlug = null;
+  let settingsRevision = 0;
 
   // A successful settings mutation can create (or clear) a temporary fleet
   // override. Re-read the server-owned convergence envelope and repaint only
   // fleet surfaces so the current form, focus, and unrelated unsaved edits stay
   // intact. Failure is deliberately non-fatal: the save already succeeded and
   // the next route mount will recover the display.
-  async function refreshDetailFleetState(slug) {
+  async function refreshDetailFleetState(slug, isCurrent = () => true) {
     if (!slug || !detailApp || detailApp.slug !== slug) return;
+    const originalApp = detailApp;
+    const stillCurrent = () => isCurrent() && detailApp?.slug === slug && (originalApp.id != null && detailApp.id != null
+      ? originalApp.id === detailApp.id : originalApp === detailApp);
     let resp;
     try {
       resp = await api(`/api/apps/${encodeURIComponent(slug)}`);
     } catch {
+      if (stillCurrent()) { markConfigurationBehaviorStale(document); }
       return;
     }
     if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (!resp.ok) return;
+    if (!resp.ok) { if (stillCurrent()) { markConfigurationBehaviorStale(document); } return; }
     let body;
-    try { body = await resp.json(); } catch { return; }
+    try { body = await resp.json(); } catch { if (stillCurrent()) { markConfigurationBehaviorStale(document); } return; }
     // The user may have navigated while the refresh was in flight.
-    if (!detailApp || detailApp.slug !== slug) return;
+    if (!stillCurrent()) return;
+    if (body?.app?.id != null && originalApp.id != null && body.app.id !== originalApp.id) {
+      markConfigurationBehaviorStale(document);
+      return;
+    }
     if (body && body.app) Object.assign(detailApp, body.app);
     detailLastEnvelope = body || {};
     refreshFleetSurfaces(document, detailApp, body && body.fleet_state);
+    if (body && body.app) applyConfigurationContext(document, detailApp, body);
+    else { markConfigurationBehaviorStale(document); }
+    updateWorkerCapacity();
   }
 
   // --- Settings dirty-state tracking (explicit-save model) ---
@@ -3397,6 +2662,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const settingsSections = {};
   let originalScalingSettings = {};
   let originalResourceSettings = {};
+  let resourceApplyPending = false;
   function registerSettingsSection(name, getEls, saveBtnId, dirtyId) {
     const els = getEls();
     const rec = {
@@ -3406,19 +2672,85 @@ document.addEventListener('DOMContentLoaded', () => {
       baseline: null,
     };
     settingsSections[name] = rec;
-    const onChange = () => recomputeDirty(name);
+    const section = rec.btn?.closest('#detail-configuration-panel .settings-block, #detail-access-panel .settings-block');
+    if (section) {
+      rec.discard = document.createElement('button');
+      rec.discard.type = 'button'; rec.discard.className = 'env-btn-secondary';
+      rec.discard.textContent = 'Discard changes'; rec.discard.disabled = true;
+      rec.btn.after(rec.discard);
+      rec.discard.addEventListener('click', () => {
+        rec.els.forEach((el, index) => {
+          const saved = rec.originals[index];
+          el.value = saved.value; el.checked = saved.checked; el.disabled = saved.disabled;
+          delete el.dataset.modeDraft;
+          el.removeAttribute('aria-invalid');
+          el.removeAttribute('aria-errormessage');
+        });
+        for (const id of Object.keys(directSettings)) refreshDirectSetting(document, id, { resetDraft: rec.els.includes(document.getElementById(id)) });
+        document.getElementById('general-description-count').textContent = `${[...document.getElementById('general-description').value].length} / 280 characters`;
+        syncAutoscaleControls(); updateAutoscaleCeiling(); updateScalingCeiling(); updateWorkerCapacity(); updateRenderPacingAdvice(); updateUsagePrivacyHelp(); refreshKeepWarmNote();
+        setError(document.getElementById(`${name}-error`), '');
+        setHidden(document.getElementById(`${name}-status`), true);
+        recomputeDirty(name);
+        focusSettingsFeedback(rec);
+      });
+      rec.sectionId = section.id;
+    }
+
+    const onChange = event => {
+      event.target.removeAttribute('aria-invalid');
+      event.target.removeAttribute('aria-errormessage');
+      recomputeDirty(name);
+    };
     els.forEach(el => {
       el.addEventListener('input', onChange);
       el.addEventListener('change', onChange);
     });
   }
+  function focusSettingsFeedback(rec) {
+    const section = rec.btn.closest('.settings-block');
+    const invalid = section.querySelector('[aria-invalid="true"]');
+    const error = section.querySelector('.error:not([hidden])');
+    if (invalid && error?.id) invalid.setAttribute('aria-errormessage', error.id);
+    if (document.activeElement !== document.body && !section.contains(document.activeElement)) return;
+    if (invalid && !invalid.disabled) {
+      invalid.closest('details')?.setAttribute('open', '');
+      invalid.focus();
+      return;
+    }
+    const target = section.querySelector('.error:not([hidden])') || section.querySelector('h2, legend');
+    target?.setAttribute('tabindex', '-1'); target?.focus({ preventScroll: true });
+  }
+  async function saveSettingsSection(name, action) {
+    const rec = settingsSections[name];
+    if (!rec || rec.saving) return;
+    const section = rec.btn.closest('.settings-block');
+    const controls = [...section.querySelectorAll('input, select, textarea, button')].filter(el => !el.closest('.settings-immediate'));
+    const slug = settingsSlug, revision = settingsRevision;
+    rec.lockedStates = new Map(controls.map(el => [el, el.disabled]));
+    section.setAttribute('aria-busy', 'true');
+    rec.saving = true;
+    rec.els.forEach(el => { el.removeAttribute('aria-invalid'); el.removeAttribute('aria-errormessage'); });
+    controls.forEach(el => { el.disabled = true; });
+    try { await action(); }
+    finally {
+      if (settingsSlug === slug && settingsRevision === revision) {
+        section.removeAttribute('aria-busy');
+        for (const [el, disabled] of rec.lockedStates) el.disabled = disabled;
+        rec.lockedStates = null; rec.saving = false;
+        recomputeDirty(name);
+        focusSettingsFeedback(rec);
+      } else { section.removeAttribute('aria-busy'); rec.lockedStates = null; rec.saving = false; }
+    }
+  }
+
   function sectionSnapshot(rec) {
-    // Disabled inputs don't contribute to the saved payload (e.g. the custom
-    // hibernate-minutes / autoscale-target fields are disabled unless their mode
-    // is selected). Excluding them keeps a section from reading "dirty" after a
-    // toggle to a mode-specific field and back.
+    // Track values independently of temporary save locks and mode relevance.
+    // Policy values are explicit fields; Discard restores the whole draft.
     return JSON.stringify(rec.els.map(el => {
-      if (el.disabled) return null;
+      // Inherited/off numbers are display values, not app configuration. A
+      // refreshed server default must not create an unsaved app override.
+      if (directSettings[el.id] && document.getElementById(`${el.id}-mode`).value !== 'custom') return null;
       return (el.type === 'checkbox' || el.type === 'radio') ? el.checked : el.value;
     }));
   }
@@ -3426,6 +2758,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const rec = settingsSections[name];
     if (!rec) return;
     rec.baseline = sectionSnapshot(rec);
+    rec.originals = rec.els.map(el => ({ value: el.value, checked: el.checked, disabled: rec.lockedStates?.get(el) ?? el.disabled }));
     recomputeDirty(name);
   }
   function isSectionDirty(name) {
@@ -3437,11 +2770,21 @@ document.addEventListener('DOMContentLoaded', () => {
     const rec = settingsSections[name];
     if (!rec) return;
     const dirty = isSectionDirty(name);
-    if (rec.btn && !rec.btn.hidden) rec.btn.disabled = !dirty;
+    if (rec.btn && !rec.btn.hidden) rec.btn.disabled = !!rec.saving || !dirty;
     if (rec.dirtyEl) setHidden(rec.dirtyEl, !dirty);
+    if (rec.discard) { rec.discard.disabled = !!rec.saving || !dirty; rec.discard.hidden = rec.btn.hidden; }
+    if (rec.sectionId) {
+      updateConfigurationDirty(document, rec.sectionId, dirty);
+    }
+    if (name === 'resources') {
+      document.getElementById('resources-retry-btn').hidden = !resourceApplyPending || dirty || rec.btn.hidden;
+      document.getElementById('resources-apply-note').hidden = !resourceApplyPending;
+    }
+    const status = document.getElementById(`${name}-status`);
+    if (dirty && status) setHidden(status, true);
   }
   function anySettingsDirty() {
-    return Object.keys(settingsSections).some(isSectionDirty);
+    return envFormDirty() || Object.keys(settingsSections).some(isSectionDirty);
   }
   // clearSettingsDirty re-snapshots every section to its current values, so the
   // unsaved-changes guard treats them as clean. Used on a confirmed discard and
@@ -3452,16 +2795,31 @@ document.addEventListener('DOMContentLoaded', () => {
   // confirmDiscardIfDirty gates navigation: returns true when it is safe to
   // leave (nothing unsaved, or the user confirmed). On confirm it re-snapshots
   // so the guard doesn't fire again during teardown.
-  function confirmDiscardIfDirty() {
+  function confirmDiscardIfDirty(destination) {
+    if (profileModal && !profileModal.hidden && !closeProfileModal()) return false;
+    if (!tokenManager.allowLeave()) return false;
+    if (envSaving || Object.values(settingsSections).some(rec => rec.saving)) { flashToast('Wait for the setting to finish saving.', 'info'); return false; }
+    if (destination && isSameAppSettingsDestination(destination, settingsSlug)) return true;
     if (announcementEditor && !announcementEditor.allowLeave()) return false;
     if (!anySettingsDirty()) return true;
     const ok = window.confirm('You have unsaved changes in this app’s settings. Leave without saving?');
-    if (ok) clearSettingsDirty();
+    if (ok) { closeEnvForm(true); clearSettingsDirty(); }
     return ok;
+  }
+
+  function updateAccessViewingNote(access) {
+    const note = document.getElementById('access-viewing-note');
+    const messages = {
+      public: 'Currently public: anyone can open this app without signing in. Removing members or groups does not restrict viewing.',
+      shared: 'Currently shared: all signed-in users can open this app. Removing members or groups does not restrict viewing.',
+      private: 'Removing a grant may leave access through other memberships, groups or platform roles.',
+    };
+    note.textContent = messages[access] || '';
   }
 
   function populateAccessPanel(app) {
     const canManage = canManageApp(state.user, app);
+    updateAccessViewingNote(app.access);
     const radios = document.querySelectorAll('input[name="access-level"]');
     radios.forEach(r => {
       r.checked = r.value === app.access;
@@ -3472,10 +2830,24 @@ document.addEventListener('DOMContentLoaded', () => {
     setHidden(document.getElementById('visibility-status'), true);
     snapshotSettingsSection('visibility');
 
+    // A newly mounted app invalidates pending access requests.
+    accessPanelRevision++;
+    memberListRequest++;
+    groupListRequest++;
     // Clear previous state.
     document.getElementById('members-list').innerHTML = '';
     document.getElementById('grant-username').value = '';
     document.getElementById('grant-error').hidden = true;
+    document.getElementById('group-access-list').replaceChildren();
+    document.getElementById('group-access-name').value = '';
+    document.getElementById('group-access-role').value = 'viewer';
+    document.getElementById('group-access-error').hidden = true;
+    document.getElementById('member-add').open = false;
+    document.getElementById('group-add').open = false;
+    for (const [id, text] of [['grant-btn', 'Add member'], ['group-access-add-btn', 'Add group']]) {
+      const button = document.getElementById(id);
+      button.disabled = false; button.textContent = text;
+    }
   }
 
   async function saveVisibility() {
@@ -3489,7 +2861,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Capture the submitted slug + value BEFORE the await: the user might switch
     // apps or radios while the PATCH is in flight. Freeze the radio group so the
     // selection can't drift mid-save.
-    const slug = settingsSlug;
+    const slug = settingsSlug, revision = accessPanelRevision;
     const value = selected.value;
     const btn = document.getElementById('visibility-save-btn');
     const radios = [...document.querySelectorAll('input[name="access-level"]')];
@@ -3502,14 +2874,14 @@ document.addEventListener('DOMContentLoaded', () => {
         body: JSON.stringify({ access: value }),
       });
     } catch {
-      if (settingsSlug === slug) {
+      if (accessRequestCurrent(slug, revision)) {
         radios.forEach(r => { r.disabled = false; });
         setError(errEl, 'Failed to save. Check your connection.');
         recomputeDirty('visibility');
       }
       return;
     }
-    if (resp.status === 401) { await handleUnauthorized(); return; }
+    if (resp.status === 401) { if (accessRequestCurrent(slug, revision)) await handleUnauthorized(); return; }
     // The save applied to `slug`; reflect it in the cached list regardless of
     // where the user navigated.
     const ok = resp.ok;
@@ -3520,20 +2892,22 @@ document.addEventListener('DOMContentLoaded', () => {
     // Only touch the visibility panel if it still shows the same app (the user
     // may have navigated to another app's Access tab during the PATCH, which
     // re-populated and re-set the radios for that app).
-    if (settingsSlug !== slug) return;
+    if (!accessRequestCurrent(slug, revision)) return;
     radios.forEach(r => { r.disabled = false; });
     if (!ok) {
       let message = 'Failed to save.';
       try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
+      if (!accessRequestCurrent(slug, revision)) return;
       setError(errEl, message);
       recomputeDirty('visibility');
       return;
     }
-    statusEl.textContent = 'Saved.';
+    updateAccessViewingNote(value);
+    statusEl.textContent = 'Visibility saved.';
     setHidden(statusEl, false);
     snapshotSettingsSection('visibility');
     await refreshDetailFleetState(slug);
-    flashToast('Access updated', 'success');
+    if (accessRequestCurrent(slug, revision)) flashToast('Visibility updated', 'success');
   }
 
   // --- General tab ---
@@ -3552,13 +2926,17 @@ document.addEventListener('DOMContentLoaded', () => {
   // they agree. Null when pacing is off or no app is open.
   let renderPacingBlock = null;
 
+  function setStableText(el, value) { if (el.textContent !== value) el.textContent = value; }
+
   function updateRenderPacingAdvice() {
     const el = document.getElementById('render-pacing-advice');
     if (!el) return;
-    const raw = document.getElementById('render-seconds').value.trim();
+    const raw = document.getElementById('render-seconds-mode').value === 'off' ? '0' : document.getElementById('render-seconds').value.trim();
     // A blank field has no advice to give: saving it is a validation error, not
     // a state the operator can be told the consequences of.
-    el.textContent = raw === '' ? '' : renderPacingAdvice(Number(raw), renderPacingBlock);
+    const custom = document.getElementById('render-seconds-mode').value === 'custom';
+    const invalid = raw === '' || !Number.isFinite(Number(raw)) || Number(raw) > 600 || (custom && Number(raw) <= 0);
+    setStableText(el, invalid ? '' : renderPacingAdvice(Number(raw), renderPacingBlock));
   }
 
   const usageModeRank = (mode) => ({ unattributed: 0, pseudonymous: 1, identified: 2 }[mode] ?? 0);
@@ -3566,9 +2944,21 @@ document.addEventListener('DOMContentLoaded', () => {
   function effectiveUsageMode(hubMode, override) {
     if (override === 'disabled') return { mode: 'unattributed', collecting: false };
     if (!override || override === 'inherit') return { mode: hubMode, collecting: true };
+    if (!hubMode) return { mode: override, collecting: true };
     return usageModeRank(override) < usageModeRank(hubMode)
       ? { mode: override, collecting: true }
       : { mode: hubMode, collecting: true };
+  }
+
+  function usagePrivacyWarning(hubMode, originalMode, selectedMode) {
+    const original = effectiveUsageMode(hubMode, originalMode);
+    const selected = effectiveUsageMode(hubMode, selectedMode);
+    // Pausing totals-only collection removes no identity, so is reversible.
+    const lowering = selectedMode !== originalMode && original.collecting && ((!hubMode) ||
+      (usageModeRank(original.mode) > (selected.collecting ? usageModeRank(selected.mode) : 0)));
+    if (!lowering) return '';
+    if (!hubMode) return 'Saving may permanently remove viewer identities from existing sessions. The hub policy is unavailable, so the full effect cannot be shown. This cannot be undone.';
+    return `Saving permanently removes ${selected.mode === 'pseudonymous' && selected.collecting ? 'viewer names' : 'viewer names and unique-viewer keys'} from existing sessions. Session totals remain. This cannot be undone.`;
   }
 
   function updateUsagePrivacyHelp() {
@@ -3576,45 +2966,42 @@ document.addEventListener('DOMContentLoaded', () => {
     const help = document.getElementById('usage-privacy-help');
     const warning = document.getElementById('usage-privacy-warning');
     if (!select || !help || !warning) return;
-    const hubMode = select.dataset.hubMode || 'unattributed';
+    const hubMode = select.dataset.hubMode || '';
+    const labels = { unattributed: 'Session totals only', pseudonymous: 'Unique viewer counts', identified: 'Named viewers' };
     const selected = effectiveUsageMode(hubMode, select.value);
+    const originalMode = select.dataset.originalMode || 'inherit';
+    const changed = select.value !== originalMode;
+    const original = effectiveUsageMode(hubMode, originalMode);
+    select.querySelector('option[value="inherit"]').textContent = `Use hub policy · ${labels[hubMode] || 'Unavailable'}`;
     const descriptions = {
-      unattributed: 'Keeps session totals and audience type, without a stable viewer identifier.',
-      pseudonymous: 'Keeps an app-scoped random-looking viewer key for unique counts; names are not retained.',
-      identified: 'Keeps the signed-in account so administrators can see names and exact recent sessions.',
+      unattributed: 'Keeps session totals and audience type without an account reference or a stable viewer key.',
+      pseudonymous: 'Counts unique viewers using a key specific to this app. Names are not retained.',
+      identified: 'Retains signed-in accounts. Only platform administrators can see viewer names and individual sessions.',
     };
-    help.textContent = selected.collecting
-      ? `${descriptions[selected.mode]} Hub ceiling: ${hubMode}.`
-      : 'Stops new collection for this app. Existing non-identifying totals remain until retention expires.';
-
-    const original = effectiveUsageMode(hubMode, select.dataset.originalMode || 'inherit');
-    const lowering = (original.collecting && !selected.collecting) ||
-      (original.collecting === selected.collecting && selected.collecting && usageModeRank(selected.mode) < usageModeRank(original.mode));
-    if (lowering) {
-      warning.textContent = selected.collecting
-        ? 'Saving removes more identifying data from retained raw sessions immediately. This cannot be undone; a later upgrade only affects new sessions.'
-        : 'Saving stops collection and removes names or pseudonyms from retained raw sessions immediately. Existing totals remain. This cannot be undone.';
-    } else {
-      warning.textContent = '';
+    let description = !selected.collecting
+      ? 'Stops new collection for this app. Previously collected totals remain until their retention period ends.'
+      : descriptions[selected.mode] || 'The hub policy is unavailable, so the effective privacy level cannot be shown.';
+    if (changed && selected.collecting && (!original.collecting || usageModeRank(selected.mode) > usageModeRank(original.mode))) {
+      description += ' Applies to new sessions; past viewer identities cannot be restored.';
     }
-    setHidden(warning, !lowering);
+    help.textContent = (changed ? 'After saving: ' : '') + description;
+    const limit = document.getElementById('usage-privacy-limit');
+    if (limit) limit.textContent = select.dataset.collectionEnabled === 'false'
+      ? 'Collection is turned off for the hub. This choice applies if collection resumes.'
+      : hubMode ? `Hub limit: ${labels[hubMode]}.${hubMode === 'identified' ? '' : ' More identifying options are unavailable.'}`
+        : 'The hub limit is unavailable. Reload before changing the privacy level.';
+
+    warning.textContent = usagePrivacyWarning(hubMode, originalMode, select.value);
+    setHidden(warning, !warning.textContent);
   }
 
   function populateGeneralTab(app, envelope) {
-    const mode = hibernateModeFromValue(app.hibernate_timeout_minutes);
-    document.querySelectorAll('input[name="hibernate-mode"]').forEach(r => {
-      r.checked = r.value === mode;
-    });
-
-    const customInput = document.getElementById('hibernate-custom-minutes');
-    customInput.value = mode === 'custom' ? String(app.hibernate_timeout_minutes) : '';
-    customInput.disabled = mode !== 'custom';
-
+    applyConfigurationContext(document, app, envelope);
+    const envNote = document.getElementById('env-apply-note');
+    if (envNote.dataset.slug !== app.slug) { envNote.textContent = ''; envNote.dataset.slug = app.slug; }
     const canEdit = canManageApp(state.user, app);
-    document.querySelectorAll('input[name="hibernate-mode"]').forEach(r => {
-      r.disabled = !canEdit;
-    });
-    if (!canEdit) customInput.disabled = true;
+    document.querySelectorAll('#detail-configuration-panel [aria-invalid]').forEach(el => el.removeAttribute('aria-invalid'));
+    populateDirectSetting(document, 'hibernate-custom-minutes', app.hibernate_timeout_minutes, canEdit);
     document.getElementById('hibernate-save-btn').hidden = !canEdit;
 
     // Keep-warm floor: min_warm_replicas.
@@ -3636,40 +3023,43 @@ document.addEventListener('DOMContentLoaded', () => {
     const currentReplicas = app.replicas ?? 1;
     replicasInput.value = String(currentReplicas);
     capInput.value = String(app.max_sessions_per_replica ?? 0);
-    capInput.dataset.inheritedCap = String(app.max_sessions_per_replica ? 0 : envelope?.effective_max_sessions_per_replica || 0);
     replicasInput.dataset.original = String(currentReplicas);
     replicasInput.dataset.appStatus = String(app.status ?? '');
     replicasInput.disabled = !canEdit;
     capInput.disabled = !canEdit;
+    populateDirectSetting(document, 'scaling-cap', app.max_sessions_per_replica ?? 0, canEdit);
     document.getElementById('scaling-save-btn').hidden = !canEdit;
     setError(document.getElementById('scaling-error'), '');
     setHidden(document.getElementById('scaling-status'), true);
     updateScalingCeiling();
 
     // Worker isolation controls.
+    for (const id of ['worker-grouped-size', 'worker-max-workers', 'worker-warm-spares', 'scaling-replicas', 'scaling-cap', 'scaling-cap-mode']) delete document.getElementById(id).dataset.modeDraft;
     const isolationSelect = document.getElementById('worker-isolation');
     const groupedSizeInput = document.getElementById('worker-grouped-size');
     const maxWorkersInput = document.getElementById('worker-max-workers');
     const warmSparesInput = document.getElementById('worker-warm-spares');
-    isolationSelect.value = app.worker_isolation || app.effective_worker_isolation || 'multiplex';
+    isolationSelect.value = app.worker_isolation || '';
     isolationSelect.dataset.original = isolationSelect.value;
     isolationSelect.dataset.appStatus = String(app.status ?? '');
     groupedSizeInput.value = String(app.worker_grouped_size ?? 1);
     maxWorkersInput.value = String(app.worker_max_workers ?? 0);
     warmSparesInput.value = String(app.worker_warm_spares ?? 0);
     isolationSelect.disabled = !canEdit;
+    updateScalingCeiling();
+    document.getElementById('worker-settings').open = currentIsolationChoice() !== 'multiplex';
     groupedSizeInput.disabled = !canEdit;
     maxWorkersInput.disabled = !canEdit;
     warmSparesInput.disabled = !canEdit;
-    updateWorkerCapacity();
 
     // Render pacing: one number, plus the server's advisory for what it implies
     // on this host. The block is absent when the SAVED value is 0 (pacing off),
     // which is exactly the state the advice line then reports.
     const renderInput = document.getElementById('render-seconds');
-    renderPacingBlock = (envelope && envelope.render_pacing) || null;
+    renderPacingBlock = (envelope && envelope.render_pacing) || (app.render_seconds > 0 ? { render_seconds: app.render_seconds } : null);
     renderInput.value = String(app.render_seconds ?? 0);
     renderInput.disabled = !canEdit;
+    populateDirectSetting(document, 'render-seconds', app.render_seconds ?? 0, canEdit);
     document.getElementById('render-save-btn').hidden = !canEdit;
     setError(document.getElementById('render-error'), '');
     setHidden(document.getElementById('render-status'), true);
@@ -3678,6 +3068,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // General info: display name + description + project slug (rename / regroup).
     document.getElementById('general-name').value = app.name ?? '';
     document.getElementById('general-description').value = app.description ?? '';
+    document.getElementById('general-description-count').textContent = `${[...(app.description || '')].length} / 280 characters`;
     document.getElementById('general-project').value = app.project_slug ?? '';
     document.getElementById('general-name').disabled = !canEdit;
     document.getElementById('general-description').disabled = !canEdit;
@@ -3691,10 +3082,17 @@ document.addEventListener('DOMContentLoaded', () => {
     // operator understands why a more identifying mode cannot be selected.
     const usageSelect = document.getElementById('usage-privacy-mode');
     const usagePolicy = (envelope && envelope.usage_policy) || {};
-    const hubUsageMode = usagePolicy.hub_identity_mode || 'unattributed';
+    const hubUsageMode = usagePolicy.hub_identity_mode || '';
     const appUsageMode = app.usage_identity_mode || 'inherit';
     usageSelect.dataset.hubMode = hubUsageMode;
     usageSelect.dataset.originalMode = appUsageMode;
+    usageSelect.dataset.collectionEnabled = String(usagePolicy.collection_enabled !== false);
+    const retention = document.getElementById('usage-privacy-retention');
+    const period = days => days === 0 ? 'without a time limit' : `for ${days} ${days === 1 ? 'day' : 'days'}`;
+    const raw = usagePolicy.raw_retention_days, aggregate = usagePolicy.aggregate_retention_days;
+    const retentionKnown = Number.isInteger(raw) && raw >= 0 && Number.isInteger(aggregate) && aggregate >= 0;
+    retention.textContent = retentionKnown ? `The hub keeps individual session records ${period(raw)} and daily totals ${period(aggregate)}.` : '';
+    retention.hidden = !retentionKnown;
     usageSelect.value = appUsageMode;
     [...usageSelect.options].forEach(option => {
       option.disabled = ['pseudonymous', 'identified'].includes(option.value) &&
@@ -3708,7 +3106,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     renderIconPicker(app, canEdit);
 
-    // Resources: per-replica memory/CPU caps. null (no limit) renders as empty.
+    // Resources: null inherits the server default; zero explicitly removes the cap.
     // Limits are enforced in BOTH native and docker mode, so the controls are
     // editable in both. Native enforcement is best-effort (needs cgroup v2
     // delegation), so resource_enforcement drives a warning when it is absent.
@@ -3718,15 +3116,18 @@ document.addEventListener('DOMContentLoaded', () => {
     cpuInput.value = app.cpu_quota_percent != null ? String(app.cpu_quota_percent) : '';
     memInput.disabled = !canEdit;
     cpuInput.disabled = !canEdit;
+    populateDirectSetting(document, 'resources-memory', app.memory_limit_mb, canEdit);
+    populateDirectSetting(document, 'resources-cpu', app.cpu_quota_percent, canEdit);
     document.getElementById('resources-save-btn').hidden = !canEdit;
     // Stash originals + status so saveResources confirms the restart only when a
     // value actually changes on a running app (mirrors the scaling guard).
     memInput.dataset.original = memInput.value;
     cpuInput.dataset.original = cpuInput.value;
     originalResourceSettings = {
-      memory_limit_mb: memInput.value === '' ? null : Number(memInput.value),
-      cpu_quota_percent: cpuInput.value === '' ? null : Number(cpuInput.value),
+      memory_limit_mb: app.memory_limit_mb ?? null,
+      cpu_quota_percent: app.cpu_quota_percent ?? null,
     };
+    resourceApplyPending = app.status === 'degraded' && (app.last_error || '').startsWith('apply resource limits:');
     memInput.dataset.appStatus = app.status || '';
     const enf = app.resource_enforcement;
     const nativeMode = app.runtime_mode !== 'docker';
@@ -3734,17 +3135,18 @@ document.addEventListener('DOMContentLoaded', () => {
     let warn = '';
     if (nativeMode && enf) {
       if (!enf.memory && !enf.cpu) {
-        warn = 'This host has no cgroup v2 delegation, so memory and CPU limits set here are not enforced. Configure systemd Delegate=cpu memory on the service to apply them.';
+        warn = 'Memory and CPU limits cannot be enforced on this host. Ask a server administrator to enable memory and CPU resource controls.';
       } else if (!enf.cpu) {
-        warn = 'CPU limits are not enforced on this host (the cgroup cpu controller is not delegated; needs Delegate=cpu). Memory limits are enforced.';
+        warn = 'CPU limits cannot be enforced on this host. Ask a server administrator to enable CPU resource controls. Memory limits are enforced.';
       } else if (!enf.memory) {
-        warn = 'Memory limits are not enforced on this host (the cgroup memory controller is not delegated; needs Delegate=memory).';
+        warn = 'Memory limits cannot be enforced on this host. Ask a server administrator to enable memory resource controls.';
       }
     }
     note.textContent = warn;
     setHidden(note, warn === '');
     setError(document.getElementById('resources-error'), '');
     setHidden(document.getElementById('resources-status'), true);
+    updateWorkerCapacity();
 
     // Danger zone (lifecycle) now lives at the bottom of Configuration, not
     // Access. Visible to managers; the typed-confirm gate stays the same.
@@ -3789,13 +3191,16 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!preview || !uploadBtn || !removeBtn || !fileInput) return;
 
     setHidden(statusEl, true);
+    setError(document.getElementById('general-icon-error'), '');
     preview.replaceChildren(renderAppAvatar(document, avatarView(app), 'icon-picker-preview'));
     uploadBtn.hidden = !canEdit;
-    removeBtn.hidden = !canEdit || (!app.icon_mime && !app.icon_emoji);
+    removeBtn.hidden = !canEdit;
+    removeBtn.disabled = !app.icon_mime && !app.icon_emoji;
     // The emoji trigger and its Clear-emoji control are wired once (see the
     // top-level setup block below); only their visibility changes per render.
     if (emojiBtn) emojiBtn.hidden = !canEdit;
     if (emojiClearBtn) emojiClearBtn.hidden = !canEdit || !app.icon_emoji;
+    syncIconSaveState(app, canEdit);
 
     if (!canEdit) {
       uploadBtn.onclick = null;
@@ -3807,162 +3212,177 @@ document.addEventListener('DOMContentLoaded', () => {
     fileInput.onchange = () => {
       const f = fileInput.files && fileInput.files[0];
       fileInput.value = ''; // let the same file be re-picked later
-      if (f) uploadIcon(app, f, uploadBtn);
+      if (f) withIconSave(() => uploadIcon(app, f));
     };
-    removeBtn.onclick = () => removeIcon(app, removeBtn);
+    removeBtn.onclick = () => withIconSave(() => removeIcon(app));
+    const undoBtn = document.getElementById('general-icon-undo');
+    if (undoBtn) undoBtn.onclick = () => withIconSave(() => undoIconChange(app), 'Restoring icon…');
   }
 
-  async function uploadIcon(app, file, btn) {
-    const errEl = document.getElementById('general-error');
-    const statusEl = document.getElementById('general-icon-status');
-    setError(errEl, '');
-    if (file.size > ICON_MAX_BYTES) {
-      setError(errEl, 'Icon must be 512 KB or smaller.');
+  // Keep one exact previous state per app. Image bytes are retained only in
+  // memory, and the server checks the revision before restoring them.
+  const iconUndo = new Map();
+  let iconSaving = false;
+  let iconSaveSlug = '';
+  let iconSaveApp = null;
+  function currentIconTarget(app, appID = app?.id) {
+    return !!app && settingsSlug === app.slug && detailApp?.slug === app.slug
+      && (appID != null && detailApp.id != null ? detailApp.id === appID : detailApp === app);
+  }
+  function syncIconSaveState(app, canEdit) {
+    const group = document.getElementById('general-icon-preview')?.closest('.icon-picker');
+    const pending = iconSaving && iconSaveSlug === app.slug && currentIconTarget(iconSaveApp);
+    if (pending) group?.setAttribute('aria-busy', 'true');
+    else group?.removeAttribute('aria-busy');
+    for (const control of group?.querySelectorAll('button, input') || []) control.disabled = pending || !canEdit;
+    const undo = document.getElementById('general-icon-undo');
+    const previous = iconUndo.get(app.slug);
+    if (undo) {
+      undo.hidden = !canEdit || !previous || (app.id != null && previous.before.app_id !== app.id);
+      undo.disabled = pending || !canEdit || undo.hidden;
+    }
+    const remove = document.getElementById('general-icon-remove');
+    if (remove) remove.disabled = pending || !canEdit || (!app.icon_mime && !app.icon_emoji);
+  }
+  async function withIconSave(action, pendingText = 'Saving icon…') {
+    if (iconSaving) { flashToast('An icon change is still saving. Try again when it finishes.', 'info'); return; }
+    iconSaving = true;
+    const slug = settingsSlug;
+    iconSaveSlug = slug;
+    const targetApp = detailApp;
+    iconSaveApp = targetApp;
+    const focused = document.activeElement;
+    const status = document.getElementById('general-icon-status');
+    try {
+      const request = action();
+      if (document.getElementById('general-icon-error').hidden) {
+        status.textContent = pendingText;
+        setHidden(status, false);
+      }
+      if (detailApp?.slug === slug) syncIconSaveState(detailApp, canManageApp(state.user, detailApp));
+      await request;
+    } finally {
+      iconSaving = false;
+      iconSaveSlug = '';
+      iconSaveApp = null;
+      if (currentIconTarget(targetApp)) {
+        if (status.textContent === pendingText) { status.textContent = ''; setHidden(status, true); }
+        if (detailApp?.slug === slug) syncIconSaveState(detailApp, canManageApp(state.user, detailApp));
+        const restore = focused?.closest('.emoji-picker-popover[hidden]') || (focused?.closest('.icon-picker') && (focused.hidden || focused.disabled))
+          ? document.getElementById('general-icon-emoji-btn') : focused;
+        if (restore?.isConnected && document.activeElement === document.body && !restore.disabled && !restore.hidden) restore.focus({ preventScroll: true });
+      }
+    }
+  }
+
+  function clearIconFeedback() {
+    setError(document.getElementById('general-icon-error'), '');
+    setHidden(document.getElementById('general-icon-status'), true);
+  }
+
+  async function writeIconState(app, transform, { undo = false, message = 'Icon updated.' } = {}) {
+    const err = document.getElementById('general-icon-error');
+    const path = `/api/apps/${encodeURIComponent(app.slug)}/icon/state`;
+    let before, target;
+    try {
+      if (undo) {
+        const previous = iconUndo.get(app.slug);
+        if (!previous) return;
+        before = previous.before;
+        target = { ...before, revision: previous.revision };
+      } else {
+        const snapshot = await api(path, { cache: 'no-store' });
+        if (snapshot.status === 401) { await handleUnauthorized(); return; }
+        if (!snapshot.ok) throw new Error('snapshot');
+        before = await snapshot.json();
+        if (!before.app_id || typeof before.revision !== 'string' || !before.revision) throw new Error('snapshot');
+        if (!currentIconTarget(app)) return;
+        if (app.id != null && app.id !== before.app_id) throw new Error('snapshot');
+        target = { ...before, ...await transform(before) };
+      }
+    } catch {
+      if (currentIconTarget(app)) setError(err, 'Could not prepare icon change. Check your connection and try again.');
       return;
     }
-    if (file.type && !ICON_TYPES.includes(file.type)) {
-      setError(errEl, 'Icon must be a PNG, JPEG, WebP, or SVG image.');
+    if (!currentIconTarget(app, before.app_id)) return;
+    let response;
+    try {
+      response = await api(path, { method: 'PUT', body: JSON.stringify(target) });
+    } catch {
+      if (currentIconTarget(app, before?.app_id)) setError(err, 'Could not save icon. Check your connection and try again.');
       return;
     }
-    await runInFlight(btn, async () => {
-      let resp;
-      try {
-        resp = await api(`/api/apps/${encodeURIComponent(app.slug)}/icon`, {
-          method: 'PUT',
-          headers: { 'Content-Type': file.type || 'application/octet-stream' },
-          body: file,
-        });
-      } catch {
-        setError(errEl, 'Upload failed. Check your connection.');
-        return;
-      }
-      if (resp.status === 401) { await handleUnauthorized(); return; }
-      if (!resp.ok) {
-        let msg = 'Upload failed.';
-        try { const b = await resp.json(); if (b && b.error) msg = b.error; } catch { /* non-JSON */ }
-        setError(errEl, msg);
-        return;
-      }
-      let body = {};
-      try { body = await resp.json(); } catch { /* tolerate */ }
-      applyIconChange(app, { mime: body.icon_mime || file.type, emoji: '' });
-      statusEl.textContent = 'Icon updated.';
-      setHidden(statusEl, false);
-      await refreshDetailFleetState(app.slug);
+    if (response.status === 401) { await handleUnauthorized(); return; }
+    if (!response.ok) {
+      // A stale Undo can never safely replace a newer icon; do not offer it again.
+      if (response.status === 409) iconUndo.delete(app.slug);
+      if (!currentIconTarget(app, before?.app_id)) return;
+      let message = response.status === 409 ? 'Icon changed elsewhere. Reload to see the latest icon before trying again.' : 'Could not save icon. Try again.';
+      try { const body = await response.json(); if (body.error) message = body.error; } catch { /* non-JSON */ }
+      if (currentIconTarget(app, before.app_id)) setError(err, message);
+      return;
+    }
+    let body;
+    try {
+      body = await response.json();
+      if (body.app_id !== before.app_id || !body.revision) throw new Error('invalid state');
+    } catch {
+      iconUndo.delete(app.slug);
+      if (currentIconTarget(app, before?.app_id)) setError(err, 'Icon saved, but its confirmation could not be read. Reload to check the result.');
+      return;
+    }
+    if (undo) iconUndo.delete(app.slug);
+    else iconUndo.set(app.slug, { before, revision: body.revision });
+    if (!currentIconTarget(app, before?.app_id)) return;
+    applyIconChange(app, { mime: body.icon_mime || '', emoji: body.icon_emoji || '' });
+    const status = document.getElementById('general-icon-status');
+    status.textContent = message;
+    setHidden(status, false);
+    await refreshDetailFleetState(app.slug);
+    return currentIconTarget(app, before.app_id);
+  }
+
+  async function uploadIcon(app, file) {
+    clearIconFeedback();
+    const err = document.getElementById('general-icon-error');
+    if (file.size > ICON_MAX_BYTES) { setError(err, 'Icon must be 512 KB or smaller.'); return; }
+    if (file.type && !ICON_TYPES.includes(file.type)) { setError(err, 'Icon must be a PNG, JPEG, WebP, or SVG image.'); return; }
+    await writeIconState(app, async () => {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      let binary = '';
+      for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
+      return { mime: file.type || 'application/octet-stream', data: btoa(binary), emoji: '' };
     });
   }
 
-  async function removeIcon(app, btn) {
-    const errEl = document.getElementById('general-error');
-    const statusEl = document.getElementById('general-icon-status');
-    setError(errEl, '');
-    await runInFlight(btn, async () => {
-      let resp;
-      try {
-        resp = await api(`/api/apps/${encodeURIComponent(app.slug)}/icon`, { method: 'DELETE' });
-      } catch {
-        setError(errEl, 'Failed to remove icon. Check your connection.');
-        return;
-      }
-      if (resp.status === 401) { await handleUnauthorized(); return; }
-      if (!resp.ok) { setError(errEl, 'Failed to remove icon.'); return; }
-      applyIconChange(app, { mime: '', emoji: '' });
-      statusEl.textContent = 'Icon removed.';
-      setHidden(statusEl, false);
-      await refreshDetailFleetState(app.slug);
-    });
+  async function removeIcon(app) {
+    clearIconFeedback();
+    await writeIconState(app, () => ({ mime: '', data: null, emoji: '' }), { message: 'Icon removed.' });
   }
 
-  // setEmojiIcon PATCHes a single emoji as the app's icon (server-side this
-  // destroys any uploaded image - explicit user intent, mirrored by
-  // applyIconChange's mime: ''). The coarse client-side check (isSingleEmoji)
-  // only blocks the empty string, plain text, and a multi-emoji paste before
-  // a round trip; the server (deploy.ValidateIconEmoji) is the authority and
-  // its message is shown verbatim on a 400.
   async function setEmojiIcon(app, rawValue) {
-    const errEl = document.getElementById('general-error');
-    const statusEl = document.getElementById('general-icon-status');
-    setError(errEl, '');
+    clearIconFeedback();
     const value = (rawValue || '').trim();
-    if (!isSingleEmoji(value)) {
-      setError(errEl, 'Enter a single emoji.');
-      return;
-    }
-    let resp;
-    try {
-      resp = await api(`/api/apps/${encodeURIComponent(app.slug)}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ icon_emoji: value }),
-      });
-    } catch {
-      setError(errEl, 'Failed to save. Check your connection.');
-      return;
-    }
-    if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (!resp.ok) {
-      let msg = 'Failed to save icon.';
-      try { const b = await resp.json(); if (b && b.error) msg = b.error; } catch { /* non-JSON */ }
-      setError(errEl, msg);
-      return;
-    }
-    let body = {};
-    try { body = await resp.json(); } catch { /* tolerate */ }
-    applyIconChange(app, { mime: '', emoji: (body.app && body.app.icon_emoji) || '' });
-    const input = document.getElementById('general-icon-emoji-input');
-    if (input) input.value = '';
-    statusEl.textContent = 'Icon updated.';
-    setHidden(statusEl, false);
-    await refreshDetailFleetState(app.slug);
+    if (!isSingleEmoji(value)) { setError(document.getElementById('general-icon-error'), 'Enter a single emoji.'); return; }
+    const changed = await writeIconState(app, () => ({ mime: '', data: null, emoji: value }));
+    if (changed && currentIconTarget(app) && document.getElementById('general-icon-error').hidden) document.getElementById('general-icon-emoji-input').value = '';
   }
 
-  // clearEmojiIcon PATCHes icon_emoji back to empty. Unlike removeIcon (the
-  // Remove button, which destroys both the image and the emoji), this only
-  // clears the emoji: the server's clear path (SetAppIconEmoji) writes
-  // icon_emoji alone and never touches icon_mime, so an app whose emoji was
-  // set through manifest reconciliation (which also never touches icon_mime)
-  // keeps its image and it must resurface once the emoji is gone. So the mime
-  // written locally has to come from the server's own response, not a
-  // hardcoded '' - that would blank a retained image everywhere in the UI
-  // until a reload, contradicting the mutual-exclusivity contract this whole
-  // control follows. icon_mime is omitempty, so "no image" is an absent key,
-  // not ''; if the body itself fails to parse, keep the app's last-known mime
-  // rather than guessing blank.
   async function clearEmojiIcon(app) {
-    const errEl = document.getElementById('general-error');
-    const statusEl = document.getElementById('general-icon-status');
-    setError(errEl, '');
-    let resp;
-    try {
-      resp = await api(`/api/apps/${encodeURIComponent(app.slug)}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ icon_emoji: '' }),
-      });
-    } catch {
-      setError(errEl, 'Failed to clear icon. Check your connection.');
-      return;
-    }
-    if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (!resp.ok) {
-      let msg = 'Failed to clear icon.';
-      try { const b = await resp.json(); if (b && b.error) msg = b.error; } catch { /* non-JSON */ }
-      setError(errEl, msg);
-      return;
-    }
-    let body = {};
-    try { body = await resp.json(); } catch { /* tolerate */ }
-    const mime = body.app ? (body.app.icon_mime || '') : app.icon_mime;
-    applyIconChange(app, { mime, emoji: '' });
-    statusEl.textContent = 'Icon updated.';
-    setHidden(statusEl, false);
-    await refreshDetailFleetState(app.slug);
+    clearIconFeedback();
+    await writeIconState(app, () => ({ emoji: '' }));
+  }
+
+  async function undoIconChange(app) {
+    clearIconFeedback();
+    await writeIconState(app, null, { undo: true, message: 'Previous icon restored.' });
   }
 
   // applyIconChange records the new icon state on the app and every cached copy
   // (detailApp, the sidebar/grid list) and bumps updated_at as the cache-buster,
   // then re-renders the picker preview and the detail-header avatar so the change
   // shows everywhere without a reload. Both mime and emoji are written on every
-  // call, even the one that did not change, because the server enforces mutual
-  // exclusivity (setting one clears the other): the cached copy must mirror
+  // call, even the one that did not change, so the cached copy must mirror
   // exactly what the server just did, or a stale emoji (which now renders ahead
   // of the image) keeps winning until a reload.
   function applyIconChange(app, { mime, emoji }) {
@@ -3970,15 +3390,17 @@ document.addEventListener('DOMContentLoaded', () => {
     app.icon_mime = mime;
     app.icon_emoji = emoji;
     app.updated_at = stamp;
-    if (detailApp && detailApp.slug === app.slug && detailApp !== app) {
+    if (detailApp && detailApp.slug === app.slug && (app.id == null || detailApp.id == null || detailApp.id === app.id) && detailApp !== app) {
       detailApp.icon_mime = mime;
       detailApp.icon_emoji = emoji;
       detailApp.updated_at = stamp;
     }
-    const listed = (state.apps || []).find((a) => a && a.slug === app.slug);
+    const listed = (state.apps || []).find((a) => a && a.slug === app.slug && (app.id == null || a.id == null || a.id === app.id));
     if (listed) { listed.icon_mime = mime; listed.icon_emoji = emoji; listed.updated_at = stamp; }
-    renderIconPicker(app, true);
-    renderDetailHeaderAvatar(app);
+    if (settingsSlug === app.slug && (!detailApp || app.id == null || detailApp.id == null || detailApp.id === app.id)) {
+      renderIconPicker(app, canManageApp(state.user, detailApp || app));
+      renderDetailHeaderAvatar(app);
+    }
     if (typeof syncSidebar === 'function') syncSidebar();
   }
 
@@ -3993,6 +3415,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const description = document.getElementById('general-description').value.trim();
     const project = document.getElementById('general-project').value.trim();
     if (name.length < 1 || name.length > 128) {
+      document.getElementById('general-name').setAttribute('aria-invalid', 'true');
       setError(errEl, 'Display name must be 1 to 128 characters.');
       return;
     }
@@ -4000,6 +3423,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // limit matches the server's rune count and an emoji-bearing description that
     // the backend accepts is not rejected here.
     if ([...description].length > 280) {
+      document.getElementById('general-description').setAttribute('aria-invalid', 'true');
       setError(errEl, 'Description must be 280 characters or fewer.');
       return;
     }
@@ -4012,10 +3436,12 @@ document.addEventListener('DOMContentLoaded', () => {
         body: JSON.stringify({ name, description, project_slug: project }),
       });
     } catch {
+      if (settingsSlug !== slug) return;
       setError(errEl, 'Failed to save. Check your connection.');
       recomputeDirty('general');
       return;
     }
+    if (settingsSlug !== slug) return;
     if (resp.status === 401) { await handleUnauthorized(); return; }
     if (!resp.ok) {
       let message = 'Failed to save.';
@@ -4024,8 +3450,15 @@ document.addEventListener('DOMContentLoaded', () => {
       recomputeDirty('general');
       return;
     }
+    if (settingsSlug !== slug) return;
     statusEl.textContent = 'Saved.';
     setHidden(statusEl, false);
+    document.getElementById('general-name').value = name;
+    document.getElementById('general-description').value = description;
+    document.getElementById('general-project').value = project;
+    document.getElementById('general-description-count').textContent = `${[...description].length} / 280 characters`;
+    const descriptionEl = document.getElementById('app-detail-description');
+    if (descriptionEl) { descriptionEl.textContent = description; descriptionEl.hidden = !description; }
     snapshotSettingsSection('general');
     const heading = document.getElementById('app-detail-heading');
     if (heading) heading.textContent = name;
@@ -4044,133 +3477,200 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function saveUsagePrivacy() {
     if (!settingsSlug) return;
-    const slug = settingsSlug;
+    const slug = settingsSlug, revision = settingsRevision;
+    const current = () => settingsSlug === slug && settingsRevision === revision;
     const select = document.getElementById('usage-privacy-mode');
     const errEl = document.getElementById('usage-privacy-error');
     const statusEl = document.getElementById('usage-privacy-status');
-    const warning = document.getElementById('usage-privacy-warning');
     setError(errEl, '');
-    setHidden(statusEl, true);
-    if (!warning.hidden && !window.confirm(`${warning.textContent}\n\nApply this privacy change?`)) {
+    const progress = message => { statusEl.textContent = message; setHidden(statusEl, false); };
+    const fail = message => { setHidden(statusEl, true); setError(errEl, message); };
+    const override = select.value === 'inherit' ? null : select.value;
+    // Identity removal is irreversible: confirm against the latest saved policy,
+    // rather than a potentially stale form mounted before another manager's edit.
+    progress('Checking privacy…');
+    let latest;
+    try {
+      const check = await api(`/api/apps/${encodeURIComponent(slug)}`, { method: 'GET', cache: 'no-store' });
+      if (!current()) return;
+      if (check.status === 401) { await handleUnauthorized(); return; }
+      if (!check.ok) throw new Error('Policy unavailable');
+      latest = await check.json();
+    } catch {
+      if (current()) fail('The current privacy policy could not be checked. Try again before saving.');
       return;
     }
-    const override = select.value === 'inherit' ? null : select.value;
-    const btn = document.getElementById('usage-privacy-save-btn');
-    btn.disabled = true;
+    if (!current()) return;
+    const modes = ['unattributed', 'pseudonymous', 'identified'];
+    const hubMode = latest?.usage_policy?.hub_identity_mode;
+    const latestMode = latest?.app?.usage_identity_mode || 'inherit';
+    if (latest?.app?.slug !== slug || (latest.app.id != null && detailApp?.id != null && latest.app.id !== detailApp.id) ||
+        !modes.includes(hubMode) || !['inherit', 'disabled', ...modes].includes(latestMode)) {
+      fail('The current privacy policy could not be confirmed. Reload before saving.'); return;
+    }
+    if (override !== null && override !== 'disabled' && (!modes.includes(override) || usageModeRank(override) > usageModeRank(hubMode))) {
+      fail('This choice exceeds the current hub limit. Reload to see the available options.'); return;
+    }
+    const warning = usagePrivacyWarning(hubMode, latestMode, select.value);
+    if (warning && !window.confirm(`${warning}\n\nSave this privacy change?`)) { setHidden(statusEl, true); return; }
+    progress('Saving privacy…');
     let resp;
     try {
       resp = await api(`/api/apps/${encodeURIComponent(slug)}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ usage_identity_mode: override }),
+        method: 'PATCH', body: JSON.stringify({ usage_identity_mode: override }),
       });
     } catch {
-      setError(errEl, 'Privacy setting could not be saved. Check your connection and try again.');
-      recomputeDirty('usage-privacy');
+      if (!current()) return;
+      setHidden(statusEl, true);
+      setError(errEl, 'Privacy could not be saved. Check your connection and try again.');
       return;
     }
+    if (!current()) return;
     if (resp.status === 401) { await handleUnauthorized(); return; }
+    let body;
+    try { body = await resp.json(); } catch { /* An unreadable response cannot confirm the saved policy. */ }
+    if (!current()) return;
+    setHidden(statusEl, true);
     if (!resp.ok) {
-      let message = 'Privacy setting could not be saved.';
-      try { const body = await resp.json(); if (body && body.error) message = body.error; } catch { /* non-JSON */ }
+      const message = body?.error || 'Privacy could not be saved. Try again.';
       setError(errEl, usagePrivacyErrorMessage(message));
-      recomputeDirty('usage-privacy');
       return;
     }
-    let body = {};
-    try { body = await resp.json(); } catch { /* tolerate */ }
-    const saved = body.app ? body.app.usage_identity_mode : override;
+    const saved = body?.app?.usage_identity_mode ?? null;
+    if (body?.app?.slug !== slug || (body.app.id != null && detailApp?.id != null && body.app.id !== detailApp.id) ||
+        (saved !== null && !['disabled', 'unattributed', 'pseudonymous', 'identified'].includes(saved))) {
+      setError(errEl, 'The saved privacy policy could not be confirmed. Reload before making another change.');
+      return;
+    }
     if (detailApp) detailApp.usage_identity_mode = saved;
+    select.dataset.hubMode = hubMode;
+    select.dataset.collectionEnabled = String(latest.usage_policy.collection_enabled !== false);
+    [...select.options].forEach(option => {
+      option.disabled = ['pseudonymous', 'identified'].includes(option.value) && usageModeRank(option.value) > usageModeRank(hubMode);
+    });
+    select.value = saved || 'inherit';
     select.dataset.originalMode = saved || 'inherit';
-    statusEl.textContent = 'Privacy setting saved.';
-    setHidden(statusEl, false);
     updateUsagePrivacyHelp();
     snapshotSettingsSection('usage-privacy');
-    await refreshDetailFleetState(slug);
+    statusEl.textContent = 'Privacy saved.';
+    setHidden(statusEl, false);
+    await refreshDetailFleetState(slug, current);
   }
 
-  async function saveResources() {
+  async function saveResources(retry = false) {
     if (!settingsSlug) return;
-    const slug = settingsSlug;
+    const slug = settingsSlug, revision = settingsRevision;
+    const current = () => settingsSlug === slug && settingsRevision === revision;
     const errEl = document.getElementById('resources-error');
     const statusEl = document.getElementById('resources-status');
+    const progress = message => { statusEl.textContent = message; setHidden(statusEl, false); };
     setError(errEl, '');
     setHidden(statusEl, true);
-    const parseLimit = (raw, label, min, max) => {
-      const t = raw.trim();
-      if (t === '') return null; // empty == no limit (inherit)
-      // The API contract is a non-negative integer; reject fractional/exponent
-      // input (e.g. "1.5", "1e2") instead of letting parseInt silently truncate.
-      if (!/^\d+$/.test(t)) {
-        throw new Error(`${label} must be a whole number (leave empty for no limit).`);
-      }
-      const n = Number(t);
-      if (!Number.isInteger(n) || n < 0) {
-        throw new Error(`${label} must be 0 or a positive whole number (leave empty for no limit).`);
-      }
-      // 0 always means "no limit"; a positive value must fall in [min, max].
-      if (n !== 0 && min != null && n < min) {
-        throw new Error(`${label} must be 0 (no limit) or at least ${min} (leave empty to inherit).`);
-      }
-      if (max != null && n > max) {
-        throw new Error(`${label} must be between 0 and ${max} (leave empty for no limit).`);
-      }
-      return n;
-    };
-    let memory, cpu;
+    let desired;
     try {
-      memory = parseLimit(document.getElementById('resources-memory').value, 'Memory limit', 16, 1048576);
-      cpu = parseLimit(document.getElementById('resources-cpu').value, 'CPU quota', 1, 6400);
+      const read = (id, key) => {
+        const rec = settingsSections.resources;
+        const index = rec.els.findIndex(el => el.id === id);
+        const modeIndex = rec.els.findIndex(el => el.id === `${id}-mode`);
+        const mode = rec.els[modeIndex].value;
+        const unchanged = mode === rec.originals[modeIndex].value && (mode !== 'custom' || rec.els[index].value === rec.originals[index].value);
+        return unchanged ? originalResourceSettings[key] : readDirectSetting(document, id);
+      };
+      desired = {
+        memory_limit_mb: read('resources-memory', 'memory_limit_mb'),
+        cpu_quota_percent: read('resources-cpu', 'cpu_quota_percent'),
+      };
     } catch (e) {
+      if (e.fieldId) document.getElementById(e.fieldId)?.setAttribute('aria-invalid', 'true');
       setError(errEl, e.message);
       return;
     }
-    // Supported resource updates preserve processes. Memory reductions and
-    // immutable runtimes drain before replacement.
-    const memInput = document.getElementById('resources-memory');
-    const cpuInput = document.getElementById('resources-cpu');
-    const wasRunning = ['running', 'degraded'].includes(memInput.dataset.appStatus);
-    const savedResources = { memory_limit_mb: memory, cpu_quota_percent: cpu };
-    const payload = resourceSettingsPatch(savedResources, originalResourceSettings);
-    if (Object.keys(payload).length === 0) return;
-    if (wasRunning) {
-      const ok = window.confirm('Supported resource changes apply live. Memory reductions and runtimes that require replacement drain sessions first; sessions still active at the drain deadline will disconnect. Continue?');
-      if (!ok) return;
-    }
-    const btn = document.getElementById('resources-save-btn');
-    btn.disabled = true;
-    let resp;
+    let payload = resourceSettingsPatch(desired, originalResourceSettings);
+    if (!retry && Object.keys(payload).length === 0) { snapshotSettingsSection('resources'); return; }
+    const url = `/api/apps/${encodeURIComponent(slug)}`;
+    let latest;
+    // Read current lifecycle state before confirming; retry uses the latest
+    // saved target, protected by the server's revision precondition.
+    progress('Checking current limits…');
     try {
-      resp = await api(`/api/apps/${encodeURIComponent(slug)}`, {
+      const resp = await api(url, { cache: 'no-store' });
+      if (!current()) return;
+      if (resp.status === 401) { await handleUnauthorized(); return; }
+      if (!resp.ok) throw new Error('read failed');
+      latest = await resp.json();
+      if (!current()) return;
+      if (latest?.app?.slug !== slug || typeof latest.resource_revision !== 'string' || !latest.resource_revision) throw new Error('invalid app');
+    } catch {
+      if (current()) {
+        setHidden(statusEl, true);
+        setError(errEl, 'Could not check the latest limits. Your changes are kept. Try again.');
+      }
+      return;
+    }
+    if (retry) payload = { cpu_quota_percent: latest.app.cpu_quota_percent ?? null };
+    const wasRunning = ['running', 'degraded'].includes(latest.app.status);
+    if (wasRunning && !window.confirm('Save and apply resource limits? Changes apply live when supported. Lowering memory or changing limits on some runtimes restarts processes. Active sessions drain first; those still open at the deadline disconnect.')) {
+      setHidden(statusEl, true);
+      return;
+    }
+    progress(retry ? 'Retrying saved limits…' : 'Saving resource limits…');
+    let resp, result;
+    try {
+      resp = await api(url, {
         method: 'PATCH',
+        headers: { 'X-Shinyhub-If-Resource-Revision': latest.resource_revision },
         body: JSON.stringify(payload),
       });
+      if (!current()) return;
+      if (resp.status === 401) { await handleUnauthorized(); return; }
+      if (!resp.ok) {
+        let message = 'Could not save resource limits. Your changes are kept. Try again.';
+        try {
+          const body = await resp.json();
+          if (typeof body?.error === 'string') message = resp.status === 409 && body.error.includes('app revision changed')
+            ? 'The app changed while saving. Your changes are kept. Try again to check the latest state.'
+            : body.error;
+        } catch { /* non-JSON */ }
+        if (current()) { setHidden(statusEl, true); setError(errEl, message); }
+        return;
+      }
+      result = await resp.json();
+      if (!current()) return;
+      if (!result?.app) throw new Error('invalid confirmation');
     } catch {
-      setError(errEl, 'Failed to save. Check your connection.');
-      recomputeDirty('resources');
+      if (current()) {
+        setHidden(statusEl, true);
+        setError(errEl, 'Could not confirm resource limits. Your changes are kept. Try again to check the saved state.');
+      }
       return;
     }
-    if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (!resp.ok) {
-      let message = 'Failed to save.';
-      try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
-      setError(errEl, message);
-      recomputeDirty('resources');
-      return;
+    resourceApplyPending = !!result.resource_update_error;
+    originalResourceSettings = {
+      memory_limit_mb: result.app.memory_limit_mb ?? null,
+      cpu_quota_percent: result.app.cpu_quota_percent ?? null,
+    };
+    // Adopt both returned values: untouched limits may have changed elsewhere.
+    const rec = settingsSections.resources;
+    for (const [id, value] of [['resources-memory', originalResourceSettings.memory_limit_mb], ['resources-cpu', originalResourceSettings.cpu_quota_percent]]) {
+      const input = document.getElementById(id);
+      populateDirectSetting(document, id, value, !rec.btn.hidden);
+      // Preserve the shared save lock until saveSettingsSection releases it.
+      if (rec.saving) {
+        input.disabled = true;
+        document.getElementById(`${id}-mode`).disabled = true;
+      }
     }
-    const result = await resp.json();
-    if (result.resource_update_error) {
-      setError(errEl, 'Settings saved, but live application failed: ' + result.resource_update_error + '. Save again to retry.');
-      recomputeDirty('resources');
-      return;
-    }
-    statusEl.textContent = 'Saved.';
-    setHidden(statusEl, false);
-    originalResourceSettings = savedResources;
-    memInput.dataset.original = memInput.value.trim();
-    cpuInput.dataset.original = cpuInput.value.trim();
+    document.getElementById('resources-memory').dataset.appStatus = result.app.status || '';
     snapshotSettingsSection('resources');
+    updateWorkerCapacity();
+    if (resourceApplyPending) {
+      setHidden(statusEl, true);
+      setError(errEl, 'Could not apply saved limits: ' + result.resource_update_error);
+    } else {
+      progress(wasRunning ? 'Resource limits saved. Any required restart runs automatically.' : 'Resource limits saved. They will be used when the app next starts.');
+    }
     await loadApps();
-    await refreshDetailFleetState(slug);
+    if (current()) await refreshDetailFleetState(slug);
   }
 
   function updateMinWarmWarning(replicas, minWarm, isolation) {
@@ -4182,7 +3682,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // replicas that an elastic pool never runs.
     const inertEl = document.getElementById('min-warm-inert-warning');
     if (!inertEl) return;
-    const note = keepWarmInertNote(minWarm, isolation);
+    const idle = document.getElementById('hibernate-custom-minutes');
+    const policy = document.getElementById('hibernate-custom-minutes-mode').value;
+    const never = policy === 'off' || (policy === 'inherit' && idle.dataset.defaultValue === '0');
+    const note = keepWarmInertNote(minWarm, isolation) || (minWarm > 0 && never
+      ? 'Automatic hibernation is off. Keep warm still sets a minimum when autoscaling is enabled.' : '');
     inertEl.textContent = note;
     inertEl.hidden = !note;
   }
@@ -4191,94 +3695,76 @@ document.addEventListener('DOMContentLoaded', () => {
   // shows: the saved value after a load, or the pending edit before a save.
   function currentIsolationChoice() {
     const sel = document.getElementById('worker-isolation');
-    return sel && sel.value ? sel.value : 'multiplex';
+    return sel?.value || sel?.dataset.defaultIsolation || 'multiplex';
   }
 
   function updateScalingCeiling() {
     const el = document.getElementById('scaling-ceiling');
     if (!el) return;
-    const r = parseInt(document.getElementById('scaling-replicas').value, 10);
-    const c = parseInt(document.getElementById('scaling-cap').value, 10);
+    el.hidden = ['grouped', 'per_session'].includes(currentIsolationChoice());
+    if (el.hidden) return;
+    const replicaText = document.getElementById('scaling-replicas').value.trim();
+    const r = /^\d+$/.test(replicaText) ? Number(replicaText) : NaN;
+    const capRaw = document.getElementById('scaling-cap-mode').value === 'inherit' ? '0' : document.getElementById('scaling-cap').value;
+    const c = /^\d+$/.test(capRaw) ? Number(capRaw) : NaN;
     if (!Number.isFinite(r) || r < 1) { el.textContent = ''; return; }
-    if (!Number.isFinite(c) || c < 0) { el.textContent = ''; return; }
-    const inherited = Number(document.getElementById('scaling-cap').dataset.inheritedCap) || 0;
-    const effective = c || inherited;
-    el.textContent = effective > 0
-      ? `Session limit: ${r * effective} across ${r} replica${r === 1 ? '' : 's'} (${effective} per replica${c === 0 ? ', inherited from the server' : ''}). New viewers wait when capacity is full.`
-      : `Session limit: ${r} replica${r === 1 ? '' : 's'} using the server’s per-replica default. New viewers wait when capacity is full.`;
+    const customCap = document.getElementById('scaling-cap-mode').value === 'custom';
+    if (!Number.isFinite(c) || c < (customCap ? 1 : 0) || c > 1000) { el.textContent = ''; return; }
+    const inherited = document.getElementById('scaling-cap').dataset.defaultValue;
+    const effective = c > 0 ? c : inherited === '' || inherited == null ? null : Number(inherited);
+    if (effective == null) el.textContent = 'Session capacity unavailable: the server did not report its default cap.';
+    else if (effective === 0) el.textContent = 'No per-replica session cap. CPU, memory and worker limits still apply.';
+    else el.textContent = `Session capacity: ${r} × ${effective} = ${r * effective} concurrent sessions${c === 0 ? ' (inherited cap)' : ''}.`;
   }
 
   function updateWorkerCapacity() {
     const el = document.getElementById('worker-capacity');
     if (!el) return;
-    const mode = document.getElementById('worker-isolation').value;
-    syncWorkerControls(document, mode);
-    document.getElementById('scaling-ceiling').hidden = mode !== 'multiplex';
+    updateWorkerFields(document);
+    const mode = currentIsolationChoice();
     const gs = parseInt(document.getElementById('worker-grouped-size').value, 10);
     const mw = parseInt(document.getElementById('worker-max-workers').value, 10);
     // The per-session RAM estimate uses the configured memory limit so an
     // operator who has set limits gets a meaningful worst-case figure.
-    const memMB = parseInt(document.getElementById('resources-memory').value || '0', 10);
-    el.textContent = workerCapacityLine(
+    const memoryInput = document.getElementById('resources-memory');
+    const savedMemory = originalResourceSettings.memory_limit_mb;
+    const memMB = Number(savedMemory == null ? memoryInput.dataset.defaultLimit : savedMemory);
+    let capacity = workerCapacityLine(
       mode,
       Number.isFinite(gs) ? gs : 0,
       Number.isFinite(mw) ? mw : 0,
       Number.isFinite(memMB) ? memMB : 0,
-    ) || (mode === 'multiplex' ? 'Sessions share each replica. For independent session workers, choose Per session or Grouped.' : 'Worker limit is inherited from the server. New viewers wait when all workers are occupied.');
-  }
-
-  function onHibernateModeChange() {
-    const selected = document.querySelector('input[name="hibernate-mode"]:checked');
-    const customInput = document.getElementById('hibernate-custom-minutes');
-    const isCustom = selected && selected.value === 'custom';
-    customInput.disabled = !isCustom;
-    if (isCustom && !customInput.value) customInput.value = '60';
-    if (isCustom) customInput.focus();
-    setError(document.getElementById('hibernate-error'), '');
-    setHidden(document.getElementById('hibernate-status'), true);
+    );
+    if (capacity && isSectionDirty('resources')) capacity += ' Uses the saved memory limit; resource edits are not applied yet.';
+    setStableText(el, capacity);
   }
 
   async function saveHibernateSettings() {
     if (!settingsSlug) return;
-    const slug = settingsSlug;
+    const slug = settingsSlug, revision = settingsRevision;
+    const current = () => settingsSlug === slug && settingsRevision === revision;
     const errEl = document.getElementById('hibernate-error');
     const statusEl = document.getElementById('hibernate-status');
     setError(errEl, '');
     setHidden(statusEl, true);
 
-    const selected = document.querySelector('input[name="hibernate-mode"]:checked');
-    if (!selected) {
-      setError(errEl, 'Pick an option.');
-      return;
-    }
-
     let payload;
-    if (selected.value === 'default') {
-      payload = { hibernate_timeout_minutes: null };
-    } else if (selected.value === 'never') {
-      payload = { hibernate_timeout_minutes: 0 };
-    } else {
-      const raw = document.getElementById('hibernate-custom-minutes').value.trim();
-      const n = parseInt(raw, 10);
-      if (!Number.isFinite(n) || n < 1) {
-        setError(errEl, 'Enter a whole number of minutes (1 or more).');
-        return;
-      }
-      payload = { hibernate_timeout_minutes: n };
-    }
+    try { payload = { hibernate_timeout_minutes: readDirectSetting(document, 'hibernate-custom-minutes') }; }
+    catch (error) { if (error.fieldId) document.getElementById(error.fieldId)?.setAttribute('aria-invalid', 'true'); setError(errEl, error.message); return; }
 
     // Always include min_warm_replicas so the keep-warm floor is persisted
     // alongside any hibernation-mode change.
     const minWarmRaw = document.getElementById('min-warm-replicas').value.trim();
-    const minWarm = parseInt(minWarmRaw, 10);
+    const minWarm = /^\d+$/.test(minWarmRaw) ? Number(minWarmRaw) : NaN;
     if (!Number.isFinite(minWarm) || minWarm < 0 || minWarm > 1000) {
+      document.getElementById('min-warm-replicas').setAttribute('aria-invalid', 'true');
       setError(errEl, 'Keep warm must be a whole number between 0 and 1000.');
       return;
     }
     payload.min_warm_replicas = Number(minWarm);
 
-    const btn = document.getElementById('hibernate-save-btn');
-    btn.disabled = true;
+    statusEl.textContent = 'Saving hibernation…';
+    setHidden(statusEl, false);
     let resp;
     try {
       resp = await api(`/api/apps/${encodeURIComponent(slug)}`, {
@@ -4286,94 +3772,118 @@ document.addEventListener('DOMContentLoaded', () => {
         body: JSON.stringify(payload),
       });
     } catch {
-      btn.disabled = false;
+      if (!current()) return;
+      setHidden(statusEl, true);
       setError(errEl, 'Failed to save. Check your connection.');
       return;
     }
-    btn.disabled = false;
 
+    if (!current()) return;
     if (resp.status === 401) { await handleUnauthorized(); return; }
     if (!resp.ok) {
+      setHidden(statusEl, true);
       let message = 'Failed to save.';
       try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
+      if (!current()) return;
       setError(errEl, message);
       return;
     }
 
-    statusEl.textContent = 'Saved.';
+    if (!current()) return;
+    statusEl.textContent = 'Hibernation settings saved.';
     setHidden(statusEl, false);
     snapshotSettingsSection('hibernate');
     // Re-evaluate the keep-warm warning using the values just saved.
-    const savedReplicas = parseInt(document.getElementById('scaling-replicas').value, 10);
-    const savedMinWarm = minWarm;
-    updateMinWarmWarning(Number.isFinite(savedReplicas) ? savedReplicas : 1, savedMinWarm, currentIsolationChoice());
+    refreshKeepWarmNote();
     await loadApps();
-    await refreshDetailFleetState(slug);
+    if (!current()) return;
+    await refreshDetailFleetState(slug, current);
+    if (!current()) return;
   }
 
   async function saveScalingSettings() {
     if (!settingsSlug) return;
-    const slug = settingsSlug;
+    const slug = settingsSlug, revision = settingsRevision;
+    const current = () => settingsSlug === slug && settingsRevision === revision;
     const errEl = document.getElementById('scaling-error');
     const statusEl = document.getElementById('scaling-status');
     setError(errEl, '');
     setHidden(statusEl, true);
 
     const replicasRaw = document.getElementById('scaling-replicas').value.trim();
-    const capRaw = document.getElementById('scaling-cap').value.trim();
-    const replicas = parseInt(replicasRaw, 10);
+    const capRaw = document.getElementById('scaling-cap-mode').value === 'inherit' ? '0' : document.getElementById('scaling-cap').value.trim();
+    const replicas = /^\d+$/.test(replicasRaw) ? Number(replicasRaw) : NaN;
     const cap = parseInt(capRaw, 10);
     if (!Number.isFinite(replicas) || replicas < 1) {
+      document.getElementById('scaling-replicas').setAttribute('aria-invalid', 'true');
       setError(errEl, 'Replicas must be a whole number ≥ 1.');
       return;
     }
-    if (!Number.isFinite(cap) || cap < 0 || cap > 1000) {
-      setError(errEl, 'Max sessions per replica must be between 0 and 1000.');
+    const customCap = document.getElementById('scaling-cap-mode').value === 'custom';
+    if (!/^\d+$/.test(capRaw) || !Number.isFinite(cap) || cap < (customCap ? 1 : 0) || cap > 1000) {
+      document.getElementById('scaling-cap').setAttribute('aria-invalid', 'true');
+      setError(errEl, 'Max sessions per replica must be a whole number from 1 to 1000. Choose Server default to use the default limit.');
       return;
     }
 
-    // Growing preserves live slots. Shrinking drains only removed slots,
-    // whose remaining sessions can be disconnected when the deadline expires.
     const replicasInput = document.getElementById('scaling-replicas');
-    const originalReplicas = parseInt(replicasInput.dataset.original ?? '', 10);
-    const wasRunning = ['running', 'degraded'].includes(replicasInput.dataset.appStatus);
-    if (wasRunning && Number.isFinite(originalReplicas) && replicas < originalReplicas) {
-      const ok = window.confirm(
-        `Reducing replicas from ${originalReplicas} to ${replicas} will drain the removed replicas. Sessions still using them when the drain timeout expires will be disconnected. Continue?`,
-      );
-      if (!ok) return;
-    }
-
-    // Isolation mode changes also restart the app. Confirm before the
-    // disruptive case.
     const isolationSelect = document.getElementById('worker-isolation');
     const workerIsolation = isolationSelect.value;
-    const originalIsolation = isolationSelect.dataset.original ?? 'multiplex';
-    const wasRunningIso = ['running', 'degraded'].includes(isolationSelect.dataset.appStatus);
-    if (wasRunningIso && workerIsolation !== originalIsolation) {
-      const ok = window.confirm(
-        `Changing worker isolation mode from ${originalIsolation} to ${workerIsolation} will drain sessions before replacing the pool. Sessions still active at the drain deadline will disconnect. Continue?`,
-      );
-      if (!ok) return;
-    }
-
+    let originalIsolation = isolationSelect.dataset.original || isolationSelect.dataset.defaultIsolation || 'multiplex';
+    const effectiveIsolation = currentIsolationChoice();
     const maxWorkersRaw = document.getElementById('worker-max-workers').value.trim();
     const warmSparesRaw = document.getElementById('worker-warm-spares').value.trim();
-    const workerMaxWorkers = parseInt(maxWorkersRaw, 10);
-    const workerWarmSpares = parseInt(warmSparesRaw, 10);
+    const workerMaxWorkers = /^\d+$/.test(maxWorkersRaw) ? Number(maxWorkersRaw) : NaN;
+    const workerWarmSpares = /^\d+$/.test(warmSparesRaw) ? Number(warmSparesRaw) : NaN;
     if (!Number.isFinite(workerWarmSpares) || workerWarmSpares < 0 || workerWarmSpares > 1000) {
+      document.getElementById('worker-warm-spares').setAttribute('aria-invalid', 'true');
       setError(errEl, 'Warm workers must be a whole number between 0 and 1000.');
       return;
     }
-    if (workerIsolation !== 'multiplex' && Number.isFinite(workerMaxWorkers) && workerWarmSpares > workerMaxWorkers) {
+    if (effectiveIsolation !== 'multiplex' && (!Number.isInteger(workerMaxWorkers) || workerMaxWorkers < 1 || workerMaxWorkers > 1000)) {
+      document.getElementById('worker-max-workers').setAttribute('aria-invalid', 'true');
+      setError(errEl, 'Max workers must be a whole number from 1 to 1000 for per-session or grouped isolation.');
+      return;
+    }
+    if (effectiveIsolation !== 'multiplex' && Number.isFinite(workerMaxWorkers) && workerWarmSpares > workerMaxWorkers) {
+      document.getElementById('worker-warm-spares').setAttribute('aria-invalid', 'true');
       setError(errEl, 'Warm workers cannot exceed max workers.');
       return;
     }
+    const groupedRaw = document.getElementById('worker-grouped-size').value.trim();
+    if (effectiveIsolation === 'grouped' && (!/^\d+$/.test(groupedRaw) || Number(groupedRaw) < 1 || Number(groupedRaw) > 100)) {
+      document.getElementById('worker-grouped-size').setAttribute('aria-invalid', 'true');
+      setError(errEl, 'Clients per group must be a whole number from 1 to 100.'); return;
+    }
     const savedScaling = scalingSettingsSnapshot(document);
     const payload = scalingSettingsPatch(savedScaling, originalScalingSettings);
-    if (Object.keys(payload).length === 0) return;
-    const btn = document.getElementById('scaling-save-btn');
-    btn.disabled = true;
+    if (Object.keys(payload).length === 0) { snapshotSettingsSection('scaling'); return; }
+    let originalReplicas = originalScalingSettings.replicas;
+    let currentStatus = replicasInput.dataset.appStatus;
+    let isolationChanged = Object.hasOwn(payload, 'worker_isolation') && effectiveIsolation !== originalIsolation;
+    if (Object.hasOwn(payload, 'replicas') || Object.hasOwn(payload, 'worker_isolation')) {
+      try {
+        const latest = await api(`/api/apps/${encodeURIComponent(slug)}`);
+        if (latest.status === 401) { await handleUnauthorized(); return; }
+        if (!latest.ok) throw new Error('Could not read current replicas.');
+        const latestBody = await latest.json();
+        if (!current()) return;
+        originalReplicas = latestBody.app?.replicas;
+        currentStatus = latestBody.app?.status;
+        originalIsolation = latestBody.app?.effective_worker_isolation || latestBody.app?.worker_isolation || isolationSelect.dataset.defaultIsolation || originalIsolation;
+        isolationChanged = Object.hasOwn(payload, 'worker_isolation') && effectiveIsolation !== originalIsolation;
+        if (!Number.isInteger(originalReplicas) || !currentStatus) throw new Error('Current app state unavailable.');
+      } catch { if (current()) setError(errEl, 'Could not verify the current app state. Try again before changing replicas or isolation.'); return; }
+    }
+    const wasRunning = ['running', 'degraded'].includes(currentStatus);
+    if (wasRunning && Object.hasOwn(payload, 'replicas') && replicas < originalReplicas && !window.confirm(
+      `Reducing replicas from ${originalReplicas} to ${replicas} will drain the removed replicas. Sessions still using them when the drain timeout expires will be disconnected. Continue?`,
+    )) return;
+    if (wasRunning && isolationChanged && !window.confirm(
+      `Changing worker isolation mode from ${originalIsolation} to ${effectiveIsolation} will drain sessions before replacing the pool. Sessions still active at the drain deadline will disconnect. Continue?`,
+    )) return;
+    statusEl.textContent = 'Saving scaling…';
+    setHidden(statusEl, false);
     let resp;
     try {
       resp = await api(`/api/apps/${encodeURIComponent(slug)}`, {
@@ -4381,32 +3891,40 @@ document.addEventListener('DOMContentLoaded', () => {
         body: JSON.stringify(payload),
       });
     } catch {
-      btn.disabled = false;
+      if (!current()) return;
+      setHidden(statusEl, true);
       setError(errEl, 'Failed to save. Check your connection.');
       return;
     }
-    btn.disabled = false;
 
+    if (!current()) return;
     if (resp.status === 401) { await handleUnauthorized(); return; }
     if (!resp.ok) {
+      setHidden(statusEl, true);
       let message = 'Failed to save.';
       try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
+      if (!current()) return;
       setError(errEl, message);
       return;
     }
 
-    statusEl.textContent = 'Saved.';
+    if (!current()) return;
+    statusEl.textContent = 'Scaling settings saved.';
     setHidden(statusEl, false);
     originalScalingSettings = savedScaling;
+    for (const id of ['worker-grouped-size', 'worker-max-workers', 'worker-warm-spares', 'scaling-replicas', 'scaling-cap', 'scaling-cap-mode']) delete document.getElementById(id).dataset.modeDraft;
+    refreshDirectSetting(document, 'scaling-cap', { resetDraft: true });
     replicasInput.dataset.original = String(replicas);
     isolationSelect.dataset.original = workerIsolation;
     snapshotSettingsSection('scaling');
     // Isolation is one half of the keep-warm advisory shown in the Hibernation
     // fieldset, so a save that switches mode re-evaluates it against the
     // floor the operator has in the field.
-    updateMinWarmWarning(replicas, parseInt(document.getElementById('min-warm-replicas').value, 10) || 0, workerIsolation);
+    updateMinWarmWarning(replicas, parseInt(document.getElementById('min-warm-replicas').value, 10) || 0, effectiveIsolation);
     await loadApps();
-    await refreshDetailFleetState(slug);
+    if (!current()) return;
+    await refreshDetailFleetState(slug, current);
+    if (!current()) return;
     // Isolation is the one saved field the header menu is derived from, and the
     // metrics poller only ever merges status and deploying. Without folding the
     // reloaded app back into detailApp, switching multiplex to grouped leaves
@@ -4428,11 +3946,10 @@ document.addEventListener('DOMContentLoaded', () => {
     setError(errEl, '');
     setHidden(statusEl, true);
 
-    const parsed = parseRenderSeconds(document.getElementById('render-seconds').value);
-    if (!parsed.ok) {
-      setError(errEl, parsed.error);
-      return;
-    }
+    let parsed;
+    try { parsed = parseRenderSeconds(String(readDirectSetting(document, 'render-seconds'))); }
+    catch (error) { if (error.fieldId) document.getElementById(error.fieldId)?.setAttribute('aria-invalid', 'true'); setError(errEl, error.message); return; }
+    if (!parsed.ok) { setError(errEl, parsed.error); return; }
 
     // Pacing applies live (the PATCH calls proxy.ApplyRenderPacing), so this is
     // not a restart-and-drop-sessions change and needs no confirmation.
@@ -4446,12 +3963,14 @@ document.addEventListener('DOMContentLoaded', () => {
         body: JSON.stringify({ render_seconds: parsed.value }),
       });
     } catch {
+      if (settingsSlug !== slug) return;
       btn.disabled = false;
       setError(errEl, 'Failed to save. Check your connection.');
       return;
     }
     btn.disabled = false;
 
+    if (settingsSlug !== slug) return;
     if (resp.status === 401) { await handleUnauthorized(); return; }
     let body = null;
     try { body = await resp.json(); } catch { /* non-JSON */ }
@@ -4465,8 +3984,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (settingsSlug !== slug) return;
     // Adopt the advisory for the value just persisted: pacing is in effect from
     // here on, and the block that described the previous setting is now stale.
-    renderPacingBlock = (body && body.render_pacing) || null;
+    renderPacingBlock = (body && body.render_pacing) || (parsed.value > 0 ? { render_seconds: parsed.value } : null);
     updateRenderPacingAdvice();
+    if (settingsSlug !== slug) return;
     statusEl.textContent = 'Saved.';
     setHidden(statusEl, false);
     snapshotSettingsSection('render');
@@ -4489,23 +4009,12 @@ document.addEventListener('DOMContentLoaded', () => {
     minInput.value = String(app.autoscale_min_replicas ?? 1);
     maxInput.value = String(app.autoscale_max_replicas ?? 1);
 
-    // The API stores 0 to mean "inherit"; the radio mirrors that: "default"
-    // when target == 0 (no override), "custom" otherwise. The number input is
-    // pre-filled with the explicit value so a toggle to custom does not lose it.
-    const explicitTarget = Number(app.autoscale_target) || 0;
-    const mode = explicitTarget > 0 ? 'custom' : 'default';
-    document.querySelectorAll('input[name="autoscale-target-mode"]').forEach(r => {
-      r.checked = r.value === mode;
-    });
-    targetInput.value = explicitTarget > 0 ? explicitTarget.toFixed(2) : '';
-    targetInput.disabled = mode !== 'custom' || !canEdit;
-
     enabledInput.disabled = !canEdit;
     minInput.disabled = !canEdit;
     maxInput.disabled = !canEdit;
-    document.querySelectorAll('input[name="autoscale-target-mode"]').forEach(r => {
-      r.disabled = !canEdit;
-    });
+    populateDirectSetting(document, 'autoscale-target', app.autoscale_target || 0, canEdit);
+    syncAutoscaleControls();
+    document.getElementById('autoscale-policy-fields').open = enabledInput.checked;
     document.getElementById('autoscale-save-btn').hidden = !canEdit;
 
     setError(document.getElementById('autoscale-error'), '');
@@ -4519,6 +4028,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // current replica count (>=1); max becomes at least min.
   function onAutoscaleEnabledChange() {
     const enabled = document.getElementById('autoscale-enabled').checked;
+    document.getElementById('autoscale-policy-fields').open = enabled;
     if (enabled) {
       const minEl = document.getElementById('autoscale-min');
       const maxEl = document.getElementById('autoscale-max');
@@ -4527,19 +4037,17 @@ document.addEventListener('DOMContentLoaded', () => {
       const minNow = parseInt(minEl.value, 10) || 1;
       if ((parseInt(maxEl.value, 10) || 0) < minNow) maxEl.value = String(Math.max(minNow, current));
     }
+    syncAutoscaleControls();
     updateAutoscaleCeiling();
     recomputeDirty('autoscale');
   }
 
-  function onAutoscaleTargetModeChange() {
-    const selected = document.querySelector('input[name="autoscale-target-mode"]:checked');
-    const targetInput = document.getElementById('autoscale-target');
-    const isCustom = selected && selected.value === 'custom';
-    targetInput.disabled = !isCustom;
-    if (isCustom && !targetInput.value) targetInput.value = '0.80';
-    if (isCustom) targetInput.focus();
-    setError(document.getElementById('autoscale-error'), '');
-    setHidden(document.getElementById('autoscale-status'), true);
+  function syncAutoscaleControls() {
+    const enabled = document.getElementById('autoscale-enabled');
+    for (const id of ['autoscale-min', 'autoscale-max', 'autoscale-target']) {
+      document.getElementById(id).disabled = enabled.disabled;
+    }
+    refreshDirectSetting(document, 'autoscale-target');
   }
 
   function updateAutoscaleCeiling() {
@@ -4552,33 +4060,37 @@ document.addEventListener('DOMContentLoaded', () => {
     // magnitude until the user clicked Save).
     const min = parseReplicaBound(document.getElementById('autoscale-min').value);
     const max = parseReplicaBound(document.getElementById('autoscale-max').value);
+    el.hidden = !enabled;
     if (!enabled) {
-      el.textContent = 'Autoscale disabled: the controller will not change the replica count.';
+      el.textContent = 'Autoscale is off. The bounds and target are inactive until you enable it.';
       return;
     }
     if (min === null || max === null || min < 1 || max < min) {
       el.textContent = '';
       return;
     }
-    el.innerHTML = `Controller will steer between <strong>${min}</strong> and <strong>${max}</strong> replicas.`;
+    const summary = `Controller will steer between <strong>${min}</strong> and <strong>${max}</strong> replicas.`;
+    if (el.innerHTML !== summary) el.innerHTML = summary;
   }
 
   async function saveAutoscaleSettings() {
     if (!settingsSlug) return;
-    const slug = settingsSlug;
+    const slug = settingsSlug, revision = settingsRevision;
+    const current = () => settingsSlug === slug && settingsRevision === revision;
     const errEl = document.getElementById('autoscale-error');
     const statusEl = document.getElementById('autoscale-status');
     setError(errEl, '');
     setHidden(statusEl, true);
 
-    const { payload, error } = readAutoscaleForm(document);
+    const { payload, error, fieldId } = readAutoscaleForm(document);
     if (error) {
+      if (fieldId) document.getElementById(fieldId)?.setAttribute('aria-invalid', 'true');
       setError(errEl, error);
       return;
     }
 
-    const btn = document.getElementById('autoscale-save-btn');
-    btn.disabled = true;
+    statusEl.textContent = 'Saving autoscale…';
+    setHidden(statusEl, false);
     let resp;
     try {
       resp = await api(`/api/apps/${encodeURIComponent(slug)}`, {
@@ -4586,31 +4098,38 @@ document.addEventListener('DOMContentLoaded', () => {
         body: JSON.stringify({ autoscale: payload }),
       });
     } catch {
-      btn.disabled = false;
+      if (!current()) return;
+      setHidden(statusEl, true);
       setError(errEl, 'Failed to save. Check your connection.');
       return;
     }
-    btn.disabled = false;
 
+    if (!current()) return;
     if (resp.status === 401) { await handleUnauthorized(); return; }
     if (!resp.ok) {
+      setHidden(statusEl, true);
       let message = 'Failed to save.';
       try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
+      if (!current()) return;
       setError(errEl, message);
       return;
     }
 
-    statusEl.textContent = 'Saved.';
+    if (!current()) return;
+    statusEl.textContent = 'Autoscale policy saved.';
     setHidden(statusEl, false);
     snapshotSettingsSection('autoscale');
     await loadApps();
-    await refreshDetailFleetState(slug);
+    if (!current()) return;
+    await refreshDetailFleetState(slug, current);
+    if (!current()) return;
   }
 
   function resetDangerZone() {
     const input = document.getElementById('delete-confirm');
     const btn = document.getElementById('delete-app-btn');
     input.value = '';
+    document.querySelector('.settings-delete-confirm').open = false;
     btn.disabled = true;
     btn.textContent = 'Delete app';
     setError(document.getElementById('delete-error'), '');
@@ -4619,363 +4138,575 @@ document.addEventListener('DOMContentLoaded', () => {
   // --- Environment tab ---
 
   let envEditingKey = null;
+  let envBaseline = null;
+  let envSaving = false;
+  let envKeys = new Set();
+  let envListRequest = 0;
+  const envApplyStates = new Map();
+  const envFormValue = () => JSON.stringify(['env-form-key', 'env-form-value', 'env-form-secret', 'env-form-restart'].map(id => {
+    const el = document.getElementById(id); return el.type === 'checkbox' ? el.checked : el.value;
+  }));
+  function envFormDirty() { return !document.getElementById('env-form').hidden && envBaseline !== null && envFormValue() !== envBaseline; }
+  function envRequestCurrent(slug, revision) { return settingsSlug === slug && settingsRevision === revision; }
+  function envApp(slug) { return (detailApp?.slug === slug ? detailApp : null) || state.apps.find(app => app.slug === slug); }
+  function syncEnvSecret() {
+    const secret = document.getElementById('env-form-secret').checked;
+    document.getElementById('env-form-value').type = secret ? 'password' : 'text';
+    document.getElementById('env-form-value').autocomplete = secret ? 'new-password' : 'off';
+    const reveal = document.getElementById('env-value-reveal');
+    reveal.hidden = !secret; reveal.textContent = 'Show value'; reveal.setAttribute('aria-pressed', 'false');
+  }
+  function syncEnvApplyState(slug) {
+    const running = ['running', 'degraded'].includes(envApp(slug)?.status);
+    const saved = envApplyStates.get(slug);
+    document.getElementById('env-apply-note').textContent = saved === 'pending'
+      ? (running ? 'Saved changes are waiting for a restart.' : 'Saved changes will apply the next time the app starts.')
+      : saved === 'applied' ? 'Saved variables were applied by the last restart.' : '';
+    const button = document.getElementById('env-apply-btn');
+    button.hidden = !canManageApp(state.user, envApp(slug)) || !running;
+    button.textContent = saved === 'pending' ? 'Restart to apply' : 'Restart with saved values';
+  }
 
   async function refreshEnvList(slug) {
+    const revision = settingsRevision, request = ++envListRequest;
+    const current = () => envRequestCurrent(slug, revision) && request === envListRequest;
+    if (!current()) return;
     const tbody = document.querySelector('#env-list tbody');
-    tbody.innerHTML = '';
-    const errEl = document.getElementById('env-form-error');
-
-    let resp;
-    try {
-      resp = await api(`/api/apps/${encodeURIComponent(slug)}/env`);
-    } catch {
-      setError(errEl, 'Failed to load environment variables.');
-      return;
-    }
-    if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (!resp.ok) {
-      let message = 'Failed to load environment variables.';
-      try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
-      setError(errEl, message);
-      return;
-    }
-
-    let data;
-    try { data = await resp.json(); } catch { setError(errEl, 'Invalid response from server.'); return; }
-
-    // Standard {items,...} list envelope; tolerate a bare array for resilience.
-    const vars = Array.isArray(data) ? data : (data && Array.isArray(data.items) ? data.items : []);
-    const empty = document.getElementById('env-empty');
     const table = document.getElementById('env-list');
-    empty.hidden = vars.length > 0;
-    table.hidden = vars.length === 0;
-
-    // Resolve via the current detail app (carries can_manage, present on a
-    // deep-link) before the cached list, so "+ Add variable" isn't wrongly
-    // hidden for a manager who landed directly on /apps/:slug/configuration.
-    const app = (detailApp && detailApp.slug === slug ? detailApp : null)
-      || state.apps.find(a => a.slug === slug);
-    const canWrite = canManageApp(state.user, app);
-    document.getElementById('env-add-btn').hidden = !canWrite;
-    document.getElementById('env-apply-btn').hidden = !canWrite;
-
-    for (const v of vars) {
-      const tr = document.createElement('tr');
-      const keyTd = document.createElement('td');
-      keyTd.textContent = v.key;
-      const valTd = document.createElement('td');
-      valTd.className = v.secret ? 'env-secret' : '';
-      valTd.textContent = v.secret ? '••••••' : v.value;
-      const actTd = document.createElement('td');
-      actTd.className = 'env-actions';
-      if (canWrite) {
-        const editBtn = document.createElement('button');
-        editBtn.type = 'button';
-        editBtn.textContent = 'Edit';
-        editBtn.addEventListener('click', () => openEnvForm(v));
-        const delBtn = document.createElement('button');
-        delBtn.type = 'button';
-        delBtn.className = 'env-btn-danger';
-        delBtn.textContent = 'Delete';
-        delBtn.addEventListener('click', () => deleteEnvVar(slug, v.key, delBtn));
-        actTd.append(editBtn, delBtn);
+    const status = document.getElementById('env-load-status');
+    const error = document.getElementById('env-load-error');
+    const retry = document.getElementById('env-retry-btn');
+    const add = document.getElementById('env-add-btn');
+    tbody.replaceChildren(); table.hidden = true;
+    table.setAttribute('aria-busy', 'true');
+    document.getElementById('env-empty').hidden = true;
+    status.textContent = 'Loading variables…'; status.classList.remove('sr-only'); setError(error, ''); retry.hidden = true;
+    add.disabled = true;
+    const canWrite = canManageApp(state.user, envApp(slug));
+    add.hidden = !canWrite;
+    syncEnvApplyState(slug);
+    try {
+      const resp = await api(`/api/apps/${encodeURIComponent(slug)}/env`);
+      if (!current()) return;
+      if (resp.status === 401) { await handleUnauthorized(); return; }
+      if (!resp.ok) throw new Error('request failed');
+      const data = await resp.json();
+      if (!current()) return;
+      const vars = Array.isArray(data) ? data : data?.items;
+      if (!Array.isArray(vars)) throw new Error('invalid response');
+      envKeys = new Set(vars.map(v => v.key));
+      document.getElementById('env-empty').hidden = vars.length > 0;
+      table.hidden = vars.length === 0;
+      status.classList.add('sr-only');
+      status.textContent = vars.length ? `${vars.length} ${vars.length === 1 ? 'variable' : 'variables'} loaded.` : '';
+      add.disabled = envSaving;
+      for (const v of vars) {
+        const tr = document.createElement('tr');
+        tr.setAttribute('role', 'row');
+        const keyTd = document.createElement('th');
+        keyTd.scope = 'row'; keyTd.className = 'env-key'; keyTd.textContent = v.key;
+        const valTd = document.createElement('td');
+        valTd.className = v.secret ? 'env-value env-secret' : 'env-value';
+        valTd.textContent = v.secret ? 'Secret value' : v.value === '' || v.value == null ? 'Empty value' : v.value;
+        if (!v.secret && !v.value) valTd.classList.add('env-empty-value');
+        const actTd = document.createElement('td');
+        actTd.className = 'env-actions';
+        if (v.source === 'bundle') {
+          const note = document.createElement('span'); note.className = 'env-managed';
+          note.textContent = 'Edit shinyhub.toml and deploy to change this variable.';
+          actTd.appendChild(note);
+        } else if (canWrite) {
+          const editBtn = document.createElement('button'); editBtn.type = 'button';
+          editBtn.textContent = v.secret ? 'Replace' : 'Edit';
+          editBtn.setAttribute('aria-label', `${v.secret ? 'Replace' : 'Edit'} ${v.key}`);
+          editBtn.addEventListener('click', () => openEnvForm(v));
+          const delBtn = document.createElement('button'); delBtn.type = 'button';
+          delBtn.className = 'env-btn-danger'; delBtn.textContent = 'Delete';
+          delBtn.setAttribute('aria-label', `Delete ${v.key}`);
+          delBtn.addEventListener('click', () => deleteEnvVar(slug, v.key, delBtn));
+          actTd.append(editBtn, delBtn);
+        }
+        tr.append(keyTd, valTd, actTd); tbody.appendChild(tr);
       }
-      tr.append(keyTd, valTd, actTd);
-      tbody.appendChild(tr);
-    }
+    } catch {
+      if (current()) {
+        status.textContent = ''; status.classList.add('sr-only');
+        setError(error, 'Variables could not be loaded. Try again to see saved values.');
+        retry.hidden = false;
+      }
+    } finally { if (current()) table.setAttribute('aria-busy', 'false'); }
+  }
+
+  async function retryEnvList() {
+    const slug = settingsSlug, revision = settingsRevision;
+    if (!slug) return;
+    await refreshEnvList(slug);
+    if (!envRequestCurrent(slug, revision)) return;
+    const retry = document.getElementById('env-retry-btn');
+    document.getElementById(retry.hidden ? 'env-add-btn' : 'env-retry-btn').focus({preventScroll:true});
   }
 
   function openEnvForm(existing) {
+    if (envSaving) return;
+    if (envFormDirty() && !window.confirm('Discard the unsaved variable edit?')) return;
     envEditingKey = existing ? existing.key : null;
-    document.getElementById('env-form-heading').textContent = existing ? `Edit ${existing.key}` : 'Add variable';
+    document.getElementById('env-form-heading').textContent = existing ? `${existing.secret ? 'Replace' : 'Edit'} ${existing.key}` : 'Add variable';
+    document.getElementById('env-form-save').textContent = existing?.secret ? 'Replace secret' : existing ? 'Save changes' : 'Save variable';
     const keyInput = document.getElementById('env-form-key');
     const valueInput = document.getElementById('env-form-value');
     const secretInput = document.getElementById('env-form-secret');
-    keyInput.value = existing ? existing.key : '';
-    keyInput.readOnly = !!existing;
-    valueInput.value = '';
-    valueInput.placeholder = (existing && existing.secret) ? 'Enter new value (current value is write-only)' : '';
-    secretInput.checked = existing ? existing.secret : false;
-    secretInput.disabled = !!existing;
+    keyInput.removeAttribute('aria-invalid'); keyInput.removeAttribute('aria-errormessage');
+    valueInput.removeAttribute('aria-invalid'); valueInput.removeAttribute('aria-errormessage');
+    keyInput.value = existing ? existing.key : ''; keyInput.readOnly = !!existing;
+    valueInput.value = environmentEditValue(existing);
+    valueInput.placeholder = existing?.secret ? 'New secret value' : '';
+    document.getElementById('env-key-help').textContent = existing ? 'Names cannot be changed.' : 'Use uppercase letters, numbers and underscores; start with a letter or underscore. SHINYHUB_ is reserved.';
+    secretInput.checked = existing ? existing.secret : false; secretInput.disabled = !!existing;
     document.getElementById('env-form-restart').checked = false;
-    document.getElementById('env-form-error').hidden = true;
+    setError(document.getElementById('env-form-error'), '');
     document.getElementById('env-form').hidden = false;
-    keyInput.focus();
+    document.getElementById('env-value-help').textContent = existing?.secret ? 'Enter a replacement. The stored secret cannot be shown.' : 'Empty values are allowed.';
+    valueInput.required = !!existing?.secret;
+    syncEnvSecret(); envBaseline = envFormValue();
+    updateConfigurationDirty(document, 'configuration-environment', false);
+    (existing ? valueInput : keyInput).focus();
   }
 
-  function closeEnvForm() {
+  function closeEnvForm(discard = false) {
+    if (discard !== true && envFormDirty() && !window.confirm('Discard the unsaved variable edit?')) return;
     const form = document.getElementById('env-form');
-    if (form) form.hidden = true;
-    envEditingKey = null;
+    const hadFocus = form.contains(document.activeElement);
+    form.hidden = true;
+    // A completed or discarded secret must not remain in a hidden form.
+    document.getElementById('env-form-value').value = '';
+    syncEnvSecret();
+    if (hadFocus) document.getElementById('env-add-btn').focus({ preventScroll: true });
+    envEditingKey = null; envBaseline = null;
+    updateConfigurationDirty(document, 'configuration-environment', false);
+    setError(document.getElementById('env-form-error'), '');
+  }
+
+  async function withEnvMutation(button, action) {
+    if (envSaving || !settingsSlug) return;
+    const slug = settingsSlug, revision = settingsRevision;
+    const current = () => envRequestCurrent(slug, revision);
+    const controls = [...document.querySelectorAll('#configuration-environment input, #configuration-environment button')];
+    const disabled = controls.map(el => el.disabled);
+    envSaving = true;
+    try {
+      await runInFlight(button, async () => {
+        controls.forEach(el => { el.disabled = true; });
+        await action(slug, current);
+      });
+    } finally {
+      envSaving = false;
+      // These mounted controls are reused after navigation or a new session.
+      // Release our locks even when the response belongs to an old context.
+      controls.forEach((el, i) => { el.disabled = disabled[i]; });
+      if (!document.getElementById('env-retry-btn').hidden || document.getElementById('env-list').getAttribute('aria-busy') === 'true') document.getElementById('env-add-btn').disabled = true;
+      if (current()) {
+        if (document.activeElement === document.body) {
+          document.getElementById(document.getElementById('env-form').hidden ? 'env-add-btn' : 'env-form-save').focus({ preventScroll: true });
+        }
+      }
+    }
   }
 
   async function submitEnvForm(e) {
     e.preventDefault();
-    const key = document.getElementById('env-form-key').value.trim();
-    const value = document.getElementById('env-form-value').value;
-    const secret = document.getElementById('env-form-secret').checked;
+    if (envSaving || !settingsSlug) return;
+    const keyInput = document.getElementById('env-form-key');
+    const key = keyInput.value.trim();
+    const valueInput = document.getElementById('env-form-value');
+    const value = valueInput.value, secret = document.getElementById('env-form-secret').checked;
     const restart = document.getElementById('env-form-restart').checked;
     const errEl = document.getElementById('env-form-error');
-    errEl.hidden = true;
-
-    if (!/^[A-Z_][A-Z0-9_]*$/.test(key)) {
-      setError(errEl, 'Key must match [A-Z_][A-Z0-9_]*');
-      return;
-    }
-
-    if (restart && !window.confirm('Apply this environment change by draining and restarting the app? Sessions still active at the drain deadline will disconnect.')) return;
-    await runInFlight(document.getElementById('env-form-save'), async () => {
-      const url = `/api/apps/${encodeURIComponent(settingsSlug)}/env/${encodeURIComponent(key)}` + (restart ? '?restart=true' : '');
+    setError(errEl, '');
+    for (const input of [keyInput, valueInput]) { input.removeAttribute('aria-invalid'); input.removeAttribute('aria-errormessage'); }
+    const invalid = (input, message) => {
+      setError(errEl, message); input.setAttribute('aria-invalid', 'true'); input.setAttribute('aria-errormessage', errEl.id); input.focus();
+    };
+    if (!/^[A-Z_][A-Z0-9_]*$/.test(key)) { invalid(keyInput, 'Use uppercase letters, numbers and underscores. Start with a letter or underscore.'); return; }
+    if (key.startsWith('SHINYHUB_')) { invalid(keyInput, 'SHINYHUB_ is reserved. Choose a different variable name.'); return; }
+    if (!envEditingKey && envKeys.has(key)) { invalid(keyInput, 'This variable already exists. Use Edit or Replace on its row.'); return; }
+    if (envEditingKey && secret && !value) { invalid(valueInput, 'Enter a new secret value to replace the stored secret.'); return; }
+    if (new TextEncoder().encode(value).length > 65536) { invalid(valueInput, 'The value must be 64 KB or smaller.'); return; }
+    if (restart && !window.confirm('Save and restart the app? Active sessions will drain first. Sessions still active at the drain deadline will disconnect.')) return;
+    await withEnvMutation(document.getElementById('env-form-save'), async (slug, current) => {
       let resp;
       try {
-        resp = await api(url, { method: 'PUT', body: JSON.stringify({ value, secret }) });
-      } catch {
-        setError(errEl, 'Network error.');
-        return;
-      }
+        resp = await api(`/api/apps/${encodeURIComponent(slug)}/env/${encodeURIComponent(key)}${restart ? '?restart=true' : ''}`, {method:'PUT',body:JSON.stringify({value,secret})});
+      } catch { if (current()) setError(errEl, 'Network error. Your draft is kept; try saving again.'); return; }
+      if (!current()) return;
       if (resp.status === 401) { await handleUnauthorized(); return; }
       if (!resp.ok) {
-        let message = 'Save failed.';
-        try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
-        setError(errEl, message);
+        let message = 'The variable could not be saved. Your draft is kept; try again.';
+        try { const body = await resp.json(); if (body.error) message = body.error; } catch { /* non-JSON */ }
+        if (current()) setError(errEl, message);
         return;
       }
-
-      const result = await resp.json();
+      let result;
+      try { result = await resp.json(); if (!result || typeof result !== 'object') throw new Error('invalid response'); } catch {
+        if (current()) setError(errEl, 'The save could not be confirmed. Reload to check saved values before trying again.'); return;
+      }
+      if (!current()) return;
+      // An unchanged PUT deliberately skips restart on the server. Honor the
+      // explicit Save and restart choice through the dedicated apply endpoint.
+      if (restart && result.changed === false && !result.restarted) {
+        try {
+          const applied = await api(`/api/apps/${encodeURIComponent(slug)}/env/apply`, {method:'POST'});
+          if (!current()) return;
+          if (applied.status === 401) { await handleUnauthorized(); return; }
+          const body = await applied.json();
+          if (!body || applied.ok && typeof body.restarted !== 'boolean') throw new Error('invalid restart response');
+          if (!current()) return;
+          result = {...result, restarted:body.restarted === true, restart_required:body.restarted !== true,
+            restart_error:applied.ok ? '' : body.restart_error || body.error || 'The app could not be restarted'};
+        } catch { result = {...result, restart_error:'The restart could not be confirmed. Check the app status before trying again', restart_required:true}; }
+      }
+      if (!current()) return;
+      if (result.restarted) envApplyStates.set(slug, 'applied');
+      else if (result.changed !== false || result.restart_required || result.restart_error) envApplyStates.set(slug, 'pending');
+      closeEnvForm(true);
+      await refreshEnvList(slug);
+      if (!current()) return;
+      syncEnvApplyState(slug);
       if (result.restart_error) {
-        setError(errEl, 'Variable saved, but applying it failed: ' + result.restart_error + '. Use Apply saved changes to retry.');
-        return;
+        setError(errEl, 'Variable saved, but applying it failed: ' + result.restart_error + '. Retry with the Restart to apply button.'); return;
       }
-      if (result.restart_required) flashToast('Variable saved. Existing sessions keep their environment until you apply saved changes.', 'success');
-      closeEnvForm();
-      await refreshEnvList(settingsSlug);
+      flashToast(result.restarted ? 'Variable saved and applied.' : result.restart_required ? 'Variable saved. Restart to apply it to running processes.' : 'Variable saved.', 'success');
     });
   }
 
   async function deleteEnvVar(slug, key, btn) {
-    if (!window.confirm(`Delete environment variable ${key}?`)) return;
-    const errEl = document.getElementById('env-form-error');
-    await runInFlight(btn, async () => {
+    if (envSaving || settingsSlug !== slug) return;
+    if (envEditingKey === key && envFormDirty() && !window.confirm('Discard the unsaved edit before deleting this variable?')) return;
+    if (!window.confirm(`Delete ${key}? Running processes keep its current value until the app restarts.`)) return;
+    const errEl = document.getElementById('env-form-error'); setError(errEl, '');
+    await withEnvMutation(btn, async (_, current) => {
       let resp;
-      try {
-        resp = await api(`/api/apps/${encodeURIComponent(slug)}/env/${encodeURIComponent(key)}`, { method: 'DELETE' });
-      } catch {
-        setError(errEl, 'Network error.');
-        return;
-      }
+      try { resp = await api(`/api/apps/${encodeURIComponent(slug)}/env/${encodeURIComponent(key)}`, {method:'DELETE'}); }
+      catch { if (current()) setError(errEl, 'The deletion could not be confirmed. Reload to check saved values before trying again.'); return; }
+      if (!current()) return;
       if (resp.status === 401) { await handleUnauthorized(); return; }
-      if (!resp.ok && resp.status !== 204) {
-        let message = 'Delete failed.';
-        try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
-        setError(errEl, message);
-        return;
-      }
-      if (resp.headers.get('X-Shinyhub-Restart-Required') === 'true') {
-        flashToast('Variable deleted. Existing sessions keep their environment until the app is restarted.', 'success');
-      }
+      if (!resp.ok) { setError(errEl, 'The variable could not be deleted. Try again.'); return; }
+      const pending = resp.headers.get('X-Shinyhub-Restart-Required') === 'true';
+      envApplyStates.set(slug, 'pending');
+      if (envEditingKey === key) closeEnvForm(true);
       await refreshEnvList(slug);
+      if (!current()) return;
+      syncEnvApplyState(slug);
+      flashToast(pending ? 'Variable deleted. Restart to apply the removal to running processes.' : 'Variable deleted.', 'success');
+      document.getElementById('env-add-btn').focus({preventScroll:true});
     });
   }
 
-  // --- Data tab ---
-
-  function encodeDataPath(p) {
-    return p.split('/').map(encodeURIComponent).join('/');
+  async function applyEnvChanges() {
+    if (envSaving || !settingsSlug) return;
+    if (!window.confirm('Restart with saved variables? Unsaved edits are not included. Active sessions will drain first. Sessions still active at the drain deadline will disconnect.')) return;
+    const error = document.getElementById('env-form-error'); setError(error, '');
+    await withEnvMutation(document.getElementById('env-apply-btn'), async (slug, current) => {
+      try {
+        const resp = await api(`/api/apps/${encodeURIComponent(slug)}/env/apply`, {method:'POST'});
+        if (!current()) return;
+        if (resp.status === 401) { await handleUnauthorized(); return; }
+        let result;
+        try { result = await resp.json(); if (!result || typeof result.restarted !== 'boolean' && resp.ok) throw new Error('invalid response'); } catch {
+          if (current()) setError(error, 'The restart could not be confirmed. Check the app status before trying again.'); return;
+        }
+        if (!current()) return;
+        if (!resp.ok) { setError(error, result.restart_error || result.error || 'Saved variables could not be applied. Try again.'); return; }
+        envApplyStates.set(slug, result.restarted ? 'applied' : 'pending');
+        syncEnvApplyState(slug);
+        flashToast(result.restarted ? 'Saved environment applied.' : 'Saved variables will apply when the app starts.', 'success');
+        await loadApps();
+        if (current()) syncEnvApplyState(slug);
+      } catch { if (current()) setError(error, 'The restart could not be confirmed. Check the app status before trying again.'); }
+    });
   }
 
-  let dataRead = 0;
-  async function refreshDataTab(slug, app) {
-    if (!slug || slug !== settingsSlug) return;
-    const scope = accessLists.capture();
-    const read = ++dataRead;
-    const current = () => scope() && read === dataRead;
-    const tbody = document.getElementById('data-list');
-    const errEl = document.getElementById('data-error');
-    setError(errEl, '');
+  let accessPanelRevision = 0;
+  let memberListRequest = 0;
+  let groupListRequest = 0;
 
+  function accessRequestCurrent(slug, revision) {
+    return slug === settingsSlug && revision === accessPanelRevision;
+  }
+
+  function accessListState(list, message, retry) {
+    list.replaceChildren();
+    const status = document.getElementById(list.id === 'members-list' ? 'members-status' : 'groups-status');
+    status.textContent = retry ? `${message} Try again using the button below.` : message;
+    const li = document.createElement('li');
+    li.className = 'access-list-state';
+    const text = document.createElement('span');
+    text.textContent = message;
+    // The adjacent live region announces this state once. Keep the visual
+    // duplicate out of the accessibility tree, while preserving retry access.
+    text.setAttribute('aria-hidden', 'true');
+    if (!retry) li.setAttribute('aria-hidden', 'true');
+    li.appendChild(text);
+    if (retry) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = 'Try again';
+      button.addEventListener('click', retry);
+      li.appendChild(button);
+    }
+    list.appendChild(li);
+  }
+
+  async function refreshMemberList() {
+    const slug = settingsSlug, revision = accessPanelRevision, request = ++memberListRequest;
+    if (!slug) return;
+    const list = document.getElementById('members-list');
+    const current = () => accessRequestCurrent(slug, revision) && request === memberListRequest;
+    list.setAttribute('aria-busy', 'true');
+    accessListState(list, 'Loading members…');
+    try {
+      const resp = await api(`/api/apps/${slug}/members`);
+      if (!current()) return;
+      if (resp.status === 401) { await handleUnauthorized(); return; }
+      if (!resp.ok) throw new Error('request failed');
+      const body = await resp.json();
+      if (!current()) return;
+      const members = Array.isArray(body) ? body : body?.items;
+      if (!Array.isArray(members)) throw new Error('invalid response');
+      list.replaceChildren();
+      if (!members.length) accessListState(list, 'No members added.');
+      else document.getElementById('members-status').textContent = `${members.length} ${members.length === 1 ? 'member' : 'members'} loaded.`;
+      for (const m of members) {
+        const li = document.createElement('li');
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'member-name';
+        const ownMembership = m.user_id === state.user?.id;
+        nameSpan.textContent = ownMembership ? `${m.username} (you)` : m.username;
+        const roleSelect = document.createElement('select');
+        roleSelect.className = 'member-role member-role-select';
+        roleSelect.setAttribute('aria-label', `Role for ${m.username}`);
+        for (const role of ['viewer', 'manager']) {
+          const opt = document.createElement('option');
+          opt.value = role;
+          opt.textContent = role.charAt(0).toUpperCase() + role.slice(1);
+          opt.selected = m.role === role;
+          roleSelect.appendChild(opt);
+        }
+        roleSelect.dataset.previous = m.role;
+        roleSelect.addEventListener('change', () => updateMemberRole(m.user_id, m.username, roleSelect));
+        const revokeBtn = document.createElement('button');
+        revokeBtn.type = 'button';
+        revokeBtn.className = 'access-remove';
+        revokeBtn.textContent = 'Remove';
+        revokeBtn.setAttribute('aria-label', `Remove member ${m.username}`);
+        revokeBtn.addEventListener('click', () => runInFlight(revokeBtn, async () => {
+          if (!accessRequestCurrent(slug, revision)) return;
+          const error = document.getElementById('grant-error');
+          setError(error, '');
+          roleSelect.disabled = true;
+          try {
+            const r = await api(`/api/apps/${slug}/members`, {
+              method: 'DELETE', body: JSON.stringify({ user_id: m.user_id }),
+            });
+            if (!accessRequestCurrent(slug, revision)) return;
+            if (r.status === 401) { await handleUnauthorized(); return; }
+            if (!r.ok) throw new Error('request failed');
+            await refreshMemberList();
+            if (!accessRequestCurrent(slug, revision)) return;
+            flashToast(`Removed ${m.username} from members`, 'success');
+            document.querySelector('#member-add > summary').focus();
+          } catch {
+            if (accessRequestCurrent(slug, revision)) setError(error, `Could not remove ${m.username}. Refresh to check their access, then try again.`);
+          } finally { roleSelect.disabled = false; }
+        }));
+        if (ownMembership) {
+          roleSelect.disabled = true; revokeBtn.disabled = true;
+          const note = document.createElement('span');
+          note.id = `own-membership-${m.user_id}`;
+          note.className = 'access-managed';
+          note.textContent = 'Another manager must change your membership.';
+          roleSelect.setAttribute('aria-describedby', note.id);
+          revokeBtn.setAttribute('aria-describedby', note.id);
+          li.append(nameSpan, roleSelect, revokeBtn, note);
+        } else li.append(nameSpan, roleSelect, revokeBtn);
+        list.appendChild(li);
+      }
+    } catch {
+      if (current()) accessListState(list, 'Could not load members.', refreshMemberList);
+    } finally { if (current()) list.setAttribute('aria-busy', 'false'); }
+  }
+
+  async function refreshGroupAccessList() {
+    const slug = settingsSlug, revision = accessPanelRevision, request = ++groupListRequest;
+    if (!slug) return;
+    const list = document.getElementById('group-access-list');
+    const current = () => accessRequestCurrent(slug, revision) && request === groupListRequest;
+    list.setAttribute('aria-busy', 'true');
+    accessListState(list, 'Loading groups…');
+    try {
+      const resp = await api(`/api/apps/${slug}/group-access`);
+      if (!current()) return;
+      if (resp.status === 401) { await handleUnauthorized(); return; }
+      if (!resp.ok) throw new Error('request failed');
+      const body = await resp.json();
+      if (!current()) return;
+      const rules = Array.isArray(body) ? body : body?.items;
+      if (!Array.isArray(rules)) throw new Error('invalid response');
+      list.replaceChildren();
+      if (!rules.length) accessListState(list, 'No groups added.');
+      else document.getElementById('groups-status').textContent = `${rules.length} ${rules.length === 1 ? 'group' : 'groups'} loaded.`;
+      for (const rule of rules) {
+        const li = document.createElement('li');
+        li.dataset.group = rule.group;
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'member-name';
+        nameSpan.textContent = rule.group;
+        const roleSpan = document.createElement('span');
+        roleSpan.className = 'member-role';
+        roleSpan.textContent = rule.role === 'manager' ? 'Manager' : 'Viewer';
+        li.append(nameSpan, roleSpan);
+        if (rule.source === 'manifest') {
+          const note = document.createElement('span');
+          note.className = 'access-managed';
+          note.textContent = 'Edit shinyhub.toml and deploy to change this group.';
+          li.appendChild(note);
+        } else {
+          const roleSelect = document.createElement('select');
+          roleSelect.className = 'member-role group-role-select';
+          roleSelect.setAttribute('aria-label', `Role for group ${rule.group}`);
+          for (const role of ['viewer', 'manager']) {
+            const option = document.createElement('option');
+            option.value = role; option.textContent = role === 'manager' ? 'Manager' : 'Viewer';
+            option.selected = rule.role === role; roleSelect.appendChild(option);
+          }
+          roleSelect.dataset.previous = rule.role;
+          roleSelect.addEventListener('change', () => updateGroupRole(rule.group, roleSelect));
+          roleSpan.replaceWith(roleSelect);
+          const removeBtn = document.createElement('button');
+          removeBtn.type = 'button';
+          removeBtn.className = 'access-remove';
+          removeBtn.textContent = 'Remove';
+          removeBtn.setAttribute('aria-label', `Remove group grant for ${rule.group}`);
+          removeBtn.addEventListener('click', () => runInFlight(removeBtn, async () => {
+            if (!accessRequestCurrent(slug, revision)) return;
+            const error = document.getElementById('group-access-error');
+            setError(error, '');
+            roleSelect.disabled = true;
+            try {
+              const r = await api(`/api/apps/${slug}/group-access/${encodeURIComponent(rule.group)}`, { method: 'DELETE' });
+              if (!accessRequestCurrent(slug, revision)) return;
+              if (r.status === 401) { await handleUnauthorized(); return; }
+              if (!r.ok) throw new Error('request failed');
+              if (!await reconcileGroupPermissions(slug, revision)) return;
+              await refreshGroupAccessList();
+              if (!accessRequestCurrent(slug, revision)) return;
+              flashToast(`Removed group grant for ${rule.group}`, 'success');
+              document.querySelector('#group-add > summary').focus();
+            } catch {
+              if (accessRequestCurrent(slug, revision)) setError(error, `Could not remove ${rule.group}. Refresh to check the group’s access, then try again.`);
+            } finally { roleSelect.disabled = false; }
+          }));
+          li.appendChild(removeBtn);
+        }
+        list.appendChild(li);
+      }
+    } catch {
+      if (current()) accessListState(list, 'Could not load groups.', refreshGroupAccessList);
+    } finally { if (current()) list.setAttribute('aria-busy', 'false'); }
+  }
+
+  // A manager can remove their own authority through a group grant. Ask the
+  // server again before leaving stale management controls on screen.
+  async function reconcileGroupPermissions(slug, revision) {
+    try {
+      const resp = await api(`/api/apps/${encodeURIComponent(slug)}`, { cache: 'no-store' });
+      if (!accessRequestCurrent(slug, revision)) return false;
+      if (resp.status === 401) { await handleUnauthorized(); return false; }
+      let canManage = false;
+      if (resp.ok) {
+        const body = await resp.json();
+        if (!accessRequestCurrent(slug, revision)) return false;
+        if (!body.app || typeof body.can_manage !== 'boolean') throw new Error('invalid permissions');
+        canManage = body.can_manage;
+        if (detailApp?.slug === slug) Object.assign(detailApp, body.app, { can_manage: canManage });
+        const cached = state.apps.find(app => app.slug === slug);
+        if (cached) Object.assign(cached, body.app, { can_manage: canManage });
+      } else if (resp.status !== 403 && resp.status !== 404) throw new Error('permission check failed');
+      if (canManage) return true;
+      document.getElementById('detail-access-panel').hidden = true;
+      closeEnvForm(true);
+      clearSettingsDirty();
+      settingsSlug = null;
+      settingsRevision++;
+      accessPanelRevision++;
+      syncDetailHeaderActions(detailApp);
+      syncAppContext();
+      flashToast('Group change saved. You no longer manage this app.', 'info');
+      router.navigate(resp.ok && state.user?.role !== 'viewer' ? `/apps/${encodeURIComponent(slug)}` : '/apps', { replace: true });
+    } catch {
+      if (accessRequestCurrent(slug, revision)) setError(document.getElementById('group-access-error'), 'Group change saved, but your permissions could not be checked. Reload before making another change.');
+    }
+    return false;
+  }
+
+  async function updateGroupRole(group, selectEl) {
+    const slug = settingsSlug, revision = accessPanelRevision;
+    if (!slug) return;
+    const role = selectEl.value, previous = selectEl.dataset.previous;
+    const error = document.getElementById('group-access-error');
+    const removeBtn = selectEl.closest('li').querySelector('.access-remove');
+    setError(error, '');
+    selectEl.disabled = removeBtn.disabled = true;
+    try {
+      const resp = await api(`/api/apps/${slug}/group-access`, {
+        method: 'POST', body: JSON.stringify({ group, role }),
+      });
+      if (!accessRequestCurrent(slug, revision)) return;
+      if (resp.status === 401) { await handleUnauthorized(); return; }
+      if (!resp.ok) throw new Error('request failed');
+      selectEl.dataset.previous = role;
+      if (!await reconcileGroupPermissions(slug, revision)) return;
+      flashToast(`Updated group ${group} to ${role}`, 'success');
+    } catch {
+      selectEl.value = previous;
+      if (accessRequestCurrent(slug, revision)) setError(error, `Could not update the role for ${group}. Refresh to check its role, then try again.`);
+    } finally { selectEl.disabled = removeBtn.disabled = false; }
+  }
+
+  async function updateMemberRole(userId, username, selectEl) {
+    const slug = settingsSlug, revision = accessPanelRevision;
+    if (!slug) return;
+    const newRole = selectEl.value;
+    const previous = selectEl.dataset.previous || '';
+    const error = document.getElementById('grant-error');
+    setError(error, '');
+    const removeBtn = selectEl.closest('li').querySelector('button');
+    selectEl.disabled = true;
+    removeBtn.disabled = true;
     let resp;
     try {
-      resp = await api(`/api/apps/${encodeURIComponent(slug)}/data`, { signal: AbortSignal.timeout(20000) });
+      resp = await api(`/api/apps/${slug}/members/${userId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ role: newRole }),
+      });
     } catch {
-      if (current()) setError(errEl, 'Could not refresh data files. Check your connection and use Refresh data list to try again.');
+      selectEl.disabled = false;
+      removeBtn.disabled = false;
+      if (previous) selectEl.value = previous;
+      if (accessRequestCurrent(slug, revision)) setError(error, `Could not update the role for ${username}. Check your connection and try again.`);
       return;
     }
-    if (!current()) return;
+    selectEl.disabled = false;
+    removeBtn.disabled = false;
+    if (!accessRequestCurrent(slug, revision)) return;
     if (resp.status === 401) { await handleUnauthorized(); return; }
     if (!resp.ok) {
-      let message = 'Failed to load data files.';
-      try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
-      if (current()) setError(errEl, message);
+      if (previous) selectEl.value = previous; // revert to last-known role
+      setError(error, `Could not update the role for ${username}. Refresh this page to check their role, then try again.`);
       return;
     }
-
-    let env;
-    try { env = await resp.json(); } catch { if (current()) setError(errEl, 'Could not read data files. Use Refresh data list to try again.'); return; }
-    if (!current()) return;
-    if (!Array.isArray(env) && !Array.isArray(env?.items)) { setError(errEl, 'Could not read data files. Use Refresh data list to try again.'); return; }
-    tbody.replaceChildren();
-
-    // Standard {items,...} list envelope (quota_mb/used_bytes are sibling keys);
-    // tolerate a bare array for resilience.
-    const files = Array.isArray(env) ? env : (env && Array.isArray(env.items) ? env.items : []);
-    const empty = document.getElementById('data-empty');
-    const table = document.getElementById('data-list-table');
-    empty.hidden = files.length > 0;
-    table.hidden = files.length === 0;
-
-    // Resolve the app for the write-permission check. Prefer an explicitly
-    // passed app, then the current detail app (set on every detail mount and
-    // carrying can_manage — this is what keeps a direct deep-link working after
-    // an upload/delete re-renders via refreshDataTab(slug) with no app arg),
-    // then the cached list as a last resort.
-    const resolvedApp = app
-      || (detailApp && detailApp.slug === slug ? detailApp : null)
-      || state.apps.find(a => a.slug === slug);
-    const canWrite = canManageApp(state.user, resolvedApp);
-    document.getElementById('data-upload-form').hidden = !canWrite;
-
-    const quotaEl = document.getElementById('data-quota');
-    if (env) {
-      const used = formatBytes(env.used_bytes || 0);
-      quotaEl.textContent = env.quota_mb
-        ? `Using ${used} of ${env.quota_mb} MiB`
-        : `Using ${used} (no quota set)`;
-    } else {
-      quotaEl.textContent = '';
-    }
-
-    for (const f of files) {
-      const tr = document.createElement('tr');
-
-      const pathTd = document.createElement('td');
-      pathTd.textContent = f.path;
-
-      const sizeTd = document.createElement('td');
-      sizeTd.textContent = formatBytes(f.size);
-
-      const modTd = document.createElement('td');
-      modTd.textContent = new Date(f.modified_at * 1000).toLocaleString();
-
-      const actTd = document.createElement('td');
-      actTd.className = 'env-actions';
-      if (canWrite) {
-        const delBtn = document.createElement('button');
-        delBtn.type = 'button';
-        delBtn.className = 'env-btn-danger';
-        delBtn.textContent = 'Delete';
-        delBtn.addEventListener('click', () => deleteDataFile(slug, f.path, delBtn));
-        actTd.appendChild(delBtn);
-      }
-
-      tr.append(pathTd, sizeTd, modTd, actTd);
-      tbody.appendChild(tr);
-    }
+    selectEl.dataset.previous = newRole;
+    flashToast(`Updated ${username} to ${newRole}`, 'success');
   }
-
-  async function deleteDataFile(slug, path, btn) {
-    if (settingsSlug !== slug || !btn.isConnected) return;
-    const current = accessLists.capture();
-    if (!window.confirm(`Delete ${path}?`)) return;
-    const errEl = document.getElementById('data-error');
-    await runInFlight(btn, async () => {
-      let resp;
-      try {
-        resp = await api(`/api/apps/${encodeURIComponent(slug)}/data/${encodeDataPath(path)}`, { method: 'DELETE' });
-      } catch {
-        if (current()) setError(errEl, 'Could not confirm deletion. Refresh the data list before trying again.');
-        return;
-      }
-      if (!current()) return;
-      if (resp.status === 401) { await handleUnauthorized(); return; }
-      if (!resp.ok && resp.status !== 204) {
-        let message = 'Delete failed.';
-        try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
-        if (current()) setError(errEl, message);
-        return;
-      }
-      await refreshDataTab(slug);
-    });
-  }
-
-  function uploadDataFile(event) {
-    event.preventDefault();
-    const slug = settingsSlug;
-    if (!slug) return;
-    const current = accessLists.capture();
-
-    const fileInput = document.getElementById('data-file-input');
-    const destInput = document.getElementById('data-dest-input');
-    const restartInput = document.getElementById('data-restart-input');
-    const uploadBtn = document.getElementById('data-upload-btn');
-    const progressEl = document.getElementById('data-progress');
-    const errEl = document.getElementById('data-error');
-
-    const file = fileInput.files[0];
-    if (!file || uploadBtn.disabled) return;
-
-    const dest = destInput.value.trim() || file.name;
-    const restart = restartInput.checked;
-    const url = `/api/apps/${encodeURIComponent(slug)}/data/${encodeDataPath(dest)}${restart ? '?restart=true' : ''}`;
-
-    setError(errEl, '');
-    uploadBtn.disabled = true;
-    progressEl.value = 0;
-    progressEl.hidden = false;
-
-    const xhr = new XMLHttpRequest();
-    xhr.withCredentials = true;
-    xhr.open('PUT', url);
-    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
-    xhr.setRequestHeader('X-CSRF-Token', readCookie('csrf_token'));
-
-    xhr.upload.addEventListener('progress', e => {
-      if (current() && e.lengthComputable) {
-        progressEl.value = Math.round((e.loaded / e.total) * 100);
-      }
-    });
-
-    const uncertain = () => {
-      if (current()) setError(errEl, 'Could not confirm the upload. Your file is still selected. Refresh the data list to check whether it arrived before uploading again.');
-    };
-    xhr.onerror = uncertain;
-    xhr.ontimeout = uncertain;
-    xhr.onabort = uncertain;
-    xhr.timeout = 300000;
-    xhr.onload = () => {
-      if (!current()) return;
-      progressEl.hidden = true;
-      if (xhr.status === 401) { handleUnauthorized(); return; }
-      if (xhr.status < 200 || xhr.status >= 300) {
-        let message = `Upload failed (${xhr.status} ${xhr.statusText})`;
-        try {
-          const b = JSON.parse(xhr.responseText);
-          if (b && b.error) {
-            message = b.error;
-            if (b.used_bytes !== undefined && b.quota_bytes !== undefined) {
-              message += ` (quota: ${formatBytes(b.used_bytes + b.requested_bytes)} requested, ${formatBytes(b.quota_bytes)} limit)`;
-            }
-          }
-        } catch { /* non-JSON */ }
-        setError(errEl, message);
-      } else {
-        document.getElementById('data-upload-form').reset();
-        setError(errEl, '');
-        refreshDataTab(slug);
-      }
-    };
-
-    xhr.onloadend = () => {
-      if (!current()) return;
-      uploadBtn.disabled = false;
-      progressEl.hidden = true;
-    };
-
-    try { xhr.send(file); } catch { uncertain(); xhr.onloadend(); }
-  }
-
-  const accessLists = createAccessLists({ document, request: api, onUnauthorized: handleUnauthorized, notify: flashToast });
-  const refreshMemberList = () => accessLists.refreshMembers();
-  const refreshGroupAccessList = () => accessLists.refreshGroups();
 
   logPaneClose.addEventListener('click', closeLogs);
 
@@ -5052,9 +4783,6 @@ document.addEventListener('DOMContentLoaded', () => {
       document.getElementById('service-credential-copy-status').textContent = 'Copied to clipboard';
     } catch { document.getElementById('service-credential-copy-status').textContent = 'Copy is unavailable in this browser'; }
   });
-  document.getElementById('workers-refresh')?.addEventListener('click', () => loadWorkers());
-  document.getElementById('people-search').addEventListener('input', () => renderUsers(peopleInventory));
-  document.getElementById('people-role-filter').addEventListener('change', () => renderUsers(peopleInventory));
   document.getElementById('people-signin-copy').addEventListener('click', async () => {
     const status = document.getElementById('people-onboarding-status');
     try { await navigator.clipboard.writeText(`${window.location.origin}/login`); status.textContent = 'Sign-in link copied. People need access through your sign-in provider.'; flashToast('Sign-in link copied.', 'success'); }
@@ -5065,44 +4793,9 @@ document.addEventListener('DOMContentLoaded', () => {
   newUserCancel.addEventListener('click', closeNewUserModal);
   newUserForm.addEventListener('submit', submitNewUser);
 
-  // API tokens page + new-token modal wiring.
-  if (newTokenButton) newTokenButton.addEventListener('click', openNewTokenModal);
-  if (newTokenClose)  newTokenClose.addEventListener('click', closeNewTokenModal);
-  if (newTokenCancel) newTokenCancel.addEventListener('click', closeNewTokenModal);
-  if (tokenRevealDone) tokenRevealDone.addEventListener('click', closeNewTokenModal);
-  if (newTokenForm)   newTokenForm.addEventListener('submit', submitNewToken);
-  if (tokensRefresh)  tokensRefresh.addEventListener('click', () => loadTokens());
-  if (newTokenModal)  newTokenModal.addEventListener('click', e => {
-    if (e.target === e.currentTarget) closeNewTokenModal();
+  if (profileTokensLink) profileTokensLink.addEventListener('click', event => {
+    if (!closeProfileModal()) { event.preventDefault(); event.stopImmediatePropagation(); }
   });
-  if (tokensList) tokensList.addEventListener('click', e => {
-    const btn = e.target.closest('button[data-token-id]');
-    if (btn) revokeToken(btn.getAttribute('data-token-id'), btn.getAttribute('data-token-name'), btn);
-  });
-  if (profileTokensLink) profileTokensLink.addEventListener('click', () => {
-    // The data-nav link navigates to /tokens; close the profile modal behind it.
-    closeProfileModal();
-  });
-  if (cliConnectApprove) cliConnectApprove.addEventListener('click', approveCLIConnect);
-  if (cliConnectCodeInput) cliConnectCodeInput.addEventListener('keydown', e => {
-    if (e.key === 'Enter') approveCLIConnect();
-  });
-  if (tokenRevealCopy) {
-    const copyLabel = tokenRevealCopy.querySelector('.copy-label');
-    tokenRevealCopy.addEventListener('click', async () => {
-      try {
-        await navigator.clipboard.writeText(tokenRevealValue.textContent);
-        tokenRevealCopy.classList.add('is-copied');
-        if (copyLabel) copyLabel.textContent = 'Copied';
-        if (tokenRevealStatus) tokenRevealStatus.textContent = 'Copied to clipboard';
-        setTimeout(() => {
-          tokenRevealCopy.classList.remove('is-copied');
-          if (copyLabel) copyLabel.textContent = 'Copy';
-          if (tokenRevealStatus) tokenRevealStatus.textContent = '';
-        }, 2000);
-      } catch { /* clipboard unavailable */ }
-    });
-  }
 
   // Theme: re-apply the saved preference (the inline head script already set it
   // pre-paint) and, while on 'system', track OS light/dark changes live; keep the
@@ -5114,8 +4807,8 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 
-  // Profile modal: open from the sidebar identity card; close/submit wiring.
-  if (identityCard) identityCard.addEventListener('click', openProfileModal);
+  // Profile opens from the shared account menu.
+  document.getElementById('profile-button').addEventListener('click', openProfileModal);
   function previewAvatarColor(color) {
     if (!state.user || profileSaving || state.user.can_manage_self === false) return;
     pendingAvatarColor = color;
@@ -5177,6 +4870,12 @@ document.addEventListener('DOMContentLoaded', () => {
     if (input) input.addEventListener('input', () => {
       setError(profileError, '');
       setHidden(profileSuccess, true);
+      const field = input === profileDisplayName ? 'name' : input === profileCurrentPw ? 'current' : 'new';
+      // Show the upper bound while typing, before a valid-looking password
+      // reaches the server. Minimum-length errors wait until submission.
+      const lengthError = field === 'new' && new TextEncoder().encode(input.value).length > 72
+        ? profileFieldErrors('', '', input.value).new : '';
+      setProfileFieldError(document, field, lengthError);
       syncProfileSave();
     });
   }
@@ -5214,70 +4913,21 @@ document.addEventListener('DOMContentLoaded', () => {
   window.addEventListener('focus', () => {
     if (state.user?.role === 'admin') supportRecovery.load();
   });
-  auditPrev.addEventListener('click', () => loadAuditEvents(state.auditPage - 1, state.auditSelection));
-  auditNext.addEventListener('click', () => loadAuditEvents(state.auditPage + 1, state.auditSelection));
-
-  // Audit Log action filter. Options come from AUDIT_ACTIONS, the same list
-  // that drives the badge styling, so a new action type is filterable the
-  // moment it is added there. GET /api/audit supports action, run, event, and
-  // an inclusive since/until date range (see internal/api/audit.go); there is
-  // no resource or user filter to expose.
-  if (auditActionFilter) {
-    for (const action of AUDIT_ACTIONS) {
-      const opt = document.createElement('option');
-      opt.value = action;
-      opt.textContent = action;
-      auditActionFilter.appendChild(opt);
-    }
-    auditActionFilter.addEventListener('change', applyAuditFilters);
-  }
-  // Dates are UTC calendar days, matching how the table renders created_at.
-  // 'change' rather than 'input': a native date picker emits a partial value
-  // on every keystroke, and firing on those would query the log for year 0002.
-  auditSince?.addEventListener('change', applyAuditFilters);
-  auditUntil?.addEventListener('change', applyAuditFilters);
-  auditRangeClear?.addEventListener('click', () => {
-    if (auditSince) auditSince.value = '';
-    if (auditUntil) auditUntil.value = '';
-    applyAuditFilters();
-    // Focus would otherwise be lost with the button that hides itself.
-    auditActionFilter?.focus();
-  });
-
   // Apps search + sort. Restore previous values from sessionStorage.
-  const appsSearchEl = document.getElementById('apps-search');
-  const appsSortEl   = document.getElementById('apps-sort');
-  if (appsSearchEl) {
-    try {
-      const saved = sessionStorage.getItem('appsSearch');
-      if (saved) appsSearchEl.value = saved;
-    } catch { /* storage may be blocked */ }
-    appsSearchEl.addEventListener('input', () => {
-      try { sessionStorage.setItem('appsSearch', appsSearchEl.value); } catch { /* ignore */ }
-      renderApps();
-    });
+  const appFilterFields = {search:document.getElementById('apps-search'),sort:document.getElementById('apps-sort'),segment:document.getElementById('apps-segment')};
+  const appFilterKeys = {search:'appsSearch',sort:'appsSort',segment:'appsSegment'};
+  for (const [name,field] of Object.entries(appFilterFields)) {
+    try { const saved = sessionStorage.getItem(appFilterKeys[name]); if(saved) field.value = saved; }
+    catch { /* storage may be blocked */ }
   }
-  if (appsSortEl) {
-    try {
-      const saved = sessionStorage.getItem('appsSort');
-      if (saved) appsSortEl.value = saved;
-    } catch { /* storage may be blocked */ }
-    appsSortEl.addEventListener('change', () => {
-      try { sessionStorage.setItem('appsSort', appsSortEl.value); } catch { /* ignore */ }
+  bindFilterBar({root:appFilterFields.search.closest('.apps-filters'),fields:appFilterFields,
+    resetFields:['search','segment'],clearButtons:[document.getElementById('apps-clear-filters'),document.getElementById('empty-state-clear')],
+    onChange(values) {
+      for (const [name,value] of Object.entries(values)) {
+        try { sessionStorage.setItem(appFilterKeys[name],value); } catch { /* storage may be blocked */ }
+      }
       renderApps();
-    });
-  }
-  const appsSegmentEl = document.getElementById('apps-segment');
-  if (appsSegmentEl) {
-    try {
-      const saved = sessionStorage.getItem('appsSegment');
-      if (saved) appsSegmentEl.value = saved;
-    } catch { /* storage may be blocked */ }
-    appsSegmentEl.addEventListener('change', () => {
-      try { sessionStorage.setItem('appsSegment', appsSegmentEl.value); } catch { /* ignore */ }
-      renderApps();
-    });
-  }
+    }});
 
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
@@ -5299,8 +4949,7 @@ document.addEventListener('DOMContentLoaded', () => {
       } else if (scheduleModal && !scheduleModal.hidden) {
         closeScheduleForm();
       } else if (newTokenModal && !newTokenModal.hidden) {
-        // Without this branch, Escape left the modal open after the secret
-        // token value was already revealed in the DOM once (tokenRevealValue).
+        // The controller protects a one-time reveal from accidental dismissal.
         closeNewTokenModal();
       } else if (serviceCredentialModal && !serviceCredentialModal.hidden) {
         closeServiceCredentialModal();
@@ -5321,35 +4970,42 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // --- Settings tabs: explicit-save wiring + dirty tracking ---
   // General + Resources (display name/project, memory/CPU limits).
-  document.getElementById('general-save-btn').addEventListener('click', saveGeneralInfo);
-  document.getElementById('usage-privacy-save-btn').addEventListener('click', saveUsagePrivacy);
+  document.getElementById('general-description').addEventListener('input', event => {
+    const count = [...event.target.value].length;
+    document.getElementById('general-description-count').textContent = `${count} / 280 characters`;
+    event.target.setAttribute('aria-invalid', String(count > 280));
+  });
+  document.getElementById('general-save-btn').addEventListener('click', () => saveSettingsSection('general', saveGeneralInfo));
+  document.getElementById('usage-privacy-save-btn').addEventListener('click', () => saveSettingsSection('usage-privacy', saveUsagePrivacy));
   document.getElementById('usage-privacy-mode').addEventListener('change', updateUsagePrivacyHelp);
-  document.getElementById('resources-save-btn').addEventListener('click', saveResources);
+  document.getElementById('resources-save-btn').addEventListener('click', () => saveSettingsSection('resources', saveResources));
+  document.getElementById('resources-retry-btn').addEventListener('click', () => saveSettingsSection('resources', () => saveResources(true)));
 
   // Hibernation: mode radios + save button.
-  document.querySelectorAll('input[name="hibernate-mode"]').forEach(r => {
-    r.addEventListener('change', onHibernateModeChange);
-  });
-  document.getElementById('hibernate-save-btn').addEventListener('click', saveHibernateSettings);
+
+  document.getElementById('hibernate-save-btn').addEventListener('click', () => saveSettingsSection('hibernate', saveHibernateSettings));
 
   // Scaling: save + live admission-ceiling helper.
-  document.getElementById('scaling-save-btn').addEventListener('click', saveScalingSettings);
+  document.getElementById('scaling-save-btn').addEventListener('click', () => saveSettingsSection('scaling', saveScalingSettings));
   document.getElementById('scaling-replicas').addEventListener('input', updateScalingCeiling);
   document.getElementById('scaling-cap').addEventListener('input', updateScalingCeiling);
 
   // Render pacing: save + live advisory line.
-  document.getElementById('render-save-btn').addEventListener('click', saveRenderPacing);
+  document.getElementById('render-save-btn').addEventListener('click', () => saveSettingsSection('render', saveRenderPacing));
   document.getElementById('render-seconds').addEventListener('input', updateRenderPacingAdvice);
 
   // Worker isolation: live capacity helper on any input change.
-  document.getElementById('worker-isolation').addEventListener('change', updateWorkerCapacity);
-  // Live re-evaluation of the keep-warm advisory as either half is edited, so
-  // the note reflects the pending choice and not only the last saved one.
+  document.getElementById('worker-isolation').addEventListener('change', () => {
+    switchWorkerFields(document, originalScalingSettings);
+    updateWorkerCapacity(); updateScalingCeiling(); recomputeDirty('scaling');
+  });
+  // Hibernation advice uses saved Scaling settings, since sections save separately.
   const refreshKeepWarmNote = () => {
-    const replicas = parseInt(document.getElementById('scaling-replicas').value, 10);
+    const replicas = originalScalingSettings.replicas;
     const minWarm = parseInt(document.getElementById('min-warm-replicas').value, 10);
+    const isolation = originalScalingSettings.worker_isolation || document.getElementById('worker-isolation').dataset.defaultIsolation || 'multiplex';
     updateMinWarmWarning(Number.isFinite(replicas) ? replicas : 1,
-      Number.isFinite(minWarm) ? minWarm : 0, currentIsolationChoice());
+      Number.isFinite(minWarm) ? minWarm : 0, isolation);
   };
   document.getElementById('worker-isolation').addEventListener('change', refreshKeepWarmNote);
   document.getElementById('min-warm-replicas').addEventListener('input', refreshKeepWarmNote);
@@ -5358,39 +5014,31 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('worker-warm-spares').addEventListener('input', updateWorkerCapacity);
 
   // Autoscale: enabling seeds sane bounds; bounds inputs + target-mode radios.
-  document.querySelectorAll('input[name="autoscale-target-mode"]').forEach(r => {
-    r.addEventListener('change', onAutoscaleTargetModeChange);
-  });
-  document.getElementById('autoscale-save-btn').addEventListener('click', saveAutoscaleSettings);
+
+  document.getElementById('autoscale-save-btn').addEventListener('click', () => saveSettingsSection('autoscale', saveAutoscaleSettings));
   document.getElementById('autoscale-enabled').addEventListener('change', onAutoscaleEnabledChange);
   document.getElementById('autoscale-min').addEventListener('input', updateAutoscaleCeiling);
   document.getElementById('autoscale-max').addEventListener('input', updateAutoscaleCeiling);
 
   // Environment tab: add button, form submit/cancel.
   document.getElementById('env-add-btn').addEventListener('click', () => openEnvForm(null));
-  document.getElementById('env-apply-btn').addEventListener('click', () => {
-    if (!window.confirm('Apply saved environment by draining and restarting the app? Sessions still active at the drain deadline will disconnect.')) return;
-    runInFlight(document.getElementById('env-apply-btn'), async () => {
-      const errEl = document.getElementById('env-form-error');
-      setError(errEl, '');
-      try {
-        const resp = await api(`/api/apps/${encodeURIComponent(settingsSlug)}/env/apply`, { method: 'POST' });
-        if (resp.status === 401) { await handleUnauthorized(); return; }
-        const result = await resp.json();
-        if (!resp.ok) { setError(errEl, result.restart_error || result.error || 'Applying environment failed.'); return; }
-        flashToast(result.restarted ? 'Saved environment applied.' : 'Saved environment will apply when the app starts.', 'success');
-        await loadApps();
-      } catch { setError(errEl, 'Failed to apply saved environment. Check your connection.'); }
-    });
+  document.getElementById('env-apply-btn').addEventListener('click', applyEnvChanges);
+  document.getElementById('env-retry-btn').addEventListener('click', retryEnvList);
+  document.getElementById('env-form-key').addEventListener('input', event => {
+    event.target.removeAttribute('aria-invalid');
+    event.target.removeAttribute('aria-errormessage');
   });
+  document.getElementById('env-form-secret').addEventListener('change', syncEnvSecret);
+  document.getElementById('env-value-reveal').addEventListener('click', () => {
+    const input = document.getElementById('env-form-value'); const reveal = document.getElementById('env-value-reveal');
+    const show = input.type === 'password'; input.type = show ? 'text' : 'password';
+    reveal.textContent = show ? 'Hide value' : 'Show value'; reveal.setAttribute('aria-pressed', String(show));
+  });
+  for (const event of ['input', 'change']) document.getElementById('env-form').addEventListener(event, () => updateConfigurationDirty(document, 'configuration-environment', envFormDirty()));
   document.getElementById('env-form').addEventListener('submit', submitEnvForm);
   document.getElementById('env-form-cancel').addEventListener('click', closeEnvForm);
 
   // Data tab: upload form submit.
-  document.getElementById('data-upload-form').addEventListener('submit', uploadDataFile);
-  document.getElementById('data-refresh').addEventListener('click', event => runInFlight(event.currentTarget, () => refreshDataTab(settingsSlug)));
-  document.getElementById('members-refresh').addEventListener('click', refreshMemberList);
-  document.getElementById('groups-refresh').addEventListener('click', refreshGroupAccessList);
 
   // Visibility: explicit Save. (Previously auto-applied on radio change; now
   // consistent with every other settings tab.)
@@ -5405,10 +5053,10 @@ document.addEventListener('DOMContentLoaded', () => {
     () => [document.getElementById('usage-privacy-mode')],
     'usage-privacy-save-btn', 'usage-privacy-dirty');
   registerSettingsSection('resources',
-    () => [document.getElementById('resources-memory'), document.getElementById('resources-cpu')],
+    () => ['resources-memory', 'resources-cpu', 'resources-memory-mode', 'resources-cpu-mode'].map(id => document.getElementById(id)),
     'resources-save-btn', 'resources-dirty');
   registerSettingsSection('hibernate',
-    () => [...document.querySelectorAll('input[name="hibernate-mode"]'),
+    () => [document.getElementById('hibernate-custom-minutes-mode'),
            document.getElementById('hibernate-custom-minutes'),
            document.getElementById('min-warm-replicas')],
     'hibernate-save-btn', 'hibernate-dirty');
@@ -5416,6 +5064,7 @@ document.addEventListener('DOMContentLoaded', () => {
     () => [
       document.getElementById('scaling-replicas'),
       document.getElementById('scaling-cap'),
+      document.getElementById('scaling-cap-mode'),
       document.getElementById('worker-isolation'),
       document.getElementById('worker-grouped-size'),
       document.getElementById('worker-max-workers'),
@@ -5423,96 +5072,123 @@ document.addEventListener('DOMContentLoaded', () => {
     ],
     'scaling-save-btn', 'scaling-dirty');
   registerSettingsSection('render',
-    () => [document.getElementById('render-seconds')],
+    () => [document.getElementById('render-seconds'), document.getElementById('render-seconds-mode')],
     'render-save-btn', 'render-dirty');
   registerSettingsSection('autoscale',
     () => [document.getElementById('autoscale-enabled'),
            document.getElementById('autoscale-min'),
            document.getElementById('autoscale-max'),
-           ...document.querySelectorAll('input[name="autoscale-target-mode"]'),
+           document.getElementById('autoscale-target-mode'),
            document.getElementById('autoscale-target')],
     'autoscale-save-btn', 'autoscale-dirty');
+  for (const [id, section] of Object.entries({
+    'resources-memory': 'resources', 'resources-cpu': 'resources', 'scaling-cap': 'scaling',
+    'hibernate-custom-minutes': 'hibernate', 'autoscale-target': 'autoscale', 'render-seconds': 'render',
+  })) installDirectSetting(document, id, () => {
+    setError(document.getElementById(`${section}-error`), '');
+    setHidden(document.getElementById(`${section}-status`), true);
+    recomputeDirty(section);
+    if (section === 'autoscale') updateAutoscaleCeiling();
+    if (section === 'scaling') updateScalingCeiling();
+    if (section === 'resources') updateWorkerCapacity();
+    if (section === 'render') updateRenderPacingAdvice();
+    if (section === 'hibernate') refreshKeepWarmNote();
+  });
   registerSettingsSection('visibility',
     () => [...document.querySelectorAll('input[name="access-level"]')],
     'visibility-save-btn', 'visibility-dirty');
 
-  // Grant button.
-  document.getElementById('grant-btn').addEventListener('click', async () => {
+  async function addMember(event) {
+    event.preventDefault();
     const grantBtn = document.getElementById('grant-btn');
     if (grantBtn.disabled || !settingsSlug) return;
-    const slug = settingsSlug;
-    const current = accessLists.capture();
-    const username = document.getElementById('grant-username').value.trim();
+    const slug = settingsSlug, revision = accessPanelRevision;
+    const nameEl = document.getElementById('grant-username');
+    const username = nameEl.value.trim();
     const errEl = document.getElementById('grant-error');
-    errEl.hidden = true;
-    if (!username) return;
-
+    setError(errEl, '');
+    if (!username) { setError(errEl, 'Enter a username.'); nameEl.focus(); return; }
     grantBtn.disabled = true;
-    grantBtn.textContent = 'Granting…';
+    grantBtn.textContent = 'Adding…';
     try {
-      // Grant by username: the server resolves it to a user id under the same
-      // manage-app authorization, so the UI never needs a separate user-lookup
-      // (which would require broader privilege than managing this app).
-      const grantResp = await api(`/api/apps/${encodeURIComponent(slug)}/members`, {
-        method: 'POST', signal: AbortSignal.timeout(20000),
-        body: JSON.stringify({ username }),
+      // Omit role: additive POST preserves an existing manager's role.
+      const resp = await api(`/api/apps/${slug}/members`, {
+        method: 'POST', body: JSON.stringify({ username }),
       });
-      if (!current()) return;
-      if (grantResp.status === 401) { await handleUnauthorized(); return; }
-      if (!grantResp.ok) {
-        let grantMsg = grantResp.status === 404 ? 'User not found' : 'Grant failed';
-        try {
-          const j = await grantResp.json();
-          if (j && j.error && grantResp.status !== 404) grantMsg = j.error;
-        } catch { /* non-JSON */ }
-        if (!current()) return;
-        errEl.textContent = grantMsg;
-        errEl.hidden = false;
-        flashToast(grantMsg, 'error');
+      if (!accessRequestCurrent(slug, revision)) return;
+      if (resp.status === 401) { await handleUnauthorized(); return; }
+      if (!resp.ok) {
+        setError(errEl, resp.status === 404 ? 'Username not found. Check the spelling and try again.' : 'Could not add this member. Refresh to check their access, then try again.');
         return;
       }
-      document.getElementById('grant-username').value = '';
+      // Keep a newer draft if it was entered while this request was pending.
+      if (nameEl.value.trim() === username) {
+        nameEl.value = '';
+        document.getElementById('member-add').open = false;
+        document.querySelector('#member-add > summary').focus();
+      }
       await refreshMemberList();
-      if (current()) flashToast(`Granted ${username} as viewer`, 'success');
+      if (accessRequestCurrent(slug, revision)) flashToast(`Added ${username} to members`, 'success');
     } catch {
-      if (current()) setError(errEl, 'Could not confirm the access grant. Refresh members to check before trying again.');
+      if (accessRequestCurrent(slug, revision)) setError(errEl, 'Could not add this member. Check your connection and try again.');
     } finally {
-      if (current()) { grantBtn.disabled = false; grantBtn.textContent = 'Grant'; }
+      if (accessRequestCurrent(slug, revision)) {
+        grantBtn.disabled = false;
+        grantBtn.textContent = 'Add member';
+      }
     }
-  });
+  }
+  document.getElementById('member-add-form').addEventListener('submit', addMember);
 
-  // Group access: add a group rule (bound once; uses current settingsSlug at call time).
-  document.getElementById('group-access-add-btn')?.addEventListener('click', async event => {
-    const button = event.currentTarget;
-    if (button.disabled) return;
+  async function addGroupAccess(event) {
+    event.preventDefault();
+    const button = document.getElementById('group-access-add-btn');
+    if (button.disabled || !settingsSlug) return;
+    const slug = settingsSlug, revision = accessPanelRevision;
     const nameEl = document.getElementById('group-access-name');
     const roleEl = document.getElementById('group-access-role');
     const errEl = document.getElementById('group-access-error');
-    errEl.hidden = true;
-    const group = nameEl.value.trim();
-    if (!group || !settingsSlug) return;
-    const slug = settingsSlug;
-    const current = accessLists.capture();
+    const group = nameEl.value.trim(), role = roleEl.value;
+    setError(errEl, '');
+    if (!group) { setError(errEl, 'Enter a group name.'); nameEl.focus(); return; }
+    const existing = [...document.querySelectorAll('#group-access-list li[data-group]')].find(row => row.dataset.group === group);
+    if (existing) {
+      const roleSelect = existing.querySelector('select');
+      setError(errEl, roleSelect ? 'This group already has a grant. Change its role in the list.' : 'This group already has a grant. Edit shinyhub.toml and deploy to change it.');
+      roleSelect?.focus();
+      return;
+    }
     button.disabled = true;
+    button.textContent = 'Adding…';
     try {
-      const resp = await api(`/api/apps/${encodeURIComponent(slug)}/group-access`, {
-        method: 'POST', signal: AbortSignal.timeout(20000),
-        body: JSON.stringify({ group, role: roleEl.value }),
+      const resp = await api(`/api/apps/${slug}/group-access`, {
+        method: 'POST', body: JSON.stringify({ group, role }),
       });
-      if (!current()) return;
+      if (!accessRequestCurrent(slug, revision)) return;
       if (resp.status === 401) { await handleUnauthorized(); return; }
-      if (!resp.ok) {
-        const message = await errorMessage(resp, 'Could not add this group. Check its name and your permissions, then try again.');
-        if (current()) setError(errEl, message);
-        return;
+      if (!resp.ok) { setError(errEl, 'Could not add this group. Refresh to check its access, then try again.'); return; }
+      if (nameEl.value.trim() === group && roleEl.value === role) {
+        nameEl.value = '';
+        roleEl.value = 'viewer';
+        document.getElementById('group-add').open = false;
+        document.querySelector('#group-add > summary').focus();
       }
+      if (!await reconcileGroupPermissions(slug, revision)) return;
+      await refreshGroupAccessList();
+      if (!accessRequestCurrent(slug, revision)) return;
+      flashToast(`Saved group grant for ${group}`, 'success');
       const warn = resp.headers.get('X-ShinyHub-Warning');
       if (warn) flashToast(warn, 'info');
-      nameEl.value = '';
-      await refreshGroupAccessList();
-    } catch { if (current()) setError(errEl, 'Could not confirm the new group rule. Refresh the access list to check, then try again.'); }
-    finally { if (current()) button.disabled = false; }
-  });
+    } catch {
+      if (accessRequestCurrent(slug, revision)) setError(errEl, 'Could not add this group. Check your connection and try again.');
+    } finally {
+      if (accessRequestCurrent(slug, revision)) {
+        button.disabled = false;
+        button.textContent = 'Add group';
+      }
+    }
+  }
+  document.getElementById('group-add-form').addEventListener('submit', addGroupAccess);
 
   // Danger zone: typed-confirmation unlocks the Delete button.
   document.getElementById('delete-confirm').addEventListener('input', (e) => {
@@ -5559,22 +5235,8 @@ document.addEventListener('DOMContentLoaded', () => {
     router.navigate('/');
   });
 
-  function renderNewAppSnippet(slug) {
-    const origin = window.location.origin;
-    const effectiveSlug = slug && slug.length > 0 ? slug : '<slug>';
-    newAppSnippet.textContent =
-      `uv tool install shinyhub\n` +
-      `shinyhub connect ${origin}\n` +
-      `shinyhub deploy . --slug ${effectiveSlug} --wait`;
-  }
-
-  const newAppDivider = document.querySelector('#new-app-modal .handoff-card-divider');
-
   function resetNewAppModal() {
     newAppForm.hidden = false;
-    if (newAppDivider) newAppDivider.hidden = false;
-    newAppHandoff.hidden = true;
-    newAppSnippetLabel.textContent = 'Deploy from your machine after creating';
     newAppStep.textContent = 'Step 1 of 2 · App details';
     newAppSlug.value = '';
     newAppName.value = '';
@@ -5582,9 +5244,14 @@ document.addEventListener('DOMContentLoaded', () => {
     if (newAppOptional) newAppOptional.open = false;
     setError(newAppError, '');
     newAppSubmit.disabled = false;
-    newAppSubmit.textContent = 'Create';
+    newAppSubmit.textContent = 'Create app';
     slugEdited = false;
-    renderNewAppSnippet('');
+    newAppSlug.removeAttribute('aria-invalid');
+    updateNewAppURL();
+  }
+
+  function updateNewAppURL() {
+    document.getElementById('new-app-url').textContent = `/app/${newAppSlug.value || '<slug>'}/`;
   }
 
   function openNewAppModal(projectSlug = '') {
@@ -5605,22 +5272,16 @@ document.addEventListener('DOMContentLoaded', () => {
     resetNewAppModal();
   }
 
-  function showNewAppHandoff(app) {
-    newAppForm.hidden = true;
-    if (newAppDivider) newAppDivider.hidden = true;
-    newAppHandoff.hidden = false;
-    newAppStep.textContent = 'Step 2 of 2 · Deploy';
-    newAppSnippetLabel.textContent = 'Deploy from your machine';
-    renderNewAppSnippet(app.slug);
-    newAppDeployNow.dataset.slug = app.slug;
-    newAppDeployNow.dataset.name = app.name || app.slug;
-    newAppDeployNow.focus();
+  function beginFirstDeployment(app) {
+    closeNewAppModal(true);
+    openDeployModal(app, { firstDeploy: true });
   }
 
   async function submitNewApp(event) {
     event.preventDefault();
     if (newAppForm.hidden || isInFlight(newAppSubmit)) return;
     setError(newAppError, '');
+    newAppSlug.removeAttribute('aria-invalid');
 
     const slug = newAppSlug.value.trim();
     const name = newAppName.value.trim();
@@ -5657,7 +5318,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (version !== sessionVersion) return;
         if (resp.status === 401) { await handleUnauthorized(); return; }
         if (resp.status === 409) {
-          setError(newAppError, 'Slug already taken. Pick another.');
+          setError(newAppError, 'An app already uses this slug. Choose another slug.');
+          newAppSlug.setAttribute('aria-invalid', 'true');
           return;
         }
         if (resp.status === 403) {
@@ -5683,12 +5345,12 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch { /* the submitted values are a complete fallback */ }
         if (version !== sessionVersion) return;
         await loadApps();
-        if (version === sessionVersion) showNewAppHandoff(createdApp);
+        if (version === sessionVersion) beginFirstDeployment(createdApp);
       } finally {
         newAppForm.removeAttribute('aria-busy');
         for (const control of newAppForm.elements) control.disabled = false;
         newAppClose.disabled = false;
-        newAppSubmit.textContent = 'Create';
+        newAppSubmit.textContent = 'Create app';
       }
     });
   }
@@ -5699,31 +5361,27 @@ document.addEventListener('DOMContentLoaded', () => {
     return `${(n / 1048576).toFixed(1)} MB`;
   }
 
-  function updateDeployMonitor(message) {
-    const monitor = document.getElementById('deploy-monitor');
-    monitor.hidden = !deployState;
-    document.getElementById('deploy-monitor-text').textContent = deployState
-      ? `${deployState.appName || deployState.slug}: ${message}` : '';
-  }
-
-  function revealDeployModal() {
-    deployModal.hidden = false;
-    modalTrap(deployModal).activate();
-    (deployState?.uploading ? deployCancel : deploySubmit.disabled ? deployPick : deploySubmit).focus();
-  }
-  document.getElementById('deploy-monitor-open').addEventListener('click', revealDeployModal);
-  document.getElementById('deploy-view-history').addEventListener('click', closeDeployModal);
-
   function resetDeployModal() {
-    document.getElementById('deploy-monitor').hidden = true;
-    document.getElementById('deploy-stage').textContent = '';
-    document.getElementById('deploy-view-history').hidden = true;
+    document.getElementById('deploy-cli-setup').open = false;
+    document.getElementById('deploy-cli-setup-copy').textContent = 'Copy setup commands';
+    document.getElementById('deploy-cli-setup-status').textContent = '';
+    document.getElementById('deploy-upload-fallback').open = false;
     deployErrorLogs.hidden = true;
+    document.getElementById('deploy-success-logs').hidden = true;
+    document.getElementById('deploy-step').hidden = true;
+    document.getElementById('deploy-step').textContent = 'Step 2 of 2 · Deploy code';
+    document.getElementById('deploy-upload-state').hidden = true;
+    document.querySelector('.deploy-cli-guide').hidden = false;
+    document.getElementById('deploy-cli-setup').hidden = false;
+    document.getElementById('deploy-upload-fallback').hidden = false;
+    document.querySelector('.deploy-overview-link').hidden = false;
+    document.getElementById('deploy-created').hidden = true;
     deployPick.disabled = deployFileInput.disabled = false;
     deploySummary.hidden = true;
     deployIgnoredRow.hidden = true;
     deployProgressWrap.hidden = true;
     deployProgressBar.value = 0;
+    deployProgressBar.setAttribute('aria-label', 'Upload progress');
     deployProgressText.textContent = '0%';
     deployResult.hidden = true;
     deployResultList.innerHTML = '';
@@ -5731,42 +5389,33 @@ document.addEventListener('DOMContentLoaded', () => {
     deploySubmit.disabled = true;
     deploySubmit.textContent = 'Deploy';
     deployCancel.textContent = 'Cancel';
-    deployModalClose.setAttribute('aria-label', 'Close deploy modal');
     deployFileInput.value = '';
     deployDropzone.classList.remove('dragover');
-    if (deployState && deployState.xhr) {
-      deployState.xhr.abort();
-    }
+    // Closing the dialog detaches the viewer. Once submitted, the server owns
+    // deployment; aborting the request would not cancel that work.
     deployState = null;
   }
 
-  function openDeployModal(app) {
-    if (deployState?.uploading) {
-      revealDeployModal();
-      if (deployState.slug !== app.slug) flashToast('Another deployment is in progress. Its status is shown here.', 'info');
-      return;
-    }
+  function openDeployModal(app, { firstDeploy = false } = {}) {
     resetDeployModal();
     deployState = { slug: app.slug, appName: app.name, blob: null, fileCount: 0, rejections: new Map(), xhr: null };
     deployAppName.textContent = app.name ? `: ${app.name}` : '';
     renderDeployCliSnippet(app.slug);
+    document.getElementById('deploy-step').hidden = !firstDeploy;
+    document.getElementById('deploy-created').hidden = !firstDeploy;
+    document.getElementById('deploy-overview').href = `/apps/${encodeURIComponent(app.slug)}`;
     deployModal.hidden = false;
     modalTrap(deployModal).activate();
-    // The dropzone is a mouse/drag drop region (not a focusable control); land
-    // keyboard focus on the real "pick a file" button instead.
-    deployPick.focus();
+    deployCliCopy.focus();
   }
 
   function renderDeployCliSnippet(slug) {
-    const origin = window.location.origin;
-    deployCliSnippet.textContent =
-      `uv tool install shinyhub\n` +
-      `shinyhub connect ${origin}\n` +
-      `shinyhub deploy . --slug ${slug} --wait`;
+    deployCliSnippet.textContent = deployCommands(window.location.origin, slug);
+    document.getElementById('deploy-cli-setup-snippet').textContent = cliSetupCommands(window.location.origin);
   }
 
   function closeDeployModal() {
-    if (!deployState?.uploading) resetDeployModal();
+    resetDeployModal();
     deployModal.hidden = true;
     modalTrap(deployModal).release();
   }
@@ -5778,16 +5427,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const version = selection.selectionVersion = (selection.selectionVersion || 0) + 1;
     selection.blob = null;
     selection.completed = false;
-    selection.uncertain = false;
-    selection.outcome = null;
-    document.getElementById('deploy-stage').textContent = '';
-    document.getElementById('deploy-view-history').hidden = true;
+    selection.needsNewBundle = false;
+    document.getElementById('deploy-upload-state').hidden = false;
+    document.querySelector('.deploy-cli-guide').hidden = true;
+    document.getElementById('deploy-cli-setup').hidden = true;
     deploySubmit.disabled = true;
     deploySubmit.textContent = 'Deploy';
     deploySummary.hidden = true;
     deployProgressWrap.hidden = true;
     deployResult.hidden = true;
     deployErrorLogs.hidden = true;
+    document.getElementById('deploy-success-logs').hidden = true;
     setError(deployError, '');
     return () => deployState === selection && selection.selectionVersion === version;
   }
@@ -6075,89 +5725,183 @@ document.addEventListener('DOMContentLoaded', () => {
     renderDeploySummary(rootEntry.name + '/', blob.size, fileList.length, rejections, rules);
   }
 
+  function deployErrorMessage(error) {
+    if (/bundle rejected.*(?:valid ZIP|damaged)|upload a valid ZIP bundle/i.test(error.message || '')) {
+      return 'This ZIP bundle is invalid or damaged. Choose a new ZIP file or upload the app folder, then deploy again.';
+    }
+    if (error.deployment?.failure_kind === 'capacity') {
+      return 'Not enough capacity to deploy. The current version is preserved. Free capacity, then retry; this attempt will not retry automatically.';
+    }
+    if (/no app entrypoint found/i.test(error.message || '')) {
+      return 'No app entrypoint found. Include app.py, app.R, or ui.R and server.R, or set [app] command in shinyhub.toml. Choose an updated bundle and deploy again.';
+    }
+    if (/exited during startup/i.test(error.message || '')) {
+      return 'The app exited during startup. View app logs to find the error, then choose an updated bundle and deploy again.';
+    }
+    if (!error.status) return 'Could not confirm deployment. Check your connection and the app overview before retrying; the server may still be deploying.';
+    return error.message || 'Deployment failed. Check the app overview and try again.';
+  }
+
+  function uploadBundle(slug, blob) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      const form = new FormData();
+      form.append('bundle', blob, 'bundle.zip');
+
+      xhr.open('POST', `/api/apps/${encodeURIComponent(slug)}/deploy`, true);
+      xhr.withCredentials = true;
+      xhr.setRequestHeader('X-Shinyhub-Deploy-Channel', 'dashboard');
+      const csrf = readCookie('csrf_token');
+      if (csrf) xhr.setRequestHeader('X-CSRF-Token', csrf);
+
+      xhr.upload.addEventListener('progress', (e) => {
+        if (deployState?.xhr !== xhr || !e.lengthComputable) return;
+        const pct = Math.floor((e.loaded / e.total) * 100);
+        deployProgressBar.value = pct;
+        deployProgressText.textContent = `Uploading · ${pct}%`;
+      });
+      xhr.upload.addEventListener('load', () => {
+        if (deployState?.xhr !== xhr) return;
+        deployProgressBar.removeAttribute('value');
+        deployProgressBar.setAttribute('aria-label', 'Deployment progress');
+        deployProgressText.textContent = 'Upload complete. Deployment is continuing; you can close this window.';
+      });
+      xhr.addEventListener('load', () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          let body = {};
+          try { body = JSON.parse(xhr.responseText) || {}; }
+          catch { /* keep empty body; callers treat as no manifest */ }
+          resolve(body);
+        } else {
+          let msg = 'Deploy failed';
+          let deployment = null;
+          try {
+            const body = JSON.parse(xhr.responseText);
+            if (body && body.error) msg = body.error;
+            deployment = body;
+          } catch { /* non-JSON; keep default */ }
+          const err = new Error(msg);
+          err.status = xhr.status;
+          err.deployment = deployment;
+          reject(err);
+        }
+      });
+      xhr.addEventListener('error',  () => reject(new Error('Network error during upload')));
+      xhr.addEventListener('abort',  () => {
+        const err = new Error('Upload cancelled');
+        err.code = 'UPLOAD_CANCELLED';
+        reject(err);
+      });
+      xhr.addEventListener('timeout',() => reject(new Error('Upload timed out')));
+
+      deployState.xhr = xhr;
+      xhr.send(form);
+    });
+  }
+
   deploySubmit.addEventListener('click', async () => {
     if (!deployState || !deployState.blob || deployState.uploading) return;
-    if (deployState.completed || deployState.uncertain) {
-      const { slug, outcome, uncertain } = deployState;
-      closeDeployModal();
-      if (!uncertain && outcome?.openable) location.assign(`/app/${encodeURIComponent(slug)}/`);
-      else router.navigate(`/apps/${encodeURIComponent(slug)}${uncertain ? '/deployments' : ''}`);
+    if (deployState.needsNewBundle) {
+      deployFileInput.click();
       return;
     }
-    const upload = deployState;
-    const { slug, blob } = upload;
+
+    // A successful first deployment ends at the app's health overview.
+    if (deployState.completed) {
+      const slug = deployState.slug;
+      closeDeployModal();
+      router.navigate(`/apps/${encodeURIComponent(slug)}`);
+      return;
+    }
+
     setError(deployError, '');
     deploySubmit.disabled = true;
+    deploySubmit.textContent = 'Deploying…';
     deployErrorLogs.hidden = true;
-    deployCancel.textContent = 'Hide progress';
-    deployModalClose.setAttribute('aria-label', 'Hide deployment progress');
+    deployCancel.textContent = 'Close';
     deployProgressWrap.hidden = false;
     deployProgressBar.value = 0;
-    deployProgressBar.setAttribute('aria-label', 'Bundle upload progress');
-    deployProgressText.textContent = '0% uploaded';
-    const stage = document.getElementById('deploy-stage');
-    stage.textContent = 'Uploading the app bundle… You can hide this dialog and keep working.';
-    const history = document.getElementById('deploy-view-history');
-    history.href = `/apps/${encodeURIComponent(slug)}/deployments`;
-    history.hidden = false;
+    deployProgressBar.setAttribute('aria-label', 'Upload progress');
+    deployProgressText.textContent = '0%';
+
+    const { slug, blob } = deployState;
+    const upload = deployState;
+    const selectionVersion = upload.selectionVersion;
+    const version = sessionVersion;
     upload.uploading = true;
-    upload.serverPhase = false;
     deployPick.disabled = deployFileInput.disabled = true;
-    updateDeployMonitor('Uploading…');
+
+    let body;
     try {
-      const transfer = uploadDeployment({ slug, blob, csrf: readCookie('csrf_token'),
-        onUpload: percent => {
-          if (deployState !== upload || upload.serverPhase) return;
-          deployProgressBar.value = percent;
-          deployProgressText.textContent = `${percent}% uploaded`;
-        },
-        onPhase: event => {
-          if (deployState !== upload) return;
-          upload.serverPhase = true;
-          deployProgressBar.removeAttribute('value');
-          deployProgressBar.setAttribute('aria-label', 'Deployment in progress');
-          if (event.message) {
-            deployProgressText.textContent = event.message;
-            if (event.status !== 'progress') { stage.textContent = event.message; updateDeployMonitor(event.message); }
-          }
-        },
-      });
-      upload.xhr = transfer.xhr;
-      const body = await transfer.promise;
-      if (deployState !== upload) return;
-      upload.outcome = deploymentOutcome(body);
-      upload.completed = true;
-      stage.textContent = upload.outcome.title;
-      deployResult.querySelector('.deploy-result-heading').textContent = upload.outcome.title;
-      renderDeployResult(deployResult, deployResultList, [...upload.outcome.details, ...formatManifestSummary(body.manifest)]);
-      deploySubmit.textContent = upload.outcome.action;
-      deployErrorLogs.hidden = false;
-      updateDeployMonitor(upload.outcome.title);
-      // Refresh failure cannot turn a confirmed deployment into a failed one.
-      loadApps().catch(() => {});
+      body = await uploadBundle(slug, blob);
     } catch (err) {
       if (deployState !== upload) return;
+      if (err.code === 'UPLOAD_CANCELLED') {
+        return; // closeDeployModal resets state
+      }
       if (err.status === 401) { await handleUnauthorized(); return; }
-      upload.uncertain = !!err.uncertain;
-      const message = err.message || 'Could not confirm deployment. Check the app’s deployment history.';
-      setError(deployError, message);
-      stage.textContent = upload.uncertain ? 'Deployment needs checking.' : 'Deployment did not complete.';
-      deploySubmit.textContent = upload.uncertain ? 'Check deployment' : 'Try again';
-      deployErrorLogs.hidden = false;
-      updateDeployMonitor(stage.textContent);
+      setError(deployError, deployErrorMessage(err));
+      upload.needsNewBundle = [400, 413, 422].includes(err.status) && /bundle|entrypoint/i.test(err.message || '');
+      deployErrorLogs.hidden = upload.needsNewBundle || err.status === 403 || err.deployment?.failure_kind === 'capacity' || /no app entrypoint found/i.test(err.message || '');
+      deployProgressWrap.hidden = true;
+      deploySubmit.disabled = false;
+      deploySubmit.textContent = upload.needsNewBundle ? 'Choose another bundle' : 'Retry deployment';
+      deploySubmit.focus();
+      deployCancel.textContent = 'Close';
+      await loadApps();
+      return;
     } finally {
       if (deployState === upload) {
         upload.uploading = false;
-        upload.xhr = null;
-        deployProgressWrap.hidden = true;
         deployPick.disabled = deployFileInput.disabled = false;
-        deploySubmit.disabled = false;
-        deployCancel.textContent = 'Done';
-        deployModalClose.setAttribute('aria-label', 'Close deploy modal');
       }
     }
+    if (version !== sessionVersion) return;
+    // A closed viewer still owns a real deployment. Refresh the index when it
+    // finishes so a first-deploy card becomes usable without a manual reload.
+    await loadApps();
+    if (deployState !== upload || upload.selectionVersion !== selectionVersion) return;
+    deployProgressText.textContent = 'Deployed';
+
+    const summaryLines = formatManifestSummary(body && body.manifest);
+    renderDeployResult(deployResult, deployResultList, summaryLines);
+    const resultHeading = deployResult.querySelector('.deploy-result-heading');
+    const resultDescription = document.getElementById('deploy-result-description');
+    const status = body?.status || body?.app?.status;
+    if (body.kept_stopped || status === 'stopped') {
+      resultHeading.textContent = 'Code deployed. App is stopped.';
+      resultDescription.textContent = 'The new version is saved. Start the app from its overview when you’re ready.';
+    } else if (body.kept_hibernated || status === 'hibernated') {
+      resultHeading.textContent = 'Code deployed. App is sleeping.';
+      resultDescription.textContent = 'The new version is saved. Open the app from its overview to wake it.';
+    } else if (status === 'running' || status === 'idle') {
+      resultHeading.textContent = 'App is ready.';
+      resultDescription.textContent = 'Your code is deployed and the app has started.';
+    } else {
+      resultHeading.textContent = 'Deployment complete.';
+      resultDescription.textContent = 'Review the app overview for its current health.';
+    }
+    const warning = document.getElementById('deploy-warning');
+    warning.textContent = typeof body.warning === 'string' ? body.warning : '';
+    warning.hidden = !warning.textContent;
+    deployResultList.hidden = summaryLines.length === 0;
+    deployProgressWrap.hidden = true;
+    deployState.completed = true;
+    document.getElementById('deploy-step').textContent = 'Deployment complete';
+    document.getElementById('deploy-created').hidden = true;
+    document.getElementById('deploy-upload-fallback').hidden = true;
+    document.querySelector('.deploy-overview-link').hidden = true;
+    deploySubmit.disabled = false;
+    deploySubmit.textContent = 'View app';
+    document.getElementById('deploy-success-logs').hidden = false;
+    resultHeading.focus();
   });
 
+  document.getElementById('deploy-success-logs').addEventListener('click', () => {
+    if (!deployState) return;
+    const slug = deployState.slug; closeDeployModal(); openLogs(slug);
+  });
+  document.getElementById('deploy-overview').addEventListener('click', closeDeployModal);
   deployModalClose.addEventListener('click', closeDeployModal);
   deployErrorLogs.addEventListener('click', () => {
     if (!deployState) return;
@@ -6175,15 +5919,6 @@ document.addEventListener('DOMContentLoaded', () => {
   emptyStateCTA.addEventListener('click', () => openNewAppModal());
   newAppClose.addEventListener('click', closeNewAppModal);
   newAppCancel.addEventListener('click', closeNewAppModal);
-  newAppDone.addEventListener('click', closeNewAppModal);
-  newAppDeployNow.addEventListener('click', () => {
-    const app = {
-      slug: newAppDeployNow.dataset.slug,
-      name: newAppDeployNow.dataset.name,
-    };
-    closeNewAppModal();
-    openDeployModal(app);
-  });
   newAppModal.addEventListener('click', e => {
     if (e.target === e.currentTarget) closeNewAppModal();
   });
@@ -6203,27 +5938,22 @@ document.addEventListener('DOMContentLoaded', () => {
   newAppName.addEventListener('input', () => {
     if (slugEdited) return;
     newAppSlug.value = slugify(newAppName.value);
-    renderNewAppSnippet(newAppSlug.value);
+    updateNewAppURL();
   });
   newAppSlug.addEventListener('input', () => {
     slugEdited = newAppSlug.value.length > 0;
-    renderNewAppSnippet(newAppSlug.value);
+    updateNewAppURL();
   });
-  const newAppSnippetCopyLabel  = newAppSnippetCopy.querySelector('.copy-label');
-  const newAppSnippetCopyStatus = document.getElementById('new-app-snippet-status');
-
-  newAppSnippetCopy.addEventListener('click', async () => {
+  document.getElementById('deploy-cli-setup-copy').addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    const status = document.getElementById('deploy-cli-setup-status');
     try {
-      await navigator.clipboard.writeText(newAppSnippet.textContent);
-      newAppSnippetCopy.classList.add('is-copied');
-      if (newAppSnippetCopyLabel)  newAppSnippetCopyLabel.textContent  = 'Copied';
-      if (newAppSnippetCopyStatus) newAppSnippetCopyStatus.textContent = 'Copied to clipboard';
-      setTimeout(() => {
-        newAppSnippetCopy.classList.remove('is-copied');
-        if (newAppSnippetCopyLabel)  newAppSnippetCopyLabel.textContent  = 'Copy';
-        if (newAppSnippetCopyStatus) newAppSnippetCopyStatus.textContent = '';
-      }, 1800);
-    } catch { /* clipboard blocked; user can select text manually */ }
+      await navigator.clipboard.writeText(document.getElementById('deploy-cli-setup-snippet').textContent);
+      button.textContent = 'Copied';
+      status.textContent = 'Setup commands copied to clipboard.';
+    } catch {
+      status.textContent = 'Could not copy. Select the setup commands and copy them manually.';
+    }
   });
 
   deployCliCopy.addEventListener('click', async () => {
@@ -6256,6 +5986,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   loginForm.addEventListener('submit', async (event) => {
     event.preventDefault();
+    if (loginPending) return;
+    loginPending = true;
+    loginForm.setAttribute('aria-busy', 'true');
     setError(loginError, '');
 
     const submitBtn = loginForm.querySelector('button[type="submit"]');
@@ -6296,9 +6029,15 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       }
 
-      const payload = await response.json();
+      let payload;
+      try { payload = await response.json(); } catch {}
+      if (!payload?.user) {
+        setError(loginError, 'The server returned an incomplete response. Try signing in again.');
+        return;
+      }
       showLoggedIn(payload);
       passwordInput.value = '';
+      passwordVisibility.reset(loginForm);
       // Mirror the bootstrap path: await router.start() so state.apps is
       // populated before handleDeployHash consumes the persisted slug.
       // Without the await + handleDeployHash call here, a logged-out user
@@ -6309,6 +6048,8 @@ document.addEventListener('DOMContentLoaded', () => {
       await handleDeployHash();
       await restorePendingSupportSession();
     } finally {
+      loginPending = false;
+      loginForm.removeAttribute('aria-busy');
       if (submitBtn) {
         submitBtn.disabled = false;
         submitBtn.textContent = submitLabel;
@@ -6334,7 +6075,11 @@ document.addEventListener('DOMContentLoaded', () => {
   // would only leave them logged-out but stuck on the old screen.
   let suppressUnloadGuard = false;
 
+  const accountLogout = document.getElementById('account-logout');
+  accountLogout.addEventListener('click', () => logoutButton.click());
   logoutButton.addEventListener('click', async () => {
+    if (logoutButton.disabled || !confirmDiscardIfDirty()) return;
+    logoutButton.disabled = accountLogout.disabled = true;
     // Distinguish transport errors from server-side rejections. The previous
     // unconditional showLoggedOut() lied to the user when the POST returned a
     // non-OK status (e.g. 403 from a missing CSRF cookie): the SPA showed the
@@ -6346,6 +6091,7 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       resp = await api('/api/auth/logout', {method: 'POST'});
     } catch {
+      logoutButton.disabled = accountLogout.disabled = false;
       flashToast('Logout failed: network error', 'error');
       return;
     }
@@ -6359,6 +6105,7 @@ document.addEventListener('DOMContentLoaded', () => {
       window.location.assign(logoutTarget(loginProviders));
       return;
     }
+    logoutButton.disabled = accountLogout.disabled = false;
     flashToast(`Logout failed (${resp.status})`, 'error');
   });
 
@@ -6374,6 +6121,7 @@ document.addEventListener('DOMContentLoaded', () => {
         collapseBtn.setAttribute('aria-expanded', on ? 'false' : 'true');
         collapseBtn.setAttribute('aria-label', label);
         collapseBtn.dataset.tooltip = label;
+        collapseBtn.title = label;
       }
     };
     try { applyCollapsed(localStorage.getItem(COLLAPSE_KEY) === '1'); } catch {}
@@ -6425,28 +6173,25 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   let loginProviders = null;
+  function updateGroupAccessProviderHelp(data) {
+    const element = document.getElementById('group-access-sso-warning');
+    if (!element) return;
+    const warning = groupAccessWarningText(data);
+    element.textContent = warning;
+    element.hidden = !warning;
+  }
   async function loadProviders() {
     try {
       const resp = await api('/api/auth/providers');
-      if (!resp.ok) return;
+      if (!resp.ok) { updateGroupAccessProviderHelp(); return; }
       const data = await resp.json();
       loginProviders = data;
       // Reveal only the SSO buttons the server reports configured; the GitHub and
       // Google buttons start hidden in index.html, so a failed fetch or a
       // native-only server never shows a dead button (see login-providers.js).
       applyLoginProviders(document, data);
-      // Group access section: warn when granting a group rule cannot take
-      // effect. The section itself is static markup shown/hidden by view
-      // routing, so setting this once here (rather than per Access-tab visit)
-      // is enough; a failed fetch simply leaves the warning absent, same as
-      // every other providers-driven affordance above.
-      const groupWarnEl = document.getElementById('group-access-sso-warning');
-      if (groupWarnEl) {
-        const warning = groupAccessWarningText(data);
-        groupWarnEl.textContent = warning;
-        groupWarnEl.hidden = !warning;
-      }
-    } catch (e) { /* non-critical */ }
+      updateGroupAccessProviderHelp(data);
+    } catch (e) { updateGroupAccessProviderHelp(); }
   }
 
   // detailLastEnvelope is updated by renderOverview (via ctx.setDetailEnvelope)
@@ -6600,10 +6345,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function showRouteError(err) {
     console.error('route mount failed', err);
     for (const s of document.querySelectorAll('main > section')) s.hidden = true;
-    if (routeErrorView) {
-      routeErrorView.hidden = false;
-      document.getElementById('route-error-heading')?.focus({ preventScroll: true });
-    }
+    if (routeErrorView) routeErrorView.hidden = false;
   }
   function clearRouteError() {
     if (routeErrorView) routeErrorView.hidden = true;
@@ -6626,18 +6368,22 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Warn before navigating away (SPA route change or full unload) with unsaved
   // settings edits, so the explicit-save model never silently loses work.
+  appContextNavigation = installAppContextNavigation({ document, navigate: (path) => router.navigate(path) });
   router.setNavGuard(confirmDiscardIfDirty);
   window.addEventListener('beforeunload', (e) => {
-    if (!suppressUnloadGuard && (anySettingsDirty() || announcementEditor?.isDirty() || deployState?.uploading)) { e.preventDefault(); e.returnValue = ''; }
+    if (!suppressUnloadGuard && (anySettingsDirty() || (!profileModal.hidden && (profileHasChanges() || profileSaving || photoPreparing)) || announcementEditor?.isDirty() || announcementEditor?.isPending() || tokenManager.isPending() || tokenManager.needsSave())) { e.preventDefault(); e.returnValue = ''; }
   });
 
   function updateActiveNav(pathname) {
-    // Scoped to the primary section nav so active state never leaks onto other
-    // [data-nav] links (app cards, overview links, detail folder tabs).
-    for (const el of document.querySelectorAll('#primary-nav [data-nav]')) {
+    sidebarAccount.close();
+    syncAppContext(pathname);
+    // Only global navigation owns global active state. Content links such as
+    // app cards and detail tabs manage their own state.
+    for (const el of document.querySelectorAll('#primary-nav .nav-item[data-nav], #administration-nav .nav-item[data-nav]')) {
       const url = new URL(el.href);
       const active = isPrimaryNavActive(url.pathname, pathname, state.user && state.user.role);
       el.classList.toggle('tab-active', active);
+      el.classList.toggle('is-parent', el.id === 'tab-apps' && pathname.startsWith('/apps/'));
       if (active) el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current');
     }
     // Sidebar app rows own their active state separately (slug-prefix, nested
@@ -6675,28 +6421,13 @@ document.addEventListener('DOMContentLoaded', () => {
     showError: (m) => { if (appError) setError(appError, m); },
     updateActiveNav,
     syncSidebar,
-    setSettingsSlug: (slug) => {
-      if (slug !== settingsSlug) {
-        document.getElementById('grant-btn').disabled = false;
-        document.getElementById('grant-btn').textContent = 'Grant';
-        document.getElementById('grant-username').value = '';
-        document.getElementById('group-access-name').value = '';
-        document.getElementById('group-access-add-btn').disabled = false;
-        document.getElementById('data-list').replaceChildren();
-        document.getElementById('data-upload-form').reset();
-        document.getElementById('data-upload-btn').disabled = false;
-        document.getElementById('data-progress').hidden = true;
-        setError(document.getElementById('data-error'), '');
-      }
-      settingsSlug = slug; accessLists.setApp(slug);
-    },
+    setSettingsSlug: (slug) => { if (settingsSlug !== slug) settingsRevision++; settingsSlug = slug; },
+    clearSettingsDrafts: () => { closeEnvForm(true); clearSettingsDirty(); settingsSlug = null; settingsRevision++; },
     populateGeneralTab,
     populateAutoscaleTab,
     populateAccessPanel,
     refreshEnvList,
-    refreshDataTab,
     loadSchedules,
-    loadSharedData,
     refreshMemberList,
     refreshGroupAccessList,
     // setDetailEnvelope is called by renderOverview in app-detail.js to keep
@@ -6706,10 +6437,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // setDetailApp records the app currently shown on the detail page so the
     // static header kebab (wired once below) knows which app to act on, and
     // renders the header's icon/monogram avatar for that app.
-    setDetailApp: (app) => { detailApp = app; renderDetailHeaderAvatar(app); syncDetailHeaderActions(app); },
+    setDetailApp: (app) => { detailApp = app; renderDetailHeaderAvatar(app); syncDetailHeaderActions(app); syncAppContext(); },
     // restart triggers POST /api/apps/:slug/restart (the same action as the
     // header kebab), exposed so the crash banner's Restart button can reuse it.
-    restart: (slug) => restart(slug),
+    restart: (slug, button) => restart(slug, button),
+    start: (slug, button) => startApp(slug, button),
     // flashToast lets app-detail.js report failures (e.g. a failed rollback)
     // through the same accessible, auto-dismissing toast used everywhere else
     // in the dashboard instead of a blocking window.alert().
@@ -6737,7 +6469,7 @@ document.addEventListener('DOMContentLoaded', () => {
       ['restart', acts.showRestart],
       ['sleep', acts.showSleep],
       ['stop', acts.showStop],
-      ['start', acts.showStart],
+      ['start', acts.showStart && !acts.startIsPrimary],
     ]) {
       const btn = kebab.querySelector(`[data-kebab="${action}"]`);
       if (!btn) continue;
@@ -6777,13 +6509,16 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     const kebabBtn = document.getElementById('app-detail-kebab');
     const menu = kebabBtn && kebabBtn.closest('.kebab-menu');
-    if (menu) menu.hidden = !anyShown;
+    if (menu) menu.hidden = !anyShown && (!canManage || !!app?.deploying);
     // A per-app Viewer reaches this page whenever their global role clears
     // the route guard (developer/operator/admin) even though their member
     // role on this specific app cannot deploy; the API always 403s for them.
     // Hide the button rather than inviting a click that can never succeed.
     const dDeploy = document.getElementById('app-detail-deploy');
-    if (dDeploy) dDeploy.hidden = !canManage;
+    if (dDeploy) {
+      dDeploy.hidden = !canManage || !!app?.deploying;
+      dDeploy.closest('li').hidden = dDeploy.hidden;
+    }
   }
 
   // Wire the app-detail header actions once. They are static markup and always
@@ -6827,19 +6562,19 @@ document.addEventListener('DOMContentLoaded', () => {
     const eGridSlot = document.getElementById('general-icon-emoji-grid');
     if (eGridSlot) {
       eGridSlot.replaceChildren(renderEmojiPicker(document, {
-        onPick: (emoji) => { if (detailApp) setEmojiIcon(detailApp, emoji); },
+        onPick: (emoji) => { if (detailApp) withIconSave(() => setEmojiIcon(detailApp, emoji)); },
       }));
     }
     const eInput = document.getElementById('general-icon-emoji-input');
     const eUseBtn = document.getElementById('general-icon-emoji-use-btn');
     if (eUseBtn) {
       eUseBtn.addEventListener('click', () => {
-        if (detailApp && eInput) setEmojiIcon(detailApp, eInput.value);
+        if (detailApp && eInput) withIconSave(() => setEmojiIcon(detailApp, eInput.value));
       });
     }
     const eClearBtn = document.getElementById('general-icon-emoji-clear-btn');
     if (eClearBtn) {
-      eClearBtn.addEventListener('click', () => { if (detailApp) clearEmojiIcon(detailApp); });
+      eClearBtn.addEventListener('click', () => { if (detailApp) withIconSave(() => clearEmojiIcon(detailApp)); });
     }
   }
 
@@ -6900,18 +6635,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const usersAccess = resolveAdminOnlyAccess(ctx.state.user);
     if (usersAccess) return ctx.navigate(usersAccess.path, { replace: usersAccess.replace });
     hideAllPageViews();
-    return mountUsers({ ...ctx, loadUsers });
+    return mountUsers({ ...ctx, loadUsers: () => { showIdentityPanel('people'); return peopleDirectory.start(); }, clearUsers: () => { peopleDirectory.stop(); clearIdentityServices(); } });
   });
   // Preserve old bookmarks without preserving a second navigation concept.
   router.register('/users', () => ctx.navigate('/identity', { replace: true }));
   router.register('/tokens', () => {
     hideAllPageViews();
     if (tokensView) tokensView.hidden = false;
-    resetCLIConnectForm();
-    loadTokens();
+    tokenManager.start();
     // Matches the page's own <h1>, so a tab, a bookmark and a history entry
     // name this page instead of falling back to the bare product name.
-    return { title: 'API tokens', unmount() { if (tokensView) tokensView.hidden = true; } };
+    return { title: 'API tokens', unmount() { tokenManager.stop(); if (tokensView) tokensView.hidden = true; } };
   });
   router.register('/announcements', () => {
     if (!ctx.state.canManageAnnouncements) return ctx.navigate('/', { replace: true });
@@ -6923,14 +6657,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const workersAccess = resolveAdminOnlyAccess(ctx.state.user);
     if (workersAccess) return ctx.navigate(workersAccess.path, { replace: workersAccess.replace });
     hideAllPageViews();
-    return mountWorkers({ ...ctx, loadWorkers });
+    return mountWorkers(ctx);
   });
   router.register('/audit-log', (_, search) => {
     const auditAccess = resolveAuditLogAccess(ctx.state.canReadAudit);
     if (auditAccess) return ctx.navigate(auditAccess.path, { replace: auditAccess.replace });
     hideAllPageViews();
-    return mountAuditLog({ ...ctx, loadAuditEvents }, search);
-  });
+    return mountAuditLog({ ...ctx, loadAuditEvents: auditExplorer.load, stopAudit: auditExplorer.stop }, search);
+  }, {key: () => 'audit-log'});
   // All three app-detail patterns are the same page for a given app, so they
   // share a key: moving between them is a tab switch, which the mounted view
   // handles in place (see mountAppDetail's update) rather than being torn down
@@ -6950,6 +6684,7 @@ document.addEventListener('DOMContentLoaded', () => {
     key: appDetailKey,
     params: (p) => ({ ...p, tab: 'schedules' }),
   });
+  router.register('/apps/:slug/settings/:section', appDetailRoute, { key: appDetailKey, params: settingsRouteParams });
   router.register('/apps/:slug/:tab', appDetailRoute, { key: appDetailKey });
 
   async function initialize() {
@@ -7125,7 +6860,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const el = document.getElementById('cron-preview');
     if (!el) return;
     const fields = expr.trim().split(/\s+/).filter(Boolean);
-    const zone = timezone.trim() || 'the server timezone';
+    const zone = timezone.trim() || document.getElementById('sched-timezone')?.dataset.defaultTimezone || 'the server timezone';
     if (!expr.trim()) { el.textContent = `Five-field cron · evaluated in ${zone}`; return; }
     el.textContent = fields.length === 5
       ? `Five-field cron · evaluated in ${zone}`
@@ -7157,21 +6892,23 @@ document.addEventListener('DOMContentLoaded', () => {
   function stopScheduleSurface(surface = mountedScheduleSurface) {
     if (!surface || surface !== mountedScheduleSurface) return;
     surface.stopped = true;
+    surface.requests.invalidate();
+    surface.historyRequests.invalidate();
     if (surface.timer) clearTimeout(surface.timer);
     if (surface.visibilityHandler) document.removeEventListener('visibilitychange', surface.visibilityHandler);
     mountedScheduleSurface = null;
   }
 
   function scheduleNextPoll(surface, schedules) {
-    if (surface.stopped || surface !== mountedScheduleSurface || document.hidden) return;
+    if (surface.stopped || surface !== mountedScheduleSurface || surface.accessDenied || document.hidden) return;
     if (surface.timer) clearTimeout(surface.timer);
     const active = schedules.some(s => scheduleState(s).key === 'running' || activationState(s).active);
     surface.timer = setTimeout(() => refreshScheduleSurface(surface), active ? 5000 : 30000);
   }
 
-  async function loadSchedules(slug, options) {
+  function loadSchedules(slug, options) {
     let surface = mountedScheduleSurface;
-    if (options || !surface || surface.slug !== slug) {
+    if (options) {
       stopScheduleSurface();
       surface = {
         slug,
@@ -7179,6 +6916,8 @@ document.addEventListener('DOMContentLoaded', () => {
         timer: null,
         stopped: false,
         visibilityHandler: null,
+        requests: createScheduleRequestGate(),
+        historyRequests: createScheduleRequestGate(),
       };
       surface.visibilityHandler = () => {
         if (!document.hidden && !surface.stopped) refreshScheduleSurface(surface);
@@ -7187,68 +6926,118 @@ document.addEventListener('DOMContentLoaded', () => {
       document.addEventListener('visibilitychange', surface.visibilityHandler);
       mountedScheduleSurface = surface;
     }
+    // Mutations finishing after navigation must not remount an old app.
+    if (!surface || surface.stopped || surface.slug !== slug) return;
     const addBtn = document.getElementById('schedules-add-btn');
     if (addBtn) addBtn.hidden = !surface.options.canManage;
-    await refreshScheduleSurface(surface);
+    if (!options) return refreshScheduleSurface(surface, {announce: true});
+    document.getElementById('schedules-workspace')?.classList.toggle('has-detail', options.selectedScheduleID != null);
+    document.getElementById('schedule-detail').hidden = true;
+    document.getElementById('schedules-summary').hidden = true;
+    document.getElementById('schedules-list').innerHTML = '<p class="schedule-loading">Loading scheduled jobs…</p>';
+    document.getElementById('schedules-error').hidden = true;
+    refreshScheduleSurface(surface);
+    // Return cleanup before the first request settles.
     return () => stopScheduleSurface(surface);
+  }
+
+  function clearScheduleAccess(surface) {
+    surface.accessDenied = true;
+    surface.requests.invalidate();
+    surface.historyRequests.invalidate();
+    if (surface.timer) clearTimeout(surface.timer);
+    surface.schedules = null;
+    surface.renderedDetailID = null;
+    surface.renderedDetailSignature = null;
+    surface.detailRuns = [];
+    surface.detailTotal = 0;
+    const list = document.getElementById('schedules-list');
+    list.replaceChildren();
+    list.setAttribute('aria-busy', 'false');
+    const detail = document.getElementById('schedule-detail');
+    detail.replaceChildren();
+    detail.hidden = true;
+    document.getElementById('schedules-summary').hidden = true;
+    document.getElementById('schedules-add-btn').hidden = true;
+    document.getElementById('schedules-surface-status').textContent = '';
+    const refresh = document.getElementById('schedules-refresh-btn');
+    refresh.disabled = false;
+    refresh.textContent = 'Refresh';
+    const error = document.getElementById('schedules-error');
+    error.hidden = false;
+    error.querySelector('p').textContent = 'Your access to schedules changed. Ask an app manager for access.';
+    error.querySelector('button').onclick = () => refreshScheduleSurface(surface, {announce: true});
   }
 
   async function refreshScheduleSurface(surface, {announce = false} = {}) {
     if (!surface || surface.stopped || surface !== mountedScheduleSurface) return;
+    const request = surface.requests.begin();
+    const current = () => !surface.stopped && surface === mountedScheduleSurface && surface.requests.isCurrent(request);
     const container = document.getElementById('schedules-list');
     const statusEl = document.getElementById('schedules-surface-status');
-    const focusedScheduleKey = document.activeElement?.dataset?.scheduleFocus || null;
+    const error = document.getElementById('schedules-error');
+    const refresh = document.getElementById('schedules-refresh-btn');
+    const focused = document.activeElement;
+    const focusedScheduleKey = focused?.dataset?.scheduleFocus || null;
+    let keepFocus = !!focusedScheduleKey;
+    const focusMoved = event => { if (event.target !== focused && !focused?.contains(event.target)) keepFocus = false; };
     if (!container) return;
+    document.addEventListener('focusin', focusMoved);
+    document.addEventListener('pointerdown', focusMoved, true);
     if (surface.timer) clearTimeout(surface.timer);
     container.setAttribute('aria-busy', 'true');
+    if (refresh) { refresh.disabled = true; refresh.textContent = 'Refreshing…'; }
     if (announce && statusEl) statusEl.textContent = 'Refreshing schedule status…';
-
-    let resp;
     try {
-      resp = await api(`/api/apps/${encodeURIComponent(surface.slug)}/schedules`);
-    } catch {
-      if (!surface.stopped) {
-        container.innerHTML = '<div class="schedule-load-error"><p>Schedule status could not be loaded.</p><button type="button" class="env-btn-secondary" data-schedule-retry>Try again</button></div>';
-        container.querySelector('[data-schedule-retry]')?.addEventListener('click', () => refreshScheduleSurface(surface, {announce: true}));
-        container.setAttribute('aria-busy', 'false');
-        if (statusEl) statusEl.textContent = 'Schedule status could not be loaded. Try again.';
-        scheduleNextPoll(surface, []);
+      const resp = await api(`/api/apps/${encodeURIComponent(surface.slug)}/schedules`, {signal: request.signal});
+      if (!current()) return;
+      if (resp.status === 401) { await handleUnauthorized(); return; }
+      if (!resp.ok) throw Object.assign(new Error('response'), {status: resp.status});
+      const schedBody = await resp.json();
+      if (!current()) return;
+      const schedules = Array.isArray(schedBody) ? schedBody : schedBody?.items;
+      if (!Array.isArray(schedules)) throw new Error('Invalid schedule response');
+      surface.accessDenied = false;
+      surface.schedules = schedules;
+      error.hidden = true;
+      renderScheduleSummary(schedules);
+      document.getElementById('schedules-summary').hidden = !schedules.length || surface.options.selectedScheduleID != null;
+      renderScheduleList(surface, schedules);
+      if (statusEl) statusEl.textContent = announce ? 'Schedule status updated.' : '';
+      const selected = surface.options.selectedScheduleID == null
+        ? null
+        : schedules.find(s => String(s.id) === String(surface.options.selectedScheduleID));
+      if (surface.options.selectedScheduleID != null && !selected) {
+        router.navigate(`/apps/${encodeURIComponent(surface.slug)}/schedules`, {replace: true});
+        return;
       }
-      return;
+      const forceDetail = announce || (selected && scheduleState(selected).key === 'running');
+      await renderScheduleDetail(surface, selected, forceDetail);
+      if (!current()) return;
+      if (keepFocus && focusedScheduleKey) {
+        const replacement = Array.from(document.querySelectorAll('[data-schedule-focus]'))
+          .find(el => el.dataset.scheduleFocus === focusedScheduleKey);
+        replacement?.focus({preventScroll: true});
+      }
+    } catch (err) {
+      if (!current()) return;
+      if (err?.status === 403) { clearScheduleAccess(surface); return; }
+      if (!surface.schedules) container.replaceChildren();
+      error.hidden = false;
+      error.querySelector('p').textContent = err?.status === 403
+        ? 'Your access to schedules changed. Ask an app manager for access.'
+        : `Could not update schedules. ${surface.schedules ? 'The previous status is still shown. ' : ''}Check your connection and try again.`;
+      error.querySelector('button').onclick = () => refreshScheduleSurface(surface, {announce: true});
+      if (statusEl) statusEl.textContent = '';
+    } finally {
+      document.removeEventListener('focusin', focusMoved);
+      document.removeEventListener('pointerdown', focusMoved, true);
+      if (current()) {
+        container.setAttribute('aria-busy', 'false');
+        if (refresh) { refresh.disabled = false; refresh.textContent = 'Refresh'; }
+        scheduleNextPoll(surface, surface.schedules || []);
+      }
     }
-    if (surface.stopped || surface !== mountedScheduleSurface) return;
-    if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (!resp.ok) {
-      container.innerHTML = '<div class="schedule-load-error"><p>Schedule status could not be loaded.</p><button type="button" class="env-btn-secondary" data-schedule-retry>Try again</button></div>';
-      container.querySelector('[data-schedule-retry]')?.addEventListener('click', () => refreshScheduleSurface(surface, {announce: true}));
-      container.setAttribute('aria-busy', 'false');
-      if (statusEl) statusEl.textContent = 'Schedule status could not be loaded. Try again.';
-      scheduleNextPoll(surface, []);
-      return;
-    }
-    const schedBody = await resp.json();
-    const schedules = Array.isArray(schedBody) ? schedBody : (schedBody && Array.isArray(schedBody.items) ? schedBody.items : []);
-    surface.schedules = schedules;
-    renderScheduleSummary(schedules);
-    renderScheduleList(surface, schedules);
-    container.setAttribute('aria-busy', 'false');
-    if (statusEl) statusEl.textContent = announce ? 'Schedule status updated.' : '';
-
-    const selected = surface.options.selectedScheduleID == null
-      ? null
-      : schedules.find(s => String(s.id) === String(surface.options.selectedScheduleID));
-    if (surface.options.selectedScheduleID != null && !selected) {
-      router.navigate(`/apps/${encodeURIComponent(surface.slug)}/schedules`, {replace: true});
-      return;
-    }
-    const forceDetail = announce || (selected && scheduleState(selected).key === 'running');
-    await renderScheduleDetail(surface, selected, forceDetail);
-    if (focusedScheduleKey) {
-      const replacement = Array.from(document.querySelectorAll('[data-schedule-focus]'))
-        .find(el => el.dataset.scheduleFocus === focusedScheduleKey);
-      replacement?.focus({preventScroll: true});
-    }
-    scheduleNextPoll(surface, schedules);
   }
 
   function renderScheduleSummary(schedules) {
@@ -7260,9 +7049,9 @@ document.addEventListener('DOMContentLoaded', () => {
       el.classList.toggle('has-attention', attention);
     };
     set('schedules-summary-attention', String(summary.attention), summary.attention > 0);
-    set('schedules-summary-compatible', `${summary.compatible} / ${summary.total}`);
-    set('schedules-summary-active', String(summary.running + summary.activating));
-    set('schedules-summary-next', summary.nextFire ? scheduleDate(summary.nextFire.toISOString()) : '—');
+    set('schedules-summary-total', String(summary.total));
+    set('schedules-summary-enabled', String(summary.enabled));
+    set('schedules-summary-active', String(summary.activeCount));
   }
 
 	function deletedActivationHistoryMarkup(surface, schedules) {
@@ -7308,19 +7097,17 @@ document.addEventListener('DOMContentLoaded', () => {
       const activation = activationState(s);
       const compatibility = producerCompatibilityState(s);
       const tz = s.effective_timezone || 'UTC';
-      const lastRun = s.last_run_at ? scheduleDate(s.last_run_at, tz) : 'No completed run recorded';
+      const lastRun = s.last_run_at ? scheduleDate(s.last_run_at, tz) : 'No run recorded';
       const lastSuccess = Number.isFinite(s.last_success_age_s) ? `Last success ${formatAge(s.last_success_age_s)}` : 'No successful run recorded';
       const nextFire = s.retired ? 'Retired' : s.enabled === false ? 'Paused' : scheduleDate(s.next_fire, tz);
       const selected = String(s.id) === String(surface.options.selectedScheduleID);
       const actions = surface.options.canManage ? `
-        ${s.retired ? '' : `<button type="button" class="schedule-run-btn" data-action="run" data-id="${s.id}" data-name="${escapeHtml(s.name)}" data-schedule-focus="schedule-${s.id}-run">
-          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.25 3.5 12 8l-6.75 4.5z"/></svg><span>Run now</span>
-        </button>`}
         <div class="kebab-menu schedule-actions-menu">
           <button type="button" aria-haspopup="menu" aria-expanded="false" aria-label="More actions for ${escapeHtml(s.name)}">
             <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="3" cy="8" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="13" cy="8" r="1.25"/></svg>
           </button>
           <ul class="kebab-list" role="menu" hidden>
+            ${s.retired ? '' : `<li role="none"><button type="button" role="menuitem" data-action="run" data-id="${s.id}" data-name="${escapeHtml(s.name)}" data-schedule-focus="schedule-${s.id}-run">Run now</button></li>`}
             ${s.retired ? '' : `<li role="none"><button type="button" role="menuitem" data-action="edit" data-schedule='${escapeHtml(JSON.stringify(s))}' data-schedule-focus="schedule-${s.id}-edit">Edit schedule</button></li>`}
             <li role="none" class="schedule-menu-danger"><button type="button" role="menuitem" data-action="delete" data-id="${s.id}" data-name="${escapeHtml(s.name)}" data-schedule-focus="schedule-${s.id}-delete">Delete schedule</button></li>
           </ul>
@@ -7329,33 +7116,28 @@ document.addEventListener('DOMContentLoaded', () => {
         <td data-label="Schedule">
           <div class="schedule-cell-stack">
             <a class="schedule-name-link" data-nav href="/apps/${encodeURIComponent(surface.slug)}/schedules/${s.id}" data-schedule-focus="schedule-${s.id}-open">${escapeHtml(s.name)}</a>
-            <span class="schedule-definition"><code>${escapeHtml(s.cron_expr)}</code> · ${escapeHtml(tz)}${s.timezone_inherited ? ' · inherited' : ''}</span>
-            <span class="schedule-command" title="${escapeHtml((s.command || []).join(' '))}">${escapeHtml((s.command || []).join(' '))}</span>
+            <span class="schedule-cell-primary">${escapeHtml(scheduleTimingLabel(s.cron_expr))}</span>
+            <span class="schedule-definition"><code>${escapeHtml(s.cron_expr)}</code> · ${escapeHtml(tz)}${s.timezone_inherited ? ' (default)' : ''}</span>
             ${dstAdvisoryMarkup(s)}
           </div>
         </td>
-        <td data-label="Latest run">
+        <td data-label="Job status">
           <div class="schedule-cell-stack">
             ${scheduleStatusMarkup(state)}
             <span class="schedule-cell-primary">${escapeHtml(lastRun)}</span>
-            <span class="schedule-cell-secondary">${escapeHtml(lastSuccess)}</span>
-          </div>
-        </td>
-		<td data-label="Code/data compatibility">
-		  <div class="schedule-cell-stack">
-			${scheduleStatusMarkup(compatibility)}
-			<span class="schedule-cell-primary">${escapeHtml(deployTriggerLabel(s.deploy_trigger))}</span>
-			<span class="schedule-cell-secondary">${escapeHtml(compatibility.detail)}</span>
+            ${state.attention ? `<span class="schedule-cell-secondary">${escapeHtml(lastSuccess)}</span>` : ''}
+            ${compatibility.key !== 'not-tracked' && compatibility.key !== 'retired' ? `<span class="schedule-compatibility-label is-${compatibility.tone}">Data: ${escapeHtml(compatibility.label)}</span>` : ''}
+            ${activation.key !== 'none' && activation.key !== 'never' ? `<span class="schedule-cell-secondary">App rollout: ${escapeHtml(activation.label)}</span>` : ''}
           </div>
         </td>
         <td data-label="Next run">
-          <div class="schedule-cell-stack"><span class="schedule-cell-primary">${escapeHtml(nextFire)}</span></div>
+          <div class="schedule-cell-stack"><span class="schedule-cell-primary">${escapeHtml(nextFire)}</span>${s.enabled === false && !s.retired ? '<span class="schedule-cell-secondary">Manual runs available</span>' : ''}</div>
         </td>
         <td class="table-actions" data-label="Actions"><div class="schedule-row-actions">${actions}</div></td>
       </tr>`;
     }).join('');
     container.innerHTML = `<table>
-      <thead><tr><th scope="col">Schedule</th><th scope="col">Latest run</th><th scope="col">Code/data compatibility</th><th scope="col">Next run</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+      <thead><tr><th scope="col">Schedule</th><th scope="col">Job status</th><th scope="col">Next run</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
       <tbody>${rows}</tbody>
     </table>${deletedActivationHistoryMarkup(surface, schedules)}`;
 
@@ -7388,6 +7170,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     const detailSignature = scheduleDetailSignature(schedule);
     if (!force && String(surface.renderedDetailID) === String(schedule.id) && surface.renderedDetailSignature === detailSignature) return;
+    surface.historyRequests.invalidate();
+    const openDiagnostics = [...detail.querySelectorAll('details[open]')].map(node => node.querySelector('summary')?.textContent);
     surface.renderedDetailID = schedule.id;
     surface.renderedDetailSignature = detailSignature;
 
@@ -7398,11 +7182,26 @@ document.addEventListener('DOMContentLoaded', () => {
     const timezone = schedule.effective_timezone || 'UTC';
     detail.setAttribute('aria-busy', 'true');
     detail.querySelectorAll('.schedule-actions-menu').forEach(menu => kebabControls.get(menu)?.close());
+    const compatibilityMarkup = `
+      ${schedule.deploy_trigger && schedule.deploy_trigger !== 'never' ? `<section class="schedule-compatibility-panel schedule-compatibility-${compatibility.tone}" aria-labelledby="schedule-compatibility-title">
+        <div class="schedule-history-heading">
+          <div><h3 id="schedule-compatibility-title">Code and data compatibility</h3><p>${escapeHtml(compatibility.detail)}</p>${schedule.convergence_error ? `<p class="schedule-detail-error">${escapeHtml(schedule.convergence_error)}</p>` : ''}</div>
+          <div class="schedule-activation-actions">${scheduleStatusMarkup(compatibility)}${surface.options.canManage && compatibility.attention && schedule.convergence_obligation_id && schedule.convergence_status === 'failed' && schedule.enabled !== false && !schedule.retired ? `<button type="button" class="btn-primary" data-detail-action="retry-convergence">Retry producer</button>` : ''}</div>
+        </div>
+        <details class="schedule-diagnostics"><summary>Producer details</summary>\n        <dl class="schedule-compatibility-facts">
+          <div><dt>Deployment policy</dt><dd>${escapeHtml(deployTriggerLabel(schedule.deploy_trigger))}</dd></div>
+          <div><dt>Convergence</dt><dd>${escapeHtml(schedule.convergence_status || (schedule.deploy_trigger_satisfied ? 'satisfied' : 'not requested'))}</dd></div>
+          <div><dt>Current code</dt><dd><strong>${escapeHtml(schedule.current_app_version || 'Unknown version')}</strong><code>${escapeHtml(schedule.current_content_digest || 'Digest unavailable')}</code></dd></div>
+          <div><dt>Data producer</dt><dd><strong>${escapeHtml(schedule.producer_app_version || 'No proven producer')}</strong><code>${escapeHtml(schedule.producer_content_digest || 'Digest unavailable')}</code></dd></div>
+          ${schedule.producer_published_at ? `<div class="schedule-activation-wide"><dt>Published</dt><dd>${escapeHtml(scheduleDate(schedule.producer_published_at, timezone))}</dd></div>` : ''}
+          ${schedule.convergence_error ? `<div class="schedule-activation-wide schedule-activation-error"><dt>Last error</dt><dd>${escapeHtml(schedule.convergence_error)}</dd></div>` : ''}
+        </dl>\n        </details>
+      </section>` : ''}`;
     detail.innerHTML = `
       <div class="schedule-detail-head">
         <a class="schedule-detail-back" data-nav href="/apps/${encodeURIComponent(surface.slug)}/schedules">All schedules</a>
         <div class="schedule-detail-title-row">
-          <div><h2 id="schedule-detail-title">${escapeHtml(schedule.name)}</h2>${scheduleStatusMarkup(state)}</div>
+          <div><h2 id="schedule-detail-title">${escapeHtml(schedule.name)}</h2><div class="schedule-detail-states">${scheduleStatusMarkup(state)}${compatibility.key !== 'not-tracked' && compatibility.key !== 'retired' ? `<span class="schedule-compatibility-label is-${compatibility.tone}">Data: ${escapeHtml(compatibility.label)}</span>` : ''}</div></div>
           ${surface.options.canManage ? `<div class="schedule-detail-actions">
             ${schedule.retired ? '' : `<button type="button" class="schedule-run-btn" data-detail-action="run" data-schedule-focus="schedule-${schedule.id}-detail-run"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.25 3.5 12 8l-6.75 4.5z"/></svg><span>Run now</span></button>`}
             <div class="kebab-menu schedule-actions-menu" data-schedule-actions-menu>
@@ -7416,26 +7215,11 @@ document.addEventListener('DOMContentLoaded', () => {
         </div>
       </div>
       ${schedule.roll_feasibility_advisory ? `<div class="schedule-roll-advisory"><strong>Roll capacity warning</strong><span>${escapeHtml(schedule.roll_feasibility_advisory)}</span></div>` : ''}
-      <section class="schedule-compatibility-panel schedule-compatibility-${compatibility.tone}" aria-labelledby="schedule-compatibility-title">
-        <div class="schedule-history-heading">
-          <div><h3 id="schedule-compatibility-title">Code and data compatibility</h3><p>${escapeHtml(compatibility.detail)}</p></div>
-          <div class="schedule-activation-actions">${scheduleStatusMarkup(compatibility)}${surface.options.canManage && compatibility.attention ? `<button type="button" class="btn-primary" data-detail-action="retry-convergence">Retry producer</button>` : ''}</div>
-        </div>
-        <dl class="schedule-compatibility-facts">
-          <div><dt>Deployment policy</dt><dd>${escapeHtml(deployTriggerLabel(schedule.deploy_trigger))}</dd></div>
-          <div><dt>Convergence</dt><dd>${escapeHtml(schedule.convergence_status || (schedule.deploy_trigger_satisfied ? 'satisfied' : 'not requested'))}</dd></div>
-          <div><dt>Current code</dt><dd><strong>${escapeHtml(schedule.current_app_version || 'Unknown version')}</strong><code>${escapeHtml(schedule.current_content_digest || 'Digest unavailable')}</code></dd></div>
-          <div><dt>Data producer</dt><dd><strong>${escapeHtml(schedule.producer_app_version || 'No proven producer')}</strong><code>${escapeHtml(schedule.producer_content_digest || 'Digest unavailable')}</code></dd></div>
-          ${schedule.producer_published_at ? `<div class="schedule-activation-wide"><dt>Published</dt><dd>${escapeHtml(scheduleDate(schedule.producer_published_at, timezone))}</dd></div>` : ''}
-          ${schedule.convergence_error ? `<div class="schedule-activation-wide schedule-activation-error"><dt>Last error</dt><dd>${escapeHtml(schedule.convergence_error)}</dd></div>` : ''}
-        </dl>
-      </section>
       <dl class="schedule-definition-grid">
         <div><dt>Timing</dt><dd><code>${escapeHtml(schedule.cron_expr)}</code></dd></div>
         <div><dt>Timezone</dt><dd>${escapeHtml(timezone)}${schedule.timezone_inherited ? ' <span>(inherited)</span>' : ''}</dd></div>
         <div><dt>Next run</dt><dd>${escapeHtml(schedule.retired ? 'Retired' : schedule.enabled === false ? 'Paused' : scheduleDate(schedule.next_fire, timezone))}</dd></div>
-        <div><dt>After success</dt><dd>${escapeHtml(afterSuccessLabel(schedule))}<span>${escapeHtml(afterSuccessDetail(schedule))}</span></dd></div>
-        <div><dt>Deploy trigger</dt><dd>${escapeHtml(deployTriggerLabel(schedule.deploy_trigger))}</dd></div>
+        <div><dt>After success</dt><dd>${escapeHtml(afterSuccessLabel(schedule))}</dd></div>
         <div class="schedule-definition-command"><dt>Command</dt><dd><code>${escapeHtml((schedule.command || []).join(' '))}</code></dd></div>
       </dl>
 	  ${latestActivation || schedule.on_success === 'roll' ? `<section class="schedule-activation-panel" aria-labelledby="schedule-activation-title">
@@ -7450,9 +7234,22 @@ document.addEventListener('DOMContentLoaded', () => {
           ${latestActivation.last_error ? `<div class="schedule-activation-wide schedule-activation-error"><dt>Last error</dt><dd>${escapeHtml(latestActivation.last_error)}</dd></div>` : ''}
         </dl>` : '<p class="schedule-activation-empty">No successful run has requested an activation yet.</p>'}
       </section>` : ''}
+      ${compatibility.attention ? compatibilityMarkup : ''}
       <div class="schedule-history-heading"><div><h3>Run history</h3><p>Newest runs first. Times use ${escapeHtml(timezone)}.</p></div></div>
-      <div class="schedule-history" data-schedule-history><p class="schedule-loading">Loading run history…</p></div>`;
+      <div class="schedule-history" data-schedule-history role="region" aria-label="Schedule run history" tabindex="0"><p class="schedule-loading">Loading run history…</p></div>
+      ${!compatibility.attention ? compatibilityMarkup : ''}
+      <details class="schedule-diagnostics"><summary>Execution details</summary>
+        <dl class="schedule-activation-facts">
+          <div><dt>Deployment policy</dt><dd>${escapeHtml(deployTriggerLabel(schedule.deploy_trigger))}</dd></div>
+          <div><dt>Timeout</dt><dd>${escapeHtml(formatDuration(schedule.timeout_seconds))}</dd></div>
+          <div><dt>Overlapping runs</dt><dd>${escapeHtml(schedule.overlap_policy || 'skip')}</dd></div>
+          <div><dt>Missed runs</dt><dd>${escapeHtml(schedule.missed_policy || 'skip')}</dd></div>
+          <div class="schedule-activation-wide"><dt>After success</dt><dd>${escapeHtml(afterSuccessDetail(schedule))}</dd></div>
+        </dl>
+      </details>
+      ${schedule.dst_advisory ? `<p class="schedule-roll-advisory">${escapeHtml(schedule.dst_advisory)}</p>` : ''}`;
 
+    for (const node of detail.querySelectorAll('details')) if (openDiagnostics.includes(node.querySelector('summary')?.textContent)) node.open = true;
     const detailActionsMenu = detail.querySelector('[data-schedule-actions-menu]');
     if (detailActionsMenu) {
       kebabControls.set(detailActionsMenu, wireKebab(detailActionsMenu.querySelector(':scope > button'), detailActionsMenu.querySelector('.kebab-list'), detailActionsMenu));
@@ -7473,40 +7270,51 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     await loadScheduleRunPage(surface, schedule, 0, true);
-    if (!surface.stopped && detail) detail.setAttribute('aria-busy', 'false');
+    if (!surface.stopped && surface === mountedScheduleSurface && String(surface.renderedDetailID) === String(schedule.id)) detail.setAttribute('aria-busy', 'false');
   }
 
   async function loadScheduleRunPage(surface, schedule, offset, replace) {
     const host = document.querySelector('[data-schedule-history]');
-    if (!host || surface.stopped) return;
-    let response;
+    if (!host || surface.stopped || surface !== mountedScheduleSurface) return;
+    const request = surface.historyRequests.begin();
+    const focused = document.activeElement;
+    let keepFocus = host.contains(focused);
+    const focusMoved = event => { if (event.target !== focused && !focused?.contains(event.target)) keepFocus = false; };
+    document.addEventListener('focusin', focusMoved);
+    document.addEventListener('pointerdown', focusMoved, true);
+    const current = () => !surface.stopped && surface === mountedScheduleSurface && surface.historyRequests.isCurrent(request)
+      && host.isConnected && host === document.querySelector('[data-schedule-history]');
+    host.setAttribute('aria-busy', 'true');
     try {
-      response = await api(`/api/apps/${encodeURIComponent(surface.slug)}/schedules/${schedule.id}/runs?limit=50&offset=${offset}`);
+      const response = await api(`/api/apps/${encodeURIComponent(surface.slug)}/schedules/${schedule.id}/runs?limit=10&offset=${offset}`, {signal: request.signal});
+      if (!current()) return;
+      if (response.status === 401) { await handleUnauthorized(); return; }
+      if (response.status === 403) { clearScheduleAccess(surface); return; }
+      if (!response.ok) throw new Error('response');
+      const body = await response.json();
+      if (!current()) return;
+      const page = Array.isArray(body) ? body : body?.items;
+      if (!Array.isArray(page)) throw new Error('Invalid run history');
+      const total = Number.isFinite(body.total) ? body.total : page.length;
+      surface.detailTotal = total;
+      surface.detailRuns = replace ? page : [...(surface.detailRuns || []), ...page];
+      renderScheduleRuns(surface, schedule, total);
     } catch {
-      if (replace) host.innerHTML = '<div class="schedule-load-error"><p>Run history could not be loaded.</p><button type="button" class="env-btn-secondary" data-run-history-retry>Try again</button></div>';
+      if (!current()) return;
+      if (replace) host.innerHTML = '<div class="schedule-load-error" role="alert"><p>Run history could not be loaded.</p><button type="button" class="env-btn-secondary" data-run-history-retry>Try again</button></div>';
       else {
-        flashToast('More run history could not be loaded.', 'error');
+        flashToast('More run history could not be loaded. Try again.', 'error');
         renderScheduleRuns(surface, schedule, surface.detailTotal || (surface.detailRuns || []).length);
       }
       host.querySelector('[data-run-history-retry]')?.addEventListener('click', () => loadScheduleRunPage(surface, schedule, 0, true));
-      return;
-    }
-    if (response.status === 401) { await handleUnauthorized(); return; }
-    if (!response.ok) {
-      if (replace) host.innerHTML = '<div class="schedule-load-error"><p>Run history could not be loaded.</p><button type="button" class="env-btn-secondary" data-run-history-retry>Try again</button></div>';
-      else {
-        flashToast('More run history could not be loaded.', 'error');
-        renderScheduleRuns(surface, schedule, surface.detailTotal || (surface.detailRuns || []).length);
+    } finally {
+      document.removeEventListener('focusin', focusMoved);
+      document.removeEventListener('pointerdown', focusMoved, true);
+      if (current()) {
+        host.setAttribute('aria-busy', 'false');
+        if (keepFocus) host.focus({preventScroll: true});
       }
-      host.querySelector('[data-run-history-retry]')?.addEventListener('click', () => loadScheduleRunPage(surface, schedule, 0, true));
-      return;
     }
-    const body = await response.json();
-    const page = Array.isArray(body) ? body : (Array.isArray(body.items) ? body.items : []);
-    const total = Number.isFinite(body.total) ? body.total : page.length;
-    surface.detailTotal = total;
-    surface.detailRuns = replace ? page : [...(surface.detailRuns || []), ...page];
-    renderScheduleRuns(surface, schedule, total);
   }
 
   function renderScheduleRuns(surface, schedule, total) {
@@ -7543,7 +7351,7 @@ document.addEventListener('DOMContentLoaded', () => {
         <td data-label="Duration"><div class="schedule-cell-stack">${escapeHtml(duration)}</div></td>
         <td data-label="Trigger"><div class="schedule-cell-stack">${escapeHtml(trigger)}</div></td>
         <td data-label="Exit"><div class="schedule-cell-stack">${escapeHtml(exit)}</div></td>
-		<td data-label="Activation"><div class="schedule-cell-stack">${activationResult ? scheduleStatusMarkup(activationResult) : '—'}${run.target_generation ? `<span>Generation ${escapeHtml(run.target_generation)}</span>` : ''}${activationError ? `<small class="schedule-run-activation-error"><strong>Activation error:</strong> ${escapeHtml(activationError)}</small>` : ''}</div></td>
+		<td data-label="Activation"${!activationResult && !activationError ? ' class="schedule-run-no-activation"' : ''}><div class="schedule-cell-stack">${activationResult ? scheduleStatusMarkup(activationResult) : '—'}${run.target_generation ? `<span>Generation ${escapeHtml(run.target_generation)}</span>` : ''}${activationError ? `<small class="schedule-run-activation-error"><strong>Activation error:</strong> ${escapeHtml(activationError)}</small>` : ''}</div></td>
         <td class="table-actions" data-label="Actions"><div class="schedule-row-actions">${actions}</div></td>
       </tr>`;
     }).join('');
@@ -7552,7 +7360,7 @@ document.addEventListener('DOMContentLoaded', () => {
       <thead><tr><th scope="col">Job result</th><th scope="col">Started</th><th scope="col">Duration</th><th scope="col">Trigger</th><th scope="col">Exit</th><th scope="col">Activation</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
-    <div class="schedule-history-footer"><span>Showing ${runs.length} of ${total}</span>${remaining ? `<button type="button" class="env-btn-secondary" data-load-more-runs data-schedule-focus="schedule-${schedule.id}-load-more">Load ${Math.min(50, remaining)} more</button>` : ''}</div>`;
+    <div class="schedule-history-footer"><span>Showing ${runs.length} of ${total}</span>${remaining ? `<button type="button" class="env-btn-secondary" data-load-more-runs data-schedule-focus="schedule-${schedule.id}-load-more">Load ${Math.min(10, remaining)} more</button>` : ''}</div>`;
 
     host.querySelectorAll('[data-run-action]').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -7568,72 +7376,19 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // Load and render the shared-data mounts list.
-  async function loadSharedData(slug) {
-    const container = document.getElementById('shared-data-list');
-    if (!container) return;
-    let resp;
-    try {
-      resp = await api(`/api/apps/${encodeURIComponent(slug)}/shared-data`);
-    } catch {
-      container.innerHTML = '<p class="error">Failed to load shared data mounts.</p>';
-      return;
-    }
-    if (!resp.ok) {
-      container.innerHTML = '<p class="error">Failed to load shared data mounts.</p>';
-      return;
-    }
-    const body = await resp.json();
-    // Standard {items,...} list envelope; tolerate a bare array for resilience.
-    const mounts = Array.isArray(body) ? body : (body && Array.isArray(body.items) ? body.items : []);
-    if (mounts.length === 0) {
-      container.innerHTML = '<p class="env-empty">No shared data mounts configured.</p>';
-      return;
-    }
-    const items = mounts.map(m => `
-      <li>
-        <span>data/shared/<strong>${escapeHtml(m.source_slug)}</strong>/</span>
-        <button type="button" class="btn-danger-sm" data-action="revoke" data-slug="${escapeHtml(m.source_slug)}">Unmount</button>
-      </li>`).join('');
-    container.innerHTML = `<ul class="shared-data-list">${items}</ul>`;
-
-    container.querySelectorAll('[data-action="revoke"]').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        const sourceSlug = btn.dataset.slug;
-        if (!confirm(`Unmount data from "${sourceSlug}"?`)) return;
-        btn.disabled = true;
-        try {
-          let r;
-          try {
-            r = await api(`/api/apps/${encodeURIComponent(slug)}/shared-data/${encodeURIComponent(sourceSlug)}`, {
-              method: 'DELETE',
-            });
-          } catch {
-            flashToast('Unmount failed: network error', 'error');
-            return;
-          }
-          if (r.status === 401) { await handleUnauthorized(); return; }
-          if (!r.ok) {
-            flashToast('Unmount failed: ' + (await errorMessage(r)), 'error');
-            return;
-          }
-          await loadSharedData(slug);
-        } finally {
-          btn.disabled = false;
-        }
-      });
-    });
-  }
-
   // Open the schedule add/edit form modal.
   function openScheduleForm(slug, existing) {
     const modal = document.getElementById('schedule-form-modal');
     const title = document.getElementById('schedule-form-title');
     const form = document.getElementById('schedule-form');
-    const errEl = document.getElementById('schedule-form-error');
     if (!modal || !form) return;
 
+    // Clone before setting values: select.cloneNode() copies default options,
+    // not the current selection. Cloning a populated form resets saved policy.
+    const newForm = form.cloneNode(true);
+    form.parentNode.replaceChild(newForm, form);
     title.textContent = existing ? 'Edit schedule' : 'Add schedule';
-    form.reset();
+    newForm.reset();
 
     if (existing) {
       document.getElementById('sched-name').value = existing.name || '';
@@ -7652,9 +7407,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     updateCronPreview(document.getElementById('sched-cron').value, document.getElementById('sched-timezone').value);
 
-    // Replace the submit handler to capture the current slug/existing binding.
-    const newForm = form.cloneNode(true);
-    form.parentNode.replaceChild(newForm, form);
     setError(document.getElementById('schedule-form-error'), '');
 
     // Re-attach cron preview input listener and cancel button.
@@ -7665,6 +7417,8 @@ document.addEventListener('DOMContentLoaded', () => {
     newForm.querySelector('#sched-cron').addEventListener('input', refreshCronHint);
     newForm.querySelector('#sched-timezone').addEventListener('input', refreshCronHint);
     newForm.querySelector('#schedule-form-cancel')?.addEventListener('click', closeScheduleForm);
+
+    newForm.querySelector('.schedule-advanced').open = !!existing && (existing.on_success === 'roll' || (existing.timeout_seconds && existing.timeout_seconds !== 3600) || (existing.overlap_policy && existing.overlap_policy !== 'skip') || (existing.missed_policy && existing.missed_policy !== 'skip'));
 
     const refreshRollOptions = () => {
       const rolling = newForm.querySelector('#sched-on-success').value === 'roll';
@@ -7685,6 +7439,8 @@ document.addEventListener('DOMContentLoaded', () => {
         : trigger === 'first_deploy'
           ? 'Only the first deployment is guaranteed a producer run; later code changes reuse existing data.'
           : 'Deployments never run this job; code and data compatibility is not tracked.';
+      newForm.querySelector('#sched-deploy-trigger-help').textContent = trigger === 'bundle_change' ? 'Deployment waits for a successful producer result from the candidate bundle.' : trigger === 'first_deploy' ? 'Only the first deployment waits for a producer result.' : 'This job runs independently of deployments.';
+      newForm.querySelector('#sched-on-success-help').textContent = rolling ? 'A roll replaces serving replicas one at a time after a healthy surge replica starts.' : 'Serving replicas keep running. Apps that cache data may need a restart to use it.';
       consequence.innerHTML = `<strong>What will happen</strong><span>${escapeHtml(triggerCopy)} ${rolling ? 'After each successful job, serving replicas roll onto the new data.' : 'Successful jobs do not reload serving replicas.'}</span>`;
     };
     newForm.querySelector('#sched-deploy-trigger').addEventListener('change', refreshConsequence);
@@ -7765,7 +7521,8 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function runScheduleNow(slug, id, name, btn) {
-    if (!confirm(`Run "${name || 'this schedule'}" now? The command starts immediately against the current deployed bundle.`)) return;
+    if (!confirm(`Run "${name || 'this schedule'}" against the current deployed bundle? If another run is active, this schedule’s overlap policy still applies.`)) return;
+    const originSurface = mountedScheduleSurface;
     if (btn) btn.disabled = true;
     try {
       let r;
@@ -7781,8 +7538,8 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       }
       const started = await r.json().catch(() => ({}));
-      flashToast(started.run_id ? `Run #${started.run_id} started.` : 'Schedule started.', 'success');
-      await router.navigate(`/apps/${encodeURIComponent(slug)}/schedules/${id}`);
+      flashToast(started.run_id ? `Run #${started.run_id} requested.` : 'Run requested.', 'success');
+      if (originSurface === mountedScheduleSurface && !originSurface?.stopped) await router.navigate(`/apps/${encodeURIComponent(slug)}/schedules/${id}`);
     } finally {
       if (btn) btn.disabled = false;
     }
@@ -7807,7 +7564,7 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       }
       const result = await response.json().catch(() => ({}));
-      flashToast(result.run_id ? `Producer run #${result.run_id} started.` : `Producer retry started for ${name}.`, 'success');
+      flashToast(result.warning || (result.run_id ? `Producer run #${result.run_id} requested.` : `Producer retry queued for ${name}.`), result.warning ? 'error' : 'success');
       if (mountedScheduleSurface?.slug === slug) {
         mountedScheduleSurface.renderedDetailSignature = '';
         await refreshScheduleSurface(mountedScheduleSurface, {announce: true});
@@ -7908,35 +7665,6 @@ document.addEventListener('DOMContentLoaded', () => {
     btn.disabled = true;
     try {
       await refreshScheduleSurface(mountedScheduleSurface, {announce: true});
-    } finally {
-      btn.disabled = false;
-    }
-  });
-
-  document.getElementById('shared-data-add-btn')?.addEventListener('click', async (event) => {
-    if (!settingsSlug) return;
-    const sourceSlug = (prompt('Source app slug to mount read-only:') || '').trim();
-    if (!sourceSlug) return;
-    const btn = event.currentTarget;
-    btn.disabled = true;
-    try {
-      let r;
-      try {
-        r = await api(`/api/apps/${encodeURIComponent(settingsSlug)}/shared-data`, {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({source_slug: sourceSlug}),
-        });
-      } catch {
-        flashToast('Mount failed: network error', 'error');
-        return;
-      }
-      if (r.status === 401) { await handleUnauthorized(); return; }
-      if (!r.ok) {
-        flashToast('Mount failed: ' + (await errorMessage(r)), 'error');
-        return;
-      }
-      await loadSharedData(settingsSlug);
     } finally {
       btn.disabled = false;
     }

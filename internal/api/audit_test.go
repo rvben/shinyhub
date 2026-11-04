@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/auth"
@@ -299,5 +301,109 @@ func TestListAuditEvents_LimitIsClamped(t *testing.T) {
 	}
 	if len(resp.Events) >= seeded {
 		t.Fatalf("an excessive ?limit= returned %d of %d rows in one response, want it capped well below the full set", len(resp.Events), seeded)
+	}
+}
+
+// Search and counts share the same predicate, including escaped SQL wildcard
+// characters. Filtering must cover the history, not only the first UI page.
+func TestAuditSearchAcrossActorsResourcesAndCredentials(t *testing.T) {
+	srv, store := newTestServer(t)
+	if err := store.CreateUser(db.CreateUserParams{Username: "audit-operator", PasswordHash: "h", Role: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	actor, _ := store.GetUserByUsername("audit-operator")
+	for _, p := range []db.AuditEventParams{
+		{UserID: &actor.ID, Action: "update_app", ResourceType: "app", ResourceID: "forecast", Detail: `{"memory":{"old":"256 MiB","new":"512 MiB"}}`},
+		{Action: "deploy", ResourceType: "app", ResourceID: "forecast"},
+		{Action: "deploy", ResourceType: "app", ResourceID: "literal_%!"},
+		{Action: "deploy", ResourceType: "app", ResourceID: "literal-abc", CredentialName: "Release pipeline"},
+		{Action: "login_failed", ResourceType: "user", ResourceID: "visitor"},
+	} {
+		store.LogAuditEvent(p)
+	}
+	token, _ := auth.IssueJWT(actor.ID, actor.Username, "admin", "test-secret")
+	for _, tc := range []struct {
+		query  string
+		want   int
+		action string
+	}{
+		{"forecast", 2, ""}, {"update app", 1, ""}, {"AUDIT-OPERATOR", 1, ""}, {"release pipeline", 1, ""}, {"_%!", 1, ""},
+		{"not-found", 0, ""}, {"forecast", 1, "deploy"}, {"' OR 1=1 --", 0, ""},
+	} {
+		t.Run(tc.query+tc.action, func(t *testing.T) {
+			path := "/api/audit?limit=1&q=" + url.QueryEscape(tc.query) + "&action=" + url.QueryEscape(tc.action)
+			rec := httptest.NewRecorder()
+			srv.Router().ServeHTTP(rec, authedRequest(t, "GET", path, nil, token))
+			if rec.Code != 200 {
+				t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+			}
+			if rec.Header().Get("Cache-Control") != "no-store" {
+				t.Fatal("audit responses must not be cached")
+			}
+			var result struct {
+				Events  []db.AuditEvent `json:"events"`
+				Total   int             `json:"total"`
+				HasMore bool            `json:"has_more"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.Total != tc.want || result.HasMore != (tc.want > 1) {
+				t.Fatalf("total/has_more = %d/%v, want %d/%v", result.Total, result.HasMore, tc.want, tc.want > 1)
+			}
+			if tc.want > 1 {
+				next := httptest.NewRecorder()
+				srv.Router().ServeHTTP(next, authedRequest(t, "GET", path+"&offset=1", nil, token))
+				var second struct {
+					Events []db.AuditEvent `json:"events"`
+				}
+				_ = json.Unmarshal(next.Body.Bytes(), &second)
+				if len(second.Events) != 1 || second.Events[0].ID == result.Events[0].ID {
+					t.Fatal("search pagination duplicated or omitted an event")
+				}
+			}
+		})
+	}
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, "GET", "/api/audit?q="+strings.Repeat("x", 201), nil, token))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("long query status = %d", rec.Code)
+	}
+}
+
+func TestAuditRecordsAppMetadataBeforeAndAfter(t *testing.T) {
+	srv, store := newTestServer(t)
+	if err := store.CreateUser(db.CreateUserParams{Username: "metadata-admin", PasswordHash: "h", Role: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	actor, _ := store.GetUserByUsername("metadata-admin")
+	token, _ := auth.IssueJWT(actor.ID, actor.Username, "admin", "test-secret")
+	for _, request := range []struct {
+		method, path, body string
+		status             int
+	}{
+		{"POST", "/api/apps", `{"slug":"audit-metadata","name":"Original name"}`, 201},
+		{"PATCH", "/api/apps/audit-metadata", `{"description":"Original description"}`, 200},
+		{"PATCH", "/api/apps/audit-metadata", `{"name":"Updated name","description":"Updated description"}`, 200},
+	} {
+		rec := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rec, authedRequest(t, request.method, request.path, []byte(request.body), token))
+		if rec.Code != request.status {
+			t.Fatalf("%s status %d: %s", request.method, rec.Code, rec.Body.String())
+		}
+	}
+	rows, err := store.ListAuditEventsFiltered(db.AuditEventFilter{Action: "update_app"}, 1, 0)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("audit rows %d, %v", len(rows), err)
+	}
+	var detail map[string]struct {
+		Old string `json:"old"`
+		New string `json:"new"`
+	}
+	if err := json.Unmarshal([]byte(rows[0].Detail), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail["name"].Old != "Original name" || detail["name"].New != "Updated name" || detail["description"].Old != "Original description" || detail["description"].New != "Updated description" {
+		t.Fatalf("incorrect metadata attribution: %#v", detail)
 	}
 }

@@ -10,9 +10,114 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rvben/shinyhub/internal/api"
 	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
 )
+
+func TestAutomaticUserRolePreviewMatchesClearWithoutMutation(t *testing.T) {
+	_, store := newTestServer(t)
+	srv := api.New(&config.Config{
+		Auth: config.AuthConfig{Secret: "test-secret", OAuthDefaultRole: "developer",
+			GroupRoleMappings: []config.GroupRoleMapping{{Group: "ops", Role: "operator"}, {Group: "admins", Role: "admin"}}},
+		Storage: config.StorageConfig{AppsDir: t.TempDir(), AppDataDir: t.TempDir()},
+	}, store, nil, nil)
+	admin, _ := seedUserAndJWT(t, store, "admin", "admin")
+	viewer, id := seedUserAndJWT(t, store, "person", "viewer")
+	if err := store.SetManualRole(id, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	path := fmt.Sprintf("/api/users/%d/automatic-role", id)
+	for _, tc := range []struct {
+		groups       []string
+		role, source string
+	}{
+		{nil, "developer", "default"},
+		{[]string{"ops"}, "operator", "sso"},
+		{[]string{"ops", "admins"}, "admin", "sso"},
+	} {
+		if err := store.ReplaceUserGroups(id, tc.groups); err != nil {
+			t.Fatal(err)
+		}
+		rec := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rec, authedRequest(t, "GET", path, nil, admin))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("preview status %d: %s", rec.Code, rec.Body.String())
+		}
+		var result map[string]string
+		if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if result["role"] != tc.role || result["source"] != tc.source {
+			t.Fatalf("preview = %v, want %s/%s", result, tc.role, tc.source)
+		}
+		if rec.Header().Get("Cache-Control") != "no-store" {
+			t.Fatal("role previews must not be cached")
+		}
+		user, _ := store.GetUserByID(id)
+		if user.ManualRole != "admin" || user.Role != "admin" {
+			t.Fatalf("preview mutated user: %+v", user)
+		}
+		patch := httptest.NewRecorder()
+		srv.Router().ServeHTTP(patch, authedRequest(t, "PATCH", fmt.Sprintf("/api/users/%d", id), []byte(`{"role":""}`), admin))
+		if patch.Code != http.StatusOK {
+			t.Fatalf("clear role: %d %s", patch.Code, patch.Body.String())
+		}
+		user, _ = store.GetUserByID(id)
+		if user.Role != tc.role || user.RoleSource != tc.source {
+			t.Fatalf("saved role differs from preview: %+v", user)
+		}
+		if err := store.SetManualRole(id, "admin"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Re-resolved authorization uses the current role, regardless of the JWT.
+	if err := store.SetManualRole(id, "viewer"); err != nil {
+		t.Fatal(err)
+	}
+	// A preview is a read, not a reservation: changing rules must make a
+	// subsequent save fail rather than silently grant different access.
+	if err := store.SetManualRole(id, "operator"); err != nil {
+		t.Fatal(err)
+	}
+	conflict := httptest.NewRecorder()
+	srv.Router().ServeHTTP(conflict, authedRequest(t, "PATCH", fmt.Sprintf("/api/users/%d", id), []byte(`{"role":"","expected_role":"viewer"}`), admin))
+	if conflict.Code != http.StatusConflict {
+		t.Fatalf("changed preview: %d %s", conflict.Code, conflict.Body.String())
+	}
+	unchanged, _ := store.GetUserByID(id)
+	if unchanged.Role != "operator" || unchanged.ManualRole != "operator" {
+		t.Fatal("preview conflict changed access")
+	}
+	if err := store.SetManualRole(id, "viewer"); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		token, path string
+		status      int
+	}{
+		{"", path, http.StatusUnauthorized},
+		{viewer, path, http.StatusForbidden},
+		{admin, "/api/users/bad/automatic-role", http.StatusBadRequest},
+		{admin, "/api/users/999999/automatic-role", http.StatusNotFound},
+	} {
+		rec := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rec, authedRequest(t, "GET", tc.path, nil, tc.token))
+		if rec.Code != tc.status {
+			t.Fatalf("%s: got %d want %d", tc.path, rec.Code, tc.status)
+		}
+	}
+	service, err := store.UpsertSystemUser(db.SystemUsernameDeploy, "developer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, "GET", fmt.Sprintf("/api/users/%d/automatic-role", service.ID), nil, admin))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("service preview: %d", rec.Code)
+	}
+}
 
 func TestListUsers_AdminOnly(t *testing.T) {
 	srv, store := newTestServer(t)

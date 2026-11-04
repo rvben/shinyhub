@@ -99,6 +99,7 @@ export function auditSelection(search = '') {
     action: (params.get('action') || '').trim(),
     since: inverted ? '' : since,
     until: inverted ? '' : until,
+    q: (params.get('q') || '').trim(),
   };
 }
 
@@ -112,6 +113,7 @@ export function auditListPath(page, selection = {}) {
   if (selection.event) params.set('event', selection.event);
   else if (selection.run) params.set('run', selection.run);
   else {
+    if (selection.q) params.set('q', selection.q);
     if (selection.action) params.set('action', selection.action);
     if (auditDate(selection.since)) params.set('since', selection.since);
     if (auditDate(selection.until)) params.set('until', selection.until);
@@ -167,10 +169,38 @@ export function createLatestRequestGate() {
 export function mountAuditLog(ctx, search = '') {
   const view = document.getElementById('audit-view');
   view.hidden = false;
-  ctx.loadAuditEvents(0, auditSelection(search));
+  ctx.loadAuditEvents(auditPage(search), auditSelection(search), search);
   ctx.updateActiveNav(location.pathname);
   return {
     title: 'Audit Log',
-    unmount() { view.hidden = true; },
+    update(_, search) { ctx.loadAuditEvents(auditPage(search), auditSelection(search), search); },
+    unmount() { ctx.stopAudit?.(); view.hidden = true; },
   };
+}
+
+// Pages and filters travel with the URL, so Back and shared investigations
+// restore the actual server query rather than a visually similar first page.
+export function auditPage(search = '') {
+  const raw = new URLSearchParams(search).get('page') || '1';
+  return /^\d+$/.test(raw) ? Math.min(100000, Math.max(0, Number(raw) - 1)) : 0;
+}
+export function auditViewPath(selection = {}, page = 0) {
+  const params = new URLSearchParams();
+  if (selection.event) params.set('event', selection.event);
+  else if (selection.run) params.set('run', selection.run);
+  else for (const key of ['q', 'action', 'since', 'until']) if (selection[key]) params.set(key, selection[key]);
+  if (!selection.event && page > 0) params.set('page', String(page + 1));
+  return '/audit-log' + (params.size ? '?' + params.toString() : '');
+}
+export function auditValidation(selection = {}) {
+  if (new TextEncoder().encode(selection.q || '').length > 200) return 'Shorten the search to 200 bytes or fewer.';
+  for (const key of ['since', 'until']) {
+    const value = selection[key];
+    if (!value) continue;
+    const date = new Date(value + 'T00:00:00Z');
+    if (!AUDIT_DATE.test(value) || !Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== value || value.startsWith('0000'))
+      return 'Choose a valid calendar date.';
+  }
+  if (selection.since && selection.until && selection.until < selection.since) return 'The end date must be on or after the start date.';
+  return '';
 }

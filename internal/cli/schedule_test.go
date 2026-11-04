@@ -380,7 +380,7 @@ func TestScheduleLogs_FollowStripsSSEFraming(t *testing.T) {
 		},
 		"GET /api/apps/demo/schedules/7/runs/3/logs": func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/event-stream")
-			fmt.Fprint(w, "data: hello\n\n: heartbeat\n\ndata: world\n\n")
+			fmt.Fprint(w, "data: hello\n\n: heartbeat\n\ndata: world\n\nevent: complete\ndata:\n\n")
 		},
 		"GET /api/apps/demo/schedules/7/runs/3": func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, `{"status":"succeeded","exit_code":0}`)
@@ -396,6 +396,9 @@ func TestScheduleLogs_FollowStripsSSEFraming(t *testing.T) {
 	}
 	if strings.Contains(out, "heartbeat") {
 		t.Errorf("output must not contain heartbeat comments:\n%s", out)
+	}
+	if strings.Contains(out, "complete") || strings.Contains(out, "world\n\n") {
+		t.Errorf("completion must not add synthetic output: %q", out)
 	}
 	if !strings.Contains(out, "hello") || !strings.Contains(out, "world") {
 		t.Errorf("output missing log content:\n%s", out)

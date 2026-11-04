@@ -44,10 +44,10 @@ test('mountAuditLog shows the view, loads the first page, updates nav, and unmou
 });
 
 test('audit selection parses exact event and run filters and builds encoded API paths', () => {
-  assert.deepEqual(auditSelection('?event=42'), { event: '42', run: '', action: '', since: '', until: '' });
-  assert.deepEqual(auditSelection('?run=run%2Fone'), { event: '', run: 'run/one', action: '', since: '', until: '' });
-  assert.deepEqual(auditSelection('?action=env.set'), { event: '', run: '', action: 'env.set', since: '', until: '' });
-  assert.deepEqual(auditSelection('?event=bad'), { event: '', run: '', action: '', since: '', until: '' });
+  assert.deepEqual(auditSelection('?event=42'), { event: '42', run: '', action: '', since: '', until: '', q: '' });
+  assert.deepEqual(auditSelection('?run=run%2Fone'), { event: '', run: 'run/one', action: '', since: '', until: '', q: '' });
+  assert.deepEqual(auditSelection('?action=env.set'), { event: '', run: '', action: 'env.set', since: '', until: '', q: '' });
+  assert.deepEqual(auditSelection('?event=bad'), { event: '', run: '', action: '', since: '', until: '', q: '' });
 
   assert.equal(auditListPath(0, { event: '42', run: '', action: '' }), '/api/audit?limit=100&offset=0&event=42');
   assert.equal(auditListPath(2, { event: '', run: 'run/one', action: '' }), '/api/audit?limit=100&offset=200&run=run%2Fone');
@@ -62,7 +62,7 @@ test('mountAuditLog forwards the current selection to the first load', () => {
     updateActiveNav() {},
   }, '?event=42');
 
-  assert.deepEqual(loadCalls, [[0, { event: '42', run: '', action: '', since: '', until: '' }]]);
+  assert.deepEqual(loadCalls, [[0, { event: '42', run: '', action: '', since: '', until: '', q: '' }]]);
 });
 
 test('filtered audit empty and failure copy preserves investigation context', () => {
@@ -94,7 +94,7 @@ test('audit loading and asynchronous failures have announcement semantics', () =
 test('audit selection reads a date range and drops anything that is not a calendar date', () => {
   assert.deepEqual(
     auditSelection('?since=2026-09-01&until=2026-09-06'),
-    { event: '', run: '', action: '', since: '2026-09-01', until: '2026-09-06' },
+    { event: '', run: '', action: '', since: '2026-09-01', until: '2026-09-06', q: '' },
   );
   // Either end stands alone: "everything since the incident" is a real ask.
   assert.equal(auditSelection('?since=2026-09-01').since, '2026-09-01');
@@ -106,7 +106,7 @@ test('audit selection reads a date range and drops anything that is not a calend
   // for a link the operator was handed.
   assert.deepEqual(
     auditSelection('?since=2026-09-06&until=2026-09-01'),
-    { event: '', run: '', action: '', since: '', until: '' },
+    { event: '', run: '', action: '', since: '', until: '', q: '' },
   );
 });
 

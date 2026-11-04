@@ -4,8 +4,9 @@
 //
 // deploy_count only increments on a successful deploy (see app-card-badge.js),
 // so an app with no successful deployment has nothing to open yet (the
-// /app/<slug>/ URL would 404). The grid hides "Open" and shows a direct
-// first-deploy action only in that state. Once a bundle exists, redeploy moves
+// /app/<slug>/ URL would 404). The grid shows a direct first-deploy action in
+// that state. Open is for serving or wakeable apps. Stopped/crashed apps offer
+// Start to managers and an overview link to other users. Once a bundle exists, redeploy moves
 // into the overflow menu: it remains available without looking like unfinished
 // setup on every card.
 //
@@ -80,7 +81,10 @@ export function appCardActions(app, canManage) {
   const isElastic = ELASTIC_ISOLATION.has(isolation);
 
   return {
-    showOpen: hasDeployment,
+    showOpen: hasDeployment && !app.deploying && (isUp || status === 'hibernated'),
+    startIsPrimary: manageable && (status === 'stopped' || status === 'crashed'),
+    showOverview: hasDeployment && (app.deploying || (!isUp && status !== 'hibernated'))
+      && !(manageable && (status === 'stopped' || status === 'crashed')),
     deployIsPrimary: !hasDeployment,
     showRedeploy: !!canManage && hasDeployment && !app.deploying,
     showRestart: manageable && isUp,

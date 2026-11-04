@@ -257,7 +257,40 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 }
 
 type patchUserRequest struct {
-	Role string `json:"role"`
+	Role         string `json:"role"`
+	ExpectedRole string `json:"expected_role"`
+}
+
+// Preview the same saved group snapshot and default used by ClearManualRole,
+// without changing permissions just to discover the result.
+func (s *Server) handleAutomaticUserRole(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireAdmin(w, r); !ok {
+		return
+	}
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid user id")
+		return
+	}
+	user, stop := s.refuseSystemUser(w, id)
+	if stop {
+		return
+	}
+	if user == nil {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	groups, err := s.store.GetUserGroups(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	role, source := s.jitOAuthRole(), "default"
+	if resolved, matched := auth.ResolveGlobalRole(groups, AuthMappings(s.cfg.Auth.GroupRoleMappings), role); matched {
+		role, source = resolved, "sso"
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]string{"role": role, "source": source})
 }
 
 func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
@@ -303,7 +336,15 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 
 	if req.Role == "" {
 		// Empty role clears the manual override: the user returns to group/default governance.
-		if err := s.store.ClearManualRole(id, AuthMappings(s.cfg.Auth.GroupRoleMappings), s.jitOAuthRole()); err != nil {
+		if req.ExpectedRole != "" && !auth.IsValidGlobalRole(req.ExpectedRole) {
+			writeError(w, http.StatusBadRequest, "invalid expected role")
+			return
+		}
+		if err := s.store.ClearManualRoleExpected(id, AuthMappings(s.cfg.Auth.GroupRoleMappings), s.jitOAuthRole(), req.ExpectedRole); err != nil {
+			if errors.Is(err, db.ErrRolePreviewChanged) {
+				writeError(w, http.StatusConflict, "automatic role changed; select the automatic role again to review current access")
+				return
+			}
 			if errors.Is(err, db.ErrLastAdmin) {
 				writeError(w, http.StatusConflict, "cannot remove the last admin")
 				return

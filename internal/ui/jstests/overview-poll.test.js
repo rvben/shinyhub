@@ -120,7 +120,7 @@ test('metrics retry reports pending, failure and recovery while retaining keyboa
   overallRetry.click();
   await eventually(() => !document.querySelector('.ov-refresh-warning'));
   assert.equal(document.querySelector('.ov-refresh-warning'), null);
-  assert.equal(document.activeElement.id, 'ov-scope-select');
+  assert.equal(document.activeElement.dataset.focusKey, 'overview:status');
 });
 
 async function eventually(predicate) {
@@ -348,7 +348,7 @@ test('failed app polls retain a visibly stale scoped snapshot and retry restores
   mounted = mountOverview(context(async (path) => {
     if (path === '/api/apps' && retryResponse) return retryResponse.promise;
     if (path === '/api/apps' && fail) return { ok: false, status: 500 };
-    const data = path === '/api/apps' ? { items: [app] } : path.endsWith('/history') ? { history: {} } : { host: { cores: 4, memory_mb: 8192 }, metrics: { a: { replicas: [{ status: 'running', metrics_available: true, cpu_percent: 10, rss_bytes: 1024, effective_cpu_quota_percent: 0, effective_memory_limit_mb: 0 }] } } };
+    const data = path === '/api/apps' ? { items: [app, { slug: 'outside', status: 'hibernated' }] } : path.endsWith('/history') ? { history: {} } : { host: { cores: 4, memory_mb: 8192 }, metrics: { a: { replicas: [{ status: 'running', metrics_available: true, cpu_percent: 10, rss_bytes: 1024, effective_cpu_quota_percent: 0, effective_memory_limit_mb: 0 }] } } };
     return { ok: true, status: 200, json: async () => data };
   }));
   await eventually(() => document.querySelector('#ov-scope-select'));
@@ -386,7 +386,7 @@ test('attention focus and pending restarts survive polling, with a stable fallba
   let restartCalls = 0;
   const ctx = context(async (path) => {
     if (path === '/api/apps') appCalls += 1;
-    const data = path === '/api/apps' ? { items: [{ slug: 'a', status: healthy ? 'hibernated' : 'crashed' }] } : path.endsWith('/history') ? { history: {} } : { metrics: {} };
+    const data = path === '/api/apps' ? { items: [{ slug: 'a', deploy_count: 1, status: healthy ? 'hibernated' : 'crashed' }] } : path.endsWith('/history') ? { history: {} } : { metrics: {} };
     return { ok: true, status: 200, json: async () => data };
   });
   ctx.canManageApp = () => true;
@@ -412,7 +412,7 @@ test('attention focus and pending restarts survive polling, with a stable fallba
   document.querySelector('.ov-attn-name').focus();
   healthy = true; restart.resolve();
   await eventually(() => !document.querySelector('.ov-attention'));
-  assert.equal(document.activeElement.id, 'ov-scope-select');
+  assert.equal(document.activeElement.dataset.focusKey, 'overview:status');
 });
 
 test('critical resource verdict leads to pressure alerts before secondary coverage gaps', async () => {
@@ -442,8 +442,8 @@ test('critical resource verdict leads to pressure alerts before secondary covera
   const incident = document.querySelector('.ov-pulse .ov-attention');
   assert.match(incident.textContent, /Weekly reports/);
   const inspect = incident.querySelector('.ov-attn-actions a');
-  assert.equal(inspect.textContent, 'Inspect app');
-  assert.equal(inspect.getAttribute('href'), '/apps/reports');
+  assert.equal(inspect.textContent, 'View logs');
+  assert.equal(inspect.getAttribute('href'), '/apps/reports/logs');
   assert.equal(document.querySelectorAll('.ov-attention').length, 1);
   assert.equal(mixedActions[0].classList.contains('ov-primary-response'), true);
   document.getElementById('ov-pressure-title').scrollIntoView = () => {};
@@ -468,4 +468,96 @@ test('critical total usage and replica pressure each have a correctly ordered ju
   assert.equal(document.activeElement, usage);
   assert.equal(document.querySelector('[data-focus-key="coverage:review"]'), null, 'optional gaps do not become a warning action');
   assert.match(document.querySelector('.ov-coverage').textContent, /All replicas are reporting. Setting app limits is optional/);
+});
+
+
+test('first deployment failures lead to deployments without an invalid restart action', async () => {
+  const ctx = context(async (path) => ({ ok: true, status: 200, json: async () => path === '/api/apps'
+    ? { items: [{ slug: 'first', status: 'stopped', deploy_count: 0, last_deployment_status: 'failed' }] }
+    : path.endsWith('/history') ? { history: {} } : { metrics: {} },
+  }));
+  ctx.canManageApp = () => true;
+  mounted = mountOverview(ctx);
+  await eventually(() => document.querySelector('.ov-attn-actions a'));
+  assert.equal(document.querySelector('.ov-attn-actions a').getAttribute('href'), '/apps/first/deployments');
+  assert.equal(document.querySelector('.ov-attn-actions button'), null);
+});
+
+for (const kind of ['error', 'network-error']) test(`${kind} restart feedback remains visible in its incident row across polling`, async () => {
+  let appCalls = 0;
+  const ctx = context(async (path) => {
+    if (path === '/api/apps') appCalls++;
+    return { ok: true, status: 200, json: async () => path === '/api/apps'
+      ? { items: [{ slug: 'crash', status: 'crashed', deploy_count: 1 }] }
+      : path.endsWith('/history') ? { history: {} } : { metrics: {} } };
+  });
+  ctx.canManageApp = () => true;
+  ctx.restart = async () => ({ kind, message: 'Could not restart this app.' });
+  mounted = mountOverview(ctx);
+  await eventually(() => document.querySelector('.ov-attn-actions button'));
+  document.querySelector('.ov-attn-actions button').click();
+  await eventually(() => document.querySelector('.ov-attn-error'));
+  assert.match(document.querySelector('.ov-attn-error').textContent, /Could not restart/);
+  const before = appCalls; poll();
+  await eventually(() => appCalls > before);
+  assert.match(document.querySelector('.ov-attn-error').textContent, /Could not restart/);
+  assert.equal(document.querySelector('.ov-attn-actions button').disabled, false);
+});
+
+test('malformed app responses retain the last snapshot and expose a retry', async () => {
+  let malformed = false;
+  mounted = mountOverview(context(async (path) => ({ ok: true, status: 200, json: async () => path === '/api/apps'
+    ? malformed ? { message: 'unexpected response' } : { items: [{ slug: 'known', status: 'hibernated' }] }
+    : path.endsWith('/history') ? { history: {} } : { metrics: {} },
+  })));
+  await eventually(() => document.querySelector('.ov-pulse'));
+  malformed = true; poll();
+  await eventually(() => document.querySelector('.ov-refresh-warning'));
+  assert.match(document.querySelector('.ov-pulse').textContent, /Sleeping/);
+  assert.equal(document.querySelector('.ov-firstrun'), null);
+  assert.ok(document.querySelector('[data-focus-key="overview:retry"]'));
+});
+
+
+test('scope choices appear only when they narrow the app set and disappearing choices preserve focus', async () => {
+  let apps = [{ slug: 'a', status: 'hibernated' }, { slug: 'b', status: 'hibernated' }];
+  mounted = mountOverview(context(async (path) => ({ ok: true, status: 200, json: async () => path === '/api/apps'
+    ? { items: apps } : path.endsWith('/history') ? { history: {} } : { metrics: {} },
+  })));
+  await eventually(() => document.querySelector('.ov-pulse'));
+  assert.equal(document.querySelector('#ov-scope-select'), null, 'unmanaged and all apps are identical');
+  apps = apps.map((app) => ({ ...app, managed_by: 'fleet:production' }));
+  poll();
+  await eventually(() => document.querySelector('.ov-fleets'));
+  assert.equal(document.querySelector('#ov-scope-select'), null, 'one fleet covering all apps is also redundant');
+  apps = [apps[0], { ...apps[1], managed_by: null }];
+  poll();
+  await eventually(() => document.querySelector('#ov-scope-select'));
+  const select = document.querySelector('#ov-scope-select');
+  select.focus(); select.value = 'fleet:production';
+  select.dispatchEvent(new window.Event('change'));
+  assert.equal(document.querySelector('.ov-pulse').getAttribute('aria-label'), 'Fleet · production status');
+  apps = apps.map((app) => ({ ...app, managed_by: null }));
+  poll();
+  await eventually(() => !document.querySelector('#ov-scope-select'));
+  assert.equal(document.activeElement.dataset.focusKey, 'overview:status');
+  assert.equal(document.querySelector('.ov-pulse').getAttribute('aria-label'), 'All apps status');
+  assert.match(document.getElementById('overview-live').textContent, /selected fleet is no longer available/);
+});
+
+test('activity names update from the refreshed app snapshot without losing event focus', async () => {
+  let name = 'Sales dashboard';
+  const ctx = context(async (path) => ({ ok: true, status: 200, json: async () => path === '/api/apps'
+    ? { items: [{ slug: 'sales', name, status: 'hibernated' }] }
+    : path === '/api/audit?limit=12' ? { events: [{ id: 1, action: 'restart', resource_type: 'app', resource_id: 'sales', username: 'operator', created_at: '2026-11-03T14:30:00Z' }] }
+      : path.endsWith('/history') ? { history: {} } : { metrics: {} },
+  }));
+  ctx.state.canReadAudit = true;
+  mounted = mountOverview(ctx);
+  await eventually(() => document.querySelector('.ov-activity-target')?.textContent === name);
+  document.querySelector('.ov-activity-target').focus();
+  name = 'Sales dashboard · 東京'; poll();
+  await eventually(() => document.querySelector('.ov-activity-target')?.textContent === name);
+  assert.equal(document.activeElement.textContent, name);
+  assert.match(document.querySelector('.ov-activity-action-link').getAttribute('aria-label'), /Sales dashboard · 東京/);
 });

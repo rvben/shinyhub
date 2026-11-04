@@ -89,23 +89,20 @@ export function renderAppAttention(doc, apps, liveBySlug = new Map()) {
   const items = attentionApps(apps, liveBySlug);
   if (items.length === 0) return null;
 
-  const section = doc.createElement('section');
+  const section = doc.createElement('details');
   section.className = 'app-attention';
   section.setAttribute('aria-labelledby', 'app-attention-heading');
   section.dataset.signature = JSON.stringify(items.map(({ app, attention }) => [
     app.slug, attention.severity, attention.label, attention.detail,
   ]));
 
-  const header = doc.createElement('div');
+  const header = doc.createElement('summary');
   header.className = 'app-attention-header';
+  header.dataset.focusKey = 'attention:summary';
   const heading = doc.createElement('h2');
   heading.id = 'app-attention-heading';
-  heading.textContent = 'Needs attention';
-  const count = doc.createElement('span');
-  count.className = 'app-attention-count';
-  count.textContent = String(items.length);
-  count.setAttribute('aria-label', `${items.length} ${items.length === 1 ? 'app needs' : 'apps need'} attention`);
-  header.append(heading, count);
+  heading.textContent = `${items.length} ${items.length === 1 ? 'app needs' : 'apps need'} attention`;
+  header.append(heading);
 
   const list = doc.createElement('div');
   list.className = 'app-attention-list';

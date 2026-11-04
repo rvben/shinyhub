@@ -1,5 +1,5 @@
 // Sidebar app navigator: groups the visible apps by project and renders a
-// quick-switch list under the primary section nav.
+// quick-switch list nested beneath the Apps destination.
 //
 // Pure + DOM-free-by-default so the grouping and active-state logic are
 // unit-testable; renderSidebarApps takes an explicit document. The status badge
@@ -60,7 +60,7 @@ export function isPrimaryNavActive(hrefPath, currentPath, role) {
     return homeSurfaceForSession(role) === 'overview' ? href === '/' : href === '/apps';
   }
   if (current === '/launchpad') return href === '/apps';
-  if ((current.startsWith('/apps/') || current.startsWith('/projects/')) && href === '/apps') return true;
+  if (current.startsWith('/projects/') && href === '/apps') return true;
   return href === current;
 }
 
@@ -126,18 +126,6 @@ export function renderSidebarApps(container, apps, currentPath, badgeFor, doc) {
     // Leave this secondary navigation region empty instead of repeating it.
     return;
   }
-
-  const heading = d.createElement('p');
-  heading.className = 'sidebar-apps-heading';
-  const headingLabel = d.createElement('span');
-  headingLabel.textContent = 'Apps';
-  const headingCount = d.createElement('span');
-  headingCount.className = 'sidebar-apps-count';
-  headingCount.textContent = String(list.length);
-  headingCount.setAttribute('aria-hidden', 'true');
-  heading.appendChild(headingLabel);
-  heading.appendChild(headingCount);
-  container.appendChild(heading);
 
   const groups = groupAppsByProject(list);
   for (const group of groups) {

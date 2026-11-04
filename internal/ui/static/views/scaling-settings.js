@@ -9,7 +9,7 @@ const fields = {
 
 export function scalingSettingsSnapshot(doc) {
   return Object.fromEntries(Object.entries(fields).map(([key, id]) => {
-    const value = doc.getElementById(id).value;
+    const value = key === 'max_sessions_per_replica' && doc.getElementById('scaling-cap-mode')?.value === 'inherit' ? '0' : doc.getElementById(id).value;
     return [key, key === 'worker_isolation' ? value : Number(value)];
   }));
 }

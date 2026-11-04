@@ -48,6 +48,7 @@ test('click toggles the body and persists the preference', () => {
   d.toggle.click();
   assert.equal(d.body.hidden, true);
   assert.equal(d.toggle.getAttribute('aria-expanded'), 'false');
+  assert.equal(d.root.querySelector('.group-disclosure-count').textContent, '2 apps');
   assert.equal(isGroupCollapsed('sidebar', 'team', storage), true);
   d.toggle.click();
   assert.equal(d.body.hidden, false);

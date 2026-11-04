@@ -1170,10 +1170,23 @@ func (s *Server) handleScheduleRunLogs(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 		safego.Go("run log completion watch", func() { s.cancelWhenRunDone(ctx, cancel, runID) })
 		streamLogFile(w, r.WithContext(ctx), run.LogPath, true)
-		return
+	} else {
+		// Finished run: a one-shot SSE dump of the static log, then close.
+		streamLogFile(w, r, run.LogPath, false)
 	}
-	// Finished run: a one-shot SSE dump of the static log, then close.
-	streamLogFile(w, r, run.LogPath, false)
+	// EventSource treats an ordinary EOF as a dropped connection and retries.
+	// Only a terminal run may finish the viewer; disconnects and follower
+	// failures must retain their normal reconnect behavior. Empty event data
+	// keeps legacy line-oriented CLI readers from printing a synthetic log line.
+	if r.Context().Err() == nil {
+		finished, err := s.store.GetScheduleRun(runID)
+		if err == nil && finished.Status != "running" && finished.Status != "pending" {
+			fmt.Fprint(w, "event: complete\ndata:\n\n")
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+		}
+	}
 }
 
 // terminalRunPollInterval is how often a live run-log stream polls the run's
@@ -1284,6 +1297,16 @@ func (s *Server) handleGrantSharedData(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	release, lockErr := s.acquireAppOperation(app.Slug, false)
+	if lockErr != nil {
+		writeError(w, http.StatusConflict, lockErr.Error())
+		return
+	}
+	defer release()
+	app, ok = s.rereadAuthorizedApp(w, app.Slug, app.ID)
+	if !ok {
+		return
+	}
 	var req struct {
 		SourceSlug string `json:"source_slug"`
 	}
@@ -1315,6 +1338,12 @@ func (s *Server) handleGrantSharedData(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "forbidden")
 		return
 	}
+	releaseRuns, runErr := s.pauseSharedDataRuns(app.ID)
+	if runErr != nil {
+		s.sharedDataRunError(w, runErr)
+		return
+	}
+	defer releaseRuns()
 	if err := s.store.GrantSharedData(app.ID, src.ID); err != nil {
 		switch {
 		case errors.Is(err, db.ErrSelfMount), errors.Is(err, db.ErrSharedDataCycle):
@@ -1334,35 +1363,4 @@ func (s *Server) handleGrantSharedData(w http.ResponseWriter, r *http.Request) {
 		dto.Warning = sharedDataNativeWarning
 	}
 	writeJSON(w, http.StatusCreated, dto)
-}
-
-// DELETE /api/apps/{slug}/shared-data/{source_slug}
-func (s *Server) handleRevokeSharedData(w http.ResponseWriter, r *http.Request) {
-	app, ok := s.requireManageApp(w, r, chi.URLParam(r, "slug"))
-	if !ok {
-		return
-	}
-	sourceSlug := chi.URLParam(r, "source_slug")
-	u := auth.UserFromContext(r.Context())
-	if u == nil || !u.AppInScope(sourceSlug) {
-		writeError(w, http.StatusNotFound, "source app not found")
-		return
-	}
-	src, err := s.store.GetApp(sourceSlug)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "source app not found")
-		return
-	}
-	if err := s.store.RevokeSharedData(app.ID, src.ID); err != nil {
-		if errors.Is(err, db.ErrNotFound) {
-			// The mount does not exist; the outcome (not mounted) is in place.
-			// Return 204 so callers can safely re-run revoke idempotently.
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	s.audit(r, "shared_data_revoke", "app", app.Slug, fmt.Sprintf(`{"source":%q}`, src.Slug))
-	w.WriteHeader(http.StatusNoContent)
 }

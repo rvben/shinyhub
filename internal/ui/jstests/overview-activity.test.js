@@ -102,7 +102,7 @@ test('a lifecycle-only run links to its audit run without offering an empty disc
     }),
   ] });
   assert.equal(node.querySelector('.ov-activity-disclosure'), null);
-  assert.equal(node.querySelector('.ov-activity-action-link').getAttribute('aria-label'), 'Open audit run for Fleet apply');
+  assert.equal(node.querySelector('.ov-activity-action-link').getAttribute('aria-label'), 'Open audit run for Fleet apply fleet');
   assert.equal(node.querySelector('.ov-activity-target--static .ov-activity-link-icon'), null);
 });
 
@@ -196,7 +196,7 @@ test('activity renderer names the region and provides real audit and app links',
   assert.equal(node.querySelector('.ov-activity-audit').getAttribute('href'), '/audit-log');
   const actionLink = node.querySelector('.ov-activity-action-link');
   assert.equal(actionLink.getAttribute('href'), '/audit-log?event=1');
-  assert.equal(actionLink.getAttribute('aria-label'), 'Open audit event for Restarted');
+  assert.equal(actionLink.getAttribute('aria-label'), 'Open audit event for Restarted observability');
   const targetLink = node.querySelector('.ov-activity-target');
   assert.equal(targetLink.getAttribute('href'), '/apps/observability/overview');
   assert.equal(targetLink.getAttribute('aria-label'), 'Open Overview for the observability app');
@@ -397,4 +397,56 @@ test('the dot between activity metadata fields is hidden from assistive tech', (
         `${label}: a separator is exposed to assistive tech`);
     }
   }
+});
+
+
+test('activity uses visible app names for standalone and grouped events without changing destinations', () => {
+  const node = renderActivityBrief({ state: 'ready', events: [
+    event(4, 'restart', 'sales', '2026-11-03T14:30:00Z'),
+    event(3, 'restart', 'forecast', '2026-11-03T14:29:00Z'),
+    event(2, 'deploy', 'sales', '2026-11-03T14:28:00Z', { run_id: 'rollout' }),
+    event(1, 'fleet_apply_started', 'production', '2026-11-03T14:27:00Z', { run_id: 'rollout', resource_type: 'fleet' }),
+  ] }, null, { availableApps: [
+    { slug: 'sales', name: 'Sales dashboard' },
+    { slug: 'forecast', name: 'Regional forecast · 東京' },
+  ] });
+  const actions = [...node.querySelectorAll('.ov-activity-action-link')];
+  assert.equal(actions[0].getAttribute('aria-label'), 'Open audit event for Restarted Sales dashboard');
+  assert.equal(actions[1].getAttribute('aria-label'), 'Open audit event for Restarted Regional forecast · 東京');
+  const target = node.querySelector('.ov-activity-target');
+  assert.equal(target.textContent, 'Sales dashboard');
+  assert.equal(target.getAttribute('href'), '/apps/sales/overview');
+  assert.equal(target.getAttribute('aria-label'), 'Open Overview for the Sales dashboard app');
+  const child = node.querySelector('.ov-activity-child');
+  assert.equal(child.querySelector('.ov-activity-target').textContent, 'Sales dashboard');
+  assert.equal(child.querySelector('.ov-activity-target').getAttribute('href'), '/apps/sales/deployments');
+  assert.match(child.querySelector('.ov-activity-action-link').getAttribute('aria-label'), /Deployed Sales dashboard/);
+});
+
+test('deleted or unavailable activity targets retain recorded identifiers and safe navigation', () => {
+  const events = [
+    event(3, 'delete_app', 'reused', '2026-11-03T14:30:00Z'),
+    event(2, 'restart', 'missing', '2026-11-03T14:29:00Z'),
+    event(1, 'restart', 'unnamed', '2026-11-03T14:28:00Z'),
+  ];
+  const node = renderActivityBrief({ state: 'ready', events }, null, { availableApps: [
+    { slug: 'reused', name: 'Replacement app' }, { slug: 'unnamed', name: '  ' },
+  ] });
+  const targets = [...node.querySelectorAll('.ov-activity-target')];
+  assert.deepEqual(targets.map((target) => target.textContent), ['reused', 'missing', 'unnamed']);
+  assert.equal(targets[0].tagName, 'SPAN');
+  assert.equal(targets[1].tagName, 'SPAN');
+  assert.equal(targets[2].getAttribute('href'), '/apps/unnamed/overview');
+});
+
+test('login entries name the actor once while retaining a different initiating actor', () => {
+  const node = renderActivityBrief({ state: 'ready', events: [
+    event(2, 'login', 'operator', '2026-11-03T14:30:00Z', { resource_type: 'user', username: 'operator' }),
+    event(1, 'update_user', 'viewer', '2026-11-03T14:29:00Z', { resource_type: 'user', username: 'administrator' }),
+  ] });
+  const rows = [...node.querySelectorAll('.ov-activity-item')];
+  assert.equal(rows[0].querySelector('.ov-activity-target').textContent, 'operator');
+  assert.equal(rows[0].querySelector('.ov-activity-actor'), null);
+  assert.equal(rows[0].querySelector('.ov-activity-meta').textContent, 'User');
+  assert.equal(rows[1].querySelector('.ov-activity-actor').textContent, 'administrator');
 });

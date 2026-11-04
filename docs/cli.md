@@ -337,3 +337,20 @@ not require a bump. Removing a required field or changing its JSON type does:
 increment `protocol.CurrentVersion`, add the new fixture, and keep the previous
 fixture as the historical contract. CI fails if the implementation and the
 declared fixture diverge.
+
+
+## Remove shared data safely
+
+Unmounting stops the app's existing processes before removing access to the
+source files. A running app requires explicit restart consent:
+
+```bash
+shinyhub share rm forecast warehouse --restart
+```
+
+Active sessions disconnect. Stopped and hibernated apps stay dormant. Finish or
+cancel active scheduled jobs before adding or removing shared mounts. If a
+worker cannot confirm shutdown, the mount remains configured and the command
+returns an error. If removal succeeds but restart fails, the command reports
+both outcomes and leaves the app stopped; start it after resolving the error.
+The source app's files are preserved.

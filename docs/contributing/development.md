@@ -63,6 +63,58 @@ second sign-in. Set `SHINYHUB_E2E_BROWSER` to a Chrome or Chromium executable
 when auto-detection cannot find one. Set `E2E_KEEP=1` to retain logs and
 screenshots.
 
+## Run product acceptance
+
+```bash
+make test-acceptance
+```
+
+This builds the current server and starts a disposable loopback hub with its own
+database, random credentials, storage, and Python Shiny app. It requires Go,
+Node 20+, uv, and an installed Python 3.14 interpreter. The Make target installs
+the repository's locked browser dependencies and Chromium. To select a different
+installed Python, set `PYTHON_VERSION`; the suite does not download interpreters.
+
+With dependencies already installed, `npm run test:acceptance` runs the same
+suite. `npm run test:acceptance -- --api-only` runs the backend portion only.
+`SHINYHUB_E2E_BINARY` can select an already-built binary; no flag or environment
+variable can redirect the suite to an existing hub or database.
+
+The suite exercises deployment and invalid-upload recovery, settings, data and
+shared mounts, successful and failed scheduled jobs, token revocation,
+announcement replay/conflicts, membership and role restrictions, and audit
+history, followed by rollback, stop/restart, and deletion of a deployed app.
+Browser journeys cover sign-in, a real reactive app session, settings
+save/discard/navigation confirmation, new-app deployment, token management,
+profile changes, announcement conflict recovery, and copying audit deep links.
+Logs, traces, and resource history must contain live app activity; the disposable
+tracing collector listens only on loopback.
+All dashboard/app pages and a schedule detail are checked in both themes at
+390, 1113, and 1440px. Additional checks straddle the overview's layout
+breakpoint, so an empty grid column fails even without horizontal overflow.
+Phone checks also open the new-app, token, and profile dialogs and the
+announcement editor, and exercise navigation and permission redirects.
+Browser axe checks cover WCAG A/AA rules on desktop/light and phone/dark; these
+checks complement manual accessibility review, rather than certify compliance.
+
+Results, server logs, and masked screenshots go under the ignored
+`loadtest/results/acceptance-*/` directory. Failure exits nonzero. The suite
+stops its server and removes its temporary database, credentials, and app data,
+including when an assertion fails. CI runs it in the `test-acceptance` job and
+retains diagnostics for seven days. No remote worker, Docker daemon, existing
+account, or deployed service is required; live remote-worker behavior remains
+covered by `make test-remote-e2e`.
+
+Extend `scripts/acceptance/api.mjs` for public API journeys and
+`scripts/acceptance/browser.mjs` for user actions or dashboard routes. Verify
+persisted results through the API and observable browser output; do not seed the
+database directly or replace API responses. Keep screenshot diagnostics masked
+and credentials out of reports. Use explicit readiness conditions rather than
+fixed sleeps. The small test hub uses a 0.1-core update reserve and retries only
+explicit transient CPU-capacity refusals up to four attempts with a 30-second
+retry window; other deployment failures fail immediately. Capacity policy itself
+has a dedicated lifecycle gate.
+
 ## Run the real-cluster Fargate smoke test
 
 Changes to the Fargate runtime or external log handoff should also compile and,

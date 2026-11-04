@@ -40,17 +40,17 @@ test('per_session + missing memory omits the RAM clause', () => {
   );
 });
 
-test('grouped mode shows workers x clients = sessions', () => {
+test('grouped mode shows workers x clients = browser clients', () => {
   assert.equal(
     workerCapacityLine('grouped', 8, 20, 0),
-    'Up to 20 workers x 8 clients = 160 sessions',
+    'Up to 20 workers x 8 clients = 160 browser clients',
   );
 });
 
-test('grouped mode: session total is workers * groupedSize', () => {
+test('grouped mode: browser client total is workers * groupedSize', () => {
   assert.equal(
     workerCapacityLine('grouped', 4, 10, 512),
-    'Up to 10 workers x 4 clients = 40 sessions',
+    'Up to 10 workers x 4 clients = 40 browser clients',
   );
 });
 

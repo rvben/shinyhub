@@ -1069,6 +1069,8 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/api/apps/{slug}/icon", s.handleGetAppIcon)
 		r.With(rateLimitByUser(s.dataLimiter)).Put("/api/apps/{slug}/icon", s.handleSetAppIcon)
 		r.Delete("/api/apps/{slug}/icon", s.handleClearAppIcon)
+		r.Get("/api/apps/{slug}/icon/state", s.handleGetAppIconState)
+		r.With(rateLimitByUser(s.dataLimiter)).Put("/api/apps/{slug}/icon/state", s.handlePutAppIconState)
 
 		r.Get("/api/apps/{slug}/schedules", s.handleListSchedules)
 		r.Post("/api/apps/{slug}/schedules", s.handleCreateSchedule)
@@ -1103,6 +1105,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Delete("/api/user-invitations/{id}", s.handleRevokeUserInvitation)
 		r.With(rateLimitByUser(s.userLimiter)).Post("/api/user-invitations/{id}/replace", s.handleReplaceUserInvitation)
 		r.Get("/api/users", s.handleListUsers)                                        // admin: list all users
+		r.Get("/api/users/{id}/automatic-role", s.handleAutomaticUserRole)            // admin: preview group/default role
 		r.With(rateLimitByUser(s.userLimiter)).Post("/api/users", s.handleCreateUser) // admin: create user
 		r.Get("/api/users/{username}", s.handleGetUser)                               // any auth: lookup by username
 		r.Patch("/api/users/{id}", s.handlePatchUser)                                 // admin: update role

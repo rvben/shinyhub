@@ -94,7 +94,8 @@ export function applyLoginProviders(doc, providers) {
   return v;
 }
 
-// groupAccessWarningText flags Group access rules that can never take effect.
+// Group grants can be prepared ahead of sign-in setup. Explain prerequisites
+// without claiming that the browser knows whether a proxy supplies group names.
 // user_groups is populated only by an OIDC login's group claims or a
 // forward-auth proxy's trusted group header (see ReconcileUserFromGroups in
 // internal/db/reconcile.go) - a GitHub or Google login carries no group
@@ -104,6 +105,8 @@ export function applyLoginProviders(doc, providers) {
 // wording below names that possibility rather than claiming no provider can
 // ever supply groups.
 export function groupAccessWarningText(providers) {
+  if (providers == null) return 'Group sign-in could not be checked. Ask an administrator to verify it before relying on group grants.';
   if (providerVisibility(providers).oidc) return '';
-  return 'No OIDC provider is configured. Group access rules take effect only for OIDC sign-ins or a forward-auth proxy that supplies a group header, so unless one of those is set up, the rules below will not grant anyone access.';
+  if (providerVisibility(providers).forwardAuth) return 'Your sign-in proxy must supply group names for these grants to take effect. See group sign-in help below.';
+  return 'Groups can be added now. Ask an administrator to connect group sign-in; see setup below.';
 }

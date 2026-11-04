@@ -124,6 +124,6 @@ test('renderTokenList shows expiry and last-use, marking expired rows', () => {
   );
   const row = container.querySelector('[data-token-row]');
   assert.ok(row.classList.contains('token-expired'), 'expired row carries a marker class');
-  assert.match(row.textContent, /expired/, 'expiry label rendered');
-  assert.match(row.textContent, /last used 2d ago/, 'last-use label rendered');
+  assert.equal(row.querySelector('.token-expires').textContent, 'Expired', 'expiry status rendered');
+  assert.equal(row.querySelector('.token-last-used').textContent, '2d ago', 'last-use time uses its column label');
 });

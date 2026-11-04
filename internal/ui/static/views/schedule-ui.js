@@ -39,11 +39,11 @@ export function dstAdvisoryMarkup(schedule) {
 // whether a running app has consumed data the job may have written.
 export function scheduleState(schedule) {
   if (schedule?.retired) return { key: 'retired', label: 'Retired', tone: 'quiet', attention: false };
+  if (schedule?.refreshing || schedule?.active_run_id != null) {
+    return { key: 'running', label: 'Running', tone: 'active', attention: false };
+  }
   if (!schedule || schedule.enabled === false) {
     return { key: 'paused', label: 'Paused', tone: 'quiet', attention: false };
-  }
-  if (schedule.refreshing || schedule.active_run_id != null) {
-    return { key: 'running', label: 'Running', tone: 'active', attention: false };
   }
   if (schedule.freshness_error) {
     return { key: 'unknown', label: 'Unknown', tone: 'warning', attention: true };
@@ -76,11 +76,39 @@ export function runTriggerLabel(trigger) {
   switch (trigger) {
     case 'manual': return 'Manual';
     case 'register': return 'On registration';
+    case 'deploy': return 'Deployment';
     case 'missed': return 'Missed run';
     case 'schedule':
     case 'cron': return 'Scheduled';
     default: return 'Unknown';
   }
+}
+
+// Describe only simple patterns whose meaning is unambiguous. The server
+// remains responsible for cron validation, next-fire calculation and DST.
+export function scheduleTimingLabel(expr) {
+  if (typeof expr !== 'string') return '';
+  const fields = expr.trim().split(/\s+/);
+  if (fields.length !== 5) return expr;
+  const [minute, hour, day, month, weekday] = fields;
+  if (day !== '*' || month !== '*') return expr;
+  if (hour === '*' && weekday === '*') {
+    if (minute === '*') return 'Every minute';
+    const interval = /^\*\/(\d{1,2})$/.exec(minute);
+    if (interval && Number(interval[1]) >= 1 && Number(interval[1]) <= 59 && 60 % Number(interval[1]) === 0) {
+      const count = Number(interval[1]);
+      return count === 1 ? 'Every minute' : `Every ${count} minutes`;
+    }
+    return expr;
+  }
+  if (!/^\d{1,2}$/.test(minute) || !/^\d{1,2}$/.test(hour) || Number(minute) > 59 || Number(hour) > 23) return expr;
+  const time = `${hour.padStart(2, '0')}:${minute.padStart(2, '0')}`;
+  if (weekday === '*') return `Daily at ${time}`;
+  if (/^[0-6]$/.test(weekday)) {
+    const name = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][Number(weekday)];
+    return `Every ${name} at ${time}`;
+  }
+  return expr;
 }
 
 export function deployTriggerLabel(trigger) {
@@ -304,23 +332,46 @@ export function scheduleSummary(schedules) {
   let attention = 0;
   let compatible = 0;
   let activating = 0;
+  let activeCount = 0;
   let nextFire = null;
 
   for (const schedule of rows) {
     const state = scheduleState(schedule);
     const activation = activationState(schedule);
     const compatibility = producerCompatibilityState(schedule);
-    if (schedule.enabled !== false) enabled += 1;
+    if (!schedule.retired && schedule.enabled !== false) enabled += 1;
     if (state.key === 'running') running += 1;
     if (activation.active) activating += 1;
+    if (state.key === 'running' || activation.active) activeCount += 1;
     if (compatibility.key === 'ready') compatible += 1;
     if (state.attention || activation.attention || compatibility.attention) attention += 1;
-    if (schedule.enabled !== false && schedule.next_fire) {
+    if (!schedule.retired && schedule.enabled !== false && schedule.next_fire) {
       const value = new Date(schedule.next_fire);
       if (!Number.isNaN(value.getTime()) && (nextFire === null || value < nextFire)) nextFire = value;
     }
   }
-  return { total: rows.length, enabled, running, activating, compatible, attention, nextFire };
+  return { total: rows.length, enabled, running, activating, activeCount, compatible, attention, nextFire };
+}
+
+// Each surface or history loader owns its own gate. Superseding a request or
+// leaving the surface aborts pending work; identity checks also cover responses
+// from callers that cannot stop an already completed fetch or JSON read.
+export function createScheduleRequestGate() {
+  let current = null;
+  return {
+    begin() {
+      current?.abort();
+      current = new AbortController();
+      return current;
+    },
+    isCurrent(controller) {
+      return current === controller && !controller.signal.aborted;
+    },
+    invalidate() {
+      current?.abort();
+      current = null;
+    },
+  };
 }
 
 export function runDurationSeconds(run) {

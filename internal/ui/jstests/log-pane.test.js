@@ -12,6 +12,7 @@ class FakeEventSource {
     this.onopen = null;
     this.onmessage = null;
     this.onerror = null;
+    this.listeners = new Map();
     FakeEventSource.instances.push(this);
   }
   emit(data) {
@@ -26,6 +27,9 @@ class FakeEventSource {
   close() {
     this.closed = true;
   }
+  addEventListener(type, callback) { this.listeners.set(type, callback); }
+  removeEventListener(type, callback) { if (this.listeners.get(type) === callback) this.listeners.delete(type); }
+  complete() { this.listeners.get('complete')?.({data:''}); }
 }
 FakeEventSource.instances = [];
 
@@ -167,4 +171,23 @@ test('close is a no-op when nothing is open', () => {
   pane.close();
   assert.equal(doc.getElementById('log-pane').hidden, true);
   assert.equal(traps.length, 0);
+});
+
+test('a completed run retains its output and closes the stream without reconnecting', () => {
+  const {doc,pane}=setup();pane.open({titleText:'Run #1 logs',url:'/run/1/logs'});
+  const stream=FakeEventSource.instances[0];stream.emit('Final output');stream.complete();
+  assert.equal(stream.closed,true);
+  assert.equal(stream.listeners.size,0);
+  assert.equal(doc.getElementById('log-pane-body').textContent,'Final output\n');
+  assert.match(doc.getElementById('log-pane-status').textContent,/Run finished/);
+  stream.error();assert.doesNotMatch(doc.getElementById('log-pane-status').textContent,/reconnecting/);
+  assert.equal(pane.isOpen(),true,'completion keeps retained output available to read');
+});
+
+test('an empty completed run is explicit and a stale completion cannot stop a newer stream', () => {
+  const {doc,pane}=setup();pane.open({url:'/run/1/logs'});
+  const old=FakeEventSource.instances[0],oldComplete=old.listeners.get('complete');
+  pane.open({url:'/run/2/logs'});const current=FakeEventSource.instances[1];oldComplete();
+  assert.equal(current.closed,false);
+  current.complete();assert.match(doc.getElementById('log-pane-status').textContent,/no log output/);
 });

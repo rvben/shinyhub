@@ -3888,6 +3888,57 @@ func (s *Store) SetAppIcon(slug, mime string, data []byte) error {
 	return nil
 }
 
+// AppIconState includes a retained image even when an emoji is displayed ahead
+// of it. Read and restore the three fields together so Undo cannot discard it.
+type AppIconState struct {
+	AppID int64
+	Mime  string
+	Data  []byte
+	Emoji string
+}
+
+var ErrAppIconConflict = errors.New("app icon changed; reload before changing it")
+
+func (s *Store) GetAppIconState(slug string) (*AppIconState, error) {
+	var state AppIconState
+	err := s.db.QueryRow(`SELECT id, COALESCE(icon_mime, ''), icon_data, COALESCE(icon_emoji, '') FROM apps WHERE slug = ?`, slug).
+		Scan(&state.AppID, &state.Mime, &state.Data, &state.Emoji)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get app icon state: %w", err)
+	}
+	return &state, nil
+}
+
+// CompareAndSwapAppIconState protects against changes after the caller's read,
+// including a deleted and recreated slug. A single conditional UPDATE restores
+// an image and emoji atomically; the ordinary setters intentionally clear one.
+func (s *Store) CompareAndSwapAppIconState(slug string, expected, desired AppIconState) error {
+	if expected.AppID <= 0 || desired.AppID != expected.AppID {
+		return ErrAppIconConflict
+	}
+	previousData := expected.Data
+	if previousData == nil {
+		previousData = []byte{}
+	}
+	result, err := s.db.Exec(`UPDATE apps SET icon_mime = ?, icon_data = ?, icon_emoji = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE slug = ? AND id = ? AND COALESCE(icon_mime, '') = ? AND COALESCE(icon_emoji, '') = ? AND COALESCE(icon_data, ?) = ?`,
+		desired.Mime, desired.Data, desired.Emoji, slug, expected.AppID, expected.Mime, expected.Emoji, []byte{}, previousData)
+	if err != nil {
+		return fmt.Errorf("compare and swap app icon state: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("compare and swap app icon state rows: %w", err)
+	}
+	if n == 0 {
+		return ErrAppIconConflict
+	}
+	return nil
+}
+
 // ClearAppIcon removes the app's icon in every form (image and emoji),
 // reverting the UI to the monogram, and bumps updated_at. Returns ErrNotFound
 // if no app has the slug. Clearing an already-iconless app is a no-op success.
@@ -4425,6 +4476,7 @@ type AuditEventFilter struct {
 	Action  string
 	EventID int64
 	RunID   string
+	Search  string
 	// Since and Until bound created_at, both inclusive, in UTC. A zero value
 	// means that end is unbounded, so the two are independent: an operator can
 	// ask for everything after an incident without also naming an end.
@@ -4446,6 +4498,13 @@ func (s *Store) auditEventWhere(filter AuditEventFilter) (string, []any) {
 	if filter.RunID != "" {
 		clauses = append(clauses, "ae.run_id = ?")
 		args = append(args, filter.RunID)
+	}
+	if filter.Search != "" {
+		// Treat wildcard characters literally; search spans the complete result
+		// set, including actors and credentials, rather than the loaded page.
+		needle := "%" + strings.NewReplacer("!", "!!", "%", "!%", "_", "!_").Replace(strings.ToLower(filter.Search)) + "%"
+		clauses = append(clauses, `(LOWER(ae.resource_id) LIKE ? ESCAPE '!' OR LOWER(ae.resource_type) LIKE ? ESCAPE '!' OR LOWER(ae.action) LIKE ? ESCAPE '!' OR LOWER(REPLACE(REPLACE(ae.action, '_', ' '), '.', ' ')) LIKE ? ESCAPE '!' OR LOWER(ae.credential_name) LIKE ? ESCAPE '!' OR EXISTS (SELECT 1 FROM users actor WHERE actor.id = ae.user_id AND LOWER(actor.username) LIKE ? ESCAPE '!'))`)
+		args = append(args, needle, needle, needle, needle, needle, needle)
 	}
 	if !filter.Since.IsZero() {
 		clauses = append(clauses, "ae.created_at >= ?")

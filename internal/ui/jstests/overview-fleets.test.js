@@ -1,6 +1,7 @@
 import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
+import { installPopoverStub } from './popover-stub.js';
 import { buildOverviewWorkspace } from '../static/views/overview-model.js';
 import { mountOverview, renderResourcePressure } from '../static/views/overview.js';
 
@@ -27,6 +28,7 @@ afterEach(() => {
 });
 function setup() {
   dom = new JSDOM('<!doctype html><body><main id="overview-view"><div id="overview-body"></div></main></body>', { url: 'http://localhost/', pretendToBeVisual: true });
+  installPopoverStub(dom.window);
   globalThis.document = dom.window.document;
   globalThis.window = dom.window;
   globalThis.location = dom.window.location;

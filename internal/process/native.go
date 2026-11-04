@@ -57,36 +57,129 @@ func cacheEnv(dir string, maxMB int) []string {
 	}
 }
 
-// applySharedMounts symlinks each shared mount under p.Dir/data/shared/<slug>.
-// Idempotent: existing correct symlinks are left alone; wrong ones return an
-// error so we never silently corrupt a bundle. RO is a convention for native
-// (the OS does not enforce it on a symlinked dir); enforced for Docker.
-func applySharedMounts(p StartParams) error {
-	if len(p.SharedMounts) == 0 {
+// sharedMountBase refuses a symlink at the platform-owned shared directory.
+// The parent data directory may itself be the intentional persistent-data link.
+func sharedMountBase(dataDir string, create bool) (string, bool, error) {
+	base := filepath.Join(dataDir, "shared")
+	if create {
+		if err := os.MkdirAll(base, 0o750); err != nil {
+			return "", false, fmt.Errorf("mkdir data/shared: %w", err)
+		}
+	}
+	info, err := os.Lstat(base)
+	if os.IsNotExist(err) {
+		return base, false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("inspect data/shared: %w", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "", false, errors.New("data/shared must be a directory, not a symlink")
+	}
+	return base, true, nil
+}
+
+func validSharedSource(slug string) bool {
+	return slug != "" && slug != "." && slug != ".." && !strings.ContainsAny(slug, `/\`)
+}
+
+// RemoveSharedMountLink removes only the platform's mount symlink, never a
+// source directory or a real file/directory at the target (Docker uses empty
+// target directories). Call after every old consumer has been confirmed dead.
+func RemoveSharedMountLink(dataDir, sourceSlug string) error {
+	if !validSharedSource(sourceSlug) {
+		return errors.New("invalid shared source slug")
+	}
+	base, exists, err := sharedMountBase(dataDir, false)
+	if err != nil || !exists {
+		return err
+	}
+	link := filepath.Join(base, sourceSlug)
+	info, err := os.Lstat(link)
+	if os.IsNotExist(err) {
 		return nil
 	}
-	base := filepath.Join(p.Dir, "data", "shared")
-	if err := os.MkdirAll(base, 0o750); err != nil {
-		return fmt.Errorf("mkdir data/shared: %w", err)
+	if err != nil {
+		return err
 	}
-	for _, m := range p.SharedMounts {
-		if err := os.MkdirAll(m.HostPath, 0o750); err != nil {
-			return fmt.Errorf("mkdir source data %s: %w", m.HostPath, err)
+	if info.Mode()&os.ModeSymlink == 0 {
+		return nil
+	}
+	if err := os.Remove(link); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove shared mount %s: %w", sourceSlug, err)
+	}
+	return nil
+}
+
+// applySharedMounts reconciles the complete desired set, including an empty
+// set. This also cleans old worker-local links on the next cold start. Native
+// read-only remains a convention; Docker enforces it with read-only binds.
+func applySharedMounts(p StartParams) error {
+	dataDir := p.AppDataPath
+	if dataDir == "" {
+		dataDir = filepath.Join(p.Dir, "data")
+	}
+	// Jobs call Runtime.RunOnce directly rather than Manager.Start, so they
+	// also need the same persistent data link as interactive consumers.
+	if p.AppDataPath != "" && p.Dir != "" {
+		if err := os.MkdirAll(dataDir, 0o750); err != nil {
+			return err
 		}
-		link := filepath.Join(base, m.SourceSlug)
+		link := filepath.Join(p.Dir, "data")
+		if err := os.Symlink(dataDir, link); err != nil {
+			if !errors.Is(err, os.ErrExist) {
+				return fmt.Errorf("link persistent data: %w", err)
+			}
+			if target, readErr := os.Readlink(link); readErr != nil || target != dataDir {
+				return errors.New("bundle data entry is not the expected persistent data symlink")
+			}
+		}
+	}
+	desired := make(map[string]bool, len(p.SharedMounts))
+	for _, mount := range p.SharedMounts {
+		if !validSharedSource(mount.SourceSlug) || mount.HostPath == "" {
+			return errors.New("invalid shared mount")
+		}
+		desired[mount.SourceSlug] = true
+	}
+	base, exists, err := sharedMountBase(dataDir, len(desired) > 0)
+	if err != nil || !exists {
+		return err
+	}
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return fmt.Errorf("read data/shared: %w", err)
+	}
+	for _, entry := range entries {
+		if !desired[entry.Name()] && entry.Type()&os.ModeSymlink != 0 {
+			if err := RemoveSharedMountLink(dataDir, entry.Name()); err != nil {
+				return err
+			}
+		}
+	}
+	for _, mount := range p.SharedMounts {
+		if err := os.MkdirAll(mount.HostPath, 0o750); err != nil {
+			return fmt.Errorf("mkdir source data %s: %w", mount.HostPath, err)
+		}
+		link := filepath.Join(base, mount.SourceSlug)
 		switch info, err := os.Lstat(link); {
 		case err == nil:
 			if info.Mode()&os.ModeSymlink != 0 {
-				if existing, _ := os.Readlink(link); existing == m.HostPath {
+				if existing, err := os.Readlink(link); err == nil && existing == mount.HostPath {
 					continue
 				}
 			}
-			return fmt.Errorf("data/shared/%s exists and is not a matching symlink (%s)", m.SourceSlug, info.Mode())
+			return fmt.Errorf("data/shared/%s exists and is not a matching symlink (%s)", mount.SourceSlug, info.Mode())
 		case !os.IsNotExist(err):
 			return fmt.Errorf("lstat %s: %w", link, err)
 		}
-		if err := os.Symlink(m.HostPath, link); err != nil {
+		if err := os.Symlink(mount.HostPath, link); err != nil && !errors.Is(err, os.ErrExist) {
 			return fmt.Errorf("symlink %s: %w", link, err)
+		} else if errors.Is(err, os.ErrExist) {
+			// Concurrent replicas may have installed the same link.
+			if target, readErr := os.Readlink(link); readErr != nil || target != mount.HostPath {
+				return fmt.Errorf("shared mount %s changed during startup", mount.SourceSlug)
+			}
 		}
 	}
 	return nil

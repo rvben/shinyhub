@@ -12,6 +12,12 @@ import (
 // unknown tabs as Overview.
 var appDetailPath = regexp.MustCompile(`^/apps/` + slugpkg.Pattern + `(/[a-z-]+)?/?$`)
 
+// Settings pages and schedule details are client routes too. Keep their shell
+// fallback explicit so direct links and reloads work without admitting arbitrary
+// deeper paths. Unknown setting sections are normalized by the client router.
+var appSettingsPath = regexp.MustCompile(`^/apps/` + slugpkg.Pattern + `/settings/[a-z-]+/?$`)
+var appSchedulePath = regexp.MustCompile(`^/apps/` + slugpkg.Pattern + `/schedules/[1-9][0-9]*/?$`)
+
 // projectDetailPath serves the client-rendered project overview on direct
 // loads and refreshes. Project slugs use the same canonical slug grammar as
 // apps, so malformed paths still receive a real 404 from the server.
@@ -20,7 +26,7 @@ var projectDetailPath = regexp.MustCompile(`^/projects/` + slugpkg.Pattern + `/?
 // UIPathPatterns exposes the dynamic route contract to the demo edge manifest.
 // The expressions use syntax shared by Go and JavaScript regular expressions.
 func UIPathPatterns() []string {
-	return []string{appDetailPath.String(), projectDetailPath.String()}
+	return []string{appDetailPath.String(), appSettingsPath.String(), appSchedulePath.String(), projectDetailPath.String()}
 }
 
 // ExactUIRoutes is the single source of truth for the client-side SPA routes
@@ -42,5 +48,5 @@ func IsUIPath(path string) bool {
 			return true
 		}
 	}
-	return appDetailPath.MatchString(path) || projectDetailPath.MatchString(path)
+	return appDetailPath.MatchString(path) || appSettingsPath.MatchString(path) || appSchedulePath.MatchString(path) || projectDetailPath.MatchString(path)
 }

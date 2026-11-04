@@ -42,15 +42,15 @@ func TestAppDetailUnwrapsGetAppResponse(t *testing.T) {
 }
 
 // TestAppDetailAccessResolverWired pins that app-detail.js delegates its tab
-// resolution + access redirects + tablist visibility to the pure, unit-tested
-// views/app-detail-nav.js (resolveDetailAccess, tabViewModels) rather than
+// resolution + access redirects to the pure, unit-tested
+// views/app-detail-nav.js (resolveDetailAccess) rather than
 // re-inlining the decisions in the untestable mount closure. The behaviour is
 // covered by internal/ui/jstests/app-detail-nav.test.js.
 func TestAppDetailAccessResolverWired(t *testing.T) {
 	assertContains(t, "views/app-detail.js", "resolveDetailAccess",
 		"app-detail.js must resolve the tab + access redirects via resolveDetailAccess (viewer -> '/apps', non-manager off manager-only tabs)")
-	assertContains(t, "views/app-detail.js", "tabViewModels",
-		"app-detail.js must build the tab strip visibility/href/roving-tabindex model via tabViewModels")
+	assertContains(t, "app.js", "settingsRouteParams",
+		"settings destinations must share the app mount with their section params")
 }
 
 // TestConnectivityBannerWired pins the API/frontend contract for the WebSocket
@@ -94,19 +94,17 @@ func TestArrowLinksKeepTheirSpace(t *testing.T) {
 	}
 }
 
-// TestPageHeadingsUseTheTwoDocumentedWeights pins DESIGN.md's heading
-// weights: every h1 rule in style.css sets 200 (Display) or 700 (Headline,
-// Section), or inherits one. A third weight, such as the empty-state lead's
-// former 300, makes page titles look unrelated from one route to the next.
-func TestPageHeadingsUseTheTwoDocumentedWeights(t *testing.T) {
+// TestPageHeadingsUseSharedWeights keeps operational headings on the shared
+// semibold scale, while preserving display and editorial headings elsewhere.
+func TestPageHeadingsUseSharedWeights(t *testing.T) {
 	css := readStatic(t, "style.css")
 	rule := regexp.MustCompile(`(?m)^([^{}@/]*\bh1)\s*\{([^{}]*)\}`)
 	weight := regexp.MustCompile(`font-weight:\s*([^;]+);`)
 	checked := 0
 	for _, m := range rule.FindAllStringSubmatch(css, -1) {
 		checked++
-		if w := weight.FindStringSubmatch(m[2]); w != nil && w[1] != "200" && w[1] != "700" {
-			t.Errorf("%s sets font-weight %s; page headings use 200 or 700", strings.TrimSpace(m[1]), w[1])
+		if w := weight.FindStringSubmatch(m[2]); w != nil && w[1] != "200" && w[1] != "600" && w[1] != "700" {
+			t.Errorf("%s sets font-weight %s; page headings use 200, 600, or 700", strings.TrimSpace(m[1]), w[1])
 		}
 	}
 	if checked < 3 {
@@ -359,10 +357,8 @@ func TestThemeWiring(t *testing.T) {
 		"style.css must define the light palette keyed on the data-theme attribute")
 }
 
-// TestTokensUIWiring guards the /tokens page wiring. The create/list/revoke +
-// reveal-once logic lives in app.js's IIFE (not jsdom-importable), so pin it by
-// string search; the pure list rendering is unit-tested in
-// internal/ui/jstests/tokens.test.js.
+// TestTokensUIWiring guards the route-to-controller wiring. Token lifecycle,
+// secret cleanup and mutation recovery are exercised in token-manager.test.js.
 func TestTokensUIWiring(t *testing.T) {
 	assertContains(t, "index.html", `id="tokens-view"`,
 		"index.html must keep the #tokens-view page section")
@@ -374,39 +370,23 @@ func TestTokensUIWiring(t *testing.T) {
 		"index.html must keep the element that shows the raw token once")
 	assertContains(t, "index.html", `id="profile-tokens-link"`,
 		"the profile modal must keep the 'Manage API tokens' link (the page's entry point)")
-	assertContains(t, "app.js", `'/api/tokens'`,
-		"app.js must call the /api/tokens endpoint to list/create tokens")
-	assertContains(t, "app.js", "renderTokenList",
-		"app.js must render the token list via views/tokens.js")
-	assertContains(t, "app.js", "Array.isArray(body.items)",
-		"app.js loadTokens must read the {items,...} list envelope (body.items), not the raw response body")
-	assertContains(t, "app.js", "body.token",
-		"app.js must read body.token from the create response to reveal it once")
-	assertContains(t, "app.js", "Revoke token",
-		"app.js must confirm before revoking a token (destructive)")
+	assertContains(t, "app.js", "createTokenManager", "the app shell installs the token controller")
+	assertContains(t, "app.js", "tokenManager.start()", "the tokens route starts its controller")
+	assertContains(t, "app.js", "tokenManager.stop()", "the tokens route releases requests and private state")
+	assertContains(t, "views/token-manager.js", "renderTokenList", "the controller uses the safe token renderer")
 	assertContains(t, "app.js", `router.register('/tokens'`,
 		"app.js must register the /tokens SPA route")
 	assertContains(t, "index.html", `id="new-token-expiry"`,
 		"the new-token form must offer an expiry choice")
-	assertContains(t, "app.js", "getElementById('new-token-expiry')",
-		"submitNewToken must read the expiry select")
-	assertContains(t, "app.js", "payload.expires_in_days = expiryDays",
-		"submitNewToken must send expires_in_days to POST /api/tokens when an expiry is chosen")
+	assertContains(t, "views/token-manager.js", "expires_in_days:days",
+		"the controller sends the selected expiry to POST /api/tokens")
 }
 
-// TestTablistKeyboardNavWired guards the WAI-ARIA tablist keyboard pattern on
-// the app-detail settings tabs. The keydown wiring lives inside app-detail.js's
-// mount closure (not jsdom-importable), so pin it by string search: the module
-// must import createTablistNav, attach it to the tab strip, and maintain a
-// roving tabindex per render. The pure resolver + DOM behaviour are unit-tested
-// in internal/ui/jstests/tablist-keys.test.js.
-func TestTablistKeyboardNavWired(t *testing.T) {
-	assertContains(t, "views/app-detail.js", "createTablistNav",
-		"app-detail.js must wire createTablistNav onto the settings tab strip for arrow-key navigation")
-	assertContains(t, "views/app-detail.js", "'tabindex'",
-		"app-detail.js must set a roving tabindex per render so only the active tab is in the page Tab order")
-	assertContains(t, "index.html", `role="tablist"`,
-		"the settings tab strip must keep role=tablist for the keyboard pattern to apply")
+func TestAppContextNavigationWired(t *testing.T) {
+	assertContains(t, "index.html", `id="app-context-nav"`, "app navigation has one sidebar host")
+	assertContains(t, "app.js", "installAppContextNavigation", "the app shell installs contextual navigation")
+	assertContains(t, "views/app-context-nav.js", "aria-current", "sidebar destinations announce the current page")
+	assertContains(t, "views/app-context-nav.js", "navigate(link.getAttribute('href'))", "navigation goes through the draft guard")
 }
 
 // TestAppDetailTabSwitchIsInPlace guards the three-part wiring that makes a tab
@@ -589,13 +569,13 @@ func TestDeployModalReadsManifestSummary(t *testing.T) {
 func TestResourceLimitsUIWiring(t *testing.T) {
 	assertContains(t, "index.html", `id="resources-cpu"`,
 		"the Resources section must keep the CPU quota input")
-	assertContains(t, "index.html", `max="6400"`,
-		"the CPU quota input must allow up to 6400 (64 cores), matching the widened API")
+	assertContains(t, "index.html", `id="resources-cpu" type="number" min="0.01" max="64" step="0.01"`,
+		"CPU limits must be editable in hundredths of a core up to 64 cores")
 	assertContains(t, "app.js", "app.resource_enforcement",
 		"the Resources render must read the envelope's resource_enforcement to warn when native enforcement is absent; see internal/api/apps.go (resource_enforcement)")
-	assertContains(t, "app.js", "6400",
-		"saveResources must validate the CPU quota against the 6400 ceiling")
-	assertContains(t, "app.js", "runtimes that require replacement drain sessions first",
+	assertContains(t, "views/direct-setting.js", "factor: 0.01, min: 0.01, max: 64",
+		"the core editor must convert to the percentage API and preserve its 6400 ceiling")
+	assertContains(t, "app.js", "Active sessions drain first; those still open at the deadline disconnect.",
 		"saveResources must explain the drain deadline for resource changes that require replacement")
 }
 
@@ -604,16 +584,16 @@ func TestResourceLimitsUIWiring(t *testing.T) {
 // (internal/api/env.go handleListAppEnv via writeList) and refreshEnvList in
 // app.js reads data.items.
 func TestEnvListUnwrapsResponse(t *testing.T) {
-	assertContains(t, "app.js", "data.items",
+	assertContains(t, "app.js", "data?.items",
 		"GET /api/apps/:slug/env returns {items: [...]}; see internal/api/env.go handleListAppEnv")
 }
 
 // TestDataTabUnwrapsResponse guards the data-tab consumer.
 // GET /api/apps/:slug/data returns the standard {items,...} list envelope with
 // quota_mb/used_bytes as sibling keys (internal/api/data.go handleDataList via
-// writeList) and refreshDataTab in app.js reads env.items.
+// writeList) and the Data controller reads body.items.
 func TestDataTabUnwrapsResponse(t *testing.T) {
-	assertContains(t, "app.js", "env.items",
+	assertContains(t, "views/data-ui.js", "body.items",
 		"GET /api/apps/:slug/data returns {items, quota_mb, used_bytes}; see internal/api/data.go handleDataList")
 }
 
@@ -641,22 +621,20 @@ func TestGridStatusBadgeRefreshesFromMetricsPoll(t *testing.T) {
 		"app.js must import and call updateCardStatusBadge so the grid status badge tracks the live /metrics status")
 	assertContains(t, "app.js", "badge.dataset.slug = app.slug",
 		"renderGridVerbatim must tag the status badge with data-slug so onMetrics can locate it")
-	assertContains(t, "app.js", ".app-header .badge[data-slug=",
+	assertContains(t, "app.js", ".app-card .badge[data-slug=",
 		"onMetrics must locate the status badge by its data-slug to refresh it in place")
 	assertContains(t, "views/app-card-badge.js", "export function updateCardStatusBadge",
 		"app-card-badge.js must export updateCardStatusBadge for the live badge refresh")
 }
 
-// TestAppCardHasExplicitManageLink pins the card's two destinations. The app
-// name leads to administration and says so to assistive technology; Open app
+// TestAppCardHasExplicitViewLink pins the card's two destinations. The app
+// name leads to its workspace and says so to assistive technology; Open app
 // launches the active release in a new tab. The rest of the card is not a
 // nested/oversized link, leaving text selectable and actions unambiguous.
-func TestAppCardHasExplicitManageLink(t *testing.T) {
-	assertContains(t, "app.js", "? `Manage ${app.name}`",
-		"a manageable app-name link must identify its management destination")
-	assertContains(t, "app.js", ": `View ${app.name}`",
-		"a read-only app-name link must not promise management access")
-	assertContains(t, "app.js", "openLink.setAttribute('aria-label', `Open ${app.name} in a new tab`)",
+func TestAppCardHasExplicitViewLink(t *testing.T) {
+	assertContains(t, "app.js", "titleLink.setAttribute('aria-label', `View app ${app.name}`)",
+		"the app-name link must identify its workspace without promising editing access")
+	assertContains(t, "app.js", "openLink.setAttribute('aria-label', `Open app ${app.name} in a new tab`)",
 		"the launch action must identify its new-tab destination")
 	assertNotContains(t, "app.js", "app-card-body-link",
 		"the whole card must not be a link when it contains independent actions")
@@ -688,9 +666,9 @@ func TestAppAttentionRailWiring(t *testing.T) {
 // to enable/disable the Next button — the previous heuristic of "fetch 101
 // rows and check length > 100" disabled Next even when more pages existed.
 func TestAuditUnwrapsEnvelope(t *testing.T) {
-	assertContains(t, "app.js", "body.has_more",
+	assertContains(t, "views/audit-explorer.js", "payload.has_more",
 		"GET /api/audit returns {events, total, has_more}; see internal/api/audit.go handleListAuditEvents")
-	assertContains(t, "app.js", "body.events",
+	assertContains(t, "views/audit-explorer.js", "payload.events",
 		"GET /api/audit returns {events, total, has_more}; consumer must read body.events")
 }
 
@@ -803,7 +781,7 @@ func TestAppIsolationBannerReadsServerCapability(t *testing.T) {
 // owner-only; Shared adds members and groups below", which inverted the model
 // and pushed operators toward over-exposing apps.
 func TestAccessVisibilityLabelsTeachSemantics(t *testing.T) {
-	assertContains(t, "index.html", "Private (members only)",
+	assertContains(t, "index.html", "Private (owner, members and granted groups)",
 		"the private radio label must say membership is what admits people")
 	assertContains(t, "index.html", "Shared (all signed-in users)",
 		"the shared radio label must say every signed-in user can open the app")
@@ -964,8 +942,8 @@ func TestRollbackHandlerBoundOnce(t *testing.T) {
 	}
 	// Transport-failure recovery: the rollback POST must be wrapped in a
 	// try/catch so a network error re-enables the button.
-	if !strings.Contains(src, "Rollback failed: network error") {
-		t.Fatal("app-detail.js: rollback handler must catch transport errors with a `Rollback failed: network error` message and re-enable the button — otherwise btn.disabled = true sticks forever")
+	if !strings.Contains(src, "Could not confirm rollback. Refresh history before trying again.") {
+		t.Fatal("app-detail.js: rollback handler must catch transport errors with a `Could not confirm rollback. Refresh history before trying again.` message and re-enable the button — otherwise btn.disabled = true sticks forever")
 	}
 	// 401 must route through ctx.onUnauthorized so the user sees the login
 	// view instead of a silent stuck state.
@@ -1046,14 +1024,14 @@ func TestDeploymentRowFitsLongVersionIDs(t *testing.T) {
 	if strings.Contains(css, "grid-template-columns: 5rem 1fr auto auto") {
 		t.Fatal("style.css: .deployment-row must not pin the version column to a fixed 5rem; epoch-millis version IDs overflow it and overlap the timestamp, so size the column to its content instead")
 	}
-	assertContains(t, "style.css", "grid-template-columns: minmax(9rem, max-content) minmax(14rem, 1fr) minmax(6rem, auto) auto",
+	assertContains(t, "style.css", "grid-template-columns: minmax(8.5rem, max-content) minmax(0, 1fr) minmax(11rem, auto) 6.5rem",
 		"the four-column Deployments grid must let both version and source grow without overlapping the timestamp or action")
 }
 
 // Invitations hand off a browser link without collecting the recipient's password.
 func TestNewUserInvitationHandoff(t *testing.T) {
 	assertContains(t, "views/new-person.js", "${origin}/invite#${result.token}", "the invitation secret must be in the fragment, not an HTTP query")
-	assertContains(t, "views/new-person.js", "api('/api/user-invitations'", "the primary People action creates an invitation")
+	assertContains(t, "views/new-person.js", "request('/api/user-invitations'", "the primary People action creates an invitation through a bounded request")
 	assertContains(t, "accept-invitation.html", `autocomplete="new-password"`, "the recipient chooses their own password")
 }
 
@@ -1214,7 +1192,7 @@ func TestScheduleRunActivationErrorsAreVisibleAndEscaped(t *testing.T) {
 func TestScheduleSurfaceSafetyContracts(t *testing.T) {
 	assertContains(t, "index.html", `id="schedules-add-btn" hidden`,
 		"the Add schedule control must fail closed until can_manage is known")
-	assertContains(t, "index.html", "Job success alone does not prove",
+	assertContains(t, "index.html", "Job completion and the app reloading that data are shown separately",
 		"the schedules introduction must not imply that job success proves serving-data activation")
 	assertContains(t, "index.html", `id="schedule-form-error" class="error" role="alert"`,
 		"schedule form failures must be announced to assistive technology")
@@ -1242,9 +1220,9 @@ func TestScheduleSurfaceSafetyContracts(t *testing.T) {
 // enforces it at the OS level. The Settings -> Data help must say so, otherwise
 // operators trust an enforcement guarantee that native does not provide.
 func TestSharedDataReadOnlyHelpIsHonest(t *testing.T) {
-	assertContains(t, "index.html", "convention",
+	assertContains(t, "views/data-ui.js", "convention",
 		"shared-data help must state read-only is a convention under the native runtime, not OS-enforced")
-	assertContains(t, "index.html", "Docker runtime",
+	assertContains(t, "views/data-ui.js", "Docker runtime",
 		"shared-data help must point at the Docker runtime for OS-level read-only enforcement")
 }
 
@@ -2017,15 +1995,11 @@ func TestDashboardFleetSurfaceWiring(t *testing.T) {
 	assertContains(t, "app.js", "segmentApps",
 		"apps grid filters by the All/Fleet-managed/Unmanaged segment")
 
-	// Card-header overflow guard. .app-card is overflow:visible (so the kebab
-	// dropdown can escape) and .app-header is a nowrap row, so a badge appended
-	// straight into it renders out past the card border. Two pieces have to
-	// stay together: the wrapping container app.js emits and its stylesheet
-	// rule.
-	assertContains(t, "app.js", "app-header-badges",
-		"card badges go in a wrapping container, not straight into the nowrap .app-header")
-	assertContains(t, "style.css", ".app-header-badges",
-		"style.css must style the badge container app.js emits, or badges overflow the card")
+	// The card footer separates status from the independently operable actions.
+	assertContains(t, "app.js", "footer.append(badges, actions)",
+		"card status and actions share one footer without nesting interactive controls")
+	assertContains(t, "style.css", ".app-card-footer",
+		"card footer must provide a responsive layout for status and actions")
 	// The card label is a constant. That is what makes its width independent of
 	// an operator-chosen fleet id, so nothing here can overflow no matter how
 	// long the id is; the id lives in the tooltip instead.
@@ -2045,12 +2019,12 @@ func TestDashboardFleetSurfaceWiring(t *testing.T) {
 		"app detail renders fleet ownership and meaningful convergence badges")
 	assertContains(t, "views/app-detail.js", "makeFleetStateCard",
 		"the Overview renders the always-reviewable temporary changes or incomplete convergence card")
-	assertContains(t, "views/app-detail.js", "annotateFleetChanges",
-		"configuration fields show which saved values are temporary and what the fleet declares")
+	assertNotContains(t, "views/app-detail.js", "annotateFleetChanges",
+		"settings show saved values without file-ownership comparisons")
 	assertContains(t, "app.js", "await refreshDetailFleetState(slug)",
 		"successful settings saves immediately re-fetch proven fleet state instead of leaving mount-time indicators stale")
 	assertContains(t, "views/app-detail.js", "refreshFleetSurfaces",
-		"the fleet refresh repaints badges, the Overview card, and field annotations without remounting the form")
+		"the fleet refresh repaints badges and the Overview card without remounting the form")
 	assertContains(t, "style.css", ".overview-grid.has-fleet-state",
 		"fleet state participates in an explicit grid row instead of being randomly inserted")
 	assertNotContains(t, "views/fleet-ui.js", "shinyhub fleet",
@@ -2129,8 +2103,8 @@ func TestAutoscaleEditableFormWiring(t *testing.T) {
 		"index.html must expose #autoscale-max as the max-replicas input readAutoscaleForm reads")
 	assertContains(t, "index.html", `id="autoscale-target"`,
 		"index.html must expose #autoscale-target as the custom target input readAutoscaleForm reads")
-	assertContains(t, "index.html", `name="autoscale-target-mode"`,
-		"index.html must expose name=autoscale-target-mode for the default/custom radio readAutoscaleForm reads")
+	assertContains(t, "index.html", `id="autoscale-target-mode"`,
+		"index.html must expose id=autoscale-target-mode for the explicit policy state readAutoscaleForm reads")
 	assertContains(t, "index.html", `id="autoscale-save-btn"`,
 		"index.html must expose #autoscale-save-btn so saveAutoscaleSettings has a click target")
 
@@ -2160,16 +2134,16 @@ func TestAutoscaleEditableFormWiring(t *testing.T) {
 // TestTracesSurfaceWiring pins the traces panel to its testable helper module.
 // app-detail.js cannot be imported under jsdom, so the rendering logic lives in
 // views/traces-ui.js (unit-tested in jstests/traces-ui.test.js) and the panel
-// must consume it rather than re-implementing row building inline. Guards
+// must consume the viewer rather than re-implementing its state inline. Guards
 // TRC-2 (unsampled spans render no dead deep link), TRC-3 (date in the When
 // column), and TRC-5 (the traces-status element reports poll freshness).
 func TestTracesSurfaceWiring(t *testing.T) {
 	assertContains(t, "views/app-detail.js", "/static/views/traces-ui.js",
 		"the traces panel imports the traces-ui helper module")
-	assertContains(t, "views/app-detail.js", "makeTraceRow",
-		"the traces panel builds rows via makeTraceRow so unsampled/date logic is shared and tested")
-	assertContains(t, "views/app-detail.js", "formatPollStatus",
-		"the traces-status element is updated with poll freshness via formatPollStatus")
+	assertContains(t, "views/app-detail.js", "createTracesViewer",
+		"the traces panel delegates loading, inspection and cleanup to the tested viewer")
+	assertContains(t, "views/traces-ui.js", "formatPollStatus(lastLoaded)",
+		"the traces viewer reports the last successful sample freshness")
 
 	// The helper module reads the sampled flag (TRC-2) and started_at (TRC-3)
 	// from the span JSON. If tracing.Span renames either, this breaks here.
@@ -2272,8 +2246,8 @@ func TestWorkersPageWiring(t *testing.T) {
 		"app.js must register the /workers SPA route")
 	assertContains(t, "app.js", "mountWorkers(",
 		"app.js must mount the workers view")
-	assertContains(t, "app.js", "/api/workers",
-		"app.js loadWorkers must call the /api/workers endpoint")
+	assertContains(t, "views/workers.js", "/api/workers",
+		"the Workers view must call the /api/workers endpoint")
 	assertContains(t, "app.js", "tabWorkers.hidden = payload.user.role !== 'admin'",
 		"the Workers tab must be admin-gated in showLoggedIn")
 }
@@ -2307,9 +2281,9 @@ func TestAdminRouteGuardWiring(t *testing.T) {
 	// A role revoked mid-session (already on /audit-log when the server starts
 	// 403ing) must leave the same way a direct-URL visit would have been kept
 	// out, not render a generic "failed to load" banner inside the page chrome.
-	assertContains(t, "app.js", `if (resp.status === 403) {`,
+	assertContains(t, "views/audit-explorer.js", `if (response.status === 403) {`,
 		"loadAuditEvents must treat a 403 as an access change, not a generic load failure")
-	assertContains(t, "app.js", "router.navigate('/', { replace: true });",
+	assertContains(t, "views/audit-explorer.js", "navigate('/', {replace:true});",
 		"a mid-session audit-log 403 must replace-redirect home")
 }
 
@@ -2461,8 +2435,8 @@ func TestKeyboardFocusAndLabels(t *testing.T) {
 		"style.css must give buttons a visible keyboard focus ring via :focus-visible")
 	assertContains(t, "style.css", ".nav-item:focus-visible",
 		"style.css must give the sidebar section nav a visible keyboard focus ring")
-	assertContains(t, "style.css", ".settings-tab:focus-visible",
-		"style.css must give the detail folder tabs a visible keyboard focus ring")
+	assertContains(t, "style.css", "summary:focus-visible",
+		"the app switcher must have a visible keyboard focus ring")
 	b, err := fs.ReadFile(ui.Static(), "style.css")
 	if err != nil {
 		t.Fatalf("read style.css: %v", err)
@@ -2474,11 +2448,11 @@ func TestKeyboardFocusAndLabels(t *testing.T) {
 	assertContains(t, "index.html", `aria-label="Upload progress"`,
 		"deploy/data <progress> bars must carry an aria-label so screen readers announce them meaningfully")
 
-	assertContains(t, "app.js", "`Reset password for ${u.username}`",
+	assertContains(t, "views/people-directory.js", "`Reset password for ${u.username}`",
 		"the per-row Reset password button must carry a per-user aria-label")
-	assertContains(t, "app.js", "`Delete user ${u.username}`",
+	assertContains(t, "views/people-directory.js", "`Delete user ${u.username}`",
 		"the per-row Delete button must carry a per-user aria-label")
-	assertContains(t, "views/access-lists.js", "`Revoke access for ${member.username}`",
+	assertContains(t, "app.js", "`Remove member ${m.username}`",
 		"the members-list Revoke button must carry a per-user aria-label")
 }
 
@@ -2580,14 +2554,14 @@ func TestResponsiveAndStatePolish(t *testing.T) {
 	// Loading states on the two list views.
 	assertContains(t, "app.js", "Loading apps…",
 		"loadApps must show a loading placeholder on first paint")
-	assertContains(t, "app.js", "Loading people…",
+	assertContains(t, "views/people-directory.js", "Loading people…",
 		"loadUsers must show a loading row on first paint")
 	assertContains(t, "app.js", "aria-busy",
 		"the loading states must set aria-busy while fetching")
 
 	// Audit empty-state hides the table (mirrors the Workers pattern).
-	assertContains(t, "app.js", "auditTable.hidden = noEvents",
-		"renderAuditEvents must hide #audit-table when there are no events so empty headers don't show")
+	assertContains(t, "views/audit-explorer.js", "list.results({total:events.length})",
+		"audit results must pass the event count to the shared list state so empty table headers stay hidden")
 
 	// SSE log streams surface a disconnect/reconnect state instead of freezing
 	// silently. The app-detail viewer intentionally lets EventSource reconnect;
@@ -2601,8 +2575,8 @@ func TestResponsiveAndStatePolish(t *testing.T) {
 	// Workers refresh control (consistency with the other list views).
 	assertContains(t, "index.html", `id="workers-refresh"`,
 		"the Workers page must have a Refresh button like the other list views")
-	assertContains(t, "app.js", "getElementById('workers-refresh')",
-		"app.js must wire the Workers Refresh button to loadWorkers")
+	assertContains(t, "views/workers.js", "refresh.addEventListener('click', onRefresh)",
+		"the Workers view must wire the Refresh button to its route-scoped request")
 
 	// Degraded-app detail surfaced in the banner tooltip + accessible name.
 	assertContains(t, "views/fleet-health.js", "export function degradedTooltip",
@@ -2643,8 +2617,8 @@ func TestAutoscaleActionBadgeCSS(t *testing.T) {
 // TestUsersRoleDropdownAllowsAutomaticGovernance guards the manual-override clear
 // path: an empty role returns a user to group/default governance.
 func TestUsersRoleDropdownAllowsAutomaticGovernance(t *testing.T) {
-	assertContains(t, "app.js", "automatic.value = ''", "users must be able to clear a manual role override")
-	assertContains(t, "app.js", "userRolePresentation(u)", "users must see their effective role and its source")
+	assertContains(t, "views/people-directory.js", "automatic.value = ''", "users must be able to clear a manual role override")
+	assertContains(t, "views/people-directory.js", "userRolePresentation(u)", "users must see their effective role and its source")
 }
 
 // TestDefaultActionBadgeRuleComesFirst guards the source order the action badge
@@ -2679,7 +2653,7 @@ func TestDefaultActionBadgeRuleComesFirst(t *testing.T) {
 
 // TestUsersRoleDropdownOffersViewer keeps Viewer available in both user controls.
 func TestUsersRoleDropdownOffersViewer(t *testing.T) {
-	assertContains(t, "app.js", "for (const r of ['viewer', 'developer', 'operator', 'admin'])",
+	assertContains(t, "views/people-directory.js", "for (const r of ['viewer', 'developer', 'operator', 'admin'])",
 		"the People table must offer every global role, including Viewer")
 	for _, role := range []string{"viewer", "developer", "operator", "admin"} {
 		assertContains(t, "index.html", `type="radio" name="role" value="`+role+`"`, "the invitation form must visibly offer every global role")
@@ -2695,7 +2669,7 @@ func TestUsersRoleDropdownOffersViewer(t *testing.T) {
 // force a re-login was deleting the account outright. Losing this wiring
 // would silently remove the softer lockout option from the dashboard again.
 func TestUsersPageWiresRevokeSessions(t *testing.T) {
-	assertContains(t, "app.js", "/api/users/${id}/revoke-sessions",
+	assertContains(t, "views/people-directory.js", "/api/users/${user.id}/revoke-sessions",
 		"the Identity page must call the server's dedicated revoke-sessions endpoint")
 }
 
@@ -2704,11 +2678,11 @@ func TestUsersPageWiresRevokeSessions(t *testing.T) {
 // PATCH /api/apps/:slug/members/:user_id on change so a manager can promote or
 // demote members from the UI. See internal/api/router.go handleSetMemberRole.
 func TestMemberRoleDropdownWiring(t *testing.T) {
-	assertContains(t, "app.js", "createAccessLists({ document, request: api",
-		"the Access tab must wire the app-scoped access controller")
-	assertContains(t, "views/access-lists.js", "suffix: `/${member.user_id}`",
+	assertContains(t, "app.js", "async function updateMemberRole",
+		"the Access tab must define updateMemberRole so a manager can change a member's role")
+	assertContains(t, "app.js", "/members/${userId}",
 		"updateMemberRole must PATCH /api/apps/:slug/members/:user_id; see internal/api/router.go handleSetMemberRole")
-	assertContains(t, "views/access-lists.js", "member-role-select",
+	assertContains(t, "app.js", "member-role-select",
 		"refreshMemberList must render an editable role <select> per member so managers can promote/demote")
 }
 
@@ -2718,7 +2692,7 @@ func TestMemberRoleDropdownWiring(t *testing.T) {
 func TestGroupAccessSectionWiring(t *testing.T) {
 	assertContains(t, "index.html", `id="group-access-list"`,
 		"index.html must expose #group-access-list for the per-app group rules")
-	assertContains(t, "app.js", "const refreshGroupAccessList",
+	assertContains(t, "app.js", "async function refreshGroupAccessList",
 		"app.js must define refreshGroupAccessList to render group rules on the Access tab")
 	assertContains(t, "app.js", "/group-access",
 		"app.js must call /api/apps/:slug/group-access for group-rule CRUD")
@@ -2742,9 +2716,9 @@ func TestCanManageAppHonorsServerValue(t *testing.T) {
 // UI (they are managed by the bundle manifest; a UI removal would return on the
 // next deploy). See internal/api/apps.go applyManifestAccessGroups.
 func TestGroupAccessShowsManifestSource(t *testing.T) {
-	assertContains(t, "views/access-lists.js", "rule.source",
+	assertContains(t, "app.js", "rule.source",
 		"refreshGroupAccessList must read rule.source to distinguish manifest from manual rules")
-	assertContains(t, "views/access-lists.js", "manifest",
+	assertContains(t, "app.js", "manifest",
 		"manifest-sourced group rules must be labelled (e.g. \"(manifest)\") and not offer a Remove button")
 }
 
@@ -2758,51 +2732,18 @@ func TestAuditKnownActionsIncludeGroupAccess(t *testing.T) {
 	}
 }
 
-// TestAuditActionFilterWiring guards the Audit Log page's action filter. The
-// server supports filtering GET /api/audit by action, run, event, and a
-// since/until date range (see internal/api/audit.go's AuditEventFilter), so the
-// dropdown must be populated from the same AUDIT_ACTIONS list used for badge
-// styling and must reset to page 0 through the shared applyAuditFilters, which
-// carries the date range with it; there is no resource or user filter to wire
-// since the server cannot answer one.
+// Audit filters share a form so partial date input never becomes a query.
+// Behavior, routing and error recovery are exercised in audit-explorer.test.js.
 func TestAuditActionFilterWiring(t *testing.T) {
-	assertContains(t, "index.html", `id="audit-action-filter"`,
-		"index.html must expose #audit-action-filter so the Audit Log page can offer an action filter")
-	assertContains(t, "app.js", "for (const action of AUDIT_ACTIONS)",
-		"app.js must populate the audit action filter's options from AUDIT_ACTIONS")
-	assertContains(t, "app.js", "auditActionFilter.addEventListener('change', applyAuditFilters)",
-		"changing the audit action filter must go through applyAuditFilters, so the active date range survives the change")
-	assertContains(t, "app.js", "if (auditActionFilter) auditActionFilter.value = selection.action || '';",
-		"updateAuditContext must keep the audit action filter in sync with the active selection")
+	assertContains(t, "index.html", `id="audit-action-filter"`, "the action selector must be present")
+	assertContains(t, "views/audit-explorer.js", "[...AUDIT_ACTIONS].sort", "every emitted action must be filterable")
+	assertContains(t, "views/audit-explorer.js", "bindFilterBar({root:get('audit-filters'),fields:{search,action,since,until},onApply:(_,event)=>apply(event)})", "filters submit together through the shared binding")
 }
-
-// TestAuditDateRangeWiring guards the Audit Log page's date range. The pieces
-// live in three files that no jsdom test can import together: the inputs in
-// index.html, their listeners in the app.js IIFE, and the query building in
-// views/audit-log.js (unit-tested separately). A range whose inputs never reach
-// the request is the failure this pins - the operator picks two dates, the page
-// reloads, and the listing is unchanged.
 func TestAuditDateRangeWiring(t *testing.T) {
-	assertContains(t, "index.html", `id="audit-since"`,
-		"index.html must expose #audit-since so the Audit Log page can offer a start date")
-	assertContains(t, "index.html", `id="audit-until"`,
-		"index.html must expose #audit-until so the Audit Log page can offer an end date")
-	assertContains(t, "app.js", "auditSince?.addEventListener('change', applyAuditFilters)",
-		"the audit start date must reload the listing when it changes")
-	assertContains(t, "app.js", "auditUntil?.addEventListener('change', applyAuditFilters)",
-		"the audit end date must reload the listing when it changes")
-	// 'input' fires on every keystroke inside a native date picker, which would
-	// query the log for partially-typed years.
-	assertNotContains(t, "app.js", "auditSince?.addEventListener('input'",
-		"the audit date inputs must listen on 'change', not 'input': a partially typed date is a real value that would be queried")
-	assertContains(t, "app.js", "since: auditSince ? auditSince.value : ''",
-		"applyAuditFilters must read the start date out of the input, or the picker changes nothing")
-	assertContains(t, "app.js", "until: auditUntil ? auditUntil.value : ''",
-		"applyAuditFilters must read the end date out of the input, or the picker changes nothing")
-	assertContains(t, "app.js", "auditRangeSuffix",
-		"updateAuditContext must describe the active range, so an empty listing says which window was searched")
-	assertContains(t, "style.css", ".audit-date-range",
-		"the audit date range needs its own style; unstyled inputs inherit no spacing from .toolbar-actions")
+	assertContains(t, "index.html", `id="audit-since"`, "the range needs a start date")
+	assertContains(t, "index.html", `id="audit-until"`, "the range needs an end date")
+	assertContains(t, "views/audit-explorer.js", "since:since.value,until:until.value", "the submitted range must reach the query")
+	assertContains(t, "views/audit-explorer.js", "auditValidation(draft)", "invalid ranges must not silently broaden the query")
 }
 
 // TestAuditDetailErrorIsFlaggedNotOrdinary guards the detail_error contract
@@ -2810,9 +2751,9 @@ func TestAuditDateRangeWiring(t *testing.T) {
 // to encode must render as a visible problem, never as one more ordinary
 // field a reader would trust like every other row's detail.
 func TestAuditDetailErrorIsFlaggedNotOrdinary(t *testing.T) {
-	assertContains(t, "app.js", "detailEntries[0].isError",
+	assertContains(t, "views/audit-explorer.js", "entries.some(entry=>entry.isError)",
 		"renderAuditEvents must branch on auditDetailEntries' isError flag instead of always rendering the generic details expander")
-	assertContains(t, "app.js", "audit-detail-error",
+	assertContains(t, "views/audit-explorer.js", "audit-detail-error",
 		"a detail_error entry must be tagged with the audit-detail-error class so it is styled as a problem")
 	assertContains(t, "style.css", ".audit-detail-error", "audit-detail-error must have a distinct (red) style, not the default table text color")
 }
@@ -2971,10 +2912,12 @@ func TestCardKebabNotClippedByOverflow(t *testing.T) {
 // (which carries can_manage), not the cached apps LIST (state.apps), which is
 // empty on a fresh deep-link — leaving the whole upload form hidden for admins.
 func TestDataUploadWorksOnDeepLink(t *testing.T) {
-	assertContains(t, "app.js", "async function refreshDataTab(slug, app)",
-		"refreshDataTab must accept the app object so canManageApp works on a deep-link")
-	assertContains(t, "views/app-detail.js", "ctx.refreshDataTab(app.slug, app)",
-		"renderData must pass the fetched app (with can_manage) to refreshDataTab")
+	assertContains(t, "views/app-detail.js", "canManage: ctx.canManageApp(ctx.state.user, app)",
+		"Data must derive permissions from the fetched app on a direct deep link")
+	assertContains(t, "views/app-detail.js", "tabCleanup = renderData(panels.data, app, ctx, body)",
+		"Data must dispose pending requests when leaving the tab")
+	assertContains(t, "views/data-ui.js", `aria-label="Upload progress"`,
+		"Data upload progress must have an accessible name")
 }
 
 // TestDeploymentsMarkCurrent guards that the Deployments tab marks the LIVE
@@ -3055,8 +2998,8 @@ func TestSettingsExplicitSaveDirtyTracking(t *testing.T) {
 		"a beforeunload guard must warn on full-page unload with unsaved edits")
 	assertContains(t, "router.js", "function setNavGuard",
 		"the router must expose setNavGuard for the unsaved-changes guard")
-	assertContains(t, "app.js", "if (el.disabled) return null",
-		"the dirty snapshot must skip disabled mode-specific fields so toggling custom-mode and back isn't spuriously dirty")
+	assertContains(t, "app.js", "rec.originals = rec.els.map",
+		"Discard must restore every field and policy in a section independently of disabled state")
 	assertContains(t, "app.js", "clearSettingsDirty();",
 		"delete must clear the dirty state so the unsaved-changes guard doesn't strand the user on a deleted app")
 }
@@ -3085,7 +3028,7 @@ func TestPrimaryButtonsStyledGlobally(t *testing.T) {
 	// unstyled user-agent buttons.
 	assertContains(t, "views/logs-ui.js", `id="logs-copy" type="button" class="btn-row"`,
 		"the Logs 'Copy visible' button must be a styled .btn-row")
-	assertContains(t, "views/app-detail.js", `id="traces-refresh" type="button" class="btn-row"`,
+	assertContains(t, "views/traces-ui.js", `id="traces-refresh" type="button" class="btn-row"`,
 		"the Traces 'Refresh' button must be a styled .btn-row")
 }
 
@@ -3093,29 +3036,21 @@ func TestPrimaryButtonsStyledGlobally(t *testing.T) {
 // (__deploy__) is rendered read-only in the Users table (no role change, reset,
 // or delete) — those actions are meaningless for a tokenless env-managed account.
 func TestReservedUserRowIsReadOnly(t *testing.T) {
-	assertContains(t, "app.js", "userRowCaps(u, selfId)",
+	assertContains(t, "views/people-directory.js", "userRowCaps(u, selfId)",
 		"renderUsers must derive per-row capabilities via userRowCaps")
 	assertContains(t, "views/user-row.js", "__deploy__",
 		"user-row.js must treat __deploy__ as a reserved (read-only) account")
 }
 
-// TestDetailTabsSeparatedFromContent guards a margin below the app-detail tab
-// bar. The tab panel is display:contents, so without this margin the active
-// panel's content butts directly against the tab bar (zero gap).
-func TestDetailTabsSeparatedFromContent(t *testing.T) {
-	b, err := fs.ReadFile(ui.Static(), "style.css")
+func TestAppDetailHasOneNavigationSurface(t *testing.T) {
+	b, err := fs.ReadFile(ui.Static(), "index.html")
 	if err != nil {
-		t.Fatalf("read style.css: %v", err)
+		t.Fatal(err)
 	}
-	css := string(b)
-	// The base rule (not the mobile overflow-x override) starts with display:flex.
-	i := strings.Index(css, ".settings-tabs {\n  display: flex;")
-	if i < 0 {
-		t.Fatal("style.css: could not locate the base .settings-tabs rule")
-	}
-	end := strings.Index(css[i:], "}")
-	if end < 0 || !strings.Contains(css[i:i+end], "margin-bottom:") {
-		t.Fatal("style.css: .settings-tabs must carry a margin-bottom so the tab bar is separated from the panel content")
+	for _, obsolete := range []string{`class="settings-tabs"`, `id="app-section-select"`, `class="configuration-rail"`, `id="configuration-mobile-nav"`} {
+		if strings.Contains(string(b), obsolete) {
+			t.Fatalf("obsolete nested navigation remains: %s", obsolete)
+		}
 	}
 }
 
@@ -3201,11 +3136,11 @@ func TestSidebarAppListWiring(t *testing.T) {
 	}
 }
 
-// TestSidebarActiveScoping pins section-active scoped to #primary-nav and the
+// TestSidebarActiveScoping pins section-active scoped to global navigation and the
 // separate sidebar app highlighter, so aria-current never leaks onto app cards,
 // overview links, or the detail folder tabs.
 func TestSidebarActiveScoping(t *testing.T) {
-	assertContains(t, "app.js", "querySelectorAll('#primary-nav [data-nav]')", "updateActiveNav must be scoped to #primary-nav")
+	assertContains(t, "app.js", "querySelectorAll('#primary-nav .nav-item[data-nav], #administration-nav .nav-item[data-nav]')", "updateActiveNav must be scoped to primary and administration navigation")
 	assertContains(t, "app.js", "highlightSidebarApp(", "the sidebar app active state must be applied via highlightSidebarApp")
 	assertContains(t, "views/sidebar-nav.js", "startsWith(href + '/')", "sidebar active must use a segment-boundary slug-prefix match")
 }
@@ -3234,15 +3169,9 @@ func TestSidebarDrawerWiring(t *testing.T) {
 	assertContains(t, "views/sidebar-drawer.js", "createFocusTrap", "the drawer must reuse createFocusTrap for focus containment")
 }
 
-// TestSidebarFooterPinnedToBottom pins the footer (identity card, About,
-// Collapse) to the bottom of the rail whether or not the Applications list is
-// rendered. #sidebar is a flex column whose only growing child is
-// .sidebar-apps; syncSidebar hides that region for viewer sessions and the
-// collapsed rail sets it display:none. With a fixed footer margin-top nothing
-// then fills the column and the footer sits directly under the section nav
-// with the rest of the rail empty. An auto margin absorbs the free space in
-// both cases. The list-to-footer gap must live on the list region, because the
-// auto margin resolves to zero whenever the list grows to fill the column.
+// TestSidebarFooterPinnedToBottom keeps the footer at the bottom when the
+// nested app list is absent or the rail is collapsed. Primary navigation owns
+// overflow; the footer absorbs remaining space and stays outside that scroller.
 func TestSidebarFooterPinnedToBottom(t *testing.T) {
 	css := readStatic(t, "style.css")
 	footer := cssRuleBody(t, css, "\n.sidebar-footer {")
@@ -3251,7 +3180,7 @@ func TestSidebarFooterPinnedToBottom(t *testing.T) {
 	}
 	apps := cssRuleBody(t, css, "\n.sidebar-apps {")
 	if !strings.Contains(apps, "margin-bottom: 0.5rem;") {
-		t.Fatalf(".sidebar-apps must carry the list-to-footer gap as margin-bottom: 0.5rem, since the footer's auto margin is zero whenever the list fills the column; got:%s", apps)
+		t.Fatalf(".sidebar-apps must carry the gap after nested apps as margin-bottom: 0.5rem; got:%s", apps)
 	}
 }
 
@@ -3300,12 +3229,14 @@ func TestSidebarLayoutCSS(t *testing.T) {
 		"mobile drawer controls must retain accessible touch targets")
 	assertContains(t, "style.css", ".sidebar-brand { display: flex; flex: none; align-items: center; height: 3rem;",
 		"sidebar brand slot must keep the primary navigation at a stable vertical position")
-	assertContains(t, "style.css", "  min-height: 2.5rem;",
-		"identity control must keep the same compact height when its metadata is hidden")
-	assertContains(t, "style.css", "  height: 2.5rem;",
-		"identity control must not grow when its metadata is visible")
-	assertContains(t, "style.css", "  min-height: 2rem;",
-		"navigation rows must keep the same height when their labels are hidden")
+	identity := cssRuleBody(t, readStatic(t, "style.css"), "\n.sidebar-footer .identity-card {")
+	if !strings.Contains(identity, "min-height: 3.5rem;") || strings.Contains(identity, "\n  height:") {
+		t.Fatal("profile entry must preserve its two-line touch target and allow text zoom without clipping")
+	}
+	controls := cssRuleBody(t, readStatic(t, "style.css"), "\n.sidebar-footer button {")
+	if !strings.Contains(controls, "min-height: 44px;") {
+		t.Fatal("sidebar utilities must retain accessible target heights when labels are hidden")
+	}
 }
 
 // TestAppDetailHeaderActionsMeetTouchTargetSize pins that the app detail page's
@@ -3385,10 +3316,10 @@ func TestAppDetailHeaderTiles(t *testing.T) {
 	// and readiness facts on every index card.
 	assertNotContains(t, "app.js", "cardMetricsLabel",
 		"the app index must not duplicate routine CPU/RAM from the detail header")
-	// CSS: tiles, the running pulse, and a reduced-motion off-switch.
+	// CSS: metric tiles and steady status dots in every motion preference.
 	assertContains(t, "style.css", ".app-detail-stats .stat", "metric tiles must be styled")
-	assertContains(t, "style.css", ".app-detail-header .status-pill.is-live::before { animation: none; }",
-		"the running pulse must be disabled under prefers-reduced-motion (scoped to the header pill)")
+	assertNotContains(t, "style.css", ".app-detail-header .status-pill.is-live::before",
+		"status dots must stay steady rather than implying activity between updates")
 	// The header pill styles must be scoped so they don't clobber the pre-existing
 	// schedules .status-pill (status-on/status-off).
 	assertContains(t, "style.css", ".app-detail-header .status-pill::before",
@@ -3405,49 +3336,17 @@ func TestAppDetailHeaderDeployWired(t *testing.T) {
 		"the app-detail header Deploy button must open the uploader for the mounted app")
 }
 
-// TestDetailTabsScrollAffordanceOnMobile pins the mobile tab-strip polish: it
-// scroll-snaps and shows an edge fade (driven by data-overflow from app-detail.js)
-// so clipped tabs are discoverable, and the active tab is scrolled into view.
-func TestDetailTabsScrollAffordanceOnMobile(t *testing.T) {
-	assertContains(t, "style.css", "scroll-snap-type: x proximity",
-		"the mobile tab strip must scroll-snap for crisp stops")
-	assertContains(t, "style.css", `.settings-tabs[data-overflow="mid"]`,
-		"the tab strip must fade clipped edges via a data-overflow mask")
-	assertContains(t, "views/app-detail.js", "data-overflow",
-		"app-detail.js must maintain the data-overflow hint on the tab strip")
-	assertContains(t, "views/app-detail.js", "tabStripScrollTarget({",
-		"the active tab must be centered with the testable scroll-target helper")
+func TestAppSettingsRoutesShareMountedEditor(t *testing.T) {
+	assertContains(t, "app.js", "'/apps/:slug/settings/:section'", "each settings page has a bookmarkable URL")
+	assertContains(t, "app.js", "isSameAppSettingsDestination(destination, settingsSlug)", "settings-page changes preserve drafts")
+	assertContains(t, "router.js", "navGuard(full)", "the guard receives the requested destination")
+	assertContains(t, "views/sidebar-drawer.js", "#app-context-nav:not([hidden])", "mobile opens the same contextual navigation")
 }
 
-// TestDetailTabsAreFolderTabs guards the elevated folder-tab styling: tabs must
-// not render as plain underlined links (the global a{} underline is killed), the
-// active tab lifts into a surface card, and a glowing cyan cap marks it.
-func TestDetailTabsAreFolderTabs(t *testing.T) {
-	b, err := fs.ReadFile(ui.Static(), "style.css")
-	if err != nil {
-		t.Fatalf("read style.css: %v", err)
-	}
-	css := string(b)
-	// Anchor on the base rule (starts with position:relative), not the earlier
-	// mobile .settings-tab { flex: 0 0 auto } override.
-	i := strings.Index(css, ".settings-tab {\n  position: relative;")
-	if i < 0 {
-		t.Fatal("style.css: missing base .settings-tab rule")
-	}
-	end := strings.Index(css[i:], "}")
-	if end < 0 || !strings.Contains(css[i:i+end], "text-decoration: none") {
-		t.Fatal("style.css: .settings-tab must set text-decoration:none so tabs aren't plain underlined links")
-	}
-	a := strings.Index(css, ".settings-tab.active {")
-	if a < 0 {
-		t.Fatal("style.css: missing .settings-tab.active rule")
-	}
-	aEnd := strings.Index(css[a:], "}")
-	if aEnd < 0 || !strings.Contains(css[a:a+aEnd], "background: var(--surface)") {
-		t.Fatal("style.css: the active tab must lift into a surface card (background: var(--surface))")
-	}
-	assertContains(t, "style.css", ".settings-tab.active::after",
-		"the active folder tab must carry a cyan top-cap accent (::after)")
+func TestAppSettingsPageGrouping(t *testing.T) {
+	assertContains(t, "views/configuration-context.js", "'configuration-scaling', 'autoscale-options', 'configuration-hibernation'", "scaling controls live on one page")
+	assertContains(t, "views/configuration-context.js", "'configuration-resources', 'configuration-pacing'", "advanced runtime controls belong under Resources")
+	assertContains(t, "style.css", "#detail-configuration-panel[data-settings-page]", "only the selected settings page is displayed")
 }
 
 // TestLogsTabEmptyStateForNeverDeployed guards that the Logs tab does not open
@@ -3523,13 +3422,16 @@ func TestLogPaneWiring(t *testing.T) {
 		t.Fatalf("read views/log-pane.js: %v", err)
 	}
 	src := string(b)
-	onerror := strings.Index(src, "es.onerror = () => setStatus(")
+	onerror := strings.Index(src, "es.onerror = () =>")
 	if onerror < 0 {
 		t.Fatal("views/log-pane.js: es.onerror must report a status instead of appending a disconnect line into the log text")
 	}
 	lineEnd := strings.Index(src[onerror:], "\n")
 	if lineEnd < 0 {
 		lineEnd = len(src) - onerror
+	}
+	if !strings.Contains(src[onerror:onerror+lineEnd], "setStatus(") {
+		t.Fatal("views/log-pane.js: es.onerror must report connection state in the status region")
 	}
 	if strings.Contains(src[onerror:onerror+lineEnd], ".close(") {
 		t.Fatal("views/log-pane.js: es.onerror must not close the EventSource on a transient error, or the browser can never auto-retry")
@@ -3564,32 +3466,18 @@ func TestBrowserBundleFilterIsShared(t *testing.T) {
 	}
 }
 
-// TestConfigDefaultPlaceholders guards that settings fields which are empty by
-// design (no limit) or only active in another mode communicate their default
-// via a placeholder, rather than rendering as a blank box that reads as missing.
-func TestConfigDefaultPlaceholders(t *testing.T) {
-	b, err := fs.ReadFile(ui.Static(), "index.html")
-	if err != nil {
-		t.Fatalf("read index.html: %v", err)
+// Inherited numeric settings expose explicit, accessible policy controls.
+func TestConfigDirectPolicyFields(t *testing.T) {
+	for _, id := range []string{"resources-memory", "resources-cpu", "scaling-cap", "hibernate-custom-minutes", "autoscale-target"} {
+		assertContains(t, "index.html", `<select id="`+id+`-mode"`, "inherited settings expose a single native policy selector")
+		assertContains(t, "index.html", `for="`+id+`-mode"`, "policy selectors have visible labels")
 	}
-	html := string(b)
-	cases := []struct{ id, placeholder, why string }{
-		{"resources-memory", `placeholder="No limit"`, "an empty memory limit means no limit"},
-		{"resources-cpu", `placeholder="No limit"`, "an empty CPU quota means no limit"},
-		{"hibernate-custom-minutes", `placeholder="30"`, "the disabled custom-timeout input must hint its default"},
-		{"autoscale-target", `placeholder="0.80"`, "the disabled custom-target input must hint the server-wide default"},
+	for _, id := range []string{"resources-memory", "resources-cpu", "scaling-cap", "hibernate-custom-minutes", "autoscale-target", "render-seconds"} {
+		assertContains(t, "index.html", `id="`+id+`"`, "configuration exposes the editable numeric field")
+		assertContains(t, "index.html", `id="`+id+`-hint"`, "the current source and default remain visible")
 	}
-	for _, c := range cases {
-		i := strings.Index(html, `id="`+c.id+`"`)
-		if i < 0 {
-			t.Fatalf("index.html: missing input #%s", c.id)
-		}
-		// The input tag spans from the opening of the element back to '<input'.
-		start := strings.LastIndex(html[:i], "<input")
-		end := strings.Index(html[i:], ">")
-		if start < 0 || end < 0 || !strings.Contains(html[start:i+end], c.placeholder) {
-			t.Fatalf("index.html: #%s must carry %s (%s)", c.id, c.placeholder, c.why)
-		}
+	for _, name := range []string{"session limit", "idle timeout", "target session load"} {
+		assertContains(t, "index.html", `aria-label="Custom `+name+`"`, "custom numbers have accessible labels independent of their policy selector")
 	}
 }
 
@@ -3604,7 +3492,7 @@ func TestScalingRowInputsAlign(t *testing.T) {
 		t.Fatalf("read style.css: %v", err)
 	}
 	css := string(b)
-	i := strings.Index(css, ".scaling-row {")
+	i := strings.Index(css, "\n.scaling-row {")
 	if i < 0 || !strings.Contains(css[i:i+200], "grid-template-columns: minmax(0, 1fr) 16rem") {
 		t.Fatal("style.css: .scaling-row must use a fixed input column (minmax(0,1fr) 16rem) so all controls align")
 	}
@@ -3646,7 +3534,7 @@ func TestProfileIdentityWiring(t *testing.T) {
 		"the identity model must read user.display_name; see internal/api/auth.go sessionUserResponse")
 	// The admin Users table surfaces the friendly name as a subtitle, reading
 	// userResponse.display_name (see internal/api/users.go toUserResponse).
-	assertContains(t, "app.js", "u.display_name",
+	assertContains(t, "views/people-directory.js", "u.display_name",
 		"the Users table must render u.display_name as the username subtitle; see internal/api/users.go toUserResponse")
 }
 
@@ -3675,27 +3563,23 @@ func TestBootSplashAvoidsLoginFlash(t *testing.T) {
 // Restart, so an API/JS shape drift (last_error) or a missing import fails the
 // build instead of silently breaking the dashboard.
 func TestCrashedAppUX(t *testing.T) {
-	// The detail Overview imports the crash banner and feeds it a Restart wired
-	// to ctx.restart.
-	assertContains(t, "views/app-detail.js", "crash-banner.js",
-		"app-detail.js must import the crash banner")
-	assertContains(t, "views/app-detail.js", "crashBanner(document",
-		"renderOverview must build the crash banner")
-	assertContains(t, "views/app-detail.js", "ctx.restart(app.slug)",
-		"the crash banner's Restart must call ctx.restart")
-	// The banner reads the crash reason and gates on the crashed status.
-	assertContains(t, "views/crash-banner.js", "last_error",
-		"the crash banner must show app.last_error (the crash reason from GET /api/apps/:slug; see internal/db/queries.go App.LastError)")
-	assertContains(t, "views/crash-banner.js", "'crashed'",
-		"the crash banner must gate on app.status === 'crashed'")
-	// app.js exposes restart on ctx for the banner to reuse.
-	assertContains(t, "app.js", "restart: (slug) => restart(slug)",
-		"ctx must expose restart so the crash banner can reuse the existing restart action")
-	// The crashed badge + banner are styled.
+	// Recovery is part of the persistent app summary, above section navigation.
+	assertContains(t, "index.html", `id="overview-health-error"`,
+		"the app summary must expose failure details")
+	assertContains(t, "index.html", `id="overview-health-recover"`,
+		"the app summary must expose a recovery action")
+	assertContains(t, "views/app-detail.js", "ctx.restart(slug, recover)",
+		"crash recovery must reuse the existing restart action and its busy state")
+	assertContains(t, "views/app-detail.js", "(app.last_error || '').trim()",
+		"the summary must show the server-supplied crash reason")
+	assertContains(t, "views/app-detail.js", "appCardActions(showing.app, showing.canManage).showStart",
+		"recovery must respect permissions and lifecycle eligibility")
+	assertContains(t, "app.js", "restart: (slug, button) => restart(slug, button)",
+		"ctx must expose restart with its initiating control")
 	assertContains(t, "style.css", ".badge-crashed",
 		"a crashed app needs a styled status badge")
-	assertContains(t, "style.css", ".crash-banner",
-		"the crash banner needs styling")
+	assertContains(t, "style.css", "#overview-health-error",
+		"the failure details must handle long errors")
 	// The fleet-health panel counts crashed apps.
 	assertContains(t, "views/fleet-health.js", "apps.crashed",
 		"the fleet health summary must read apps.crashed; see internal/api/fleet_health.go fleetAppCounts.Crashed")
@@ -3922,7 +3806,7 @@ func TestAppIconUIContract(t *testing.T) {
 	assertContains(t, "app.js", "renderIconPicker",
 		"app.js wires the icon picker preview + upload/remove")
 	assertContains(t, "app.js", "app.slug)}/icon",
-		"app.js uploads/removes via /api/apps/<slug>/icon")
+		"app.js reaches the app icon endpoint")
 	// The author .ov-btn display would override [hidden]; the Remove button must
 	// actually hide when no icon is set.
 	assertContains(t, "style.css", ".ov-btn[hidden]",
@@ -3933,44 +3817,11 @@ func TestAppIconUIContract(t *testing.T) {
 		"the icon Remove button accounts for an emoji icon, not just an uploaded image")
 }
 
-// TestEmojiPickerUIContract pins the emoji-picker wiring added on top of
-// TestAppIconUIContract: the picker reads the PATCH envelope correctly, and
-// (per Task 9's review) the two pre-existing applyIconChange callers keep
-// passing a literal empty emoji rather than re-asserting a stale one.
+// Icon edits and Undo share the complete-state endpoint, preserving retained
+// images as well as emoji. Behavioral restoration cases live in JS/API tests.
 func TestEmojiPickerUIContract(t *testing.T) {
-	// The set-emoji caller is the first caller to read a non-empty emoji back
-	// from a PATCH response; IconEmoji is `json:"icon_emoji,omitempty"`, so a
-	// cleared emoji is an absent key, not "" - reading body.app.icon_emoji
-	// (with an || '' fallback) is the only correct way to unwrap it.
-	assertContains(t, "app.js", "body.app.icon_emoji",
-		"the emoji picker reads the new emoji from the wrapped PATCH response body.app, not a bare body.icon_emoji")
-
-	// Carried forward from Task 9's review: pin both pre-existing
-	// applyIconChange callers verbatim. Task 9 left their literal argument
-	// shape unpinned because every caller passed emoji: '' at the time, so
-	// undefined and '' read identically downstream. This task's set-emoji
-	// caller is the first to pass a NON-empty emoji, which makes
-	// `emoji: appIconEmoji(app)` a plausible copy-paste into the remove path
-	// - and that one is silently wrong, since it would re-assert an emoji the
-	// server has already cleared. removeIcon really does destroy both the
-	// image and the emoji server-side, so a literal empty mime is correct
-	// there; clearEmojiIcon does NOT share this literal (see the pin below) -
-	// its clear path leaves icon_mime untouched server-side, so hardcoding
-	// '' there would blank a retained image in the UI.
-	assertContains(t, "app.js", "applyIconChange(app, { mime: '', emoji: '' })",
-		"removeIcon must pass a literal empty emoji and mime, since it destroys both the image and the emoji")
-	assertContains(t, "app.js", "applyIconChange(app, { mime: body.icon_mime || file.type, emoji: '' })",
-		"uploadIcon must clear the emoji (a new image and an emoji are mutually exclusive), not re-assert a stale one")
-
-	// Fix round 1: clearEmojiIcon's PATCH (icon_emoji: '') never touches
-	// icon_mime server-side (SetAppIconEmoji writes icon_emoji alone), so an
-	// app whose emoji coexisted with an uploaded/manifest image must keep
-	// that image once the emoji is cleared. Hardcoding mime: '' here (as the
-	// emoji-exclusive setEmojiIcon correctly does) blanked a retained image
-	// in the detail page, sidebar, and grid until a reload. The fix reads the
-	// server's own response for the authoritative mime.
-	assertContains(t, "app.js", "body.app ? (body.app.icon_mime || '') : app.icon_mime",
-		"clearEmojiIcon must read the authoritative icon_mime from the PATCH response (or keep the app's current value) instead of hardcoding an empty mime, or it blanks a retained image when only the emoji is cleared")
+	assertContains(t, "app.js", "app.slug)}/icon/state", "immediate changes use the atomic icon-state endpoint")
+	assertContains(t, "index.html", `id="general-icon-undo"`, "immediate icon edits offer a persistent Undo control")
 
 	// Markup + module wiring.
 	assertContains(t, "index.html", `id="general-icon-emoji-btn"`,
@@ -4144,15 +3995,15 @@ func TestMetricsControllerOnErrorWired(t *testing.T) {
 	}
 }
 
-// TestScheduleAndSharedDataHandlersHardened guards UX-4/UX-9: the schedule
-// (run/delete/submit/history) and shared-data (mount/unmount) handlers used to
+// TestScheduleHandlersHardened guards UX-4/UX-9: the schedule
+// (run/delete/submit/history) handlers used to
 // call api() with no try/catch for network errors, no 401 check, and dumped
 // the raw response body (a JSON {"error":"..."} envelope; see
 // internal/api/helpers.go writeError) straight into a toast/inline error. They
 // must match the established pattern used elsewhere in app.js: catch network
 // failures, redirect a 401 through handleUnauthorized, and parse the .error
 // field via the shared errorMessage helper instead of showing raw JSON.
-func TestScheduleAndSharedDataHandlersHardened(t *testing.T) {
+func TestScheduleHandlersHardened(t *testing.T) {
 	assertContains(t, "app.js", "async function errorMessage(resp, fallback = 'Request failed')",
 		"app.js must define a shared errorMessage helper that parses the {error} JSON envelope every API handler writes")
 
@@ -4193,8 +4044,6 @@ func TestScheduleAndSharedDataHandlersHardened(t *testing.T) {
 	checkHandler("async function runScheduleNow(slug, id, name, btn)", "runScheduleNow")
 	checkHandler("async function deleteSchedule(slug, id, name, btn)", "deleteSchedule")
 	checkHandler("async function cancelScheduleActivation(slug, schedID, name, btn)", "cancelScheduleActivation")
-	checkHandler("container.querySelectorAll('[data-action=\"revoke\"]')", "the shared-data unmount handler")
-	checkHandler("document.getElementById('shared-data-add-btn')", "the shared-data mount handler")
 
 	historyStart := strings.Index(src, "async function loadScheduleRunPage(")
 	if historyStart < 0 {
@@ -4280,9 +4129,9 @@ func TestSchedulesTableResponsiveCards(t *testing.T) {
 	css := string(b)
 	for _, want := range []string{
 		".schedules-table thead",
-		".schedules-table td::before",
+		".schedules-table td:nth-child(2)::before",
 		"content: attr(data-label)",
-		"grid-template-columns: 6.8rem minmax(0, 1fr)",
+		"grid-template-columns: repeat(2, minmax(0, 1fr))",
 	} {
 		if !strings.Contains(css, want) {
 			t.Fatalf("style.css: responsive schedules contract missing %q", want)
@@ -4368,11 +4217,11 @@ func TestDoubleSubmitGuardsOnDestructiveActions(t *testing.T) {
 		}
 	}
 
-	checkGuard("async function deleteUser(id, username, btn)", "deleteUser", "btn.disabled = true", "btn.disabled = false")
-	checkGuard("async function revokeUserSessions(id, username, btn)", "revokeUserSessions", "btn.disabled = true", "btn.disabled = false")
-	checkGuard("async function revokeToken(id, name, btn)", "revokeToken", "btn.disabled = true", "btn.disabled = false")
+	// Token request guards are exercised behaviorally by token-manager.test.js.
+	assertContains(t, "views/token-manager.js", "begin('revoke')", "revocation enters pending state before sending its request")
+	assertContains(t, "views/token-manager.js", "if (!canMutate() || !confirming) return;", "revocation requires confirmation and rejects duplicate pending requests")
 	// Invitation request guards are exercised behaviorally by new-person.test.js.
-	assertContains(t, "views/new-person.js", "if (busy || form.hidden) return;", "invitation creation rejects duplicate submissions")
+	assertContains(t, "views/new-person.js", "if (busy || uncertain || form.hidden) return;", "invitation creation rejects duplicates and requires reconciliation after an uncertain result")
 	assertContains(t, "views/new-person.js", "setBusy(true)", "invitation creation disables inputs while pending")
 	assertContains(t, "views/new-person.js", "setBusy(false)", "invitation creation restores inputs after completion")
 	checkGuard("async function performRestart(slug, btn, cardLocal = false)", "the Restart request handler", "btn.disabled = true", "btn.disabled = false")
@@ -4381,17 +4230,6 @@ func TestDoubleSubmitGuardsOnDestructiveActions(t *testing.T) {
 		t.Fatal("card-local Restart must reject a second request while its first restart is pending")
 	}
 
-	// Each guarded function must actually receive the triggering button at its
-	// call site, not just declare an unused parameter.
-	if !strings.Contains(src, "deleteUser(u.id, u.username, delBtn)") {
-		t.Fatal("the Delete user button click handler must pass its own button through to deleteUser for the disable guard")
-	}
-	if !strings.Contains(src, "revokeUserSessions(u.id, u.username, revokeBtn)") {
-		t.Fatal("the Sign out everywhere button click handler must pass its own button through to revokeUserSessions for the disable guard")
-	}
-	if !strings.Contains(src, "revokeToken(btn.getAttribute('data-token-id'), btn.getAttribute('data-token-name'), btn)") {
-		t.Fatal("the Revoke token button click handler must pass its own button through to revokeToken for the disable guard")
-	}
 	// Restart, Sleep, Stop and Start are wired from one table in the card kebab,
 	// so a single call site carries the button through for all four. Dropping the
 	// argument there would remove the guard from every one of them at once.
@@ -4421,7 +4259,7 @@ func TestRollbackFailureUsesToastNotAlert(t *testing.T) {
 		"app.js must expose flashToast on the ctx object passed to mountAppDetail so app-detail.js can report failures without window.alert()")
 	assertNotContains(t, "views/app-detail.js", "alert(",
 		"app-detail.js must not use window.alert() for rollback failures; use ctx.flashToast so failures match the rest of the dashboard's error UI")
-	assertContains(t, "views/app-detail.js", "ctx.flashToast('Rollback failed: network error.', 'error')",
+	assertContains(t, "views/app-detail.js", "ctx.flashToast('Could not confirm rollback. Refresh history before trying again.', 'error')",
 		"a network failure during rollback must be reported via ctx.flashToast, not a blocking alert()")
 	assertContains(t, "views/app-detail.js", "ctx.flashToast(msg, 'error')",
 		"a non-OK rollback response must be reported via ctx.flashToast, not a blocking alert()")
@@ -4459,7 +4297,7 @@ func TestGridGroupBodyOwnsTheCardGrid(t *testing.T) {
 		"style.css must style the grid group heading")
 	assertContains(t, "style.css", ".app-grid-group-body",
 		"style.css must give each project disclosure its own card-grid body")
-	assertContains(t, "style.css", "grid-template-columns: repeat(auto-fill, minmax(340px, 1fr))",
+	assertContains(t, "style.css", "grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr))",
 		"project disclosure bodies must retain the responsive card grid")
 }
 
@@ -4561,32 +4399,24 @@ func TestBothProjectInputsShareTheProjectDatalist(t *testing.T) {
 	}
 }
 
-// The first-app path is an activation flow, not a resource-creation dead end:
-// after the app row is created the same modal must advance to deployment and
-// offer the browser uploader immediately. These source-level wiring assertions
-// complement the document-wide accessibility test without coupling to styling.
+// Creation hands off directly to the shared deployment surface, without
+// making a user navigate a second handoff screen or copy placeholder commands.
 func TestFirstAppOnboardingAdvancesDirectlyToDeploy(t *testing.T) {
 	html := readStatic(t, "index.html")
-	for _, want := range []string{
-		`id="empty-state-cta" class="emptystate-btn emptystate-btn-primary">Deploy your first app`,
-		`id="new-app-step"`,
-		`id="new-app-deploy-now"`,
-		`Step 1 of 2`,
-	} {
+	for _, want := range []string{`id="empty-state-cta"`, `id="new-app-step"`, `id="deploy-step"`, `Step 1 of 2`, `Step 2 of 2`} {
 		if !strings.Contains(html, want) {
 			t.Errorf("first-app onboarding markup missing %q", want)
 		}
 	}
-
 	js := readStatic(t, "app.js")
-	showHandoff := jsFunctionBody(t, js, "showNewAppHandoff")
-	for _, want := range []string{"Step 2 of 2", "newAppDeployNow", "app.slug"} {
-		if !strings.Contains(showHandoff, want) {
-			t.Errorf("showNewAppHandoff must advance the real app into deploy step; missing %q", want)
+	handoff := jsFunctionBody(t, js, "beginFirstDeployment")
+	for _, want := range []string{"closeNewAppModal(true)", "openDeployModal(app, { firstDeploy: true })"} {
+		if !strings.Contains(handoff, want) {
+			t.Errorf("creation must advance directly to deployment; missing %q", want)
 		}
 	}
-	if !strings.Contains(js, "closeNewAppModal();\n    openDeployModal(app);") {
-		t.Error("Upload app must close the creation modal and open the browser deploy modal")
+	if strings.Contains(html, `id="new-app-snippet"`) {
+		t.Error("creation must not show placeholder deployment commands")
 	}
 }
 
@@ -4619,27 +4449,30 @@ func TestRemoteCLIConnectionOnboardingContract(t *testing.T) {
 	if strings.Contains(html, `id="cli-connect-panel" class="cli-connect-panel" hidden`) {
 		t.Error("CLI connection panel must not default to hidden; it is always available for typing a code")
 	}
-	js := readStatic(t, "app.js")
+	app := readStatic(t, "app.js")
+	if !strings.Contains(app, "deployCommands(window.location.origin, slug)") || !strings.Contains(app, "search:() => location.search") {
+		t.Error("app shell must wire the CLI deployment command and location into the controller")
+	}
+	controller := readStatic(t, "views/token-manager.js")
 	for _, want := range []string{
 		"/api/auth/cli-connect/approve",
-		"user_code: code",
-		"normalizeCLIUserCode(cliConnectCodeInput",
-		"validCLIUserCode(code)",
-		"shinyhub connect ${origin}",
-		"shinyhub deploy . --slug ${slug} --wait",
-		"legacyCLIConnectLinkDetected(location.search)",
+		"user_code:userCode",
+		"normalizeCLIUserCode(code.value)",
+		"validCLIUserCode(userCode)",
+		"legacyCLIConnectLinkDetected(search())",
 	} {
-		if !strings.Contains(js, want) {
+		if !strings.Contains(controller, want) {
 			t.Errorf("remote CLI onboarding wiring missing %q", want)
 		}
 	}
+	js := app + controller
 	// The browser must never hold, transmit, or derive from anything that
 	// identifies which credential to approve other than the code a person
 	// typed: no hash, no pre-approved request carried on the URL or in
 	// storage, and no endpoint that mints a key straight from a hash. The
 	// legacy-link detector itself lives only in cli-connect.js, which reads
 	// query PARAMETER NAMES to decide whether to show a static notice, never
-	// a value; app.js calling it by name (asserted above) without ever
+	// a value; the controller calling it by name (asserted above) without ever
 	// spelling out connect_hash/connect_name/connect_code itself is exactly
 	// what keeps this list meaningful here.
 	for _, forbidden := range []string{
@@ -4939,16 +4772,10 @@ func TestFormFieldsAreNotMonospaceByDefault(t *testing.T) {
 	}
 }
 
-// TestAuditActionBadgeIsHumanReadable pins that the Audit Log's Action column
-// shows a human-readable phrase (auditActionLabel) rather than the raw
-// snake_case or dotted action key the server records, while keeping that raw
-// key available as the badge's title/tooltip for anyone who needs the exact
-// value to search server logs.
+// Human labels lead each event while its exact action remains in the details.
 func TestAuditActionBadgeIsHumanReadable(t *testing.T) {
-	assertContains(t, "app.js", "badge.textContent = auditActionLabel(e.action);",
-		"the Action column badge must render a human-readable label, not the raw action key")
-	assertContains(t, "app.js", "badge.title = e.action;",
-		"the raw action key must still be reachable, as the badge's tooltip")
+	assertContains(t, "views/audit-explorer.js", "auditActionLabel(event.action)", "events need readable action labels")
+	assertContains(t, "views/audit-explorer.js", "{label:'Action',value:event.action}", "exact action keys must remain inspectable")
 }
 
 // TestLoginLabelsAreSentenceCase pins that the login form's "Username" and

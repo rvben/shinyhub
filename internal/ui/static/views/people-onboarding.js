@@ -83,5 +83,5 @@ export function createInvitationList({ document, api, onUnauthorized, confirm, a
       error.textContent = 'Could not load invitations. Use Refresh to try again.'; error.hidden = false;
     }
   }
-  return { load };
+  return { load, clear() { generation++; section.hidden = true; list.replaceChildren(); error.hidden = true; error.textContent = ''; } };
 }

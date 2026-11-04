@@ -225,7 +225,8 @@ test('a stopped app whose deploy_count increment was lost still offers Start', (
     true,
   );
   assert.equal(a.showStart, true);
-  assert.equal(a.showOpen, true);
+  assert.equal(a.showOpen, false);
+  assert.equal(a.startIsPrimary, true);
   assert.equal(a.deployIsPrimary, false);
   assert.equal(a.showRedeploy, true);
 });

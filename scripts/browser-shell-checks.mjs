@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readPageHeader, assertPageHeader } from './browser-page-header-checks.mjs';
 
 // Compare routes with each other, not with approved pixel values. A deliberate
 // global redesign is allowed; an accidental page-specific redesign is not.
@@ -12,15 +13,15 @@ export async function checkShellConsistency(page, origin, { role, width, theme, 
       const collapsed = await page.locator('body').evaluate(el => el.classList.contains('sidebar-collapsed'));
       if (collapsed !== (mode === 'collapsed')) await page.locator('#sidebar-collapse').click();
     }
-    const primaryRoutes = await page.locator('#primary-nav a:not([hidden])').evaluateAll(links => links.map(a => a.getAttribute('href')));
+    const primaryRoutes = await page.locator('#primary-nav .nav-item:not([hidden])').evaluateAll(links => links.map(a => a.getAttribute('href')));
     assert.ok(primaryRoutes.length, 'The shell check must exercise real navigation');
     const routes = [...new Set(['/', ...primaryRoutes, ...extraRoutes])];
-    let baseline, activeBaseline;
+    let baseline, activeBaseline, headingBaseline;
     for (const path of routes) {
       // Primary destinations use the SPA navigation path. Detail destinations
       // also exercise direct loads, where shell initialization can diverge.
       if (new URL(page.url()).pathname !== path) {
-        const link = page.locator(`#primary-nav a:not([hidden])[href=${JSON.stringify(path)}]`);
+        const link = page.locator(`#primary-nav .nav-item:not([hidden])[href=${JSON.stringify(path)}]`);
         if (await link.count()) {
           if (mobile && await page.locator('#sidebar-toggle').getAttribute('aria-expanded') !== 'true') {
             await page.locator('#sidebar-toggle').click();
@@ -44,8 +45,25 @@ export async function checkShellConsistency(page, origin, { role, width, theme, 
       });
       const actual = await page.evaluate(readShell);
       const label = `${role}/${theme}/${width}/${mode} ${path}`;
+      if (role === 'admin') {
+        const selection = await page.evaluate(() => {
+          const nav = document.querySelector('#primary-nav');
+          const app = [...nav.querySelectorAll('.sidebar-app')].find(link =>
+            location.pathname === link.pathname || location.pathname.startsWith(link.pathname + '/'));
+          return { expected: app?.getAttribute('href'),
+            current: [...nav.querySelectorAll('[aria-current="page"]')].map(link => link.getAttribute('href')),
+            nested: document.querySelector('#sidebar-apps').previousElementSibling?.id === 'tab-apps' };
+        });
+        assert.ok(selection.nested, `${label}: apps must be nested directly beneath Apps`);
+        if (selection.expected) assert.deepEqual(selection.current, [selection.expected], `${label}: only the current app should be selected`);
+      }
+      assertPageHeader(await page.evaluate(readPageHeader), label);
       if (!baseline) baseline = actual.shell;
       assert.deepEqual(actual.shell, baseline, `${label}: shared shell changed between routes`);
+      if (actual.heading && (path === '/' || primaryRoutes.includes(path))) {
+        headingBaseline ||= actual.heading;
+        assert.deepEqual(actual.heading, headingBaseline, `${label}: primary page heading changed between routes`);
+      }
       if (actual.active) {
         activeBaseline ||= actual.active;
         assert.deepEqual(actual.active, activeBaseline, `${label}: active navigation styling changed between routes`);
@@ -60,6 +78,11 @@ export async function checkShellConsistency(page, origin, { role, width, theme, 
     assert.throws(() => assert.deepEqual(after.shell, before.shell), { name: 'AssertionError' },
       'The shell comparison must reject the injected route-specific padding regression');
     await mutation.evaluate(el => el.remove());
+    const contentMutation = await page.addStyleTag({ content: 'body:has(main section:not([hidden])) main { padding-left: 123px !important; }' });
+    const contentAfter = await page.evaluate(readShell);
+    assert.throws(() => assert.deepEqual(contentAfter.shell.contentFrame, before.shell.contentFrame), { name: 'AssertionError' },
+      'The shell comparison must reject route-specific content padding');
+    await contentMutation.evaluate(el => el.remove());
     if (!mobile && mode === 'collapsed') await page.locator('#sidebar-collapse').click();
   }
 }
@@ -84,9 +107,29 @@ export function readShell() {
     if (!el) throw new Error(`Missing shell element: ${selector}`);
     return [selector, { ...read(el, [...layout, ...paint]), rect: geometry(el) }];
   }));
+  // Content height belongs to each page; its frame belongs to the shared shell.
+  // Comparing width, insets and typography catches route-specific workspace CSS
+  // without forcing dashboards and detail views to have identical contents.
+  const main = document.querySelector('main');
+  const mainRect = geometry(main);
+  shell.contentFrame = {
+    ...read(main, ['max-width', 'padding', 'font-family', 'font-size']),
+    x: mainRect.x, width: mainRect.width,
+  };
+  const pageRoot = main.querySelector(':scope > section:not([hidden])');
+  if (pageRoot) {
+    const pageRect = geometry(pageRoot);
+    shell.contentFrame.page = {
+      ...read(pageRoot, ['padding']),
+      x: pageRect.x, width: pageRect.width,
+    };
+  }
+  shell.canvas = read(document.body, ['background-color']);
   // Selected destination may change color, but cannot move any nav row.
-  const links = [...document.querySelectorAll('#primary-nav a:not([hidden])')];
+  const links = [...document.querySelectorAll('#primary-nav .nav-item:not([hidden])')];
   shell.links = links.map(el => ({ href: el.getAttribute('href'), ...read(el, layout), rect: geometry(el) }));
   const active = links.find(el => el.classList.contains('tab-active'));
-  return { shell, active: active ? read(active, paint) : null };
+  const heading = [...main.querySelectorAll('.toolbar h1')].find(el => el.getClientRects().length);
+  return { shell, active: active ? read(active, paint) : null,
+    heading: heading ? read(heading, ['font-family', 'font-size', 'font-weight', 'line-height', 'letter-spacing']) : null };
 }

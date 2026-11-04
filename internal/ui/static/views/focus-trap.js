@@ -11,6 +11,7 @@ const FOCUSABLE_SELECTOR = [
   'input:not([disabled])',
   'select:not([disabled])',
   'textarea:not([disabled])',
+  'summary',
   '[tabindex]:not([tabindex="-1"])',
 ].join(',');
 
@@ -24,6 +25,10 @@ export function focusableElements(container) {
     if (el.getAttribute('aria-hidden') === 'true') return false;
     for (let node = el; node && node !== container.parentElement; node = node.parentElement) {
       if (node.hidden) return false;
+      if (node.tagName === 'DETAILS' && !node.open) {
+        const summary = Array.from(node.children).find(child => child.tagName === 'SUMMARY');
+        if (!summary || !summary.contains(el)) return false;
+      }
       const view = node.ownerDocument && node.ownerDocument.defaultView;
       if (view && typeof view.getComputedStyle === 'function') {
         const style = view.getComputedStyle(node);

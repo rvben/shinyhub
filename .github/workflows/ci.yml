@@ -245,6 +245,36 @@ jobs:
       - name: Verify shared shell across routes and display states
         run: make test-browser-shell-e2e
 
+  test-acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-go
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - uses: astral-sh/setup-uv@v7
+      - name: Install acceptance dependencies
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm --prefix loadtest/render/driver ci --ignore-scripts --no-audit --no-fund
+          cd loadtest/render/driver
+          npx --no-install playwright install --with-deps chromium
+      - name: Real-backend and responsive browser acceptance
+        run: npm run test:acceptance
+      - name: Retain acceptance diagnostics
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: acceptance-diagnostics
+          path: loadtest/results/acceptance-*/
+          if-no-files-found: ignore
+          retention-days: 7
+
   test-browser-agent-charts:
     runs-on: ubuntu-latest
     timeout-minutes: 10

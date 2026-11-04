@@ -118,7 +118,8 @@ func newShareAddCmd() *cobra.Command {
 }
 
 func newShareRmCmd() *cobra.Command {
-	return &cobra.Command{
+	var restart bool
+	cmd := &cobra.Command{
 		Use:     "rm <slug> <source-slug>",
 		Short:   "Remove a shared-data mount from an app",
 		Aliases: []string{"delete"},
@@ -132,6 +133,9 @@ func newShareRmCmd() *cobra.Command {
 			}
 
 			url := cfg.Host + "/api/apps/" + slug + "/shared-data/" + sourceSlug
+			if restart {
+				url += "?restart=true"
+			}
 			req, err := http.NewRequest("DELETE", url, nil)
 			if err != nil {
 				return fmt.Errorf("build request: %w", err)
@@ -149,9 +153,37 @@ func newShareRmCmd() *cobra.Command {
 				return httpError(cfg.Token, "remove shared-data", resp, out)
 			}
 
-			return renderAction(cmd, "unmounted",
-				map[string]any{"slug": slug, "source_slug": sourceSlug},
-				fmt.Sprintf("%s: removed shared-data mount %q", slug, sourceSlug))
+			var result struct {
+				Unmounted    bool   `json:"unmounted"`
+				Restarted    bool   `json:"restarted"`
+				AppStatus    string `json:"app_status"`
+				RestartError string `json:"restart_error"`
+			}
+			if resp.StatusCode != http.StatusNoContent {
+				if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || !result.Unmounted {
+					return fmt.Errorf("unmount could not be confirmed; inspect shared mounts before retrying")
+				}
+			}
+			fields := map[string]any{"slug": slug, "source_slug": sourceSlug, "unmounted": true, "restarted": result.Restarted}
+			message := fmt.Sprintf("%s: removed shared-data mount %q", slug, sourceSlug)
+			if result.AppStatus != "" {
+				fields["app_status"] = result.AppStatus
+			}
+			if result.Restarted {
+				message += "; app restarted"
+			}
+			if result.RestartError != "" {
+				fields["restart_error"] = result.RestartError
+			}
+			if err := renderAction(cmd, "unmounted", fields, message); err != nil {
+				return err
+			}
+			if result.RestartError != "" {
+				return fmt.Errorf("mount removed, but app restart failed: %s; the app is stopped", result.RestartError)
+			}
+			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&restart, "restart", false, "Allow restarting a running app to remove the mount (disconnects active sessions)")
+	return cmd
 }

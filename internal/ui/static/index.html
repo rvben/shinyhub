@@ -108,55 +108,88 @@
           <span class="brand-art" aria-hidden="true"></span>
           <span class="sr-only">ShinyHub</span>
         </a>
+        <button id="sidebar-collapse" type="button" class="sidebar-collapse" aria-label="Collapse sidebar" aria-controls="sidebar" aria-expanded="true" data-tooltip="Collapse sidebar" title="Collapse sidebar">
+          <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="14 7 9 12 14 17"/></svg>
+        </button>
       </div>
+
+      <div id="app-context-nav" hidden></div>
 
       <nav id="primary-nav" aria-label="Sections">
         <a href="/" data-nav class="nav-item" id="tab-overview" aria-label="Overview" data-tooltip="Overview" hidden>
           <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="8" height="18" rx="1.5"/><rect x="14" y="3" width="7" height="8" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
           <span class="nav-label">Overview</span>
         </a>
-        <a href="/apps" data-nav class="nav-item" id="tab-apps" aria-label="Apps" data-tooltip="Apps">
-          <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
-          <span class="nav-label">Apps</span>
-        </a>
-        <a href="/identity" data-nav class="nav-item" id="tab-users" aria-label="Identity" data-tooltip="Identity" hidden>
-          <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3.6 19.2a6 6 0 0 1 10.8 0"/><path d="M16.4 5.4a3 3 0 0 1 0 5.2"/><path d="M18 13.7a6 6 0 0 1 3 4"/></svg>
-          <span class="nav-label">Identity</span>
-        </a>
-        <a href="/workers" data-nav class="nav-item" id="tab-workers" aria-label="Workers" data-tooltip="Workers" hidden>
-          <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="7" rx="1.6"/><rect x="3" y="13" width="18" height="7" rx="1.6"/><line x1="6.6" y1="7.5" x2="6.6" y2="7.5"/><line x1="6.6" y1="16.5" x2="6.6" y2="16.5"/></svg>
-          <span class="nav-label">Workers</span>
-        </a>
-        <a href="/audit-log" data-nav class="nav-item" id="tab-audit" aria-label="Audit Log" data-tooltip="Audit Log" hidden>
-          <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="4.6" cy="7" r="1.1"/><circle cx="4.6" cy="12" r="1.1"/><circle cx="4.6" cy="17" r="1.1"/><line x1="9" y1="7" x2="20" y2="7"/><line x1="9" y1="12" x2="20" y2="12"/><line x1="9" y1="17" x2="20" y2="17"/></svg>
-          <span class="nav-label">Audit Log</span>
-        </a>
-        <a href="/announcements" data-nav class="nav-item" id="tab-announcements" aria-label="Announcements" data-tooltip="Announcements" hidden>
-          <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10h4l11-5v14l-11-5H4z"/><path d="M8 14v6h4l-2-5"/></svg><span class="nav-label">Announcements</span>
-        </a>
+        <div class="sidebar-apps-section">
+          <a href="/apps" data-nav class="nav-item" id="tab-apps" aria-label="Apps" data-tooltip="Apps">
+            <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+            <span class="nav-label">Apps</span>
+          </a>
+          <div id="sidebar-apps" class="sidebar-apps" role="group" aria-label="Applications"></div>
+        </div>
+        <div id="administration-nav" role="group" aria-label="Administration" hidden>
+          <div class="sidebar-section-label" aria-hidden="true">Administration</div>
+          <details class="mobile-disclosure mobile-manage" data-mobile-disclosure data-hide-empty open>
+            <summary>Administration</summary>
+            <div class="mobile-disclosure-content">
+              <a href="/identity" data-nav class="nav-item" id="tab-users" aria-label="Identity" data-tooltip="Identity" hidden>
+                <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3.6 19.2a6 6 0 0 1 10.8 0"/><path d="M16.4 5.4a3 3 0 0 1 0 5.2"/><path d="M18 13.7a6 6 0 0 1 3 4"/></svg>
+                <span class="nav-label">Identity</span>
+              </a>
+              <a href="/workers" data-nav class="nav-item" id="tab-workers" aria-label="Workers" data-tooltip="Workers" hidden>
+                <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="7" rx="1.6"/><rect x="3" y="13" width="18" height="7" rx="1.6"/><line x1="6.6" y1="7.5" x2="6.6" y2="7.5"/><line x1="6.6" y1="16.5" x2="6.6" y2="16.5"/></svg>
+                <span class="nav-label">Workers</span>
+              </a>
+              <a href="/audit-log" data-nav class="nav-item" id="tab-audit" aria-label="Audit Log" data-tooltip="Audit Log" hidden>
+                <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="4.6" cy="7" r="1.1"/><circle cx="4.6" cy="12" r="1.1"/><circle cx="4.6" cy="17" r="1.1"/><line x1="9" y1="7" x2="20" y2="7"/><line x1="9" y1="12" x2="20" y2="12"/><line x1="9" y1="17" x2="20" y2="17"/></svg>
+                <span class="nav-label">Audit Log</span>
+              </a>
+              <a href="/announcements" data-nav class="nav-item" id="tab-announcements" aria-label="Manage announcements" data-tooltip="Manage announcements" hidden>
+                <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10h4l11-5v14l-11-5H4z"/><path d="M8 14v6h4l-2-5"/></svg><span class="nav-label">Announcements</span>
+              </a>
+            </div>
+          </details>
+        </div>
       </nav>
 
-      <nav id="sidebar-apps" class="sidebar-apps" aria-label="Applications"></nav>
-
       <div class="sidebar-footer">
-        <button id="identity-card" type="button" class="identity-card" aria-haspopup="dialog" aria-label="Open your profile" data-tooltip="Profile">
+        <button id="identity-card" type="button" class="identity-card" popovertarget="account-menu" aria-controls="account-menu" aria-expanded="false" data-tooltip="Account menu">
+          <span class="sr-only">Account menu for </span>
           <span id="identity-avatar" class="identity-avatar" aria-hidden="true">?</span>
           <span class="identity-meta">
             <span id="identity-name" class="identity-name">&nbsp;</span>
             <span id="identity-role" class="identity-role"></span>
           </span>
-          <svg class="identity-cog" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19.4 12 15.7 18.4 8.3 18.4 4.6 12 8.3 5.6 15.7 5.6Z"/><circle cx="12" cy="12" r="3.3"/></svg>
+          <svg class="identity-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 14 5-5 5 5"/></svg>
         </button>
-        <!-- About: product and server identity, one click from anywhere. The
-             explicit product name keeps ShinyHub visible after external auth. -->
-        <button id="about-button" type="button" class="sidebar-about" aria-haspopup="dialog" aria-label="About ShinyHub" data-tooltip="About ShinyHub">
-          <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><line x1="12" y1="11" x2="12" y2="16.5"/><line x1="12" y1="7.6" x2="12" y2="7.6"/></svg>
-          <span class="nav-label">About ShinyHub</span>
+        <button id="help-button" type="button" class="sidebar-help" popovertarget="help-menu" aria-controls="help-menu" aria-expanded="false" aria-label="Help" data-tooltip="Help" title="Help">
+          <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 8.5a2.5 2.5 0 0 1 5 0c0 2-2.5 2-2.5 4m0 3.5v.1"/></svg>
         </button>
-        <button id="sidebar-collapse" type="button" class="sidebar-collapse" aria-label="Collapse sidebar" aria-controls="sidebar" aria-expanded="true" data-tooltip="Collapse sidebar">
-          <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="14 7 9 12 14 17"/></svg>
-          <span class="nav-label">Collapse</span>
-        </button>
+        <div id="account-menu" class="sidebar-menu account-menu" popover="auto" role="group" aria-label="Account options">
+          <button id="profile-button" type="button" class="account-menu-profile" aria-haspopup="dialog">
+            <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
+            <span>Your profile</span>
+          </button>
+          <a href="/tokens" data-nav id="account-tokens-link">
+            <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="4"/><path d="m11 11 9 9m-5-5 3-3m-6 0 3-3"/></svg>
+            <span>API tokens</span>
+          </a>
+          <div class="sidebar-menu-divider"></div>
+          <button id="account-logout" type="button">
+            <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 4H4v16h6m5-12 4 4-4 4m-6-4h10"/></svg>
+            <span>Log out</span>
+          </button>
+        </div>
+        <div id="help-menu" class="sidebar-menu" popover="auto" role="group" aria-label="Help options">
+          <a href="https://github.com/rvben/shinyhub#readme" target="_blank" rel="noopener noreferrer">
+            <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5c-3-2-6-2-9-1v15c3-1 6-1 9 1 3-2 6-2 9-1V4c-3-1-6-1-9 1Zm0 0v15"/></svg>
+            <span>Documentation</span>
+          </a>
+          <button id="about-button" type="button" class="sidebar-about" aria-haspopup="dialog" aria-label="About ShinyHub" data-tooltip="About ShinyHub">
+            <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><line x1="12" y1="11" x2="12" y2="16.5"/><line x1="12" y1="7.6" x2="12" y2="7.6"/></svg>
+            <span class="nav-label">About ShinyHub</span>
+          </button>
+        </div>
       </div>
     </aside>
 
@@ -164,10 +197,6 @@
 
     <div class="app-content">
   <main>
-    <div id="deploy-monitor" class="deploy-monitor" hidden>
-      <span id="deploy-monitor-text" role="status"></span>
-      <button type="button" id="deploy-monitor-open" class="env-btn-secondary">View deployment</button>
-    </div>
     <section id="support-session-recovery" class="support-session-recovery" hidden
              role="region" aria-labelledby="support-session-recovery-heading">
       <svg class="support-session-recovery-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -207,7 +236,7 @@
 
     <section id="route-error-view" hidden aria-labelledby="route-error-heading">
       <div class="login-box">
-        <h1 id="route-error-heading" tabindex="-1">Something went wrong</h1>
+        <h1 id="route-error-heading">Something went wrong</h1>
         <p>This page failed to load. The rest of ShinyHub is unaffected.</p>
         <button type="button" id="route-error-reload">Reload</button>
       </div>
@@ -225,14 +254,16 @@
             <span class="sr-only">ShinyHub</span>
           </span>
         </div>
-        <!-- The lockup is the card's visible title; the heading is the view's
-             accessible name (the page has no other heading when signed out). -->
-        <h1 id="login-heading" class="sr-only">Sign in</h1>
+        <h1 id="login-heading">Sign in</h1>
         <form id="login-form" aria-describedby="login-error">
           <label for="login-username" class="login-label">Username</label>
-          <input id="login-username" type="text" autocomplete="username" required>
+          <input id="login-username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required>
           <label for="login-password" class="login-label">Password</label>
-          <input id="login-password" type="password" autocomplete="current-password" required>
+          <div class="password-control">
+            <input id="login-password" type="password" autocomplete="current-password" aria-describedby="login-password-help" required>
+            <button type="button" class="password-visibility" data-password-toggle="login-password" aria-label="Show password" aria-pressed="false">Show</button>
+          </div>
+          <p id="login-password-help" class="login-hint">Forgot your password? Contact your hub administrator.</p>
           <button type="submit">Sign in</button>
         </form>
         <!-- role=alert so a rejected sign-in is announced, not just painted. -->
@@ -250,10 +281,11 @@
 
     <section id="announcements-view" hidden aria-label="Announcements"></section>
     <section id="overview-view" hidden aria-labelledby="overview-heading">
-      <div class="toolbar">
-        <div class="workspace-intro">
+      <div class="toolbar page-header" data-page-header>
           <h1 id="overview-heading">Overview</h1>
-          <p>App health, capacity, and recent changes.</p>
+          <p class="page-description">App health, capacity, and recent changes.</p>
+        <div class="toolbar-actions page-actions">
+          <a href="/apps" data-nav class="ov-btn">View apps</a>
         </div>
       </div>
       <div id="overview-body"></div>
@@ -265,39 +297,49 @@
     </section>
 
     <section id="apps-view" hidden aria-labelledby="apps-heading">
-      <div class="toolbar">
+      <div class="toolbar page-header" data-page-header>
         <h1 id="apps-heading">Apps</h1>
-        <div class="toolbar-actions">
-          <label for="apps-search" class="sr-only">Search apps</label>
-          <input id="apps-search" type="search" class="apps-search" placeholder="Search…" autocomplete="off" aria-label="Filter apps by name or slug">
-          <label for="apps-sort" class="sr-only">Sort apps</label>
-          <select id="apps-sort" class="apps-sort" aria-label="Sort apps">
-            <option value="default">Default order</option>
-            <option value="name">Name A-Z</option>
-            <option value="deploy">Most recent deploy</option>
-            <option value="status">Status</option>
-          </select>
-          <label for="apps-segment" class="sr-only">Filter by fleet management</label>
-          <select id="apps-segment" class="apps-sort" aria-label="Filter apps by fleet management">
-            <option value="all">All apps</option>
-            <option value="fleet">Fleet-managed</option>
-            <option value="unmanaged">Unmanaged</option>
-          </select>
-          <button id="new-app-button" type="button" hidden>+ New app</button>
+        <div class="toolbar-actions page-actions">
           <button id="refresh-button" class="toolbar-btn-quiet" type="button">Refresh</button>
-          <span id="apps-results-status" class="sr-only" role="status" aria-live="polite"></span>
+          <button id="new-app-button" class="btn-primary" type="button" hidden>New app</button>
         </div>
+      </div>
+      <div class="page-filters filter-bar apps-filters" role="search" aria-label="Filter apps">
+        <label for="apps-search" class="sr-only">Search apps</label>
+        <input id="apps-search" type="search" class="apps-search" placeholder="Search apps…" autocomplete="off" aria-label="Filter apps by name or slug">
+        <details class="mobile-disclosure apps-filter-options" data-mobile-disclosure open>
+          <summary>Filters</summary>
+          <div class="mobile-disclosure-content">
+            <label for="apps-sort" class="sr-only">Sort apps</label>
+            <select id="apps-sort" class="apps-sort" aria-label="Sort apps">
+              <option value="default">Default order</option>
+              <option value="name">Name A-Z</option>
+              <option value="deploy">Most recent deploy</option>
+              <option value="status">Status</option>
+            </select>
+            <label for="apps-segment" class="sr-only">Filter by fleet management</label>
+            <select id="apps-segment" class="apps-sort" aria-label="Filter apps by fleet management">
+              <option value="all">All apps</option>
+              <option value="fleet">Fleet-managed</option>
+              <option value="unmanaged">Unmanaged</option>
+            </select>
+          </div>
+        </details>
+      </div>
+      <div class="apps-results">
+        <span id="apps-results-status" role="status" aria-live="polite"></span>
+        <button id="apps-clear-filters" type="button" class="linklike" hidden>Clear filters</button>
       </div>
       <p id="app-error" class="error" role="alert" hidden></p>
       <div id="fleet-health" class="fleet-health" hidden role="status" aria-label="Fleet health"></div>
       <div id="app-grid" class="app-grid"></div>
       <div id="empty-state" class="emptystate-card dashboard-emptystate" hidden role="region"
            aria-labelledby="empty-state-heading">
-        <p class="emptystate-eyebrow"><span class="sparkle" aria-hidden="true"></span><span id="empty-state-eyebrow">Nothing here yet</span></p>
         <h2 id="empty-state-heading"></h2>
         <p class="lead" id="empty-state-lead"></p>
         <div class="emptystate-actions" id="empty-state-actions" hidden>
           <button type="button" id="empty-state-cta" class="emptystate-btn emptystate-btn-primary">Deploy your first app</button>
+          <button type="button" id="empty-state-clear" hidden>Clear filters</button>
         </div>
       </div>
     </section>
@@ -308,8 +350,8 @@
         <span aria-hidden="true">›</span>
         <span id="project-detail-breadcrumb" aria-current="page">Project</span>
       </nav>
-      <div class="project-detail-header">
-        <div class="project-detail-identity">
+      <div class="project-detail-header page-header" data-page-header>
+        <div class="project-detail-identity" data-page-identity>
           <div id="project-detail-icon" class="project-detail-avatar" aria-hidden="true"></div>
           <div class="project-detail-copy">
             <div class="project-detail-title-row">
@@ -320,10 +362,15 @@
             <p id="project-detail-description" class="project-detail-description"></p>
           </div>
         </div>
-        <div class="project-detail-actions">
-          <button id="project-detail-edit" type="button" class="toolbar-btn-quiet" hidden>Edit project</button>
-          <button id="project-detail-add" type="button" class="btn-primary" hidden>Add app</button>
-          <button id="project-detail-refresh" type="button" class="toolbar-btn-quiet">Refresh</button>
+        <div class="project-detail-actions page-actions">
+          <details class="mobile-disclosure page-secondary" data-mobile-disclosure open>
+            <summary>More<span class="sr-only"> page actions</span></summary>
+            <div class="page-secondary-panel">
+              <button id="project-detail-refresh" type="button" class="toolbar-btn-quiet">Refresh</button>
+              <button id="project-detail-edit" type="button" class="toolbar-btn-quiet" hidden>Edit project</button>
+              <button id="project-detail-add" type="button" class="btn-primary" hidden>Add app</button>
+            </div>
+          </details>
         </div>
       </div>
       <div class="project-detail-section-heading">
@@ -345,11 +392,11 @@
     </section>
 
     <section id="users-view" hidden aria-labelledby="identity-heading">
-      <div class="toolbar">
-        <div><h1 id="identity-heading">Identity</h1><p class="identity-page-intro">Manage people, their roles, and service accounts for automation.</p></div>
-        <div class="toolbar-actions">
-          <button id="new-user-button" class="btn-primary" type="button" hidden>Invite person</button>
+      <div class="toolbar page-header" data-page-header>
+        <h1 id="identity-heading">Identity</h1><p class="identity-page-intro">Manage people, their roles, and service accounts for automation.</p>
+        <div class="toolbar-actions page-actions">
           <button id="users-refresh" class="toolbar-btn-quiet" type="button">Refresh</button>
+          <button id="new-user-button" class="btn-primary" type="button" hidden>Invite person</button>
         </div>
       </div>
       <div class="identity-tabs" role="tablist" aria-label="Identity type">
@@ -357,18 +404,23 @@
         <button id="identity-services-tab" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="identity-services-panel">Service accounts</button>
       </div>
       <section id="identity-people-panel" role="tabpanel" aria-labelledby="identity-people-tab">
-        <div class="people-filters">
+        <div class="people-filters filter-bar" role="search" aria-label="Filter people">
           <label for="people-search">Find a person<input id="people-search" type="search" placeholder="Search by username or name" autocomplete="off"></label>
           <label for="people-role-filter">Role<select id="people-role-filter"><option value="">All roles</option><option value="viewer">Viewer</option><option value="developer">Developer</option><option value="operator">Operator</option><option value="admin">Admin</option></select></label>
+          <button id="people-clear" class="ov-btn" type="button" hidden>Clear filters</button>
           <span id="people-count" role="status"></span>
         </div>
         <p id="users-error" class="error" role="alert" hidden></p>
-        <table id="users-table">
-          <thead><tr><th scope="col">Person</th><th scope="col">Role</th><th scope="col">Created</th><th scope="col" class="users-actions-col">Actions</th></tr></thead>
+        <div id="people-loading" class="workers-loading" role="status" hidden><span class="sr-only">Loading people…</span><div aria-hidden="true"><span></span><span></span><span></span></div></div>
+        <div id="people-no-matches" class="people-empty" hidden><h2>No matching people</h2><p>Try another name or clear the filters to see everyone.</p><button id="people-no-matches-clear" class="ov-btn" type="button">Clear filters</button></div>
+        <div id="people-empty" class="people-empty" hidden><h2>No people yet</h2><p>Invite someone or share your sign-in link to get started.</p></div>
+        <p id="people-status" class="sr-only" role="status" aria-live="polite"></p>
+        <table id="users-table" aria-label="People and roles" hidden>
+          <thead><tr><th scope="col">Person</th><th scope="col">Role</th><th scope="col">Joined</th><th scope="col" class="users-actions-col">Actions</th></tr></thead>
           <tbody id="users-body"></tbody>
         </table>
         <section id="people-invitations" class="people-invitations" hidden aria-labelledby="people-invitations-heading">
-          <h2 id="people-invitations-heading">Pending invitations</h2>
+          <h2 id="people-invitations-heading" tabindex="-1">Pending invitations</h2>
           <p class="profile-hint">Accounts appear in People after the invitation is accepted.</p>
           <p id="people-invitations-error" class="error" role="alert" hidden></p>
           <div id="people-invitations-list"></div>
@@ -384,8 +436,8 @@
       </section>
       <section id="identity-services-panel" role="tabpanel" aria-labelledby="identity-services-tab" hidden>
         <div class="service-account-explainer">
-          <div><h2>Deployment automation, not another admin</h2></div>
-          <div class="service-account-explainer-copy"><p>Use a separate credential for each team or pipeline. Every credential has its own role, app scope, expiry, and audit trail. Human admins can still deploy with their own accounts.</p><a href="/audit-log" data-nav>Review automation activity in Audit</a></div>
+          <div><h2>Deployment credentials</h2></div>
+          <div class="service-account-explainer-copy"><p>Give each team or pipeline its own credential. Set its role, apps, and expiry, and review its use in the audit log.</p><a href="/audit-log" data-nav>Review automation activity in Audit</a></div>
         </div>
         <p id="service-accounts-error" class="error" role="alert" hidden></p>
         <p id="service-accounts-status" class="sr-only" role="status"></p>
@@ -394,133 +446,180 @@
     </section>
 
     <section id="tokens-view" hidden aria-labelledby="tokens-heading">
-      <div class="toolbar">
+      <div class="toolbar page-header" data-page-header>
         <h1 id="tokens-heading">API tokens</h1>
-        <div class="toolbar-actions">
-          <button id="new-token-button" type="button" class="btn-primary">+ New token</button>
-          <button id="tokens-refresh" class="toolbar-btn-quiet" type="button">Refresh</button>
+        <p class="page-description">Manage credentials for your CLI and API.</p>
+        <div class="toolbar-actions page-actions">
+          <details class="mobile-disclosure page-secondary" data-mobile-disclosure open>
+            <summary>More<span class="sr-only"> page actions</span></summary>
+            <div class="page-secondary-panel">
+              <button id="tokens-refresh" class="toolbar-btn-quiet" type="button">Refresh</button>
+            </div>
+          </details>
+          <button id="new-token-button" type="button" class="btn-primary">New token</button>
         </div>
       </div>
-      <section id="cli-connect-panel" class="cli-connect-panel" aria-labelledby="cli-connect-heading">
-        <div class="cli-connect-icon" aria-hidden="true">›_</div>
+      <div class="tokens-section-head"><h2 class="list-heading">Personal tokens</h2><span id="tokens-count" class="list-status" hidden></span></div>
+      <p class="tokens-intro">Tokens use your account’s access. You can see each token’s value only when you create it.</p>
+      <p id="tokens-status" class="list-status" role="status" aria-atomic="true" hidden></p>
+      <div id="tokens-loading" class="inventory-loading" role="status" hidden><span class="sr-only">Loading tokens…</span><div aria-hidden="true"><span></span><span></span><span></span></div></div>
+      <p id="tokens-error" class="error" role="alert" hidden></p>
+      <div id="tokens-list" class="tokens-list"></div>
+      <details id="token-usage" class="tokens-usage">
+        <summary>Using a token<span>Examples for the CLI and API</span></summary>
+        <div class="token-usage-content">
+          <p>Replace <code>&lt;token&gt;</code> with the value you saved.</p>
+          <div class="token-usage-example">
+            <div class="token-example-head"><h3>CLI</h3><button id="token-usage-copy" type="button" class="btn-row" aria-label="Copy CLI command">Copy command</button></div>
+            <pre tabindex="0" role="region" aria-label="CLI token example"><code id="token-usage-command"></code></pre>
+            <p id="token-usage-status" class="token-copy-status" role="status" aria-live="polite" aria-atomic="true" hidden></p>
+          </div>
+          <div class="token-usage-example">
+            <div class="token-example-head"><h3>API requests</h3><button id="token-api-copy" type="button" class="btn-row" aria-label="Copy API authorization header">Copy header</button></div>
+            <pre tabindex="0" role="region" aria-label="API authorization header"><code id="token-api-header">Authorization: token &lt;token&gt;</code></pre>
+            <p id="token-api-status" class="token-copy-status" role="status" aria-live="polite" aria-atomic="true" hidden></p>
+          </div>
+          <p class="token-usage-note">Store tokens in your secret manager.</p>
+        </div>
+      </details>
+      <details id="cli-connect-panel" class="cli-connect-panel">
+        <summary id="cli-connect-heading">Connect a CLI<span>Use a verification code from your terminal</span></summary>
         <div class="cli-connect-content">
-          <h2 id="cli-connect-heading">Connect a CLI</h2>
           <p>Run <code>shinyhub connect</code> in a terminal, then type the code it prints below. Approving creates a personal token that expires in 90 days; the credential itself stays private in your terminal.</p>
           <p id="cli-connect-legacy-notice" class="cli-connect-legacy-notice" role="status" hidden>This link came from an older shinyhub CLI; upgrade it and run <code>shinyhub connect</code> again.</p>
-          <div class="cli-connect-form">
+          <form id="cli-connect-form" class="cli-connect-form">
             <label for="cli-connect-code-input">Verification code</label>
-            <input id="cli-connect-code-input" type="text" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="ABCD-1234" maxlength="9">
-            <button id="cli-connect-approve" type="button" class="btn-primary">Connect CLI</button>
-          </div>
+            <input id="cli-connect-code-input" type="text" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="ABCD-1234" maxlength="32" aria-describedby="cli-connect-hint cli-connect-error">
+            <button id="cli-connect-approve" type="submit" class="btn-primary">Connect CLI</button>
+          </form>
+          <p id="cli-connect-hint" class="hint">Enter a code only from a connection you started.</p>
           <p id="cli-connect-error" class="error" role="alert" hidden></p>
           <p id="cli-connect-success" class="cli-connect-success" role="status" hidden></p>
         </div>
-      </section>
-      <h2 class="list-heading">Personal tokens</h2>
-      <p class="tokens-intro">Personal tokens for the CLI and API. Use with <code>Authorization: token &lt;value&gt;</code> or <code>SHINYHUB_TOKEN</code>. A token is shown once at creation, so store it somewhere safe.</p>
-      <p id="tokens-loading" class="list-status" role="status" hidden>Loading tokens…</p>
-      <p id="tokens-error" class="error" role="alert" hidden></p>
-      <div id="tokens-list" class="tokens-list"></div>
+      </details>
     </section>
 
     <section id="workers-view" hidden aria-labelledby="workers-heading">
-      <div class="toolbar">
-        <div><h1 id="workers-heading">Workers</h1><p class="page-description">Worker availability and the last heartbeat received by this hub.</p></div>
-        <div class="toolbar-actions">
+      <div class="toolbar page-header" data-page-header>
+        <h1 id="workers-heading">Workers</h1><p class="page-description">Status and connectivity of remote workers.</p>
+        <div class="toolbar-actions page-actions">
           <button id="workers-refresh" class="toolbar-btn-quiet" type="button">Refresh</button>
         </div>
       </div>
-      <p id="workers-loading" class="list-status" role="status" hidden>Loading workers…</p>
-      <p id="workers-summary" class="list-status" role="status" hidden></p>
+      <div class="workers-context">
+        <div id="workers-summary" role="group" aria-label="Worker status summary" hidden></div>
+        <p id="workers-updated" class="workers-updated"></p>
+      </div>
       <p id="workers-error" class="error" role="alert" hidden></p>
-      <p id="workers-empty" class="env-empty" hidden>No workers have joined. Workers appear here when worker hosting is enabled and a <code>shinyhub worker</code> node joins over mTLS.</p>
-      <table id="workers-table" tabindex="0" aria-label="Registered workers" hidden>
-        <thead>
-          <tr>
-            <th scope="col">Node</th>
-            <th scope="col">Tier</th>
-            <th scope="col">Status</th>
-            <th scope="col">Version</th>
-            <th scope="col">Last heartbeat</th>
-          </tr>
-        </thead>
+      <div id="workers-loading" class="workers-loading" role="status" hidden>
+        <span class="sr-only">Loading workers…</span>
+        <div aria-hidden="true"><span></span><span></span><span></span></div>
+      </div>
+      <div id="workers-filters" class="workers-filters filter-bar" role="search" aria-label="Filter workers" hidden>
+        <label class="sr-only" for="workers-search">Search workers by name, node ID, address, tier, or version</label>
+        <input id="workers-search" class="apps-search" type="search" placeholder="Search name, node ID or address" autocomplete="off">
+        <label class="sr-only" for="workers-status-filter">Filter workers by status</label>
+        <select id="workers-status-filter" class="apps-sort">
+          <option value="">All statuses</option>
+          <option value="up">Online</option><option value="down">Offline</option>
+          <option value="joining">Joining</option><option value="revoked">Revoked</option>
+          <option value="unknown">Unknown</option>
+        </select>
+        <button id="workers-reset" class="toolbar-btn-quiet" type="button" hidden>Clear filters</button>
+        <p id="workers-results"></p>
+      </div>
+      <div id="workers-empty" class="workers-empty" hidden>
+        <h2>No remote workers yet</h2>
+        <p>Apps can run on this hub without remote workers. Join a worker to run apps on another host.</p>
+        <a href="https://shinyhub.dev/recipes/remote-worker/" target="_blank" rel="noopener noreferrer" class="ov-btn">Set up a remote worker</a>
+      </div>
+      <div id="workers-no-matches" class="workers-empty" hidden>
+        <h2>No matching workers</h2><p>Try another search or clear the filters to see all workers.</p>
+        <button id="workers-clear" type="button" class="ov-btn">Clear filters</button>
+      </div>
+      <table id="workers-table" aria-label="Registered workers" hidden>
+        <thead><tr>
+          <th scope="col">Worker</th><th scope="col">Status</th><th scope="col"><abbr title="Deployment tier used to place app replicas">Tier</abbr></th>
+          <th scope="col">Version</th><th scope="col">Last heartbeat</th>
+        </tr></thead>
         <tbody id="workers-body"></tbody>
       </table>
+      <p id="workers-note" class="workers-note" hidden>Status is reported by the hub. Refreshes every 10 seconds while this page is visible.</p>
+      <p id="workers-live" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
     </section>
 
-    <section id="audit-view" hidden>
-      <div class="toolbar">
-        <h1>Audit Log</h1>
-        <div class="toolbar-actions">
-          <label for="audit-action-filter" class="sr-only">Filter by action</label>
-          <select id="audit-action-filter" class="apps-sort" aria-label="Filter audit events by action">
-            <option value="">All actions</option>
-          </select>
-          <div class="audit-date-range">
-            <label for="audit-since">From</label>
-            <input type="date" id="audit-since" aria-label="Show audit events on or after this date (UTC)">
-            <label for="audit-until">to</label>
-            <input type="date" id="audit-until" aria-label="Show audit events on or before this date (UTC)">
-            <button type="button" id="audit-range-clear" class="linklike" hidden>Clear dates</button>
+    <section id="audit-view" hidden aria-labelledby="audit-heading">
+      <div class="toolbar page-header" data-page-header>
+        <h1 id="audit-heading">Audit Log</h1><p class="page-description">Who changed what, and when.</p>
+        <div class="toolbar-actions page-actions"><button id="audit-refresh" class="toolbar-btn-quiet" type="button">Refresh</button></div>
+      </div>
+      <form id="audit-filters" class="audit-filters filter-bar" aria-label="Filter audit events">
+        <label class="audit-search-field" for="audit-search">Search events<input id="audit-search" type="search" placeholder="Actor, resource or action" maxlength="200" autocomplete="off"></label>
+        <details class="mobile-disclosure audit-filter-options" data-mobile-disclosure open>
+          <summary>Action and dates</summary>
+          <div class="mobile-disclosure-content">
+        <label class="audit-action-field" for="audit-action-filter">Action<select id="audit-action-filter" aria-label="Filter audit events by action"><option value="">All actions</option></select></label>
+        <div class="audit-date-range">
+          <label for="audit-since">From (UTC)<input type="date" id="audit-since" aria-label="Show audit events on or after this date (UTC)"></label>
+          <label for="audit-until">Through (UTC)<input type="date" id="audit-until" aria-label="Show audit events on or before this date (UTC)"></label>
+        </div>
           </div>
+        </details>
+        <button id="audit-apply" class="ov-btn" type="submit">Apply filters</button>
+        <button type="button" id="audit-range-clear" class="ov-btn" hidden>Clear dates</button>
+      </form>
+      <p id="audit-validation" class="error" role="alert" hidden></p>
+      <div id="audit-context" class="audit-context" hidden><p id="audit-context-copy"></p><a href="/audit-log" data-nav>View all events</a></div>
+      <div class="audit-results-bar">
+        <p id="audit-range" role="status" aria-live="polite"></p>
+        <div id="audit-pagination" class="audit-pagination" aria-label="Audit pages" hidden>
+          <button id="audit-prev" class="ov-btn" type="button">Previous</button><button id="audit-next" class="ov-btn" type="button">Next</button>
         </div>
       </div>
-      <div id="audit-context" class="audit-context" hidden>
-        <p id="audit-context-copy"></p>
-        <a href="/audit-log" data-nav>View all events</a>
-      </div>
-      <p id="audit-loading" class="env-empty" role="status" hidden>Loading audit events…</p>
-      <p id="audit-error" class="error" role="alert" hidden></p>
-      <p id="audit-empty" class="env-empty" hidden>No audit events recorded yet. Every mutating action will appear here.</p>
-      <table id="audit-table" tabindex="0" aria-label="Audit events">
-        <thead>
-          <tr>
-            <th scope="col">Time</th>
-            <th scope="col">User</th>
-            <th scope="col">Action</th>
-            <th scope="col">Resource</th>
-            <th scope="col">Details</th>
-            <th scope="col">IP</th>
-          </tr>
-        </thead>
+      <p id="audit-loading" class="list-status" role="status" hidden>Loading audit events…</p>
+      <div id="audit-failure" class="audit-failure" hidden><p id="audit-error" class="error" role="alert" hidden></p><button id="audit-retry" class="ov-btn" type="button">Try again</button></div>
+      <div id="audit-empty" class="audit-empty" hidden><h2 id="audit-empty-heading">No events yet</h2><p id="audit-empty-copy"></p><a id="audit-empty-clear" class="ov-btn" href="/audit-log" data-nav hidden>View all events</a></div>
+      <table id="audit-table" aria-label="Audit events" hidden>
+        <thead><tr><th scope="col">Event</th><th scope="col">Actor</th><th scope="col">Time (UTC)</th><th scope="col"><span class="sr-only">Inspect event</span></th></tr></thead>
         <tbody id="audit-body"></tbody>
       </table>
-      <div id="audit-pagination" class="pagination">
-        <button id="audit-prev" type="button">← Prev</button>
-        <span id="audit-range"></span>
-        <button id="audit-next" type="button">Next →</button>
+      <div id="audit-pagination-bottom" class="audit-pagination audit-pagination-bottom" aria-label="Audit pages at end of results" hidden>
+        <button id="audit-prev-bottom" class="ov-btn" type="button">Previous</button><a href="#audit-heading">Back to top</a><button id="audit-next-bottom" class="ov-btn" type="button">Next</button>
       </div>
+      <p id="audit-announcement" class="sr-only" role="status" aria-live="polite"></p>
     </section>
 
     <section id="app-detail-view" hidden aria-labelledby="app-detail-heading">
-      <nav class="breadcrumb" aria-label="Breadcrumb">
-        <a href="/apps" data-nav>
-          <svg aria-hidden="true" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M10.5 3.5 6 8l4.5 4.5"/></svg>
-          Apps
-        </a>
-      </nav>
       <header class="app-detail-header">
-        <div class="app-detail-bar">
-          <div class="app-detail-identity">
-            <span id="app-detail-icon" class="app-detail-icon-slot" aria-hidden="true"></span>
+        <div class="app-detail-bar page-header" data-page-header>
+          <div class="app-detail-identity" data-page-identity>
             <div class="app-detail-name">
-              <h1 id="app-detail-heading" class="app-detail-title"></h1>
+              <div class="app-detail-title-row">
+                <span class="app-detail-icon-control">
+                  <span id="app-detail-icon" class="app-detail-icon-slot" aria-hidden="true"></span>
+                  <button id="app-detail-icon-edit" class="app-detail-icon-edit" type="button" aria-label="Edit app icon" title="Edit app icon" hidden>
+                    <svg class="app-detail-icon-edit-mark" aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9.5 3.5 3 3M3 10l7.5-7.5a1.4 1.4 0 0 1 2 2L5 12l-3 1z"/></svg>
+                  </button>
+                </span>
+                <h1 id="app-detail-heading" class="app-detail-title"></h1>
+              </div>
+              <p id="app-detail-slug" class="app-detail-slug"></p>
               <p id="app-detail-description" class="app-detail-description" hidden></p>
             </div>
             <span id="app-detail-status" class="status-pill" role="status" aria-live="polite"></span>
             <span id="app-detail-fleet-badge"></span>
           </div>
-          <div class="app-detail-actions">
+          <div class="app-detail-actions page-actions">
             <a id="app-detail-open" href="" target="_blank" rel="noopener noreferrer" hidden>
               Open app
               <svg aria-hidden="true" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h7v7M13 3 5 11"/><path d="M11 9v3a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h3"/></svg>
             </a>
-            <button id="app-detail-deploy" type="button" class="btn-primary" aria-label="Deploy a new app bundle">Deploy</button>
             <div class="kebab-menu">
               <button id="app-detail-kebab" type="button" aria-label="More actions" aria-haspopup="menu" aria-expanded="false">
                 <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><circle cx="3" cy="8" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="13" cy="8" r="1.25"/></svg>
               </button>
               <ul id="app-detail-kebab-menu" class="kebab-list" role="menu" hidden>
+                <li role="none" hidden><button id="app-detail-deploy" type="button" role="menuitem">Deploy via CLI</button></li>
                 <li role="none"><button id="app-detail-restart" type="button" role="menuitem">Restart</button></li>
                 <li role="none"><button id="app-detail-sleep" type="button" role="menuitem">Sleep</button></li>
                 <li role="none"><button id="app-detail-stop" type="button" role="menuitem">Stop</button></li>
@@ -529,101 +628,89 @@
             </div>
           </div>
         </div>
-        <div class="app-detail-meta">
-          <span id="app-detail-slug" class="meta-chip"></span>
-        </div>
-        <div id="app-detail-release" class="app-detail-release" hidden></div>
-        <div class="app-detail-capacity" data-metrics-state="loading">
-          <div class="capacity-freshness">
-            <p id="app-detail-metrics-status" class="app-detail-metrics-status" role="status"><span id="app-detail-metrics-message">Loading live metrics…</span> <button id="app-detail-metrics-retry" type="button" class="ov-btn" hidden>Retry metrics</button></p>
-            <span id="app-detail-metrics-updated" hidden></span>
+        <div class="app-detail-summary">
+          <div class="overview-health" id="overview-health" role="status" aria-live="polite" hidden>
+            <div class="overview-health-copy"><strong id="overview-health-title">Checking app health…</strong><p id="overview-health-detail"></p>
+              <pre id="overview-health-error" role="region" tabindex="0" aria-label="App failure details" hidden></pre>
+            </div>
+            <div class="overview-health-side"><span id="overview-health-freshness" class="sr-only"></span><a id="overview-health-action" href="" hidden>Review app</a><button id="overview-health-recover" class="btn-primary" type="button" hidden>Restart</button></div>
           </div>
-          <dl class="app-detail-stats" aria-label="Current app metrics">
-            <div class="stat stat-cpu">
-              <dt class="stat-label">CPU</dt>
-              <dd class="stat-value" id="app-detail-cpu" tabindex="-1">—</dd>
-              <dd class="cpu-meter" id="app-detail-cpu-meter" hidden><meter aria-label="CPU capacity"></meter></dd>
-              <dd class="cpu-context" id="app-detail-cpu-context"></dd>
-            </div>
-            <div class="stat stat-replicas">
-              <dt class="stat-label" id="app-detail-capacity-label">Replicas</dt>
-              <dd class="stat-value" id="app-detail-replicas">—</dd>
-              <dd class="replicas-explain">running</dd>
-              <dd class="replica-desired" id="app-detail-replica-desired" hidden></dd>
-            </div>
-            <div class="stat stat-memory">
-              <dt class="stat-label">Memory</dt>
-              <dd class="stat-value" id="app-detail-ram">—</dd>
-            </div>
-            <div class="stat stat-sessions">
-              <dt class="stat-label">Sessions</dt>
-              <dd class="stat-value" id="app-detail-sessions">—</dd>
-            </div>
-          </dl>
-          <details id="app-detail-capacity-details" class="capacity-details" hidden>
-            <summary><span id="app-detail-capacity-details-label">Inspect replica CPU and autoscaling</span> <span id="app-detail-capacity-signal"></span></summary>
-            <div class="capacity-diagnostics">
-                <div id="app-detail-cpu-heat" class="cpu-heat" hidden>
-                  <div class="cpu-heat-label" title="Each value is measured against one core or its enforced CPU quota. A one-core reference is not a limit."><span class="cpu-heat-title">Replica CPU</span> <span class="cpu-heat-unit">per-core or quota</span></div>
-                  <p class="cpu-heat-guide" id="replica-cpu-help">Select a process to inspect it. Use arrow keys to move between processes. Percentages use one core or the enforced quota.</p>
-                  <div class="cpu-heat-cells" role="group" aria-label="CPU use by running replica" aria-describedby="replica-cpu-help"></div>
-                  <div class="cpu-heat-footer">
-                    <span class="cpu-heat-warning" role="status" hidden></span>
-                    <span class="cpu-heat-state" role="status" hidden></span>
-                  </div>
-                  <p class="cpu-heat-inspector" aria-live="off" hidden></p>
-                </div>
-              <section id="app-detail-autoscale-visual" class="autoscale-visual" aria-label="Autoscale capacity" hidden>
-                <p class="autoscale-range-heading"></p>
-                <div class="autoscale-range-track" role="img" aria-label="Autoscale replica range"><span class="autoscale-range-segments" aria-hidden="true"></span><span class="autoscale-range-fill"></span><span class="autoscale-range-marker"></span></div>
-                <div class="autoscale-range-labels"><span class="autoscale-min"></span><span class="autoscale-max"></span></div>
-                <div class="autoscale-session">
-                  <div class="autoscale-session-head"><strong class="autoscale-next"></strong><span class="autoscale-session-now"></span></div>
-                  <div class="autoscale-load-track" role="img" aria-label="Sessions toward next replica" hidden><span class="autoscale-load-fill"></span></div>
-                  <div class="autoscale-load-labels"><span class="autoscale-band-start"></span><span class="autoscale-session-target"></span></div>
-                  <span class="autoscale-session-state"></span>
-                </div>
-              </section>
-            </div>
-          </details>
+          <div id="app-detail-release" class="app-detail-release" hidden></div>
         </div>
       </header>
-      <nav class="settings-tabs" role="tablist" aria-label="App sections">
-        <a href="" data-nav class="settings-tab" role="tab" data-tab="overview"      id="detail-tab-overview"      aria-controls="detail-overview-panel"      aria-selected="true"  >Overview</a>
-        <a href="" data-nav class="settings-tab" role="tab" data-tab="usage"         id="detail-tab-usage"         aria-controls="detail-usage-panel"         aria-selected="false" >Usage</a>
-        <a href="" data-nav class="settings-tab" role="tab" data-tab="logs"          id="detail-tab-logs"          aria-controls="detail-logs-panel"          aria-selected="false" >Logs</a>
-        <a href="" data-nav class="settings-tab" role="tab" data-tab="traces"        id="detail-tab-traces"        aria-controls="detail-traces-panel"        aria-selected="false" >Traces</a>
-        <a href="" data-nav class="settings-tab" role="tab" data-tab="deployments"   id="detail-tab-deployments"   aria-controls="detail-deployments-panel"   aria-selected="false" >Deployments</a>
-        <a href="" data-nav class="settings-tab" role="tab" data-tab="schedules"     id="detail-tab-schedules"     aria-controls="detail-schedules-panel"     aria-selected="false" >Schedules</a>
-        <a href="" data-nav class="settings-tab" role="tab" data-tab="configuration" id="detail-tab-configuration" aria-controls="detail-configuration-panel" aria-selected="false" >Configuration</a>
-        <a href="" data-nav class="settings-tab" role="tab" data-tab="data"          id="detail-tab-data"          aria-controls="detail-data-panel"          aria-selected="false" >Data</a>
-        <a href="" data-nav class="settings-tab" role="tab" data-tab="access"        id="detail-tab-access"        aria-controls="detail-access-panel"        aria-selected="false" >Access</a>
-      </nav>
-      <label class="app-section-picker" for="app-section-select">App section
-        <select id="app-section-select" aria-label="App section">
-          <option value="overview">Overview</option>
-          <option value="usage">Usage</option>
-          <option value="logs">Logs</option>
-          <option value="traces">Traces</option>
-          <option value="deployments">Deployments</option>
-          <option value="schedules">Schedules</option>
-          <option value="configuration">Configuration</option>
-          <option value="data">Data</option>
-          <option value="access">Access</option>
-        </select>
-      </label>
+      <div id="app-overview-heading" class="app-tab-heading app-overview-heading" hidden>
+        <div><h2>Overview</h2><p>Live health, resource use, and recent activity.</p></div>
+        <button type="button" id="overview-refresh" class="env-btn-secondary">Refresh</button>
+      </div>
+      <p id="overview-refresh-status" class="sr-only" role="status" hidden></p>
+        <div class="app-technical-summary">
+            <div class="app-detail-capacity" data-metrics-state="loading">
+              <div class="capacity-freshness">
+                <p id="app-detail-metrics-status" class="app-detail-metrics-status" role="status"><span id="app-detail-metrics-message">Loading live metrics…</span> <button id="app-detail-metrics-retry" type="button" class="ov-btn" hidden>Retry metrics</button></p>
+                <span id="app-detail-metrics-updated" hidden></span>
+              </div>
+              <dl class="app-detail-stats" aria-label="Current app metrics">
+                <div class="stat stat-cpu">
+                  <dt class="stat-label">CPU</dt>
+                  <dd class="stat-value" id="app-detail-cpu" tabindex="-1">—</dd>
+                  <dd class="cpu-meter" id="app-detail-cpu-meter" hidden><meter aria-label="CPU capacity"></meter></dd>
+                  <dd class="cpu-context" id="app-detail-cpu-context"></dd>
+                </div>
+                <div class="stat stat-replicas">
+                  <dt class="stat-label" id="app-detail-capacity-label">Replicas</dt>
+                  <dd class="stat-value" id="app-detail-replicas">—</dd>
+                  <dd class="replicas-explain">running</dd>
+                  <dd class="replica-desired" id="app-detail-replica-desired" hidden></dd>
+                </div>
+                <div class="stat stat-memory">
+                  <dt class="stat-label">Memory</dt>
+                  <dd class="stat-value" id="app-detail-ram">—</dd>
+                </div>
+                <div class="stat stat-sessions">
+                  <dt class="stat-label">Sessions</dt>
+                  <dd class="stat-value" id="app-detail-sessions">—</dd>
+                </div>
+              </dl>
+              <details id="app-detail-capacity-details" class="capacity-details" hidden>
+                <summary><span id="app-detail-capacity-details-label">Inspect replica CPU and autoscaling</span> <span id="app-detail-capacity-signal"></span></summary>
+                <div class="capacity-diagnostics">
+                    <div id="app-detail-cpu-heat" class="cpu-heat" hidden>
+                      <div class="cpu-heat-label" title="Each value is measured against one core or its enforced CPU quota. A one-core reference is not a limit."><span class="cpu-heat-title">Replica CPU</span> <span class="cpu-heat-unit">per-core or quota</span></div>
+                      <p class="cpu-heat-guide" id="replica-cpu-help">Select a process to inspect it. Use arrow keys to move between processes. Percentages use one core or the enforced quota.</p>
+                      <div class="cpu-heat-cells" role="group" aria-label="CPU use by running replica" aria-describedby="replica-cpu-help"></div>
+                      <div class="cpu-heat-footer">
+                        <span class="cpu-heat-warning" role="status" hidden></span>
+                        <span class="cpu-heat-state" role="status" hidden></span>
+                      </div>
+                      <p class="cpu-heat-inspector" aria-live="off" hidden></p>
+                    </div>
+                  <section id="app-detail-autoscale-visual" class="autoscale-visual" aria-label="Autoscale capacity" hidden>
+                    <p class="autoscale-range-heading"></p>
+                    <div class="autoscale-range-track" role="img" aria-label="Autoscale replica range"><span class="autoscale-range-segments" aria-hidden="true"></span><span class="autoscale-range-fill"></span><span class="autoscale-range-marker"></span></div>
+                    <div class="autoscale-range-labels"><span class="autoscale-min"></span><span class="autoscale-max"></span></div>
+                    <div class="autoscale-session">
+                      <div class="autoscale-session-head"><strong class="autoscale-next"></strong><span class="autoscale-session-now"></span></div>
+                      <div class="autoscale-load-track" role="img" aria-label="Sessions toward next replica" hidden><span class="autoscale-load-fill"></span></div>
+                      <div class="autoscale-load-labels"><span class="autoscale-band-start"></span><span class="autoscale-session-target"></span></div>
+                      <span class="autoscale-session-state"></span>
+                    </div>
+                  </section>
+                </div>
+              </details>
+            </div>
+        </div>
       <div class="app-detail-panels">
-        <section id="detail-overview-panel"      class="settings-tab-panel" role="tabpanel" aria-labelledby="detail-tab-overview"></section>
-        <section id="detail-usage-panel"         class="settings-tab-panel" role="tabpanel" aria-labelledby="detail-tab-usage" hidden></section>
-        <section id="detail-logs-panel"          class="settings-tab-panel" role="tabpanel" hidden></section>
-        <section id="detail-traces-panel"        class="settings-tab-panel" role="tabpanel" hidden></section>
-        <section id="detail-deployments-panel"   class="settings-tab-panel" role="tabpanel" hidden></section>
-        <section id="detail-schedules-panel"     class="settings-tab-panel" role="tabpanel" aria-labelledby="detail-tab-schedules" hidden>
+        <section id="detail-overview-panel"      class="settings-tab-panel" role="region" aria-label="Overview"></section>
+        <section id="detail-usage-panel"         class="settings-tab-panel" role="region" aria-label="Usage" hidden></section>
+        <section id="detail-logs-panel"          class="settings-tab-panel" role="region" aria-label="Logs" hidden></section>
+        <section id="detail-traces-panel"        class="settings-tab-panel" role="region" aria-label="Traces" hidden></section>
+        <section id="detail-deployments-panel"   class="settings-tab-panel" role="region" aria-label="Deployments" hidden></section>
+        <section id="detail-schedules-panel"     class="settings-tab-panel" role="region" aria-label="Schedules" hidden>
           <div class="schedules-surface">
             <header class="schedules-heading">
               <div>
-                <h2>Scheduled jobs</h2>
-                <p>Run short-lived commands against this app's deployed bundle. Job success alone does not prove that a serving process reloaded its data; when a schedule is configured to roll the app, its serving-data activation is reported separately.</p>
+                <h2>Schedules</h2>
+                <p>Run commands on a schedule, such as refreshing data. Job completion and the app reloading that data are shown separately.</p>
               </div>
               <div class="schedules-heading-actions">
                 <button type="button" class="env-btn-secondary" id="schedules-refresh-btn">Refresh</button>
@@ -631,14 +718,14 @@
               </div>
             </header>
 
-            <dl id="schedules-summary" class="schedules-summary" aria-label="Schedule summary">
-              <div class="schedules-summary-priority"><dt>Needs attention</dt><dd id="schedules-summary-attention">—</dd></div>
-              <div><dt>Code/data compatible</dt><dd id="schedules-summary-compatible">—</dd></div>
-              <div><dt>Active work</dt><dd id="schedules-summary-active">—</dd></div>
-              <div class="schedules-summary-next"><dt>Next run</dt><dd id="schedules-summary-next">—</dd></div>
+            <dl id="schedules-summary" class="schedules-summary" aria-label="Schedule summary" hidden>
+              <div><dt>Schedules</dt><dd id="schedules-summary-total">—</dd></div>
+              <div><dt>Enabled</dt><dd id="schedules-summary-enabled">—</dd></div>
+              <div><dt>Needs attention</dt><dd id="schedules-summary-attention">—</dd></div>
+              <div><dt>Running jobs or rollouts</dt><dd id="schedules-summary-active">—</dd></div>
             </dl>
-
-            <p id="schedules-surface-status" class="schedules-surface-status" role="status" aria-live="polite"></p>
+            <div id="schedules-error" class="schedule-load-error" role="alert" hidden><p></p><button type="button" class="env-btn-secondary">Try again</button></div>
+            <p id="schedules-surface-status" class="sr-only" role="status" aria-live="polite"></p>
             <div id="schedules-workspace" class="schedules-workspace">
               <div class="schedules-list-pane">
                 <div id="schedules-list" class="schedules-table" aria-busy="true"><p class="schedule-loading">Loading scheduled jobs…</p></div>
@@ -647,35 +734,49 @@
             </div>
           </div>
         </section>
-        <section id="detail-configuration-panel" class="settings-tab-panel" role="tabpanel" hidden>
-          <section class="settings-block">
+        <section id="detail-configuration-panel" class="settings-tab-panel" role="region" aria-label="Settings" hidden>
+          <section class="settings-block" id="configuration-general">
             <h2 class="settings-block-title">General</h2>
-            <p class="settings-block-desc">Name the app and group it with related ones. The URL slug (<code>/app/&lt;slug&gt;/</code>) is part of the app's address and can't be changed after creation.</p>
+            <p class="settings-block-desc">Name the app and group it with related ones. App address: <a id="general-app-link" href="#" target="_blank" rel="noopener"><code id="general-app-path">/app/&lt;slug&gt;/</code></a>. The address cannot be renamed.</p>
             <div class="settings-block-body">
               <label class="scaling-row">
                 <span>
                   <span class="scaling-option-title">Display name</span>
-                  <span class="scaling-option-help">Shown across the dashboard.</span>
+                  <span class="scaling-option-help" id="general-name-help">Shown across the dashboard.</span>
                 </span>
-                <input id="general-name" type="text" maxlength="128" autocomplete="off" aria-label="App display name">
+                <input id="general-name" aria-describedby="general-name-help" type="text" maxlength="128" autocomplete="off" aria-label="App display name">
               </label>
               <label class="scaling-row">
                 <span>
                   <span class="scaling-option-title">Description</span>
-                  <span class="scaling-option-help">A one-line summary shown in Apps.</span>
+                  <span class="scaling-option-help" id="general-description-help">A short summary shown in Apps. <span id="general-description-count">0 / 280 characters</span></span>
                 </span>
-                <input id="general-description" type="text" autocomplete="off" placeholder="(optional)" aria-label="App description">
+                <textarea id="general-description" aria-describedby="general-description-help" rows="2" autocomplete="off" placeholder="What does this app help people do?" aria-label="App description"></textarea>
               </label>
-              <div class="scaling-row">
+              <label class="scaling-row">
+                <span>
+                  <span class="scaling-option-title">Project</span>
+                  <span class="scaling-option-help" id="general-project-help">Choose an existing project or enter a new slug. Leave blank for no project.</span>
+                </span>
+                <input id="general-project" type="text" class="field-code" aria-describedby="general-project-help" maxlength="63" list="project-slugs"
+                       pattern="[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
+                       autocomplete="off" spellcheck="false" placeholder="No project" aria-label="Project slug">
+              </label>
+              <div class="env-form-actions">
+                <button id="general-save-btn" type="button" class="env-btn-primary" hidden disabled>Save general settings</button>
+                <div class="settings-feedback" role="status" aria-live="polite"><span id="general-dirty" class="settings-dirty" hidden>Unsaved changes</span><span id="general-status" class="hibernate-status" hidden></span></div>
+              </div>
+              <p id="general-error" class="error" role="alert" hidden></p>
+              <div class="scaling-row settings-immediate">
                 <span>
                   <span class="scaling-option-title">Icon</span>
-                  <span class="scaling-option-help">Shown in Apps and on app pages. Upload a PNG, JPEG, WebP, or SVG (up to 512&nbsp;KB), or pick an emoji. Saved immediately.</span>
+                  <span class="scaling-option-help">Changes save immediately. Use an emoji or upload PNG, JPEG, WebP or SVG (up to 512 KB).</span>
                 </span>
                 <div class="icon-picker">
                   <span id="general-icon-preview" class="icon-picker-preview" aria-hidden="true"></span>
                   <div class="icon-picker-controls">
                     <button id="general-icon-upload" type="button" class="ov-btn">Upload</button>
-                    <button id="general-icon-remove" type="button" class="ov-btn" hidden>Remove</button>
+                    <button id="general-icon-remove" type="button" class="ov-btn" disabled>Remove icon</button>
                     <div class="emoji-picker">
                       <button id="general-icon-emoji-btn" type="button" class="ov-btn" aria-haspopup="true" aria-expanded="false">Choose emoji</button>
                       <div id="general-icon-emoji-popover" class="emoji-picker-popover" hidden>
@@ -688,292 +789,30 @@
                         <div id="general-icon-emoji-grid" class="emoji-picker-grid-slot"></div>
                       </div>
                     </div>
-                    <span id="general-icon-status" class="hibernate-status" hidden></span>
+                    <button id="general-icon-undo" type="button" class="ov-btn" aria-label="Undo last icon change" hidden>Undo</button>
+                    <span id="general-icon-error" class="error" role="alert" hidden></span><span id="general-icon-status" class="hibernate-status" role="status" hidden></span>
                   </div>
                   <input id="general-icon-file" type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml" aria-label="Choose an icon image" hidden>
                 </div>
               </div>
-              <label class="scaling-row">
-                <span>
-                  <span class="scaling-option-title">Project</span>
-                  <span class="scaling-option-help">Optional grouping label; apps that share it are grouped on the dashboard.</span>
-                </span>
-                <input id="general-project" type="text" class="field-code" maxlength="63" list="project-slugs"
-                       pattern="[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
-                       autocomplete="off" spellcheck="false" placeholder="(none)" aria-label="Project slug">
-              </label>
-              <div class="env-form-actions">
-                <button id="general-save-btn" type="button" class="env-btn-primary" hidden disabled>Save</button>
-                <span id="general-dirty" class="settings-dirty" hidden>Unsaved changes</span>
-                <span id="general-status" class="hibernate-status" hidden></span>
-              </div>
-              <p id="general-error" class="error" hidden></p>
             </div>
           </section>
 
-          <section class="settings-block" id="usage-privacy-settings">
-            <h2 class="settings-block-title">Usage privacy</h2>
-            <p class="settings-block-desc">Choose how much viewer identity this app keeps. An app can be stricter than the hub policy, never more identifying.</p>
-            <div class="settings-block-body">
-              <label class="scaling-row">
-                <span>
-                  <span class="scaling-option-title">Identity granularity</span>
-                  <span id="usage-privacy-help" class="scaling-option-help">Loading the effective policy…</span>
-                </span>
-                <select id="usage-privacy-mode" aria-label="Usage identity granularity" aria-describedby="usage-privacy-help usage-privacy-warning">
-                  <option value="inherit">Inherit hub policy</option>
-                  <option value="disabled">Do not collect</option>
-                  <option value="unattributed">Unattributed totals</option>
-                  <option value="pseudonymous">Pseudonymous viewers</option>
-                  <option value="identified">Named viewers</option>
-                </select>
-              </label>
-              <p id="usage-privacy-warning" class="settings-inline-note" role="status" aria-live="polite" hidden></p>
-              <div class="env-form-actions">
-                <button id="usage-privacy-save-btn" type="button" class="env-btn-primary" hidden disabled>Save privacy setting</button>
-                <span id="usage-privacy-dirty" class="settings-dirty" hidden>Unsaved changes</span>
-                <span id="usage-privacy-status" class="hibernate-status" role="status" hidden></span>
-              </div>
-              <p id="usage-privacy-error" class="error" role="alert" hidden></p>
-            </div>
-          </section>
-
-          <section class="settings-block">
-            <h2 class="settings-block-title">Resources</h2>
-            <p class="settings-block-desc">Per-replica caps on memory and CPU. Enforcement depends on the runtime and host capabilities shown below.</p>
-            <p id="resources-runtime-note" class="settings-inline-note" hidden></p>
-            <div class="settings-block-body">
-              <label class="scaling-row">
-                <span>
-                  <span class="scaling-option-title">Memory limit</span>
-                  <span class="scaling-option-help">Hard cap per replica, in MB. Empty or <code>0</code> means no limit.</span>
-                </span>
-                <input id="resources-memory" type="number" min="0" max="1048576" step="1" inputmode="numeric" autocomplete="off" placeholder="No limit" aria-label="Memory limit in MB">
-              </label>
-              <label class="scaling-row">
-                <span>
-                  <span class="scaling-option-title">CPU quota</span>
-                  <span class="scaling-option-help">Percent of one core per replica. <code>100</code> = a full core, <code>150</code> = 1.5 cores (up to 6400 = 64 cores). Empty or <code>0</code> means no limit.</span>
-                </span>
-                <input id="resources-cpu" type="number" min="0" max="6400" step="1" inputmode="numeric" autocomplete="off" placeholder="No limit" aria-label="CPU quota percent (0 to 6400)">
-              </label>
-              <div class="env-form-actions">
-                <button id="resources-save-btn" type="button" class="env-btn-primary" hidden disabled>Save</button>
-                <span id="resources-dirty" class="settings-dirty" hidden>Unsaved changes</span>
-                <span id="resources-status" class="hibernate-status" hidden></span>
-              </div>
-              <p id="resources-error" class="error" hidden></p>
-            </div>
-          </section>
-
-          <fieldset class="settings-block access-level hibernate-options">
-            <legend class="settings-block-title">Hibernation</legend>
-            <p class="settings-block-desc">Stop the app after a period of inactivity to free resources; it restarts automatically on the next request.</p>
-            <div class="settings-block-body">
-              <div class="access-radios">
-                <label>
-                  <input type="radio" name="hibernate-mode" value="default">
-                  <span>
-                    <span class="hibernate-option-title">Use global default</span>
-                    <span class="hibernate-option-help">Apps idle for the server-wide threshold are stopped.</span>
-                  </span>
-                </label>
-                <label>
-                  <input type="radio" name="hibernate-mode" value="never">
-                  <span>
-                    <span class="hibernate-option-title">Never hibernate</span>
-                    <span class="hibernate-option-help">Keep this app running continuously. Useful for apps with large in-memory state.</span>
-                  </span>
-                </label>
-                <label>
-                  <input type="radio" name="hibernate-mode" value="custom">
-                  <span>
-                    <span class="hibernate-option-title">Custom timeout</span>
-                    <span class="hibernate-option-help">Hibernate after this many minutes of inactivity.</span>
-                    <span class="hibernate-custom-row">
-                      <input id="hibernate-custom-minutes" type="number" min="1" max="525600" step="1"
-                             inputmode="numeric" autocomplete="off" disabled placeholder="30" aria-label="Custom hibernate timeout in minutes">
-                      <span class="hibernate-custom-unit">minutes</span>
-                    </span>
-                  </span>
-                </label>
-              </div>
-              <label class="scaling-row">
-                <span>
-                  <span class="scaling-option-title">Keep warm</span>
-                  <span class="scaling-option-help">Replicas kept running when the app idles. 0 stops all (full hibernation).</span>
-                  <span id="min-warm-warning" class="scaling-option-help scaling-option-warn" hidden>Configured replicas is below the keep-warm floor; the floor self-clamps to the replica count.</span>
-                  <span id="min-warm-inert-warning" class="scaling-option-help scaling-option-warn" hidden></span>
-                </span>
-                <input id="min-warm-replicas" type="number" min="0" max="1000" step="1"
-                       inputmode="numeric" autocomplete="off" aria-label="Minimum warm replicas when idle">
-              </label>
-              <div class="env-form-actions">
-                <button id="hibernate-save-btn" type="button" class="env-btn-primary" hidden disabled>Save</button>
-                <span id="hibernate-dirty" class="settings-dirty" hidden>Unsaved changes</span>
-                <span id="hibernate-status" class="hibernate-status" hidden></span>
-              </div>
-              <p id="hibernate-error" class="error" hidden></p>
-            </div>
-          </fieldset>
-
-          <section class="settings-block">
-            <h2 class="settings-block-title">Scaling</h2>
-            <p class="settings-block-desc">How many processes serve this app, and how many sessions each one admits.</p>
-            <div class="settings-block-body">
-              <p id="scaling-ceiling" class="scaling-ceiling" aria-live="polite"></p>
-              <p id="worker-capacity" class="scaling-ceiling" aria-live="polite"></p>
-              <label class="scaling-row">
-                <span>
-                  <span class="scaling-option-title">Replicas</span>
-                  <span class="scaling-option-help">Identical processes serving this app's traffic. More replicas help CPU-bound apps; each has its own memory.</span>
-                </span>
-                <input id="scaling-replicas" type="number" min="1" max="32" step="1"
-                       inputmode="numeric" autocomplete="off" aria-label="Number of replica processes">
-              </label>
-              <label class="scaling-row">
-                <span>
-                  <span class="scaling-option-title">Max sessions per replica</span>
-                  <span class="scaling-option-help">Maximum new sessions admitted by each replica. <code>0</code> inherits the server default. When the limit is reached, new viewers wait and retry automatically.</span>
-                </span>
-                <input id="scaling-cap" type="number" min="0" max="1000" step="1"
-                       inputmode="numeric" autocomplete="off" aria-label="Maximum new sessions per replica">
-              </label>
-              <label class="scaling-row">
-                <span>
-                  <span class="scaling-option-title">Worker isolation</span>
-                  <span class="scaling-option-help">How sessions share worker processes. <strong>Multiplex</strong> runs all sessions in one process per replica. <strong>Per session</strong> spawns one process per session. <strong>Grouped</strong> bundles a fixed number of sessions per process.</span>
-                </span>
-                <select id="worker-isolation" autocomplete="off" aria-label="Worker isolation mode">
-                  <option value="multiplex">Multiplex (default)</option>
-                  <option value="per_session">Per session</option>
-                  <option value="grouped">Grouped</option>
-                </select>
-              </label>
-              <label class="scaling-row">
-                <span>
-                  <span class="scaling-option-title">Clients per group</span>
-                  <span class="scaling-option-help">Sessions bundled into each grouped worker process (grouped mode only).</span>
-                </span>
-                <input id="worker-grouped-size" type="number" min="1" max="100" step="1"
-                       inputmode="numeric" autocomplete="off" aria-label="Clients per worker group">
-              </label>
-              <label class="scaling-row">
-                <span>
-                  <span class="scaling-option-title">Max workers</span>
-                  <span class="scaling-option-help">Upper bound on isolated worker processes per replica (per session and grouped modes). <code>0</code> uses the server default.</span>
-                </span>
-                <input id="worker-max-workers" type="number" min="0" max="1000" step="1"
-                       inputmode="numeric" autocomplete="off" aria-label="Maximum worker processes per replica">
-              </label>
-              <label class="scaling-row">
-                <span>
-                  <span class="scaling-option-title">Warm workers</span>
-                  <span class="scaling-option-help">Healthy, unused isolated workers kept ready for the next sessions. They are frozen and memory-reclaimed when the runtime supports it, and always count toward max workers.</span>
-                </span>
-                <input id="worker-warm-spares" type="number" min="0" max="1000" step="1"
-                       inputmode="numeric" autocomplete="off" aria-label="Warm isolated worker processes for this app">
-              </label>
-              <div class="env-form-actions">
-                <button id="scaling-save-btn" type="button" class="env-btn-primary" hidden disabled>Save</button>
-                <span id="scaling-dirty" class="settings-dirty" hidden>Unsaved changes</span>
-                <span id="scaling-status" class="hibernate-status" hidden></span>
-              </div>
-              <p id="scaling-error" class="error" hidden></p>
-            </div>
-          </section>
-
-          <section class="settings-block">
-            <h2 class="settings-block-title">Render pacing</h2>
-            <p class="settings-block-desc">Admit page loads at a rate this host can actually render, so a burst queues on a wait page instead of stalling every session at once.</p>
-            <div class="settings-block-body">
-              <label class="scaling-row">
-                <span>
-                  <span class="scaling-option-title">Render cost (seconds)</span>
-                  <span class="scaling-option-help">Roughly how long one page render keeps a CPU busy. <code>0</code> turns pacing off. Above <code>0</code>, page loads beyond the sustainable rate get a wait page that retries by itself.</span>
-                </span>
-                <input id="render-seconds" type="number" min="0" max="600" step="0.1"
-                       inputmode="decimal" autocomplete="off" placeholder="0"
-                       aria-label="Render cost in seconds">
-              </label>
-              <p id="render-pacing-advice" class="scaling-ceiling" aria-live="polite"></p>
-              <div class="env-form-actions">
-                <button id="render-save-btn" type="button" class="env-btn-primary" hidden disabled>Save</button>
-                <span id="render-dirty" class="settings-dirty" hidden>Unsaved changes</span>
-                <span id="render-status" class="hibernate-status" hidden></span>
-              </div>
-              <p id="render-error" class="error" hidden></p>
-            </div>
-          </section>
-
-          <fieldset class="settings-block access-level autoscale-options" id="autoscale-options">
-            <legend class="settings-block-title">Autoscale</legend>
-            <p class="settings-block-desc">Let the controller grow and shrink the replica pool automatically based on observed session load.</p>
-            <div class="settings-block-body">
-              <label class="scaling-row">
-                <span>
-                  <span class="scaling-option-title">Enable autoscale</span>
-                  <span class="scaling-option-help">The bounds below cap how far the pool can move.</span>
-                </span>
-                <input id="autoscale-enabled" type="checkbox" autocomplete="off" aria-label="Enable autoscale">
-              </label>
-              <label class="scaling-row">
-                <span>
-                  <span class="scaling-option-title">Min replicas</span>
-                  <span class="scaling-option-help">Lower bound the controller will not scale below. At least 1 when enabled.</span>
-                </span>
-                <input id="autoscale-min" type="number" min="0" max="1000" step="1"
-                       inputmode="numeric" autocomplete="off" aria-label="Minimum replicas">
-              </label>
-              <label class="scaling-row">
-                <span>
-                  <span class="scaling-option-title">Max replicas</span>
-                  <span class="scaling-option-help">Upper bound the controller will not scale above. At least min when enabled.</span>
-                </span>
-                <input id="autoscale-max" type="number" min="0" max="1000" step="1"
-                       inputmode="numeric" autocomplete="off" aria-label="Maximum replicas">
-              </label>
-              <div class="access-radios">
-                <label>
-                  <input type="radio" name="autoscale-target-mode" value="default">
-                  <span>
-                    <span class="hibernate-option-title">Use runtime default target</span>
-                    <span class="hibernate-option-help">Scale toward the server-wide target session load.</span>
-                  </span>
-                </label>
-                <label>
-                  <input type="radio" name="autoscale-target-mode" value="custom">
-                  <span>
-                    <span class="hibernate-option-title">Custom target</span>
-                    <span class="hibernate-option-help">Override the server-wide target. Range 0.01 to 1.00; lower scales out sooner.</span>
-                    <span class="hibernate-custom-row">
-                      <input id="autoscale-target" type="number" min="0.01" max="1.00" step="0.01"
-                             inputmode="decimal" autocomplete="off" disabled placeholder="0.80" aria-label="Custom target session load">
-                    </span>
-                  </span>
-                </label>
-              </div>
-              <p id="autoscale-ceiling" class="scaling-ceiling" aria-live="polite"></p>
-              <div class="env-form-actions">
-                <button id="autoscale-save-btn" type="button" class="env-btn-primary" hidden disabled>Save</button>
-                <span id="autoscale-dirty" class="settings-dirty" hidden>Unsaved changes</span>
-                <span id="autoscale-status" class="hibernate-status" hidden></span>
-              </div>
-              <p id="autoscale-error" class="error" hidden></p>
-            </div>
-          </fieldset>
-
-          <section class="settings-block">
+          <section class="settings-block" id="configuration-environment">
             <h2 class="settings-block-title">Environment variables</h2>
-            <p class="settings-block-desc">Key/value pairs passed to the app process when it starts. Saving or deleting a variable preserves current sessions; restart the app to apply saved changes. Secrets are encrypted at rest and write-only.</p>
+            <p class="settings-block-desc">Saved variables take effect the next time the app starts. To apply them now, restart the app. Secrets are encrypted and cannot be read back.</p>
             <div class="settings-block-body">
               <div class="env-header">
-                <p class="env-empty" id="env-empty" hidden>No environment variables set for this app.</p>
-                <button id="env-add-btn" type="button" class="env-add-btn">+ Add variable</button>
-                <button id="env-apply-btn" type="button" class="env-add-btn" hidden>Apply saved changes</button>
+                <p class="env-empty" id="env-empty" hidden>No variables yet. Add values your app reads from its environment.</p>
+                <button id="env-add-btn" type="button" class="env-add-btn" disabled>Add variable</button>
+                <button id="env-apply-btn" type="button" class="env-add-btn" hidden>Restart with saved values</button>
               </div>
-              <table id="env-list" class="env-list" hidden>
-                <thead><tr><th>Key</th><th>Value</th><th></th></tr></thead>
+              <p id="env-load-status" class="sr-only" role="status" aria-atomic="true"></p>
+              <p id="env-load-error" class="error" role="alert" hidden></p>
+              <button id="env-retry-btn" type="button" class="env-btn-secondary" hidden>Try again</button>
+              <p id="env-apply-note" class="settings-inline-note" role="status" aria-live="polite"></p>
+              <table id="env-list" class="env-list" role="table" aria-label="Saved environment variables" hidden>
+                <thead><tr><th scope="col">Key</th><th scope="col">Saved value</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
                 <tbody></tbody>
               </table>
             </div>
@@ -982,27 +821,267 @@
               <h3 id="env-form-heading">Add variable</h3>
               <div class="env-form-row">
                 <label for="env-form-key">Key</label>
-                <input id="env-form-key" type="text" pattern="[A-Z_][A-Z0-9_]*" required autocomplete="off" spellcheck="false">
+                <input id="env-form-key" type="text" pattern="[A-Z_][A-Z0-9_]*" aria-describedby="env-key-help" required autocomplete="off" spellcheck="false">
               </div>
+              <p id="env-key-help" class="settings-inline-note">Use uppercase letters, numbers and underscores; start with a letter or underscore. SHINYHUB_ is reserved.</p>
               <div class="env-form-row">
                 <label for="env-form-value">Value</label>
-                <input id="env-form-value" type="text" autocomplete="off" spellcheck="false">
+                <div class="env-value-entry"><input id="env-form-value" type="text" autocomplete="off" spellcheck="false" aria-describedby="env-value-help"><button id="env-value-reveal" type="button" class="env-btn-secondary" aria-pressed="false" hidden>Show value</button></div><p id="env-value-help" class="settings-inline-note">Empty values are allowed.</p>
               </div>
               <div class="env-form-row env-form-checks">
-                <label><input type="checkbox" id="env-form-secret"><span>Secret (encrypted at rest, write-only)</span></label>
-                <label><input type="checkbox" id="env-form-restart"><span>Apply now by draining and restarting the app</span></label>
+                <label><input type="checkbox" id="env-form-secret"><span>Store as a secret</span></label>
+                <label><input type="checkbox" id="env-form-restart"><span>Save and restart the app</span></label>
               </div>
+              <p class="env-form-help">Restarting drains active sessions.</p>
               <div class="env-form-actions">
-                <button type="submit" id="env-form-save" class="env-btn-primary">Save</button>
+                <button type="submit" id="env-form-save" class="env-btn-primary">Save variable</button>
                 <button type="button" id="env-form-cancel" class="env-btn-secondary">Cancel</button>
               </div>
             </form>
             <p class="error" id="env-form-error" role="alert" hidden></p>
           </section>
 
+          <section class="settings-block" id="configuration-resources">
+            <h2 class="settings-block-title">Resources</h2>
+            <p id="resources-description" class="settings-block-desc">Memory and CPU available to each replica.</p>
+            <p id="resources-apply-note" class="settings-inline-note" hidden>Saved limits still need to be applied.</p>
+              <p id="resources-runtime-note" class="settings-inline-note" hidden></p>
+            <div class="settings-block-body">
+              <div class="direct-setting-row">
+                <div class="direct-setting-label"><label for="resources-memory-mode">Memory limit</label><p id="resources-memory-help">Hard cap for each replica. Enter whole MB, for example 1,024.</p></div>
+                <div class="resource-setting-controls">
+                  <select id="resources-memory-mode" aria-describedby="resources-memory-help resources-memory-hint"><option value="inherit">Server default</option><option value="custom">Custom limit</option><option value="off">No limit</option></select>
+                  <div class="setting-number"><input id="resources-memory" type="number" min="16" max="1048576" step="1" aria-label="Custom memory limit" inputmode="numeric" autocomplete="off" aria-describedby="resources-memory-unit resources-memory-help resources-memory-hint"><span id="resources-memory-unit">MB</span></div>
+                  <p id="resources-memory-hint" class="setting-policy-note" aria-live="polite"></p>
+                </div>
+              </div>
+              <div class="direct-setting-row">
+                <div class="direct-setting-label"><label for="resources-cpu-mode">CPU limit</label><p id="resources-cpu-help">0.5 core allows half of one CPU core.</p><p id="resources-cpu-capacity">Host CPU capacity is not reported.</p></div>
+                <div class="resource-setting-controls">
+                  <select id="resources-cpu-mode" aria-describedby="resources-cpu-help resources-cpu-hint resources-cpu-capacity"><option value="inherit">Server default</option><option value="custom">Custom limit</option><option value="off">No limit</option></select>
+                  <div class="setting-number"><input id="resources-cpu" type="number" min="0.01" max="64" step="0.01" aria-label="Custom CPU limit" inputmode="decimal" autocomplete="off" aria-describedby="resources-cpu-unit resources-cpu-help resources-cpu-hint resources-cpu-capacity"><span id="resources-cpu-unit">cores</span></div>
+                  <p id="resources-cpu-hint" class="setting-policy-note" aria-live="polite"></p>
+                </div>
+              </div>
+              <p id="resources-save-help">Changes apply live when supported. Some changes restart running processes.</p>
+              <div class="env-form-actions">
+                <button id="resources-save-btn" type="button" class="env-btn-primary" hidden disabled>Save resource limits</button>
+                <button id="resources-retry-btn" type="button" class="env-btn-secondary" hidden>Retry applying limits</button>
+                <div class="settings-feedback" role="status" aria-live="polite"><span id="resources-dirty" class="settings-dirty" hidden>Unsaved changes</span><span id="resources-status" class="hibernate-status" hidden></span></div>
+              </div>
+              <p id="resources-error" class="error" role="alert" hidden></p>
+            </div>
+          </section>
+
+          <section class="settings-block" id="configuration-scaling">
+            <h2 class="settings-block-title">Scaling</h2>
+            <p class="settings-block-desc">Set app capacity and how visitors share its processes.</p>
+            <div class="settings-block-body">
+              <div id="scaling-replica-fields">
+              <label class="scaling-row">
+                <span>
+                  <span class="scaling-option-title">Replicas</span>
+                  <span class="scaling-option-help" id="scaling-replicas-help">Parallel copies of the app. Each uses its own memory; reducing the count drains sessions.<span id="scaling-replicas-policy" class="setting-default"></span></span>
+                </span>
+                <input id="scaling-replicas" aria-describedby="scaling-replicas-help" type="number" min="1" step="1"
+                       inputmode="numeric" autocomplete="off" aria-label="Replicas">
+              </label>
+              <div class="direct-setting-row">
+                <div class="direct-setting-label"><label for="scaling-cap-mode">Max sessions per replica</label><p id="scaling-cap-help">New visitors are asked to retry when this limit is reached.</p></div>
+                <div class="direct-setting-controls policy-setting-controls">
+                  <select id="scaling-cap-mode" aria-label="Session limit policy" aria-describedby="scaling-cap-help scaling-cap-hint" autocomplete="off"><option value="inherit">Server default</option><option value="custom">Custom limit</option></select>
+                  <div class="setting-number"><input id="scaling-cap" aria-label="Custom session limit" type="number" min="1" max="1000" step="1" inputmode="numeric" autocomplete="off" aria-describedby="scaling-cap-unit scaling-cap-help scaling-cap-hint"><span id="scaling-cap-unit">sessions</span></div>
+
+                  <p id="scaling-cap-hint" class="setting-policy-note" aria-live="polite"></p>
+                </div>
+              </div>
+              </div>
+              <details class="settings-advanced" id="worker-settings"><summary>Worker processes</summary><p class="settings-inline-note">Changing isolation replaces the process pool. Active sessions may disconnect after draining.</p><div class="settings-advanced-body">
+              <label class="scaling-row">
+                <span>
+                  <span class="scaling-option-title">Worker isolation</span>
+                  <span class="scaling-option-help" id="worker-isolation-help">Choose whether sessions share a process or use isolated workers.</span>
+                </span>
+                <select id="worker-isolation" aria-describedby="worker-isolation-help worker-mode-help" autocomplete="off" aria-label="Worker isolation mode">
+                  <option value="">Inherit server policy</option>
+                  <option value="multiplex">Multiplex (shared process)</option>
+                  <option value="per_session">Per session (one browser client)</option>
+                  <option value="grouped">Grouped (a few clients per worker)</option>
+                </select>
+              </label>
+              <p id="worker-mode-help" class="worker-mode-help"></p>
+              <label class="scaling-row">
+                <span>
+                  <span class="scaling-option-title">Clients per group</span>
+                  <span class="scaling-option-help" id="worker-grouped-size-help">Browser clients sharing one worker. Tabs in the same browser profile count as one client.</span>
+                </span>
+                <input id="worker-grouped-size" aria-describedby="worker-grouped-size-help" type="number" min="1" max="100" step="1"
+                       inputmode="numeric" autocomplete="off" aria-label="Clients per group">
+              </label>
+              <label class="scaling-row">
+                <span>
+                  <span class="scaling-option-title">Max workers</span>
+                  <span class="scaling-option-help" id="worker-max-workers-help">Maximum workers in the app’s pool, including warm workers. At least 1 is required.</span>
+                </span>
+                <input id="worker-max-workers" aria-describedby="worker-max-workers-help" type="number" min="0" max="1000" step="1"
+                       inputmode="numeric" autocomplete="off" aria-label="Max workers">
+              </label>
+              <label class="scaling-row">
+                <span>
+                  <span class="scaling-option-title">Warm workers</span>
+                  <span class="scaling-option-help" id="worker-warm-spares-help">Idle workers ready for new sessions. Counts toward Max workers. Zero keeps none ready.</span>
+                </span>
+                <input id="worker-warm-spares" aria-describedby="worker-warm-spares-help" type="number" min="0" max="1000" step="1"
+                       inputmode="numeric" autocomplete="off" aria-label="Warm workers">
+              </label>
+              <p id="worker-capacity" class="scaling-ceiling" aria-live="polite"></p>
+              </div></details>
+              <p id="scaling-ceiling" class="scaling-ceiling" aria-live="polite"></p>
+              <div class="env-form-actions">
+                <button id="scaling-save-btn" type="button" class="env-btn-primary" hidden disabled>Save scaling</button>
+                <div class="settings-feedback" role="status" aria-live="polite"><span id="scaling-dirty" class="settings-dirty" hidden>Unsaved changes</span><span id="scaling-status" class="hibernate-status" hidden></span></div>
+              </div>
+              <p id="scaling-error" class="error" role="alert" hidden></p>
+            </div>
+          </section>
+
+          <fieldset class="settings-block access-level autoscale-options" id="autoscale-options">
+            <legend class="settings-block-title">Autoscale</legend>
+            <p class="settings-block-desc">Adjust replicas to match session load. Policy changes apply without a restart.</p>
+            <p id="autoscale-policy-note" class="settings-inline-note" hidden></p>
+            <div class="settings-block-body">
+              <label class="scaling-row">
+                <span>
+                  <span class="scaling-option-title">Enable autoscale</span>
+                  <span class="scaling-option-help" id="autoscale-enabled-help">Turn off to set the replica count manually.</span>
+                </span>
+                <input id="autoscale-enabled" aria-describedby="autoscale-enabled-help" type="checkbox" autocomplete="off" aria-label="Enable autoscale">
+              </label>
+              <details class="settings-policy-details" id="autoscale-policy-fields"><summary>Replica bounds and target</summary><div class="settings-block-body">
+              <label class="scaling-row">
+                <span>
+                  <span class="scaling-option-title">Minimum replicas</span>
+                  <span class="scaling-option-help" id="autoscale-min-help">Fewest replicas kept available while autoscaling. At least 1.</span>
+                </span>
+                <input id="autoscale-min" aria-describedby="autoscale-min-help" type="number" min="0" max="1000" step="1"
+                       inputmode="numeric" autocomplete="off" aria-label="Min replicas">
+              </label>
+              <label class="scaling-row">
+                <span>
+                  <span class="scaling-option-title">Maximum replicas</span>
+                  <span class="scaling-option-help" id="autoscale-max-help">Upper bound the controller will not scale above. At least min when enabled.</span>
+                </span>
+                <input id="autoscale-max" aria-describedby="autoscale-max-help" type="number" min="0" max="1000" step="1"
+                       inputmode="numeric" autocomplete="off" aria-label="Max replicas">
+              </label>
+              <div class="direct-setting-row">
+                <div class="direct-setting-label"><label for="autoscale-target-mode">Target session load</label><p id="autoscale-target-help">Scale before replicas fill up. A lower target leaves more spare capacity.</p></div>
+                <div class="direct-setting-controls policy-setting-controls">
+                  <select id="autoscale-target-mode" aria-label="Target session load policy" aria-describedby="autoscale-target-help autoscale-target-hint" autocomplete="off"><option value="inherit">Server default</option><option value="custom">Custom target</option></select>
+                  <div class="setting-number"><input id="autoscale-target" aria-label="Custom target session load" type="number" min="1" max="100" step="any" inputmode="decimal" autocomplete="off" aria-describedby="autoscale-target-unit autoscale-target-help autoscale-target-hint"><span id="autoscale-target-unit">%</span></div>
+
+                  <p id="autoscale-target-hint" class="setting-policy-note" aria-live="polite"></p>
+                </div>
+              </div>
+              </div></details>
+              <p id="autoscale-ceiling" class="scaling-ceiling" aria-live="polite"></p>
+              <div class="env-form-actions">
+                <button id="autoscale-save-btn" type="button" class="env-btn-primary" hidden disabled>Save autoscale</button>
+                <div class="settings-feedback" role="status" aria-live="polite"><span id="autoscale-dirty" class="settings-dirty" hidden>Unsaved changes</span><span id="autoscale-status" class="hibernate-status" hidden></span></div>
+              </div>
+              <p id="autoscale-error" class="error" role="alert" hidden></p>
+            </div>
+          </fieldset>
+
+          <fieldset id="configuration-hibernation" class="settings-block access-level hibernate-options">
+            <legend class="settings-block-title">Hibernation</legend>
+            <p class="settings-block-desc">Stop the app after a period of inactivity to free resources; it restarts automatically on the next request.</p>
+            <div class="settings-block-body">
+              <div class="direct-setting-row">
+                <div class="direct-setting-label"><label for="hibernate-custom-minutes-mode">Idle timeout</label><p id="hibernate-custom-minutes-help">Stop idle replicas after this long. The next visitor wakes the app.</p></div>
+                <div class="direct-setting-controls policy-setting-controls">
+                  <select id="hibernate-custom-minutes-mode" aria-label="Idle timeout policy" aria-describedby="hibernate-custom-minutes-help hibernate-custom-minutes-hint" autocomplete="off"><option value="inherit">Server default</option><option value="custom">Custom timeout</option><option value="off">Never hibernate</option></select>
+                  <div class="setting-number"><input id="hibernate-custom-minutes" aria-label="Custom idle timeout" type="number" min="1" step="1" inputmode="numeric" autocomplete="off" aria-describedby="hibernate-custom-minutes-unit hibernate-custom-minutes-help hibernate-custom-minutes-hint"><span id="hibernate-custom-minutes-unit">min</span></div>
+
+                  <p id="hibernate-custom-minutes-hint" class="setting-policy-note" aria-live="polite"></p>
+                </div>
+              </div>
+              <label class="scaling-row">
+                <span>
+                  <span class="scaling-option-title">Keep warm</span>
+                  <span class="scaling-option-help" id="min-warm-replicas-help">Replicas to keep ready while idle. Zero lets all replicas sleep.</span>
+                  <span id="min-warm-warning" class="scaling-option-help scaling-option-warn" hidden>Keep warm is higher than the replica count. All configured replicas will stay ready.</span>
+                  <span id="min-warm-inert-warning" class="scaling-option-help scaling-option-warn" hidden></span>
+                </span>
+                <input id="min-warm-replicas" aria-describedby="min-warm-replicas-help min-warm-warning min-warm-inert-warning" type="number" min="0" max="1000" step="1"
+                       inputmode="numeric" autocomplete="off" aria-label="Keep warm">
+              </label>
+              <div class="env-form-actions">
+                <button id="hibernate-save-btn" type="button" class="env-btn-primary" hidden disabled>Save hibernation</button>
+                <div class="settings-feedback" role="status" aria-live="polite"><span id="hibernate-dirty" class="settings-dirty" hidden>Unsaved changes</span><span id="hibernate-status" class="hibernate-status" hidden></span></div>
+              </div>
+              <p id="hibernate-error" class="error" role="alert" hidden></p>
+            </div>
+            <details class="configuration-behavior"><summary>Saved runtime behavior</summary><p id="configuration-behavior" hidden></p><p id="configuration-behavior-note">Unsaved changes are not included.</p></details>
+          </fieldset>
+
+          <details class="settings-block settings-runtime-advanced" id="configuration-pacing"><summary>Advanced runtime settings</summary>
+            <h2 class="settings-block-title">Render pacing</h2>
+            <p class="settings-block-desc">Admit page loads at a rate this host can actually render, so a burst queues on a wait page instead of stalling every session at once.</p>
+            <div class="settings-block-body">
+              <div class="direct-setting-row">
+                <div class="direct-setting-label"><label for="render-seconds">Render cost</label><p id="render-seconds-help">Estimated CPU time for one page render. Type a cost to enable pacing.</p></div>
+                <div class="direct-setting-controls">
+                  <input type="hidden" id="render-seconds-mode" value="off">
+                  <div class="setting-number"><input id="render-seconds" type="number" min="0.001" max="600" step="any" inputmode="decimal" autocomplete="off" aria-describedby="render-seconds-unit render-seconds-help render-seconds-hint"><span id="render-seconds-unit">s</span></div>
+                  <button type="button" class="setting-action" data-setting="render-seconds" data-policy="off">Turn off</button>
+                  <p id="render-seconds-hint" class="setting-policy-note" aria-live="polite"></p>
+                </div>
+              </div>
+              <p id="render-pacing-advice" class="scaling-ceiling" aria-live="polite"></p>
+              <div class="env-form-actions">
+                <button id="render-save-btn" type="button" class="env-btn-primary" hidden disabled>Save render pacing</button>
+                <div class="settings-feedback" role="status" aria-live="polite"><span id="render-dirty" class="settings-dirty" hidden>Unsaved changes</span><span id="render-status" class="hibernate-status" hidden></span></div>
+              </div>
+              <p id="render-error" class="error" role="alert" hidden></p>
+            </div>
+          </details>
+
+          <section class="settings-block" id="usage-privacy-settings">
+            <h2 class="settings-block-title">Usage privacy</h2>
+            <p class="settings-block-desc">Choose whether usage reports can distinguish individual viewers.</p>
+            <div class="settings-block-body">
+              <div class="privacy-choice">
+                <label for="usage-privacy-mode" class="scaling-option-title">Viewer data</label>
+                <select id="usage-privacy-mode" aria-describedby="usage-privacy-help usage-privacy-limit usage-privacy-warning">
+                  <option value="inherit">Use hub policy</option>
+                  <option value="disabled">Do not collect</option>
+                  <option value="unattributed">Session totals only</option>
+                  <option value="pseudonymous">Unique viewer counts</option>
+                  <option value="identified">Named viewers</option>
+                </select>
+                <p id="usage-privacy-help" class="scaling-option-help">Loading the privacy policy…</p>
+                <p id="usage-privacy-limit" class="scaling-option-help"></p>
+              </div>
+              <p id="usage-privacy-warning" class="settings-block-warning" role="status" aria-live="polite" hidden></p>
+              <div class="env-form-actions">
+                <button id="usage-privacy-save-btn" type="button" class="env-btn-primary" hidden disabled>Save privacy</button>
+                <div class="settings-feedback" role="status" aria-live="polite"><span id="usage-privacy-dirty" class="settings-dirty" hidden>Unsaved changes</span><span id="usage-privacy-status" class="hibernate-status" hidden></span></div>
+              </div>
+              <p id="usage-privacy-error" class="error" role="alert" hidden></p>
+              <details class="settings-advanced privacy-details">
+                <summary>About usage data</summary>
+                <p>Usage reports are available to app owners, managers, and platform administrators. Only platform administrators can see named viewers and individual session details.</p>
+                <p>Collection records app sessions, duration, and audience type. It does not record IP addresses, browser fingerprints, or actions inside the app.</p>
+                <p id="usage-privacy-retention" hidden></p>
+              </details>
+            </div>
+          </section>
+
           <section id="danger-zone" class="settings-block danger-zone" hidden>
             <h2 class="settings-block-title">Danger zone</h2>
             <p class="settings-block-desc">Deleting an app stops it, removes all deployments and history, and releases the slug. This cannot be undone.</p>
+            <details class="settings-delete-confirm"><summary>Delete this app</summary>
             <div class="settings-block-body">
               <div class="danger-zone-row">
                 <label for="delete-confirm" class="danger-zone-label">
@@ -1013,107 +1092,90 @@
                   <button id="delete-app-btn" type="button" class="btn-danger" disabled>Delete app</button>
                 </div>
               </div>
-              <p id="delete-error" class="error" hidden></p>
+              <p id="delete-error" class="error" role="alert" hidden></p>
             </div>
+            </details>
           </section>
+          <p id="configuration-pending" class="settings-pending" role="status" hidden></p>
         </section>
-        <section id="detail-data-panel"          class="settings-tab-panel" role="tabpanel" hidden>
-          <section class="settings-block">
-            <h2 class="settings-block-title">Data files</h2>
-            <p class="settings-block-desc">Files in this app's persistent data directory, available to the running app and kept across deploys.</p>
-            <div class="settings-block-body">
-              <div class="env-header">
-                <p class="env-empty" id="data-empty" hidden>No files in this app's data dir.</p>
-                <button id="data-refresh" type="button" class="env-btn-secondary">Refresh data list</button>
-                <span id="data-quota" class="settings-meta"></span>
-              </div>
-              <table id="data-list-table" class="env-list" hidden>
-                <thead><tr><th>Path</th><th>Size</th><th>Modified</th><th></th></tr></thead>
-                <tbody id="data-list"></tbody>
-              </table>
-
-              <p id="data-error" class="error" role="alert" hidden></p>
-              <form id="data-upload-form" class="env-form" hidden>
-                <h3>Upload file</h3>
-                <div class="env-form-row">
-                  <label for="data-file-input">File</label>
-                  <input id="data-file-input" type="file" required>
-                </div>
-                <div class="env-form-row">
-                  <label for="data-dest-input">Destination path</label>
-                  <input id="data-dest-input" type="text" autocomplete="off" spellcheck="false" placeholder="optional subpath (defaults to filename)">
-                </div>
-                <div class="env-form-row env-form-checks">
-                  <label><input type="checkbox" id="data-restart-input"><span>Restart app after upload</span></label>
-                </div>
-                <progress id="data-progress" max="100" value="0" aria-label="Upload progress" hidden></progress>
-                <div class="env-form-actions">
-                  <button id="data-upload-btn" type="submit" class="env-btn-primary">Upload</button>
-                </div>
-              </form>
-            </div>
-          </section>
-
-          <section class="settings-block">
-            <h2 class="settings-block-title">Shared data</h2>
-            <p class="settings-block-desc">Mount another app's persistent data dir read-only. It appears at <code>data/shared/&lt;source-slug&gt;/</code> inside this app. Read-only is enforced under the Docker runtime; under native it is a convention only.</p>
-            <div class="settings-block-body">
-              <div id="shared-data-list" class="shared-data-table"></div>
-              <div><button type="button" class="btn-primary" id="shared-data-add-btn">+ Mount data from another app</button></div>
-            </div>
-          </section>
-        </section>
-        <section id="detail-access-panel"        class="settings-tab-panel" role="tabpanel" hidden>
-          <fieldset class="settings-block access-level">
+        <section id="detail-data-panel" class="settings-tab-panel" role="region" aria-label="Data" hidden></section>
+        <section id="detail-access-panel"        class="settings-tab-panel" role="region" aria-label="Access" hidden>
+          <header class="app-tab-heading"><div><h2>Access</h2><p>Control who can open and manage this app.</p></div></header>
+          <fieldset class="settings-block access-level" id="access-visibility">
             <legend class="settings-block-title">Visibility</legend>
-            <p class="settings-block-desc">Who can open this app. Private: only the owner plus the members and groups granted below. Shared: every signed-in user. Public: anyone who can reach the server, no sign-in. Admins and operators can always open it.</p>
+            <p class="settings-block-desc">Admins and operators always have access. Save to apply visibility changes.</p>
             <div class="settings-block-body">
               <div class="access-radios">
-                <label><input type="radio" name="access-level" value="private"> Private (members only)</label>
+                <label><input type="radio" name="access-level" value="private"> Private (owner, members and granted groups)</label>
                 <label><input type="radio" name="access-level" value="shared"> Shared (all signed-in users)</label>
                 <label><input type="radio" name="access-level" value="public"> Public (no sign-in)</label>
               </div>
+              <p id="access-viewing-note" class="access-viewing-note" role="status" aria-atomic="true"></p>
               <div class="env-form-actions">
-                <button id="visibility-save-btn" type="button" class="env-btn-primary" hidden disabled>Save</button>
-                <span id="visibility-dirty" class="settings-dirty" hidden>Unsaved changes</span>
-                <span id="visibility-status" class="hibernate-status" hidden></span>
+                <button id="visibility-save-btn" type="button" class="env-btn-primary" hidden disabled>Save visibility</button>
+                <span id="visibility-dirty" class="settings-dirty" role="status" hidden>Unsaved changes</span>
+                <span id="visibility-status" class="hibernate-status" role="status" aria-atomic="true" hidden></span>
               </div>
-              <p id="visibility-error" class="error" hidden></p>
+              <p id="visibility-error" class="error" role="alert" hidden></p>
             </div>
           </fieldset>
 
-          <section class="settings-block">
-            <h2 class="settings-block-title">Members</h2>
-            <p class="settings-block-desc">People granted direct access. On a private app this is what admits them; the manager role also lets them deploy, configure, and manage members.</p>
+          <section class="settings-block access-grants" aria-labelledby="members-title">
+            <h2 id="members-title" class="settings-block-title">Members</h2>
+            <p class="settings-block-desc">Viewers can open the app. Managers can also deploy, change settings and manage access.</p>
             <div class="settings-block-body">
-              <button id="members-refresh" type="button" class="env-btn-secondary">Refresh members</button>
-              <ul id="members-list" class="access-list"></ul>
-              <div class="grant-row">
-                <label for="grant-username" class="sr-only">Username to grant access</label>
-                <input id="grant-username" type="text" placeholder="username" autocomplete="off" aria-describedby="grant-error">
-                <button id="grant-btn" type="button" class="btn-primary">Grant</button>
-              </div>
+              <p id="members-timing" class="access-help-text">Role changes and removals apply immediately.</p>
+              <p id="members-status" class="sr-only" role="status" aria-atomic="true"></p>
+              <ul id="members-list" class="access-grant-list" role="list" aria-label="App members" aria-describedby="members-timing access-viewing-note"></ul>
               <p id="grant-error" class="error" role="alert" hidden></p>
+              <details id="member-add" class="access-add">
+                <summary>Add member</summary>
+                <form id="member-add-form" class="access-add-form">
+                  <div class="access-add-field">
+                    <label for="grant-username">Username</label>
+                    <input id="grant-username" name="username" type="text" placeholder="Enter a username" autocomplete="off" required aria-describedby="member-add-help grant-error">
+                    <p id="member-add-help">New members start as viewers. You can change their role after adding them.</p>
+                  </div>
+                  <button id="grant-btn" type="submit" class="btn-primary">Add member</button>
+                </form>
+              </details>
             </div>
           </section>
 
-          <section class="settings-block">
-            <h2 class="settings-block-title">Group access</h2>
-            <p class="settings-block-desc">Grant an IdP group viewer or manager access. Group access is additive and does not restrict a public or shared app.</p>
-            <p id="group-access-sso-warning" class="settings-block-warning" hidden></p>
+          <section class="settings-block access-grants" aria-labelledby="group-access-title">
+            <h2 id="group-access-title" class="settings-block-title">Group access</h2>
+            <p class="settings-block-desc">Give everyone in an identity-provider group the same role.</p>
             <div class="settings-block-body">
-              <button id="groups-refresh" type="button" class="env-btn-secondary">Refresh groups</button>
-              <ul id="group-access-list" class="access-list"></ul>
-              <div class="grant-row">
-                <label for="group-access-name" class="sr-only">Group name</label>
-                <input id="group-access-name" aria-describedby="group-access-error" type="text" placeholder="group name" autocomplete="off">
-                <select id="group-access-role" aria-label="Group role">
-                  <option value="viewer">Viewer</option>
-                  <option value="manager">Manager</option>
-                </select>
-                <button id="group-access-add-btn" type="button" class="btn-primary">Add</button>
-              </div>
+              <p id="group-access-sso-warning" class="settings-block-warning" hidden></p>
+              <p id="groups-timing" class="access-help-text">Role changes and removals apply immediately.</p>
+              <p id="groups-status" class="sr-only" role="status" aria-atomic="true"></p>
+              <ul id="group-access-list" class="access-grant-list" role="list" aria-label="App groups" aria-describedby="groups-timing access-viewing-note"></ul>
               <p id="group-access-error" class="error" role="alert" hidden></p>
+              <details id="group-add" class="access-add">
+                <summary>Add group</summary>
+                <form id="group-add-form" class="access-add-form">
+                  <div class="access-add-field">
+                    <label for="group-access-name">Group name</label>
+                    <input id="group-access-name" name="group" type="text" placeholder="Enter the exact group name" autocomplete="off" required aria-describedby="group-add-help group-access-error">
+                  </div>
+                  <div class="access-add-field access-role-field">
+                    <label for="group-access-role">Role</label>
+                    <select id="group-access-role" aria-label="Group role">
+                      <option value="viewer">Viewer</option>
+                      <option value="manager">Manager</option>
+                    </select>
+                  </div>
+                  <button id="group-access-add-btn" type="submit" class="btn-primary">Add group</button>
+                  <p id="group-add-help" class="access-add-help">Use the exact group name supplied by your sign-in service.</p>
+                </form>
+              </details>
+              <details class="access-setup" id="group-access-setup">
+                <summary>How group sign-in works</summary>
+                <p>You can save grants before group sign-in is connected. They take effect when users sign in with matching groups.</p>
+                <p>Ask a ShinyHub administrator to configure OIDC group claims or a trusted forward-auth group header.</p>
+                <a href="https://github.com/rvben/shinyhub/blob/main/docs/native-oidc.md#configuration" target="_blank" rel="noopener">OIDC setup guide</a>
+                <a href="https://github.com/rvben/shinyhub/blob/main/docs/reverse-proxy/nginx.md#shinyhub-configuration" target="_blank" rel="noopener">Forward-auth setup guide</a>
+              </details>
             </div>
           </section>
         </section>
@@ -1139,7 +1201,7 @@
     <p id="log-pane-status" class="log-pane-status" role="status" hidden></p>
     <pre id="log-pane-body" class="log-pane-body"></pre>
   </div>
-  <!-- New-app modal: create-only; hand-off to CLI for the first deploy -->
+  <!-- Creation leads straight to the shared deployment dialog. -->
   <div id="new-app-modal" class="modal-overlay" hidden
        role="dialog" aria-modal="true" aria-labelledby="new-app-heading">
     <div class="modal-card">
@@ -1148,21 +1210,21 @@
         <button id="new-app-close" type="button" aria-label="Close new app modal"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg></button>
       </div>
       <div class="modal-body">
-        <p id="new-app-step" class="onboarding-step" aria-live="polite">Step 1 of 2 · App details</p>
-        <div class="handoff-card">
+        <p id="new-app-step" class="onboarding-step">Step 1 of 2 · App details</p>
+        <p class="new-app-intro">Give your app a name. You’ll deploy its code next.</p>
           <form id="new-app-form">
             <label for="new-app-name">Display name</label>
             <input id="new-app-name" type="text" required maxlength="128"
-                   placeholder="My Sales Dashboard">
+                   placeholder="Sales dashboard" autocomplete="off">
 
             <label for="new-app-slug">Slug</label>
             <input id="new-app-slug" type="text" class="field-code" required
                    maxlength="63"
                    pattern="[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
-                   placeholder="lowercase-letters-digits-dashes"
+                   placeholder="sales-dashboard"
                    autocomplete="off" spellcheck="false"
                    aria-describedby="new-app-slug-hint">
-            <p class="hint" id="new-app-slug-hint">1-63 chars, lowercase letters, digits and dashes. Must start and end with a letter or digit. Used in the URL: <code>/app/&lt;slug&gt;/</code>.</p>
+            <p class="hint" id="new-app-slug-hint">Your app’s URL: <code id="new-app-url">/app/&lt;slug&gt;/</code>. Use lowercase letters, digits and dashes (1-63 characters).</p>
 
             <details class="new-app-optional">
               <summary>Add to a project <span class="hint-inline">(optional)</span></summary>
@@ -1176,48 +1238,13 @@
 
             <div class="modal-actions">
               <button type="button" id="new-app-cancel">Cancel</button>
-              <button type="submit" id="new-app-submit" class="btn-primary">Create</button>
+              <button type="submit" id="new-app-submit" class="btn-primary">Create app</button>
             </div>
           </form>
-
-          <hr class="handoff-card-divider" aria-hidden="true">
-
-          <div>
-            <p class="handoff-section-label" id="new-app-snippet-label">Deploy from your machine after creating</p>
-            <div class="snippet">
-              <pre role="region" tabindex="0" aria-labelledby="new-app-snippet-label"><code id="new-app-snippet"></code></pre>
-              <button type="button" id="new-app-snippet-copy" class="copy-btn"
-                      aria-label="Copy CLI commands to clipboard">
-                <svg class="copy-icon-clipboard" viewBox="0 0 16 16" fill="none"
-                     stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
-                     stroke-linejoin="round" aria-hidden="true">
-                  <rect x="4" y="3" width="8" height="10" rx="1.2"/>
-                  <path d="M6.5 3V2.25a.75.75 0 0 1 .75-.75h1.5a.75.75 0 0 1 .75.75V3"/>
-                </svg>
-                <svg class="copy-icon-check" viewBox="0 0 16 16" fill="none"
-                     stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
-                     stroke-linejoin="round" aria-hidden="true">
-                  <path d="M3.5 8.5 6.5 11.5 12.5 5"/>
-                </svg>
-                <span class="copy-label" aria-hidden="true">Copy</span>
-                <span class="sr-only" id="new-app-snippet-status" aria-live="polite"></span>
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <section id="new-app-handoff" hidden>
-          <p class="handoff-success">Your app is ready for code.</p>
-          <p class="hint">Upload a folder or <code>.zip</code> now, or copy the commands above to deploy from your terminal.</p>
-          <div class="modal-actions">
-            <button type="button" id="new-app-done">Done for now</button>
-            <button type="button" id="new-app-deploy-now" class="btn-primary">Upload app</button>
-          </div>
-        </section>
       </div>
     </div>
   </div>
-  <!-- Deploy modal: accepts folder drop, zip drop, or file pick -->
+  <!-- CLI deployment is primary; browser upload is an explicit fallback. -->
   <div id="deploy-modal" class="modal-overlay" hidden
        role="dialog" aria-modal="true" aria-labelledby="deploy-modal-heading">
     <div class="modal-card">
@@ -1226,45 +1253,11 @@
         <button id="deploy-modal-close" type="button" aria-label="Close deploy modal"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="3" x2="13" y2="13"/><line x1="13" y1="3" x2="3" y2="13"/></svg></button>
       </div>
       <div class="modal-body">
-        <div id="deploy-dropzone" class="dropzone">
-          <p>Drop a folder or <code>.zip</code> here,</p>
-          <p>or <button id="deploy-pick" type="button" class="linklike">pick a file</button>.</p>
-        </div>
-        <input id="deploy-file" type="file" accept=".zip" aria-label="Choose an app bundle (.zip file)" hidden>
-
-        <ul id="deploy-summary" class="deploy-summary" hidden>
-          <li>Source: <span id="deploy-source-name">—</span></li>
-          <li>Files: <span id="deploy-file-count">0</span></li>
-          <li>Bundle size: <span id="deploy-bundle-size">0 B</span></li>
-          <li id="deploy-ignored-row" hidden>
-            Ignored: <span id="deploy-ignored-list"></span>
-          </li>
-        </ul>
-
-        <p id="deploy-stage" class="hint" role="status"></p>
-        <a id="deploy-view-history" data-nav hidden>View deployment history</a>
-        <div id="deploy-progress-wrap" class="deploy-progress" hidden>
-          <progress id="deploy-progress-bar" max="100" value="0" aria-label="Upload progress"></progress>
-          <span id="deploy-progress-text">0%</span>
-        </div>
-
-        <div id="deploy-result" class="deploy-result" hidden>
-          <p class="deploy-result-heading">Deploy succeeded.</p>
-          <ul id="deploy-result-list" class="deploy-result-list" aria-label="Deployment outcome and changes"></ul>
-        </div>
-
-        <p id="deploy-error" class="error" role="alert" hidden></p>
-
-        <div class="modal-actions">
-          <button type="button" id="deploy-cancel">Cancel</button>
-          <button type="button" id="deploy-error-logs" hidden>View app logs</button>
-          <button type="button" id="deploy-submit" class="btn-primary" disabled>Deploy</button>
-        </div>
-
-        <hr class="handoff-card-divider" aria-hidden="true">
-
-        <div>
-          <p class="handoff-section-label">Or deploy from your CLI</p>
+        <p id="deploy-step" class="onboarding-step" hidden>Step 2 of 2 · Deploy code</p>
+        <p id="deploy-created" class="deploy-created" role="status" hidden>App created. Deploy its code to bring it online.</p>
+        <section class="deploy-cli-guide" aria-labelledby="deploy-cli-heading">
+          <h3 id="deploy-cli-heading">Deploy from your terminal</h3>
+          <p>Recommended for production. Run this command from your app’s project directory.</p>
           <div class="snippet">
             <pre role="region" tabindex="0" aria-label="CLI deployment commands"><code id="deploy-cli-snippet"></code></pre>
             <button type="button" id="deploy-cli-snippet-copy" class="copy-btn"
@@ -1284,7 +1277,59 @@
               <span class="sr-only" id="deploy-cli-snippet-status" aria-live="polite"></span>
             </button>
           </div>
-        </div>
+        </section>
+        <details id="deploy-cli-setup" class="deploy-cli-setup">
+          <summary>Set up the CLI on a new computer</summary>
+          <p class="hint">Install the CLI once, then connect to this ShinyHub server.</p>
+          <div class="snippet">
+            <pre role="region" tabindex="0" aria-label="First-time CLI setup commands"><code id="deploy-cli-setup-snippet"></code></pre>
+            <button type="button" id="deploy-cli-setup-copy" class="copy-btn">Copy setup commands</button>
+          </div>
+          <p id="deploy-cli-setup-status" class="hint" role="status" aria-live="polite"></p>
+        </details>
+        <details id="deploy-upload-fallback" class="deploy-upload-fallback">
+          <summary>Browser upload <span>Fallback</span></summary>
+          <p class="hint">Upload a folder or ZIP when you can’t use the CLI. Browser upload is not recommended for production. Include <code>app.py</code> or <code>app.R</code> and your dependency file.</p>
+          <div id="deploy-dropzone" class="dropzone">
+            <p>Drop a folder or <code>.zip</code> here,</p>
+            <p>or <button id="deploy-pick" type="button" class="linklike">pick a file</button>.</p>
+          </div>
+          <input id="deploy-file" type="file" accept=".zip" aria-label="Choose an app bundle (.zip file)" hidden>
+
+          <ul id="deploy-summary" class="deploy-summary" hidden>
+            <li>Source: <span id="deploy-source-name">—</span></li>
+            <li>Files: <span id="deploy-file-count">0</span></li>
+            <li>Bundle size: <span id="deploy-bundle-size">0 B</span></li>
+            <li id="deploy-ignored-row" hidden>
+              Ignored: <span id="deploy-ignored-list"></span>
+            </li>
+          </ul>
+
+        </details>
+        <section id="deploy-upload-state" hidden aria-label="Deployment result">
+          <div id="deploy-progress-wrap" class="deploy-progress" hidden>
+            <progress id="deploy-progress-bar" max="100" value="0" aria-label="Upload progress"></progress>
+            <span id="deploy-progress-text" role="status" aria-live="polite">0%</span>
+          </div>
+
+          <div id="deploy-result" class="deploy-result" hidden>
+            <p class="deploy-result-heading" tabindex="-1" role="status">App is ready.</p>
+            <p id="deploy-result-description">Review the app overview for its current health.</p>
+            <p id="deploy-warning" class="hint" role="status" hidden></p>
+            <ul id="deploy-result-list" class="deploy-result-list" aria-label="Manifest changes applied"></ul>
+          </div>
+
+          <p id="deploy-error" class="error" role="alert" hidden></p>
+
+          <div class="modal-actions">
+            <button type="button" id="deploy-cancel">Cancel</button>
+            <button type="button" id="deploy-error-logs" hidden>View app logs</button>
+            <button type="button" id="deploy-success-logs" hidden>View logs</button>
+            <button type="button" id="deploy-submit" class="btn-primary" disabled>Deploy</button>
+          </div>
+
+        </section>
+        <div class="deploy-overview-link"><a id="deploy-overview" href="/apps" data-nav>View app overview →</a></div>
       </div>
     </div>
   </div>
@@ -1310,21 +1355,25 @@
                 <button id="profile-photo-change" type="button" aria-describedby="profile-photo-hint">Change photo</button>
                 <button id="profile-photo-remove" type="button" hidden>Use initials</button>
               </div>
-              <input id="profile-photo-file" type="file" aria-label="Profile photo" accept="image/png,image/jpeg,image/webp" hidden>
-              <div class="modal-actions profile-color-actions">
-                <label for="profile-avatar-color">Initials color</label>
-                <input id="profile-avatar-color" type="color">
-                <button id="profile-color-reset" type="button">Use default</button>
-              </div>
               <p id="profile-photo-hint" class="profile-hint">PNG, JPEG or WebP · 5 MB max · Square crop</p>
+              <input id="profile-photo-file" type="file" aria-label="Profile photo" accept="image/png,image/jpeg,image/webp" hidden>
+              <details class="profile-initials" id="profile-initials">
+                <summary>Initials color</summary>
+                <div class="modal-actions profile-color-actions">
+                  <label for="profile-avatar-color">Initials color</label>
+                  <input id="profile-avatar-color" type="color">
+                  <button id="profile-color-reset" type="button">Use default</button>
+                </div>
+              </details>
             </div>
           </section>
 
           <div id="profile-name-field">
             <label for="profile-display-name">Display name</label>
-            <input id="profile-display-name" type="text" maxlength="80"
-                   autocomplete="name" spellcheck="false" placeholder="Your name" aria-describedby="profile-name-hint">
-            <p id="profile-name-hint" class="profile-hint">Leave blank to use your username.</p>
+            <input id="profile-display-name" type="text"
+                   autocomplete="name" spellcheck="false" placeholder="Your name" aria-describedby="profile-name-hint profile-name-error">
+            <p id="profile-name-hint" class="profile-hint">Up to 80 characters. Leave blank to use your username.</p>
+            <p id="profile-name-error" class="field-error" hidden></p>
           </div>
 
           <fieldset id="theme-picker" class="profile-appearance">
@@ -1341,9 +1390,18 @@
               <summary>Change password<svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 3 5 5-5 5"/></svg></summary>
               <div class="profile-password-fields">
                 <label for="profile-current-password">Current password</label>
-                <input id="profile-current-password" type="password" autocomplete="current-password" placeholder="Your current password">
+                <div class="password-control">
+                  <input id="profile-current-password" type="password" autocomplete="current-password" aria-describedby="profile-current-error">
+                  <button type="button" class="password-visibility" data-password-toggle="profile-current-password" aria-label="Show current password" aria-pressed="false">Show</button>
+                </div>
+                <p id="profile-current-error" class="field-error" hidden></p>
                 <label for="profile-new-password">New password</label>
-                <input id="profile-new-password" type="password" minlength="15" autocomplete="new-password" placeholder="At least 15 characters">
+                <div class="password-control">
+                  <input id="profile-new-password" type="password" autocomplete="new-password" aria-describedby="profile-password-hint profile-new-error">
+                  <button type="button" class="password-visibility" data-password-toggle="profile-new-password" aria-label="Show new password" aria-pressed="false">Show</button>
+                </div>
+                <p id="profile-password-hint" class="profile-hint">Use 15 to 72 characters. Emoji and some letters reach the maximum sooner. Other sessions will be signed out.</p>
+                <p id="profile-new-error" class="field-error" aria-live="polite" hidden></p>
               </div>
             </details>
             <p id="profile-password-managed" class="profile-hint" hidden>Your name and password are managed by your identity provider.</p>
@@ -1360,7 +1418,7 @@
             <p id="profile-success" class="profile-success" role="status" aria-live="polite" hidden></p>
           </div>
           <div class="modal-actions profile-actions">
-            <button id="profile-cancel" type="button">Cancel</button>
+            <button id="profile-cancel" type="button">Close</button>
             <button id="profile-submit" type="submit" class="btn-primary">Save changes</button>
           </div>
         </div>
@@ -1410,10 +1468,11 @@
       </div>
       <div class="modal-body">
         <form id="new-token-form">
+          <p class="person-form-intro">This token will have the same access as your account.</p>
           <label for="new-token-name">Token name</label>
           <input id="new-token-name" type="text" required maxlength="64"
-                 autocomplete="off" spellcheck="false" placeholder="e.g. ci-deploy or laptop">
-          <p class="profile-hint">A label to recognise it later. Must be unique among your tokens.</p>
+                 autocomplete="off" spellcheck="false" placeholder="e.g. ci-deploy or laptop" aria-describedby="new-token-name-hint new-token-error">
+          <p id="new-token-name-hint" class="profile-hint">A label to recognise it later. Must be unique among your tokens.</p>
 
           <label for="new-token-expiry">Expires</label>
           <select id="new-token-expiry">
@@ -1424,6 +1483,7 @@
           <p class="profile-hint">An expired token stops authenticating; create a new one to replace it.</p>
 
           <p id="new-token-error" class="error" role="alert" hidden></p>
+          <button id="new-token-check" class="btn-row" type="button" hidden>Check token status</button>
 
           <div class="modal-actions">
             <button type="button" id="new-token-cancel">Cancel</button>
@@ -1432,6 +1492,7 @@
         </form>
 
         <div id="token-reveal" class="token-reveal" hidden>
+          <p id="token-reveal-detail" class="hint"></p>
           <p class="token-reveal-warning" role="alert">
             Copy this token now. For security it is <strong>shown only once</strong> and cannot be retrieved again.
           </p>
@@ -1442,9 +1503,16 @@
               <span class="copy-label">Copy</span>
             </button>
           </div>
-          <p id="token-reveal-status" class="sr-only" role="status" aria-live="polite"></p>
+          <p id="token-reveal-status" class="token-copy-status" role="status" aria-live="polite" aria-atomic="true"></p>
+          <div id="token-reveal-dismiss" class="token-dismiss" role="group" aria-labelledby="token-dismiss-question" hidden>
+            <p id="token-dismiss-question" role="alert">This token cannot be shown again. Close anyway?</p>
+            <div class="token-dismiss-actions">
+              <button id="token-reveal-keep" type="button" class="btn-row">Keep open</button>
+              <button id="token-reveal-discard" type="button" class="btn-row">Close anyway</button>
+            </div>
+          </div>
           <div class="modal-actions">
-            <button type="button" id="token-reveal-done" class="btn-primary">Done</button>
+            <button type="button" id="token-reveal-done" class="btn-primary">I’ve saved my token</button>
           </div>
         </div>
       </div>
@@ -1477,6 +1545,8 @@
           <p id="new-user-error" class="error" role="alert" hidden></p>
           <div class="modal-actions">
             <button type="button" id="new-user-cancel">Cancel</button>
+            <button type="button" id="new-user-check" hidden>Check invitation status</button>
+            <button type="button" id="new-user-view-invitations" hidden>View pending invitations</button>
             <button type="submit" id="new-user-submit" class="btn-primary">Create invitation</button>
           </div>
         </form>
@@ -1607,7 +1677,8 @@
             <legend>Job</legend>
             <p class="schedule-form-intro">Name the job and enter the command exactly as the runtime should execute it.</p>
             <label for="sched-name">Name</label>
-            <input id="sched-name" name="name" class="field-code" required pattern="[A-Za-z0-9_\-]{1,64}" autocomplete="off">
+            <input id="sched-name" name="name" class="field-code" required pattern="[A-Za-z0-9_\-]{1,64}" maxlength="64" autocomplete="off" aria-describedby="sched-name-help">
+            <p id="sched-name-help" class="hint">1 to 64 letters, numbers, hyphens or underscores.</p>
             <label for="sched-command">Command <span>one token per line</span></label>
             <textarea id="sched-command" name="command" class="field-code" rows="3" required placeholder="python&#10;fetch.py" autocapitalize="none" autocorrect="off" spellcheck="false"></textarea>
           </fieldset>
@@ -1618,7 +1689,8 @@
             <input id="sched-cron" name="cron_expr" class="field-code" required placeholder="0 6 * * *" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" aria-describedby="cron-preview">
             <div id="cron-preview" class="hint">Five-field cron · evaluated in the server timezone</div>
             <label for="sched-timezone">Timezone <span>optional</span></label>
-            <input id="sched-timezone" name="timezone" class="field-code" placeholder="Europe/Amsterdam (empty inherits the server default)" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
+            <input id="sched-timezone" name="timezone" class="field-code" placeholder="e.g. Europe/Amsterdam" aria-describedby="sched-timezone-help" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
+            <p id="sched-timezone-help" class="hint"></p>
             <label class="schedule-enabled-row"><input type="checkbox" id="sched-enabled" name="enabled" checked><span>Enabled</span></label>
           </fieldset>
 

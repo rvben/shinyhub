@@ -208,7 +208,7 @@ test('app-detail logs cross HTTP for replicas, history, switching, and cursor-sa
   await waitFor('both live replica lines', () =>
     output().includes('zero before drop') && output().includes('one live 1'));
   assert.equal(panel.querySelector('#logs-source').firstElementChild.textContent,
-    'All current replicas (2 live, 2 total)');
+    'All current replicas (2 live)');
   await waitFor('fully connected status', () => status() === 'Live · 2 connected sources');
 
   dropReplicaZero();

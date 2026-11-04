@@ -1,20 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { JSDOM } from 'jsdom';
 import {
   TAB_ROUTES,
   MANAGER_ONLY_TABS,
   resolveDetailAccess,
-  tabStripScrollTarget,
-  tabViewModels,
+  SETTINGS_PAGES,
+  settingsRouteParams,
+  isSameAppSettingsDestination,
 } from '../static/views/app-detail-nav.js';
 
-// The app-detail page resolves which tab to show and whether the visitor is
-// allowed on the page / the requested tab, then renders a roving-tabindex
-// tablist. These decisions used to live inline in mountAppDetail (untestable
-// IIFE-adjacent code); extracting them keeps the routing/visibility contract
-// under test. See internal/ui/static/views/app-detail.js for the wiring.
+// Contextual navigation keeps the existing renderer permissions while mapping
+// individual settings URLs onto the shared settings form.
 
 test('TAB_ROUTES and MANAGER_ONLY_TABS match the app-detail contract', () => {
   assert.deepEqual(TAB_ROUTES, [
@@ -25,7 +21,7 @@ test('TAB_ROUTES and MANAGER_ONLY_TABS match the app-detail contract', () => {
   assert.equal(MANAGER_ONLY_TABS.has('data'), true);
   assert.equal(MANAGER_ONLY_TABS.has('access'), true);
   assert.equal(MANAGER_ONLY_TABS.has('overview'), false);
-  assert.equal(MANAGER_ONLY_TABS.has('logs'), false);
+  assert.equal(MANAGER_ONLY_TABS.has('logs'), true);
   assert.equal(MANAGER_ONLY_TABS.has('schedules'), false);
 });
 
@@ -72,10 +68,18 @@ test('resolveDetailAccess redirects a non-manager off a manager-only tab to the 
 
 test('resolveDetailAccess lets a non-manager view a non-manager tab', () => {
   const r = resolveDetailAccess({
-    user: { role: 'developer' }, canManage: false, requestedTab: 'logs', slug: 'demo',
+    user: { role: 'developer' }, canManage: false, requestedTab: 'traces', slug: 'demo',
   });
-  assert.equal(r.tab, 'logs');
+  assert.equal(r.tab, 'traces');
   assert.equal(r.redirect, null);
+});
+
+test('log routes follow the backend manager boundary, including after permissions change', () => {
+  for (const role of ['developer', 'operator', 'admin', 'viewer']) {
+    assert.equal(resolveDetailAccess({user:{role}, canManage:true, requestedTab:'logs', slug:'demo'}).redirect, null);
+    assert.deepEqual(resolveDetailAccess({user:{role}, canManage:false, requestedTab:'logs', slug:'demo'}).redirect,
+      {path:role === 'viewer' ? '/apps' : '/apps/demo', replace:true});
+  }
 });
 
 test('resolveDetailAccess: the viewer / redirect wins over the manager-only tab redirect', () => {
@@ -95,71 +99,66 @@ test('resolveDetailAccess tolerates a null user (unauthenticated render)', () =>
   assert.equal(r.redirect, null);
 });
 
-test('tabViewModels marks the active tab and builds correct hrefs', () => {
-  const models = tabViewModels('demo', 'logs', true);
-  assert.deepEqual(models.map(m => m.route), TAB_ROUTES);
-
-  const overview = models.find(m => m.route === 'overview');
-  const logs = models.find(m => m.route === 'logs');
-  const cfg = models.find(m => m.route === 'configuration');
-
-  // Overview keeps the bare /apps/<slug> URL; every other tab has its segment.
-  assert.equal(overview.href, '/apps/demo');
-  assert.equal(logs.href, '/apps/demo/logs');
-  assert.equal(cfg.href, '/apps/demo/configuration');
-
-  // Active state + ARIA only on the active tab.
-  assert.equal(logs.active, true);
-  assert.equal(logs.ariaSelected, true);
-  assert.equal(logs.ariaCurrent, 'page');
-  assert.equal(overview.active, false);
-  assert.equal(overview.ariaSelected, false);
-  assert.equal(overview.ariaCurrent, null);
-
-  // Roving tabindex: only the active tab is in the page Tab order.
-  assert.equal(logs.tabindex, '0');
-  assert.equal(overview.tabindex, '-1');
+test('settings pages map to the shared configuration renderer except Access', () => {
+  assert.deepEqual(SETTINGS_PAGES, ['general', 'environment', 'resources', 'scaling', 'access', 'privacy']);
+  for (const section of SETTINGS_PAGES) {
+    const params = {slug:'forecast', section, extra:'kept'};
+    assert.deepEqual(settingsRouteParams(params), {slug:'forecast', section, extra:'kept', tab:section === 'access' ? 'access' : 'configuration'});
+    assert.equal(Object.hasOwn(params, 'tab'), false, 'route input is not mutated');
+  }
 });
 
-test('tabViewModels hides manager-only tabs from a non-manager', () => {
-  const models = tabViewModels('demo', 'overview', false);
-  const hiddenByRoute = Object.fromEntries(models.map(m => [m.route, m.hidden]));
-  assert.equal(hiddenByRoute.configuration, true);
-  assert.equal(hiddenByRoute.usage, true);
-  assert.equal(hiddenByRoute.data, true);
-  assert.equal(hiddenByRoute.access, true);
-  assert.equal(hiddenByRoute.overview, false);
-  assert.equal(hiddenByRoute.logs, false);
-  assert.equal(hiddenByRoute.traces, false);
-  assert.equal(hiddenByRoute.deployments, false);
-  assert.equal(hiddenByRoute.schedules, false);
+test('unknown or omitted settings pages resolve to General and replace stale renderer keys', () => {
+  for (const section of [undefined, '', 'unknown', 'files', 'Access', 'overview', '../access']) {
+    assert.deepEqual(settingsRouteParams({slug:'forecast', section, tab:'logs'}), {slug:'forecast', section:'general', tab:'configuration'});
+  }
+  assert.deepEqual(settingsRouteParams(), {tab:'configuration', section:'general'});
 });
 
-test('tabViewModels shows every tab to a manager', () => {
-  const models = tabViewModels('demo', 'overview', true);
-  assert.equal(models.every(m => m.hidden === false), true);
+test('settings destinations preserve the current app mount for every page and legacy settings links', () => {
+  for (const section of [...SETTINGS_PAGES, 'future-page']) {
+    assert.equal(isSameAppSettingsDestination(`/apps/forecast/settings/${section}`, 'forecast'), true);
+    assert.equal(isSameAppSettingsDestination(`/apps/forecast/settings/${section}?mode=edit#field`, 'forecast'), true);
+  }
+  for (const legacy of ['configuration', 'access']) {
+    assert.equal(isSameAppSettingsDestination(`/apps/forecast/${legacy}`, 'forecast'), true);
+    assert.equal(isSameAppSettingsDestination(`/apps/forecast/${legacy}?mode=edit#field`, 'forecast'), true);
+  }
 });
 
-test('tabStripScrollTarget centers the active tab and clamps both edges', () => {
-  assert.equal(tabStripScrollTarget({
-    clientWidth: 390, scrollWidth: 760, tabLeft: 310, tabWidth: 110,
-  }), 170);
-  assert.equal(tabStripScrollTarget({
-    clientWidth: 390, scrollWidth: 760, tabLeft: 20, tabWidth: 90,
-  }), 0);
-  assert.equal(tabStripScrollTarget({
-    clientWidth: 390, scrollWidth: 760, tabLeft: 700, tabWidth: 90,
-  }), 370);
-  assert.equal(tabStripScrollTarget({
-    clientWidth: 760, scrollWidth: 760, tabLeft: 300, tabWidth: 90,
-  }), 0);
+test('settings destinations compare decoded app identifiers exactly once', () => {
+  for (const slug of ['sales forecast', 'café', 'a/b', 'sales%2Fforecast', 'forecast?#']) {
+    const encoded = encodeURIComponent(slug);
+    assert.equal(isSameAppSettingsDestination(`/apps/${encoded}/settings/resources`, slug), true);
+    assert.equal(isSameAppSettingsDestination(`/apps/${encoded}/access`, slug), true);
+    assert.equal(isSameAppSettingsDestination(`/apps/${encoded}/settings/resources`, `${slug}-other`), false);
+  }
+  assert.equal(isSameAppSettingsDestination('/apps/%66orecast/settings/%61ccess', 'forecast'), true);
+  assert.equal(isSameAppSettingsDestination('/apps/sales%252Fforecast/settings/general', 'sales/forecast'), false, 'double decoding would confuse distinct app identities');
 });
 
-test('app detail breadcrumb returns to the canonical Apps destination', () => {
-  const dom = new JSDOM(readFileSync(new URL('../static/index.html', import.meta.url), 'utf8'));
-  const link = dom.window.document.querySelector('#app-detail-view [aria-label="Breadcrumb"] a');
-  assert.equal(link.textContent.trim(), 'Apps');
-  assert.equal(link.getAttribute('href'), '/apps');
-  assert.equal(link.hasAttribute('data-nav'), true);
-  dom.window.close();
+test('unrelated, external, nested, or malformed destinations leave the settings mount', () => {
+  const paths = [
+    '/apps', '/apps/forecast', '/apps/other/settings/general',
+    '/apps/forecast/overview', '/apps/forecast/usage', '/apps/forecast/logs', '/apps/forecast/data',
+    '/apps/forecast/settings/resources/', '/apps/forecast/configuration/', '/apps/forecast/access/',
+    '/apps/forecast/settings', '/apps/forecast/settings/', '/apps/forecast/settings/general/extra',
+    '/apps/forecast/configuration/extra', '/apps/forecast/access/extra',
+    '/apps/forecast/settings/general/../../logs', '/apps/forecast/settings/a%2Fb',
+    '/apps/%E0%A4%A/settings/general', '/apps/forecast/settings/%ZZ',
+    'https://example.com/apps/forecast/settings/general', '//example.com/apps/forecast/settings/general',
+    '/\t/example.com/apps/forecast/settings/general',
+    'apps/forecast/settings/general', '/apps/forecast\\settings/general', '', null, undefined,
+  ];
+  for (const path of paths) assert.equal(isSameAppSettingsDestination(path, 'forecast'), false, `unexpected settings destination: ${path}`);
+  assert.equal(isSameAppSettingsDestination('/apps/forecast/settings/general', ''), false);
+  assert.equal(isSameAppSettingsDestination('/apps/forecast/settings/general', null), false);
+});
+
+test('the settings URL mapping preserves manager-only permission gates', () => {
+  for (const section of SETTINGS_PAGES) {
+    const params = settingsRouteParams({slug:'forecast', section});
+    assert.deepEqual(resolveDetailAccess({user:{role:'developer'}, canManage:false, requestedTab:params.tab, slug:params.slug}).redirect, {path:'/apps/forecast', replace:true});
+    assert.equal(resolveDetailAccess({user:{role:'viewer'}, canManage:true, requestedTab:params.tab, slug:params.slug}).redirect, null);
+  }
 });

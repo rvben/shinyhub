@@ -31,10 +31,10 @@ export function appCardFacts(app, live = null, now = Date.now()) {
     || (Number(app.deploy_count) || 0) > 0;
   const latestFailed = app.last_deployment_status === 'failed';
 
+  if (!hasRelease && app.deploying) return [fact('Preparing the first release', 'setup')];
+
   if (!hasRelease) {
-    return [latestFailed
-      ? fact('Latest deployment failed', 'danger')
-      : fact('Not deployed yet', 'attention')];
+    return latestFailed ? [fact('Latest deployment failed', 'danger')] : [fact('No releases yet')];
   }
 
   const facts = [];

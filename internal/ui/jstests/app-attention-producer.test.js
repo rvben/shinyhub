@@ -25,7 +25,9 @@ test('failed apps render a recovery entry in the attention list', () => {
   const section = renderAppAttention(doc, [{
     slug: 'dashboard', name: 'Dashboard', status: 'failed', deploy_count: 2,
   }]);
-  assert.equal(section.querySelector('.app-attention-count').textContent, '1');
+  assert.equal(section.tagName, 'DETAILS');
+  assert.equal(section.open, false);
+  assert.equal(section.querySelector('summary').textContent, '1 app needs attention');
   assert.equal(section.querySelector('.app-attention-problem strong').textContent, 'Unavailable');
   assert.equal(section.querySelector('.app-attention-action').getAttribute('href'), '/apps/dashboard');
 });

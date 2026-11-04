@@ -15,6 +15,8 @@
   ],
   "uiPatterns": [
     "^/apps/[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(/[a-z-]+)?/?$",
+    "^/apps/[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?/settings/[a-z-]+/?$",
+    "^/apps/[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?/schedules/[1-9][0-9]*/?$",
     "^/projects/[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?/?$"
   ],
   "api": [
@@ -213,6 +215,14 @@
     {
       "method": "PUT",
       "path": "/api/apps/{slug}/icon"
+    },
+    {
+      "method": "GET",
+      "path": "/api/apps/{slug}/icon/state"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/apps/{slug}/icon/state"
     },
     {
       "method": "GET",
@@ -563,6 +573,10 @@
       "path": "/api/users/{id}"
     },
     {
+      "method": "GET",
+      "path": "/api/users/{id}/automatic-role"
+    },
+    {
       "method": "PATCH",
       "path": "/api/users/{id}/password"
     },
@@ -639,15 +653,19 @@
     "views/app-card-badge.js",
     "views/app-card-facts.js",
     "views/app-card-lifecycle.js",
+    "views/app-context-nav.js",
     "views/app-deploy-state.js",
     "views/app-detail-envelope.js",
     "views/app-detail-nav.js",
     "views/app-detail.js",
     "views/app-grid-groups.js",
     "views/app-isolation-banner.js",
+    "views/app-overview-activity.js",
     "views/apps-grid.js",
     "views/audit-detail.js",
+    "views/audit-explorer.js",
     "views/audit-log.js",
+    "views/auth-fields.js",
     "views/autoscale-visual.js",
     "views/autoscale.js",
     "views/boot-prefetch.js",
@@ -655,11 +673,16 @@
     "views/bundle-filter.js",
     "views/capacity-banner.js",
     "views/cli-connect.js",
+    "views/configuration-behavior.js",
+    "views/configuration-context.js",
     "views/connectivity-banner.js",
     "views/cpu-capacity.js",
     "views/crash-banner.js",
+    "views/data-ui.js",
+    "views/deploy-commands.js",
     "views/deployment-row.js",
     "views/detail-capacity.js",
+    "views/direct-setting.js",
     "views/emoji-picker.js",
     "views/fleet-health.js",
     "views/fleet-ui.js",
@@ -668,6 +691,7 @@
     "views/freshness.js",
     "views/group-disclosure.js",
     "views/in-flight.js",
+    "views/json-request.js",
     "views/kebab-menu.js",
     "views/launchpad-model.js",
     "views/launchpad.js",
@@ -675,10 +699,14 @@
     "views/login-providers.js",
     "views/logout-navigation.js",
     "views/logs-ui.js",
+    "views/metric-value.js",
+    "views/mobile-disclosure.js",
     "views/new-person.js",
     "views/overview-activity.js",
     "views/overview-model.js",
     "views/overview.js",
+    "views/page-components.js",
+    "views/people-directory.js",
     "views/people-onboarding.js",
     "views/person-actions.js",
     "views/project-detail.js",
@@ -692,7 +720,9 @@
     "views/resource-settings.js",
     "views/scaling-settings.js",
     "views/schedule-ui.js",
+    "views/select-picker.js",
     "views/session-controller.js",
+    "views/sidebar-account.js",
     "views/sidebar-drawer.js",
     "views/sidebar-nav.js",
     "views/sparkline.js",
@@ -703,6 +733,7 @@
     "views/support-session-settings.js",
     "views/tablist-keys.js",
     "views/theme.js",
+    "views/token-manager.js",
     "views/tokens.js",
     "views/traces-ui.js",
     "views/trends-card.js",

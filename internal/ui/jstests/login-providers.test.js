@@ -199,8 +199,8 @@ test('malformed forward-auth flags do not advertise gateway sign-in', () => {
 // --- groupAccessWarningText ---
 // user_groups (which Group access rules key on) is populated only by an OIDC
 // login's group claims or a forward-auth proxy's group header, never by a
-// plain GitHub/Google login. So this warns on the absence of OIDC alone,
-// even when other SSO providers are configured.
+// plain GitHub/Google login. Proxy sign-in still needs an explicit group
+// header; an enabled OIDC provider supplies the configured group claims.
 
 test('oidc configured: no warning', () => {
   assert.equal(groupAccessWarningText({ oidc: { enabled: true, display_name: 'Okta' } }), '');
@@ -209,7 +209,7 @@ test('oidc configured: no warning', () => {
 test('no oidc configured: warns, even with github/google SSO present', () => {
   const warning = groupAccessWarningText({ github: true, google: true, oidc: { enabled: false } });
   assert.notEqual(warning, '');
-  assert.match(warning, /No OIDC provider is configured/);
+  assert.match(warning, /administrator to connect group sign-in/);
 });
 
 test('a missing or partial response fails toward warning, not silence', () => {
@@ -217,4 +217,10 @@ test('a missing or partial response fails toward warning, not silence', () => {
   assert.notEqual(groupAccessWarningText({}), '');
   // only a strict boolean true on oidc.enabled silences the warning
   assert.notEqual(groupAccessWarningText({ oidc: { enabled: 'true' } }), '');
+});
+
+test('group setup guidance distinguishes an unchecked service from a sign-in proxy',()=>{
+  assert.match(groupAccessWarningText(null),/could not be checked/);
+  assert.match(groupAccessWarningText({forward_auth:true}),/proxy must supply group names/);
+  assert.equal(groupAccessWarningText({forward_auth:true,oidc:{enabled:true}}),'');
 });

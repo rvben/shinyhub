@@ -1,10 +1,12 @@
+import { revealConfigurationSection, applyScheduleTimezone } from '/static/views/configuration-context.js';
+import { deployCommands } from '/static/views/deploy-commands.js';
 // App detail view. Mounts #app-detail-view, populates the header, and shows
-// the requested tab. Tabs other than Overview are added in later tasks; for
-// now Overview is the only one with a renderer and other tabs show "Coming
-// soon" placeholders.
-import { formatFleetValue, makeFleetStateCard, renderFleetBadges } from '/static/views/fleet-ui.js';
+// the requested tab while keeping app identity and health consistent.
+import { makeFleetStateCard, renderFleetBadges } from '/static/views/fleet-ui.js';
 import { backendLabel, metricsText, reasonLabel } from '/static/views/replica-display.js';
-import { makeTraceRow, formatPollStatus } from '/static/views/traces-ui.js';
+import { createOverviewActivity } from '/static/views/app-overview-activity.js';
+import { createDataViewer } from '/static/views/data-ui.js';
+import { createTracesViewer } from '/static/views/traces-ui.js';
 import { startVisiblePoll } from '/static/views/visible-poll.js';
 import {
   summariseAutoscale,
@@ -23,27 +25,19 @@ import { seedDetailCapacity } from '/static/views/detail-capacity.js';
 import { formatStatus } from '/static/views/status-label.js';
 import { appAttention } from '/static/views/app-attention.js';
 import { appStatusView } from '/static/views/app-card-badge.js';
-import { awaitingFirstDeploy, firstDeployFailed } from '/static/views/app-deploy-state.js';
-import { crashBanner } from '/static/views/crash-banner.js';
+import { awaitingFirstDeploy, firstDeployFailed, hasSucceededDeploy } from '/static/views/app-deploy-state.js';
+import { appCardActions } from '/static/views/app-card-actions.js';
 import { capacityBanner } from '/static/views/capacity-banner.js';
 import { connectivityBanner } from '/static/views/connectivity-banner.js';
 import { renderTrendsCard } from '/static/views/trends-card.js';
-import { createTablistNav } from '/static/views/tablist-keys.js';
 import {
   TAB_ROUTES,
   resolveDetailAccess,
-  tabStripScrollTarget,
-  tabViewModels,
 } from '/static/views/app-detail-nav.js';
 import { normalizeAppEnvelope } from '/static/views/app-detail-envelope.js';
 import { createFreshness } from '/static/views/freshness.js';
 import { createLogsViewer } from '/static/views/logs-ui.js';
-import {
-  createUsageRequestGate,
-  renderUsageDashboard,
-  renderUsageError,
-  renderUsageLoading,
-} from '/static/views/usage-ui.js';
+import { createUsageViewer } from '/static/views/usage-ui.js';
 
 function pluralize(n, one, many) {
   return `${n} ${n === 1 ? one : many}`;
@@ -64,6 +58,34 @@ function setText(el, value) {
 
 export function mountAppDetail(ctx) {
   const view = document.getElementById('app-detail-view');
+  const health = view.querySelector('#overview-health');
+  const overviewHeading = view.querySelector('#app-overview-heading');
+  const overviewRefresh = view.querySelector('#overview-refresh');
+  const overviewRefreshStatus = view.querySelector('#overview-refresh-status');
+  const metricsDisclosure = view.querySelector('.app-technical-summary');
+  const recover = view.querySelector('#overview-health-recover');
+  const editIcon = view.querySelector('#app-detail-icon-edit');
+  editIcon?.addEventListener('click', async () => {
+    if (!showing || !ctx.canManageApp(ctx.state.user, showing.app)) return;
+    const slug = showing.slug;
+    await ctx.navigate(`/apps/${encodeURIComponent(slug)}/settings/general`);
+    // Navigation can be vetoed by unsaved edits or superseded by another app.
+    // Only move focus once this app's editor is actually on screen.
+    if (!showing || showing.slug !== slug || panels.configuration.hidden
+        || panels.configuration.dataset.settingsPage !== 'general'
+        || !ctx.canManageApp(ctx.state.user, showing.app)) return;
+    revealConfigurationSection(view, 'configuration-general');
+    const upload = view.querySelector('#general-icon-upload');
+    upload?.focus({ preventScroll: true });
+    upload?.closest('.scaling-row')?.scrollIntoView({ block: 'center' });
+  });
+  recover?.addEventListener('click', async () => {
+    if (!showing || showing.app.deployment_repair_required || !appCardActions(showing.app, showing.canManage).showStart) return;
+    const { slug, app } = showing;
+    if (app.status === 'crashed') await ctx.restart(slug, recover);
+    else await ctx.start(slug, recover);
+    await revalidate(slug, true);
+  });
   const panels = {
     overview:      document.getElementById('detail-overview-panel'),
     usage:         document.getElementById('detail-usage-panel'),
@@ -75,59 +97,11 @@ export function mountAppDetail(ctx) {
     data:          document.getElementById('detail-data-panel'),
     access:        document.getElementById('detail-access-panel'),
   };
-  const tabEls = Object.fromEntries(
-    TAB_ROUTES.map(t => [t, document.getElementById(`detail-tab-${t}`)]),
-  );
-
-  // Maintain a data-overflow hint on the tab strip so CSS can fade only the
-  // edge(s) with clipped tabs when it scrolls (mobile). Wired once; the strip is
-  // static markup, so the listeners outlive individual renders.
-  const tabsNav = document.querySelector('.settings-tabs');
-  const sectionPicker = document.getElementById('app-section-select');
-  if (sectionPicker && !sectionPicker.dataset.wired) {
-    sectionPicker.dataset.wired = 'true';
-    sectionPicker.addEventListener('change', () => {
-      const target = tabEls[sectionPicker.value];
-      if (target && !target.hidden) ctx.navigate(target.getAttribute('href'));
-    });
-  }
-  function updateTabOverflow() {
-    if (!tabsNav) return;
-    const slack = tabsNav.scrollWidth - tabsNav.clientWidth;
-    if (slack <= 1) { tabsNav.removeAttribute('data-overflow'); return; }
-    const atStart = tabsNav.scrollLeft <= 1;
-    const atEnd = tabsNav.scrollLeft >= slack - 1;
-    tabsNav.setAttribute('data-overflow', atStart ? 'start' : atEnd ? 'end' : 'mid');
-  }
-  // Center the active tab and recompute the edge fade. Run on the next frame and
-  // again after web fonts load (on a fresh/deep-link load the tabs widen when
-  // the font swaps in, which is what makes the strip overflow in the first place).
-  function syncTabStrip(activeEl) {
-    if (activeEl && tabsNav) {
-      const navRect = tabsNav.getBoundingClientRect();
-      const activeRect = activeEl.getBoundingClientRect();
-      tabsNav.scrollLeft = tabStripScrollTarget({
-        clientWidth: tabsNav.clientWidth,
-        scrollWidth: tabsNav.scrollWidth,
-        tabLeft: activeRect.left - navRect.left + tabsNav.scrollLeft,
-        tabWidth: activeRect.width,
-      });
-    }
-    updateTabOverflow();
-  }
-  if (tabsNav) {
-    tabsNav.addEventListener('scroll', updateTabOverflow, { passive: true });
-    window.addEventListener('resize', updateTabOverflow, { passive: true });
-    // WAI-ARIA tablist keyboard nav (manual activation): arrow/Home/End move
-    // focus between the visible tabs; Enter/Space commit the focused tab by
-    // reusing the delegated data-nav click handler to navigate. Manual (not
-    // focus-follows) activation is required here because navigating moves page
-    // focus to the section heading, which would otherwise break the next arrow.
-    // Wired once; roving tabindex is refreshed per render in the loop below.
-    createTablistNav(tabsNav, document, { onActivate: (el) => el.click() });
-  }
-
   let tabCleanup = null;
+  let overviewManualRevision = 0;
+  let configurationInitialized = false;
+  let accessInitialized = false;
+  let activeTab = 'overview';
   // The app currently on screen, with the envelope it was rendered from. A tab
   // switch reuses it (see update below) instead of refetching and repainting
   // what the visitor is already looking at.
@@ -150,39 +124,46 @@ export function mountAppDetail(ctx) {
   // page's cached copy without the call site having to remember.
   document.addEventListener('shinyhub:mutated', () => freshness.mutated());
 
-  // Apply the per-tab visibility/href/ARIA/roving-tabindex model. Hrefs are
-  // populated so middle-click / cmd-click open real URLs; only the active tab
-  // carries tabindex 0 (arrow keys move between the rest, see createTablistNav).
-  function applyTabs(slug, tab, canManage) {
-    for (const vm of tabViewModels(slug, tab, canManage)) {
-      const el = tabEls[vm.route];
-      el.hidden = vm.hidden;
-      el.setAttribute('href', vm.href);
-      el.classList.toggle('active', vm.active);
-      el.setAttribute('aria-selected', String(vm.ariaSelected));
-      el.setAttribute('tabindex', vm.tabindex);
-      if (vm.ariaCurrent) el.setAttribute('aria-current', vm.ariaCurrent);
-      else el.removeAttribute('aria-current');
-      const option = sectionPicker?.querySelector(`option[value="${vm.route}"]`);
-      if (option) option.hidden = vm.hidden;
-    }
-    if (sectionPicker) sectionPicker.value = tab;
+  function enforceCurrentAccess() {
+    if (!showing) return false;
+    const { redirect } = resolveDetailAccess({
+      user: ctx.state.user, canManage: showing.canManage, requestedTab: activeTab, slug: showing.slug,
+    });
+    if (!redirect) return true;
+    panels.configuration.hidden = true;
+    panels.access.hidden = true;
+    configurationInitialized = false; accessInitialized = false;
+    ctx.clearSettingsDrafts?.();
+    ctx.navigate(redirect.path, { replace: redirect.replace });
+    return false;
   }
 
   // Show the selected panel, hide the rest, and render the active tab. The
   // panel that is about to fill is the only region allowed to be empty while
-  // its data loads; the header and the tab strip stay put.
+  // its data loads; the app header and contextual navigation stay put.
   async function renderTab(tab, params) {
     const { app, body, replicasStatus } = showing;
+    activeTab = tab;
+    view.dataset.appPage = tab;
+    syncHeaderDestinations();
+    if (tab !== 'configuration' && tab !== 'access') { configurationInitialized = false; accessInitialized = false; }
     for (const t of TAB_ROUTES) {
       panels[t].hidden = t !== tab;
     }
 
     if (tabCleanup) { tabCleanup(); tabCleanup = null; }
+    overviewManualRevision++;
+    overviewRefresh.disabled = false;
+    overviewRefreshStatus.textContent = '';
+    overviewHeading.hidden = tab !== 'overview';
+    overviewRefreshStatus.hidden = tab !== 'overview';
+    metricsDisclosure.hidden = tab !== 'overview' || !hasSucceededDeploy(app);
+    renderAppHealth(app, body, liveMetrics, metricsStale,
+      overviewEnvelopeError || Date.now() - overviewCheckedAt > 60000);
 
     if (tab === 'overview') {
-      renderOverview(panels.overview, app, replicasStatus, body, ctx);
-      renderOverviewHealth(panels.overview, app, body, liveMetrics, metricsStale,
+      tabCleanup = renderOverview(panels.overview, app, replicasStatus, body, ctx);
+      renderAppHealth(app, body, liveMetrics, metricsStale,
         overviewEnvelopeError || Date.now() - overviewCheckedAt > 60000);
     }
     if (tab === 'usage') {
@@ -195,19 +176,30 @@ export function mountAppDetail(ctx) {
       tabCleanup = renderTraces(panels.traces, app, ctx);
     }
     if (tab === 'deployments') {
-      await renderDeployments(panels.deployments, app, ctx);
+      const cleanup = renderDeployments(panels.deployments, app, ctx, () => {
+        freshness.mutated();
+        return revalidate(app.slug, true);
+      });
+      tabCleanup = cleanup;
     }
     if (tab === 'schedules') {
-      tabCleanup = await renderSchedules(panels.schedules, app, ctx, params.scheduleId);
+      tabCleanup = renderSchedules(panels.schedules, app, ctx, params.scheduleId, body);
     }
     if (tab === 'configuration') {
-      renderConfiguration(panels.configuration, app, ctx, body);
+      if (!configurationInitialized) {
+        renderConfiguration(panels.configuration, app, ctx, body);
+        configurationInitialized = true;
+      }
+      revealConfigurationSection(view, params.section || 'general');
     }
     if (tab === 'data') {
-      renderData(panels.data, app, ctx);
+      tabCleanup = renderData(panels.data, app, ctx, body);
     }
     if (tab === 'access') {
-      renderAccess(panels.access, app, ctx, body);
+      if (!accessInitialized) {
+        renderAccess(panels.access, app, ctx);
+        accessInitialized = true;
+      }
     }
   }
 
@@ -227,14 +219,12 @@ export function mountAppDetail(ctx) {
     });
     if (redirect) { ctx.navigate(redirect.path, { replace: redirect.replace }); return; }
 
-    // The tab strip moves on the click, before any request: the visitor gets
-    // immediate confirmation, and the panel below it swaps when it is ready.
-    applyTabs(params.slug, tab, showing.canManage);
     if (freshness.isStale()) await refetch(params.slug);
     // A refetch that found the app gone has already navigated away.
     if (!showing || showing.slug !== params.slug) return;
+    activeTab = tab;
+    if (!enforceCurrentAccess()) return;
     await renderTab(tab, params);
-    requestAnimationFrame(() => syncTabStrip(tabEls[tab]));
     ctx.updateActiveNav(location.pathname);
     ctx.metrics.setTargets([showing.app.slug]);
     revalidate(params.slug);
@@ -275,7 +265,7 @@ export function mountAppDetail(ctx) {
     if (!panels.overview.hidden) syncOverviewSignals(panels.overview, app, body, ctx);
     overviewCheckedAt = Date.now();
     overviewEnvelopeError = false;
-    renderOverviewHealth(panels.overview, app, body, liveMetrics, metricsStale, false);
+    renderAppHealth(app, body, liveMetrics, metricsStale, false);
   }
 
   // Refresh the envelope in the background. Changed health signals are patched
@@ -292,7 +282,7 @@ export function mountAppDetail(ctx) {
         if (resp.status === 401) { ctx.onUnauthorized(); return; }
         if (!resp.ok) {
           overviewEnvelopeError = true;
-          renderOverviewHealth(panels.overview, showing.app, showing.body, liveMetrics, metricsStale, true);
+          renderAppHealth(showing.app, showing.body, liveMetrics, metricsStale, true);
           return;
         }
         const body = await resp.json();
@@ -305,7 +295,7 @@ export function mountAppDetail(ctx) {
         // Nothing changed, so there is nothing to repaint. Writing the same
         // values back would still replace DOM nodes for no reason.
         if (unchanged) {
-          renderOverviewHealth(panels.overview, showing.app, showing.body, liveMetrics, metricsStale, false);
+          renderAppHealth(showing.app, showing.body, liveMetrics, metricsStale, false);
           return;
         }
         const { app, replicasStatus } = normalizeAppEnvelope(body);
@@ -314,13 +304,15 @@ export function mountAppDetail(ctx) {
           canManage: ctx.canManageApp(ctx.state.user, app),
         };
         if (ctx.setDetailApp) ctx.setDetailApp(app);
+        if (!enforceCurrentAccess()) return;
         if (ctx.setDetailEnvelope) ctx.setDetailEnvelope(body);
         applyHeader(app, body);
         if (!panels.overview.hidden) {
           const normal = !awaitingFirstDeploy(app) && !firstDeployFailed(app);
-          const hasNormalPanel = !!panels.overview.querySelector('#overview-health');
+          const hasNormalPanel = !!panels.overview.querySelector('.overview-grid');
           if (normal !== hasNormalPanel || (!normal && !!firstDeployFailed(app) !== !!panels.overview.querySelector('#overview-failed-error'))) {
-            renderOverview(panels.overview, app, replicasStatus, body, ctx);
+            tabCleanup?.();
+            tabCleanup = renderOverview(panels.overview, app, replicasStatus, body, ctx);
           } else {
             syncOverviewSignals(panels.overview, app, body, ctx);
           }
@@ -328,40 +320,62 @@ export function mountAppDetail(ctx) {
           if (autoscale) renderAutoscaleSummary(autoscale, summariseAutoscale(app, body));
           if (ctx.setDetailEnvelope) ctx.setDetailEnvelope(body);
         }
-        renderOverviewHealth(panels.overview, app, body, liveMetrics, metricsStale, false);
+        renderAppHealth(app, body, liveMetrics, metricsStale, false);
       })
       .catch(() => {
         if (token !== revalidation || !showing || showing.slug !== slug) return;
         overviewEnvelopeError = true;
-        renderOverviewHealth(panels.overview, showing.app, showing.body, liveMetrics, metricsStale, true);
+        renderAppHealth(showing.app, showing.body, liveMetrics, metricsStale, true);
       });
   }
+
+  overviewRefresh.addEventListener('click', async () => {
+    if (!showing || activeTab !== 'overview' || overviewRefresh.disabled) return;
+    const slug = showing.slug;
+    const revision = ++overviewManualRevision;
+    overviewRefresh.disabled = true;
+    overviewRefreshStatus.textContent = 'Refreshing overview…';
+    try {
+      const results = await Promise.allSettled([revalidate(slug, true), ctx.metrics.refresh?.(), refreshTrends(slug), tabCleanup?.refresh?.(true)]);
+      if (revision !== overviewManualRevision || !showing || showing.slug !== slug || activeTab !== 'overview') return;
+      overviewRefreshStatus.textContent = overviewEnvelopeError || metricsStale || results.some(result => result.status === 'rejected' || result.value === false)
+        ? 'Some overview information could not be refreshed. Check the messages in each section.' : 'Overview updated.';
+    } finally { if (revision === overviewManualRevision) overviewRefresh.disabled = false; }
+  });
 
   // A metrics poll is also the cadence for checking the slower envelope-only
   // health signals. Keep this separate from the 10s live resource measurements.
   mount.onLiveMetrics = (slug, metrics) => {
-    if (!showing || showing.slug !== slug || panels.overview.hidden) return;
+    if (!showing || showing.slug !== slug) return;
     const statusChanged = !!metrics.status && metrics.status !== showing.app.status;
-    if (statusChanged) showing.app = { ...showing.app, status: metrics.status };
+    if (statusChanged || typeof metrics.deploying === 'boolean') {
+      showing.app = { ...showing.app, ...(metrics.status ? { status: metrics.status } : {}),
+        ...(typeof metrics.deploying === 'boolean' ? { deploying: metrics.deploying } : {}) };
+      if (ctx.setDetailApp) ctx.setDetailApp(showing.app);
+      applyHeader(showing.app, showing.body);
+    }
     liveMetrics = metrics;
     const trends = document.getElementById('overview-trends');
     if (trends) trends.dataset.cpuCapacityCores = String(metrics.cpu_capacity_cores || '');
     metricsStale = false;
-    renderOverviewHealth(panels.overview, showing.app, showing.body, liveMetrics, metricsStale, overviewEnvelopeError || Date.now() - overviewCheckedAt > 60000);
+    renderAppHealth(showing.app, showing.body, liveMetrics, metricsStale, overviewEnvelopeError || Date.now() - overviewCheckedAt > 60000);
+    if (overviewRefresh.disabled) return;
     if (overviewRefreshPending || (!statusChanged && Date.now() - overviewRefreshAt < 30000)) return;
     overviewRefreshAt = Date.now();
     overviewRefreshPending = true;
     Promise.resolve(revalidate(slug, true)).finally(() => { overviewRefreshPending = false; });
     refreshTrends(slug);
+    if (activeTab === 'overview') void tabCleanup?.refresh?.();
   };
   mount.onMetricsError = (slug) => {
-    if (!showing || showing.slug !== slug || panels.overview.hidden) return;
+    if (!showing || showing.slug !== slug) return;
     metricsStale = true;
-    renderOverviewHealth(panels.overview, showing.app, showing.body, liveMetrics, metricsStale, overviewEnvelopeError || Date.now() - overviewCheckedAt > 60000);
+    renderAppHealth(showing.app, showing.body, liveMetrics, metricsStale, overviewEnvelopeError || Date.now() - overviewCheckedAt > 60000);
   };
 
   // A fresh arrival on this page: fetch the app, build the whole view, reveal it.
   async function mount(params) {
+    const sessionIdentity = ctx.state.sessionIdentity;
     const { slug } = params;
     const stamp = freshness.begin();
 
@@ -371,6 +385,7 @@ export function mountAppDetail(ctx) {
     // who pasted/bookmarked the explicit overview URL.
 
     const resp = await ctx.api(`/api/apps/${slug}`);
+    if (sessionIdentity !== ctx.state.sessionIdentity) return {};
     if (resp.status === 404) { ctx.navigate('/apps', { replace: true }); return {}; }
     if (resp.status === 401) { ctx.onUnauthorized(); return {}; }
     // A silent `return {}` here used to leave the main panel totally blank with
@@ -383,6 +398,7 @@ export function mountAppDetail(ctx) {
     // release_number/released_at/released_version) onto app and returns
     // replicas_status. See views/app-detail-envelope.js.
     const body = await resp.json();
+    if (sessionIdentity !== ctx.state.sessionIdentity) return {};
     const { app, replicasStatus } = normalizeAppEnvelope(body);
 
     const canManage = ctx.canManageApp(ctx.state.user, app);
@@ -398,6 +414,7 @@ export function mountAppDetail(ctx) {
     });
     if (redirect) { ctx.navigate(redirect.path, { replace: redirect.replace }); return {}; }
 
+    configurationInitialized = false; accessInitialized = false;
     showing = { slug, app, body, replicasStatus, canManage };
     liveMetrics = null;
     metricsStale = false;
@@ -411,26 +428,18 @@ export function mountAppDetail(ctx) {
     if (ctx.setDetailApp) ctx.setDetailApp(app);
     if (ctx.setDetailEnvelope) ctx.setDetailEnvelope(body);
 
-    applyTabs(slug, tab, canManage);
-    // On narrow screens the tab bar scrolls horizontally. Keep the active tab
-    // for the post-render centering pass below; measuring while the view is
-    // still hidden would produce zero-width geometry on a deep link.
-    const activeTabEl = tabEls[tab];
-
     applyHeader(app, body);
     // Seed the metric tiles until the first metrics poll arrives. Only on a
     // fresh mount: on a tab switch the poller is still running and the tiles
     // already hold real values, and blanking them to "—" is precisely what made
     // a tab click look like a page load.
+    overviewRefreshStatus.textContent = '';
     seedStats(app);
 
     await renderTab(tab, params);
+    if (sessionIdentity !== ctx.state.sessionIdentity) return {};
 
     view.hidden = false;
-    requestAnimationFrame(() => syncTabStrip(activeTabEl));
-    if (document.fonts && document.fonts.ready) {
-      document.fonts.ready.then(() => syncTabStrip(activeTabEl)).catch(() => {});
-    }
     ctx.updateActiveNav(location.pathname);
     ctx.metrics.setTargets([app.slug]);
 
@@ -438,12 +447,13 @@ export function mountAppDetail(ctx) {
       title: app.name,
       update,
       unmount() {
-        ctx.setSettingsSlug?.(null);
+        overviewManualRevision++;
         if (tabCleanup) { tabCleanup(); tabCleanup = null; }
         // Abandon any in-flight revalidation: its result belongs to a page the
         // visitor has left.
         revalidation++;
         showing = null;
+        if (ctx.setDetailApp) ctx.setDetailApp(null);
         liveMetrics = null;
         freshness.forget();
         view.hidden = true;
@@ -459,6 +469,7 @@ export function mountAppDetail(ctx) {
   // which would drop a selection the visitor had made inside the header.
   function applyHeader(app, body) {
     setText(document.getElementById('app-detail-heading'), app.name);
+    if (editIcon) editIcon.hidden = !ctx.canManageApp(ctx.state.user, app);
     const descriptionEl = document.getElementById('app-detail-description');
     if (descriptionEl) {
       const description = typeof app.description === 'string' ? app.description.trim() : '';
@@ -478,7 +489,16 @@ export function mountAppDetail(ctx) {
     const openLink = document.getElementById('app-detail-open');
     const openHref = `/app/${app.slug}/`;
     if (openLink.getAttribute('href') !== openHref) openLink.href = openHref;
-    openLink.hidden = !['running', 'idle'].includes(app.status);
+    const hasRelease = hasSucceededDeploy(app) || app.last_deployment_status === 'succeeded';
+    openLink.hidden = !hasRelease || !['running', 'idle', 'hibernated', 'degraded'].includes(app.status);
+    statusEl.hidden = !awaitingFirstDeploy(app) && !firstDeployFailed(app);
+    if (health) health.hidden = awaitingFirstDeploy(app) || firstDeployFailed(app);
+    if (recover) {
+      recover.hidden = !!app.deployment_repair_required || !appCardActions(app, ctx.canManageApp(ctx.state.user, app)).showStart;
+      recover.textContent = app.status === 'crashed' ? 'Restart' : 'Start app';
+    }
+    document.querySelector('.app-detail-capacity').hidden = !hasRelease;
+    metricsDisclosure.hidden = panels.overview.hidden || !hasRelease;
 
     // The header kebab holds only manager actions, so a viewer must not see it
     // at all. That decision, and which individual items apply to this app, is
@@ -494,6 +514,12 @@ export function mountAppDetail(ctx) {
     renderReleaseStrip(document, document.getElementById('app-detail-release'), releaseStripModel(app), {
       markFor: provenanceMark,
     });
+    syncHeaderDestinations();
+  }
+
+  function syncHeaderDestinations() {
+    const history = view.querySelector('.release-history');
+    if (history) history.hidden = activeTab === 'deployments';
   }
 
   // A fresh mount has no live measurements; preserve values on tab switches.
@@ -619,64 +645,7 @@ function renderLogs(panel, app, replicasStatus, ctx) {
 }
 
 function renderUsage(panel, app, ctx) {
-  let disposed = false;
-  let days = 30;
-  const requests = createUsageRequestGate();
-
-  async function load(showLoading = true, focusTarget = '') {
-    const request = requests.begin();
-    if (showLoading) renderUsageLoading(document, panel);
-    const trigger = focusTarget === 'refresh' ? panel.querySelector('.usage-controls button') : null;
-    if (trigger) {
-      trigger.disabled = true;
-      trigger.textContent = 'Refreshing…';
-    }
-    const showError = (message) => {
-      renderUsageError(document, panel, message, () => load());
-      if (focusTarget) panel.querySelector('button')?.focus();
-    };
-    let response;
-    try {
-      response = await ctx.api(`/api/apps/${encodeURIComponent(app.slug)}/usage?days=${days}`, {
-        signal: request.signal,
-      });
-    } catch {
-      if (!disposed && requests.isCurrent(request)) {
-        showError('The server could not be reached. Check the connection and try again.');
-      }
-      return;
-    }
-    if (disposed || !requests.isCurrent(request)) return;
-    if (response.status === 401) { ctx.onUnauthorized(); return; }
-    if (!response.ok) {
-      const message = response.status === 403
-        ? 'Your access to this app changed. Reload the page or ask an app manager for access.'
-        : `The server returned HTTP ${response.status}. Try again in a moment.`;
-      showError(message);
-      return;
-    }
-    let data;
-    try {
-      data = await response.json();
-    } catch {
-      if (requests.isCurrent(request)) showError('The server returned an invalid response. Try again in a moment.');
-      return;
-    }
-    if (disposed || !requests.isCurrent(request)) return;
-    days = Number(data.window_days) || days;
-    renderUsageDashboard(document, panel, data, {
-      onRangeChange(nextDays) {
-        days = nextDays;
-        load(true, 'range');
-      },
-      onRefresh() { load(false, 'refresh'); },
-    });
-    if (focusTarget === 'range') panel.querySelector('.usage-controls select')?.focus();
-    if (focusTarget === 'refresh') panel.querySelector('.usage-controls button')?.focus();
-  }
-
-  load();
-  return () => { disposed = true; requests.invalidate(); };
+  return createUsageViewer({ panel, app, api: ctx.api, onUnauthorized: ctx.onUnauthorized });
 }
 
 function makeStatusBadge(cls, text) {
@@ -686,7 +655,7 @@ function makeStatusBadge(cls, text) {
   return span;
 }
 
-function makeDeploymentRow(m, nested = false) {
+function makeDeploymentRow(m, nested = false, app) {
   const li = document.createElement('li');
   li.className = 'deployment-row' + (m.isCurrent ? ' deployment-row-current' : '') + (nested ? ' deployment-row-attempt' : '');
   const verCell = document.createElement('span');
@@ -711,8 +680,14 @@ function makeDeploymentRow(m, nested = false) {
   }
   const whenCell = document.createElement('span');
   whenCell.className = 'deployment-when';
-  whenCell.textContent = m.relWhen || '—';
-  if (m.absWhen) whenCell.title = m.absWhen;
+  if (m.time) {
+    const time = document.createElement('time');
+    time.dateTime = m.time.datetime;
+    time.textContent = m.time.absolute;
+    const age = document.createElement('span');
+    age.textContent = m.time.relative;
+    whenCell.append(time, age);
+  } else whenCell.textContent = 'Time unavailable';
 
   const sourceCell = document.createElement('span');
   sourceCell.className = 'deployment-source';
@@ -720,16 +695,23 @@ function makeDeploymentRow(m, nested = false) {
   sourcePrimary.className = 'deployment-source-primary';
   if (nested && m.source.developmentSession) sourcePrimary.textContent = 'Development save';
   else if (m.source.url) sourcePrimary.appendChild(externalLink(m.source.label, m.source.url));
-  else sourcePrimary.textContent = m.source.label;
+  else sourcePrimary.textContent = m.source.available ? m.source.label : 'Source not recorded';
   const sourceDetail = document.createElement('span');
   sourceDetail.className = 'deployment-source-detail';
-  sourceDetail.append(m.failureReason && (m.status === 'failed' || m.status === 'blocked') ? m.failureReason : m.source.detail);
+  if (m.source.available) sourceDetail.append(m.source.detail);
   if (m.source.change) {
     sourceDetail.append(' · ');
     sourceDetail.append(m.source.change.url ? externalLink(m.source.change.label, m.source.change.url) : m.source.change.label);
   }
   if (m.restoredFromReleaseNumber != null) sourceDetail.append(` · restored bundle from v${m.restoredFromReleaseNumber}`);
-  sourceCell.append(sourcePrimary, sourceDetail);
+  sourceCell.appendChild(sourcePrimary);
+  if (sourceDetail.textContent) sourceCell.appendChild(sourceDetail);
+  if (m.status === 'failed' || m.status === 'blocked') {
+    const reason = document.createElement('span');
+    reason.className = 'deployment-failure-reason';
+    reason.textContent = m.failureReason || (m.status === 'blocked' ? 'Deployment is blocked.' : 'No failure details were recorded.');
+    sourceCell.appendChild(reason);
+  }
 
   const actionCell = document.createElement('span');
   actionCell.className = 'deployment-action';
@@ -738,15 +720,35 @@ function makeDeploymentRow(m, nested = false) {
     btn.type = 'button';
     btn.className = 'rollback-btn';
     btn.dataset.id = m.id;
+    btn.dataset.release = m.releaseLabel || `deployment #${m.id}`;
+    btn.setAttribute('aria-label', `Roll back to ${btn.dataset.release}`);
     btn.textContent = 'Roll back';
     actionCell.appendChild(btn);
-  } else if (m.isCurrent) {
-    const span = document.createElement('span');
-    span.className = 'deployment-live-note';
-    span.textContent = 'Live';
-    actionCell.appendChild(span);
+  } else if ((m.status === 'failed' || m.status === 'blocked') && app) {
+    const logs = document.createElement('a');
+    logs.href = `/apps/${encodeURIComponent(app.slug)}/logs`;
+    logs.dataset.nav = '';
+    logs.className = 'deployment-logs-link';
+    logs.textContent = 'App logs';
+    actionCell.appendChild(logs);
   }
-  li.append(verCell, sourceCell, whenCell, actionCell);
+  // Definition pairs carry the same relationships on desktop, mobile and in
+  // a screen reader, including attempts nested under development sessions.
+  const fields = document.createElement('dl');
+  fields.className = 'deployment-fields';
+  for (const [label, cell] of [['Deployment', verCell], ['Source & outcome', sourceCell], ['Started', whenCell], ['Actions', actionCell]]) {
+    if (label === 'Actions' && !cell.hasChildNodes()) continue;
+    const group = document.createElement('div');
+    group.className = cell.className;
+    const term = document.createElement('dt');
+    term.className = 'sr-only';
+    term.textContent = label;
+    const value = document.createElement('dd');
+    value.append(...cell.childNodes);
+    group.append(term, value);
+    fields.appendChild(group);
+  }
+  li.appendChild(fields);
   return li;
 }
 
@@ -755,6 +757,7 @@ function makeDevelopmentSessionRow(model, app) {
   li.className = 'development-session-row' + (model.isCurrent ? ' development-session-current' : '');
   const details = document.createElement('details');
   details.className = 'development-session-details';
+  details.dataset.sessionId = model.id;
   if (model.pendingCount > 0) details.open = true;
   const summary = document.createElement('summary');
   summary.className = 'development-session-summary';
@@ -802,134 +805,204 @@ function makeDevelopmentSessionRow(model, app) {
   const attempts = document.createElement('ul');
   attempts.className = 'development-session-attempts';
   attempts.setAttribute('aria-label', `${model.attemptCount} deployment attempts`);
-  for (const attempt of model.attempts) attempts.appendChild(makeDeploymentRow(attempt, true));
+  for (const attempt of model.attempts) attempts.appendChild(makeDeploymentRow(attempt, true, app));
   details.append(summary, tools, attempts);
   li.appendChild(details);
   return li;
 }
 
-async function renderDeployments(panel, app, ctx) {
+function renderDeployments(panel, app, ctx, onChanged) {
+  const canManage = ctx.canManageApp(ctx.state.user, app);
+  const identity = ctx.state.sessionIdentity;
+  let disposed = false, loading = false, rollingBack = false, pending = false;
+  let rows = [], total = 0, signature = '', stopPoll = null;
+  const active = () => !disposed && identity === ctx.state.sessionIdentity;
   panel.innerHTML = `
-    <ul id="detail-deployments-list" class="deployments-list" hidden>
+    <header class="app-tab-heading">
+      <div><h2>Deployments</h2><p>Release history and rollbacks.</p></div>
+      <div class="deployment-tools">
+        <button type="button" class="btn-row" id="detail-deployments-refresh">Refresh</button>
+        ${canManage ? '<button type="button" class="btn-primary" id="detail-deploy-new">Deploy new version</button>' : ''}
+      </div>
+    </header>
+    <p id="detail-deployments-status" class="deployment-status" role="status"></p>
+    <p id="detail-deployments-announcement" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
+    <ul id="detail-deployments-list" class="deployments-list" aria-label="Deployment history" hidden>
       <li class="deployments-head" aria-hidden="true">
-        <span>Deployment</span>
-        <span>Source</span>
-        <span>Deployed</span>
+        <span>Deployment</span><span>Source &amp; outcome</span><span>Started</span>
         <span class="deployment-action">Actions</span>
       </li>
     </ul>
-    <p id="detail-deployments-empty" class="env-empty" hidden>No deployments yet.</p>
+    <p id="detail-deployments-empty" class="env-empty" hidden>${canManage ? 'No deployments yet. Deploy your first version to get started.' : 'No deployments yet. An app manager can deploy the first version.'}</p>
     <div id="detail-deployments-error" class="deployments-error" hidden>
-      <p class="error"></p>
+      <p class="error" role="alert"></p>
       <button type="button" class="btn-row" id="detail-deployments-retry">Retry</button>
-    </div>`;
-  const list = document.getElementById('detail-deployments-list');
+    </div>
+    <button type="button" class="btn-row deployment-earlier" id="detail-deployments-earlier" hidden>Load earlier deployments</button>`;
+  const list = panel.querySelector('#detail-deployments-list');
   const head = list.querySelector('.deployments-head');
-  const empty = document.getElementById('detail-deployments-empty');
-  const errWrap = document.getElementById('detail-deployments-error');
+  const empty = panel.querySelector('#detail-deployments-empty');
+  const errWrap = panel.querySelector('#detail-deployments-error');
+  const status = panel.querySelector('#detail-deployments-status');
+  const announcement = panel.querySelector('#detail-deployments-announcement');
+  const refresh = panel.querySelector('#detail-deployments-refresh');
+  const retry = panel.querySelector('#detail-deployments-retry');
+  const earlier = panel.querySelector('#detail-deployments-earlier');
+  const deploy = panel.querySelector('#detail-deploy-new');
+  deploy?.addEventListener('click', () => ctx.openDeployModal(app));
 
-  // Bind the rollback delegate exactly once per render. The earlier code
-  // registered it inside load(), so every Retry attached another listener
-  // and a single Roll back click fanned out into N concurrent POSTs.
-  // Using onclick (not addEventListener) makes the single-handler invariant
-  // structurally enforced — re-assignment replaces the previous delegate.
-  list.onclick = async (e) => {
-    const btn = e.target.closest('.rollback-btn');
-    if (!btn) return;
-    if (!window.confirm(`Roll back ${app.name} to deployment ${btn.dataset.id}?`)) return;
-    // Disable the button immediately so a double-click can't fire two POSTs
-    // before navigation completes. Every code path below MUST re-enable it
-    // unless we've already navigated away — otherwise a transport failure
-    // leaves the user staring at a permanently-disabled button.
-    btn.disabled = true;
-    let r;
-    try {
-      r = await ctx.api(`/api/apps/${app.slug}/rollback`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Shinyhub-Deploy-Channel': 'dashboard',
-        },
-        body: JSON.stringify({ deployment_id: Number(btn.dataset.id) }),
+  function syncControls() {
+    refresh.disabled = loading || rollingBack;
+    retry.disabled = loading || rollingBack;
+    earlier.disabled = loading || rollingBack;
+    if (deploy) deploy.disabled = rollingBack || pending;
+    list.querySelectorAll('.rollback-btn').forEach(btn => { btn.disabled = loading || rollingBack || pending; });
+    list.setAttribute('aria-busy', String(loading));
+    setText(status, rollingBack ? 'Rolling back… Keep this page open to see the result.'
+      : pending ? 'Deployment in progress. History updates automatically.'
+      : loading ? (rows.length ? 'Refreshing deployment history…' : 'Loading deployments…') : '');
+    status.hidden = !status.textContent;
+  }
+
+  function showError(message) {
+    setText(errWrap.querySelector('.error'), message + (rows.length ? ' Showing the last loaded history.' : ''));
+    errWrap.hidden = false;
+  }
+
+  function paint() {
+    const next = JSON.stringify(rows);
+    if (next !== signature) {
+      const focusID = list.contains(document.activeElement) ? document.activeElement.dataset.id : null;
+      const openSessions = new Map([...list.querySelectorAll('details')].map(el => [el.dataset.sessionId, el.open]));
+      list.replaceChildren(head);
+      for (const item of deploymentTimelineModels(rows)) {
+        list.appendChild(item.kind === 'development-session'
+          ? makeDevelopmentSessionRow(item, app)
+          : makeDeploymentRow(item.deployment, false, app));
+      }
+      list.querySelectorAll('details').forEach(el => {
+        if (openSessions.has(el.dataset.sessionId)) el.open = openSessions.get(el.dataset.sessionId);
       });
-    } catch {
-      btn.disabled = false;
-      ctx.flashToast('Rollback failed: network error.', 'error');
-      return;
+      if (!canManage) list.querySelectorAll('.rollback-btn').forEach(button => button.closest('.deployment-action').remove());
+      if (focusID) [...list.querySelectorAll('.rollback-btn')].find(btn => btn.dataset.id === focusID)?.focus();
+      signature = next;
     }
-    if (r.status === 401) {
-      btn.disabled = false;
-      ctx.onUnauthorized();
-      return;
-    }
-    if (r.ok) {
-      // The overview tab replaces this panel, and coming back here re-runs
-      // renderDeployments, which rebuilds the list from scratch. This button
-      // never returns, so leaving it disabled costs nothing.
-      ctx.navigate(`/apps/${app.slug}`);
-      return;
-    }
-    btn.disabled = false;
-    let msg = 'Rollback failed.';
-    try { const j = await r.json(); if (j && j.error) msg = `Rollback failed: ${j.error}`; } catch { /* non-JSON */ }
-    ctx.flashToast(msg, 'error');
-  };
+    list.hidden = rows.length === 0;
+    empty.hidden = rows.length !== 0;
+    earlier.hidden = rows.length >= total;
+  }
 
-  async function load() {
-    list.hidden = false;
-    // Keep the header row; drop only previously-rendered deployment rows.
-    list.querySelectorAll('.deployment-row, .development-session-row').forEach(r => r.remove());
+  async function load(append = false, manual = false) {
+    if (!active() || loading || rollingBack) return;
+    const initiator = panel.contains(document.activeElement) ? document.activeElement : null;
+    loading = true;
+    if (manual) setText(announcement, '');
     empty.hidden = true;
     errWrap.hidden = true;
-
-    let resp;
+    syncControls();
     try {
-      resp = await ctx.api(`/api/apps/${app.slug}/deployments`);
-    } catch {
-      errWrap.querySelector('.error').textContent = 'Network error: could not load deployments.';
-      errWrap.hidden = false;
-      list.hidden = true;
-      return;
-    }
-
-    // Session expired: route through the same logged-out flow the rest of
-    // the SPA uses. Falling into the generic !resp.ok branch would show
-    // "Failed to load deployments (HTTP 401)" while the rest of the page
-    // still looks signed in — client and server session state diverge
-    // until the user refreshes.
-    if (resp.status === 401) { ctx.onUnauthorized(); return; }
-    if (!resp.ok) {
-      let msg = `Failed to load deployments (HTTP ${resp.status}).`;
-      try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch { /* non-JSON */ }
-      errWrap.querySelector('.error').textContent = msg;
-      errWrap.hidden = false;
-      list.hidden = true;
-      return;
-    }
-
-    let body;
-    try { body = await resp.json(); } catch {
-      errWrap.querySelector('.error').textContent = 'Invalid response from server.';
-      errWrap.hidden = false;
-      list.hidden = true;
-      return;
-    }
-
-    // The server returns the standard {items,total,limit,offset} list envelope;
-    // tolerate a bare array for resilience across versions.
-    const rows = Array.isArray(body) ? body : (body && Array.isArray(body.items) ? body.items : []);
-    if (rows.length === 0) { empty.hidden = false; list.hidden = true; return; }
-
-    const models = deploymentTimelineModels(rows);
-    for (const item of models) {
-      list.appendChild(item.kind === 'development-session'
-        ? makeDevelopmentSessionRow(item, app)
-        : makeDeploymentRow(item.deployment));
+      // A refresh reloads every visible page so prepended releases cannot shift
+      // the offset under an already expanded history.
+      const fresh = [];
+      const target = append ? rows.length + 50 : Math.max(rows.length, 50);
+      let nextTotal = 0;
+      do {
+        const offset = fresh.length;
+        const query = `?limit=50&offset=${offset}`;
+        const resp = await ctx.api(`/api/apps/${app.slug}/deployments${query}`);
+        if (!active()) return;
+        if (resp.status === 401) { ctx.onUnauthorized(); return; }
+        if (!resp.ok) {
+          let message = `Could not load deployments (HTTP ${resp.status}). Try again.`;
+          try { const body = await resp.json(); if (body?.error) message = body.error; } catch { /* non-JSON */ }
+          throw new Error(message);
+        }
+        const body = await resp.json();
+        if (!active()) return;
+        const page = Array.isArray(body) ? body : (body && body.items);
+        if (!Array.isArray(page) || page.some(row => !row || typeof row !== 'object' || !Number.isSafeInteger(row.id))) {
+          throw new Error('Could not read deployment history. Try again.');
+        }
+        nextTotal = Number.isSafeInteger(body?.total) ? body.total : fresh.length + page.length;
+        fresh.push(...page);
+        if (!page.length) break;
+      } while (fresh.length < target && fresh.length < nextTotal);
+      rows = fresh;
+      total = nextTotal;
+      const wasPending = pending;
+      pending = rows.some(row => row.status === 'pending');
+      paint();
+      if (pending && !stopPoll) stopPoll = startVisiblePoll(document, 5000, () => { void load(); });
+      if (!pending && stopPoll) { stopPoll(); stopPoll = null; }
+      if (wasPending && !pending) await onChanged?.();
+      if (manual && active()) setText(announcement, append ? 'Earlier deployments loaded.' : 'Deployment history updated.');
+    } catch (error) {
+      if (active()) showError(error instanceof SyntaxError ? 'Could not read deployment history. Try again.'
+        : error instanceof TypeError ? 'Network error: could not load deployments. Try again.' : error.message || 'Could not load deployments. Try again.');
+    } finally {
+      if (active()) {
+        loading = false;
+        syncControls();
+        if (initiator && (document.activeElement === document.body || document.activeElement === initiator)) {
+          (initiator.isConnected && !initiator.hidden && !initiator.closest('[hidden]') ? initiator : refresh).focus();
+        }
+      }
     }
   }
 
-  document.getElementById('detail-deployments-retry').addEventListener('click', load);
-  await load();
+  // One delegate survives retries and polling; only one rollback can run.
+  list.onclick = async (event) => {
+    const btn = event.target.closest('.rollback-btn');
+    if (!btn || !canManage || loading || rollingBack || pending || !active()) return;
+    const release = btn.dataset.release;
+    if (!window.confirm(`Roll back ${app.name} to ${release}?\n\nThis creates a new release from that bundle and restarts the app. Active sessions may be interrupted.`)) return;
+    rollingBack = true;
+    errWrap.hidden = true;
+    syncControls();
+    try {
+      const resp = await ctx.api(`/api/apps/${app.slug}/rollback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Shinyhub-Deploy-Channel': 'dashboard' },
+        body: JSON.stringify({ deployment_id: Number(btn.dataset.id) }),
+      });
+      if (!active()) return;
+      if (resp.status === 401) { ctx.onUnauthorized(); return; }
+      let body;
+      try { body = await resp.json(); } catch { /* response metadata is optional */ }
+      if (!active()) return;
+      if (!resp.ok) {
+        const msg = body?.error ? `Rollback failed: ${body.error}` : 'Rollback failed. Refresh history before trying again.';
+        showError(msg);
+        ctx.flashToast(msg, 'error');
+      } else {
+        ctx.flashToast(body?.warning || `Rolled back to ${release}.`, body?.warning ? 'warning' : 'success');
+      }
+      // Even an unsuccessful response can follow a runtime change. Recheck the
+      // header and history, but never repeat a mutation automatically.
+      await onChanged?.();
+      if (!active()) return;
+      rollingBack = false;
+      const rollbackError = !errWrap.hidden ? errWrap.querySelector('.error').textContent : '';
+      await load();
+      if (active() && rollbackError) showError(rollbackError.replace(' Showing the last loaded history.', ''));
+    } catch {
+      if (!active()) return;
+      showError('Could not confirm rollback. Refresh history before trying again.');
+      ctx.flashToast('Could not confirm rollback. Refresh history before trying again.', 'error');
+    } finally {
+      if (active()) {
+        rollingBack = false;
+        syncControls();
+        if (document.activeElement === document.body) refresh.focus();
+      }
+    }
+  };
+  refresh.addEventListener('click', () => { void load(false, true); });
+  retry.addEventListener('click', () => { void load(false, true); });
+  earlier.addEventListener('click', () => { void load(true, true); });
+  const cleanup = () => { disposed = true; stopPoll?.(); list.onclick = null; };
+  void load();
+  return cleanup;
 }
 
 function renderOverview(panel, app, replicasStatus, envelope, ctx) {
@@ -939,26 +1012,49 @@ function renderOverview(panel, app, replicasStatus, envelope, ctx) {
   // cause to explain, and showing it the brand-new-app snippet claimed nothing
   // had been deployed while the crash sat in its log.
   if (awaitingFirstDeploy(app)) {
+    const canDeploy = ctx.canManageApp(ctx.state.user, app);
     panel.innerHTML = `
-      <section class="emptystate-card">
-        <p class="emptystate-eyebrow"><span class="sparkle" aria-hidden="true"></span>Awaiting deploy</p>
-        <h2>Deploy your first bundle</h2>
-        <p class="lead">Your app isn't running yet. Upload a <code>.zip</code>
-           or use the CLI snippet below.</p>
-        <div class="snippet">
-          <pre role="region" tabindex="0" aria-label="CLI deployment commands"><code id="overview-cli-snippet"></code></pre>
+      <section class="first-deploy" aria-labelledby="first-deploy-heading">
+        <div class="first-deploy-intro">
+          <h2 id="first-deploy-heading">Deploy your first release</h2>
+          <p>${canDeploy
+            ? 'Run this command from your app’s project directory to deploy its first release.'
+            : 'This app has not been deployed yet. An app manager can deploy its first release.'}</p>
+          ${canDeploy ? `<p class="first-deploy-note">The CLI is recommended for production deployments.</p>
+          <button type="button" class="btn-row" id="overview-deploy-btn">Deployment options</button>` : ''}
         </div>
-        <div class="emptystate-actions">
-          <button type="button" class="btn-primary" id="overview-deploy-btn">Deploy</button>
+        ${canDeploy ? `<div class="first-deploy-terminal">
+          <div class="first-deploy-terminal-header">
+            <h3>Run in your terminal</h3>
+            <button type="button" id="overview-cli-copy" class="btn-row">Copy command</button>
+          </div>
+          <pre tabindex="0" role="region" aria-label="CLI deployment commands"><code id="overview-cli-snippet"></code></pre>
+          <p id="overview-cli-copy-status" class="first-deploy-copy-status" role="status" aria-live="polite"></p>
         </div>
+        <div class="first-deploy-setup">
+          <div><a href="/apps/${app.slug}/settings/general" data-nav>Configure app</a><p>Set environment variables and runtime options.</p></div>
+          <div><a href="/apps/${app.slug}/settings/access" data-nav>Manage access</a><p>Choose who can open or manage this app.</p></div>
+        </div>` : ''}
       </section>
     `;
-    document.getElementById('overview-cli-snippet').textContent =
-      `shinyhub login --host ${location.origin} --username ${ctx.state.user.username}\n` +
-      `shinyhub deploy --slug ${app.slug} .`;
-    document.getElementById('overview-deploy-btn').addEventListener('click', () => {
-      ctx.openDeployModal(app);
-    });
+    if (canDeploy) {
+      const commands = deployCommands(location.origin, app.slug);
+      document.getElementById('overview-cli-snippet').textContent = commands;
+      const copy = document.getElementById('overview-cli-copy');
+      const copyStatus = document.getElementById('overview-cli-copy-status');
+      copy.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(commands);
+          copy.textContent = 'Copied';
+          copyStatus.textContent = 'Deployment command copied to clipboard.';
+        } catch {
+          copyStatus.textContent = 'Could not copy. Select the commands above and copy them manually.';
+        }
+      });
+      document.getElementById('overview-deploy-btn').addEventListener('click', () => {
+        ctx.openDeployModal(app);
+      });
+    }
     return;
   }
   // Deployed at least once, never successfully, newest attempt failed: there is
@@ -979,7 +1075,7 @@ function renderOverview(panel, app, replicasStatus, envelope, ctx) {
         <div class="emptystate-actions">
           <a class="emptystate-btn emptystate-btn-primary" href="/apps/${app.slug}/logs" data-nav>View logs</a>
           <a class="emptystate-btn" href="/apps/${app.slug}/deployments" data-nav>Deployment history</a>
-          <button type="button" class="emptystate-btn" id="overview-deploy-btn">Deploy again</button>
+          ${ctx.canManageApp(ctx.state.user, app) ? '<button type="button" class="emptystate-btn" id="overview-deploy-btn">Deploy again</button>' : ''}
         </div>
       </section>
     `;
@@ -990,23 +1086,12 @@ function renderOverview(panel, app, replicasStatus, envelope, ctx) {
       document.getElementById('overview-failed-error-text').textContent = failedError;
       document.getElementById('overview-failed-error').hidden = false;
     }
-    document.getElementById('overview-deploy-btn').addEventListener('click', () => {
+    document.getElementById('overview-deploy-btn')?.addEventListener('click', () => {
       ctx.openDeployModal(app);
     });
     return;
   }
   panel.innerHTML = `
-    <div class="overview-intro">
-      <div>
-        <h2>Operational health</h2>
-        <p>Current signals, scaling, and replica activity for this app.</p>
-      </div>
-      <a href="/apps/${app.slug}/logs" data-nav>View logs <span aria-hidden="true">→</span></a>
-    </div>
-    <div class="overview-health" id="overview-health" role="status" aria-live="polite">
-      <div><strong id="overview-health-title">Checking app health…</strong><p id="overview-health-detail"></p></div>
-      <div class="overview-health-side"><span id="overview-health-freshness"></span><a id="overview-health-action" href="" hidden></a></div>
-    </div>
     <div class="overview-alerts" id="overview-alerts"></div>
     <section id="overview-rejects-by-reason" class="overview-card overview-rejects" hidden>
       <div class="overview-card-heading">
@@ -1023,19 +1108,9 @@ function renderOverview(panel, app, replicasStatus, envelope, ctx) {
     </section>
     <div class="overview-grid">
       <div id="overview-trends" class="overview-card overview-trends">
-        <h2>Trends</h2>
-        <p class="trends-empty">Collecting…</p>
+        <h2>Resource history</h2><p class="trends-empty">Loading recent metrics…</p>
       </div>
-      <section class="overview-card overview-autoscale">
-        <div class="overview-card-heading">
-          <div>
-            <h2>Autoscale</h2>
-            <p class="overview-card-description">Pool policy and controller state</p>
-          </div>
-          ${ctx.canManageApp(ctx.state.user, app) ? `<a class="overview-card-link" href="/apps/${app.slug}/configuration" data-nav>Configure <span aria-hidden="true">→</span></a>` : ''}
-        </div>
-        <dl id="autoscale-summary" class="overview-dl"></dl>
-      </section>
+      <section id="overview-activity" class="overview-card overview-recent-activity" aria-label="Recent activity"></section>
       <section class="overview-card overview-replicas">
         <div class="overview-card-heading overview-replicas-heading">
           <div>
@@ -1044,7 +1119,7 @@ function renderOverview(panel, app, replicasStatus, envelope, ctx) {
           </div>
           <span id="overview-replicas-cap" class="overview-replicas-cap"></span>
         </div>
-        <p class="overview-replica-note">PSS estimates each process's share of physical memory, including shared pages. It can be unavailable on remote workers.</p>
+        <details class="overview-memory-help"><summary>About memory measurements</summary><p class="overview-replica-note">PSS estimates each process's share of physical memory, including shared pages. It can be unavailable on remote workers.</p></details>
         <div class="overview-replica-columns" aria-hidden="true">
           <span>Process</span>
           <div><span>Sessions</span><span>CPU</span><span>Memory</span><span>PSS</span></div>
@@ -1053,6 +1128,14 @@ function renderOverview(panel, app, replicasStatus, envelope, ctx) {
           <li class="replicas-empty">Waiting for metrics…</li>
         </ul>
       </section>
+      <details class="overview-card overview-autoscale overview-scaling-details">
+        <summary>Scaling policy</summary>
+        <div class="overview-scaling-content">
+          <p class="overview-card-description">Current policy and controller state.</p>
+          ${ctx.canManageApp(ctx.state.user, app) ? `<a class="overview-card-link" href="/apps/${app.slug}/settings/scaling" data-nav>Edit scaling settings <span aria-hidden="true">→</span></a>` : ''}
+          <dl id="autoscale-summary" class="overview-dl"></dl>
+        </div>
+      </details>
     </div>
   `;
 
@@ -1077,11 +1160,14 @@ function renderOverview(panel, app, replicasStatus, envelope, ctx) {
   if (ctx.setDetailEnvelope) ctx.setDetailEnvelope(envelope || {});
 
   refreshTrends(app.slug);
+  return createOverviewActivity({panel: panel.querySelector('#overview-activity'), app, api: ctx.api,
+    canReadSchedules: app.schedule_capabilities?.can_read ?? ctx.canManageApp(ctx.state.user, app),
+    onUnauthorized: ctx.onUnauthorized});
 }
 
 function syncOverviewSignals(panel, app, envelope, ctx) {
-  const health = panel.querySelector('#overview-health');
-  if (!health) return;
+  const health = document.getElementById('overview-health');
+  if (!health || !panel.querySelector('#overview-alerts')) return;
   const state = envelope || {};
   const key = JSON.stringify([app.status, app.last_error, state.fleet_state,
     state.connectivity, state.rejects_by_reason, state.update_status]);
@@ -1090,20 +1176,15 @@ function syncOverviewSignals(panel, app, envelope, ctx) {
 
   const alerts = panel.querySelector('#overview-alerts');
   alerts.replaceChildren();
-  const crash = crashBanner(document, app, {
-    canManage: ctx.canManageApp(ctx.state.user, app),
-    onRestart: () => ctx.restart(app.slug),
-  });
   const connectivity = connectivityBanner(document, state);
   const capacity = capacityBanner(document, state);
-  if (crash) alerts.append(crash);
   if (connectivity) alerts.append(connectivity);
   if (capacity) alerts.append(capacity);
 
   const grid = panel.querySelector('.overview-grid');
   const previousFleet = grid.querySelector('.overview-fleet-state');
   const nextFleet = makeFleetStateCard(document, state.fleet_state, {
-    configurationHref: `/apps/${app.slug}/configuration`, relativeTime,
+    configurationHref: `/apps/${app.slug}/settings/general`, relativeTime,
   });
   if (previousFleet) previousFleet.remove();
   grid.classList.toggle('has-fleet-state', !!nextFleet);
@@ -1120,16 +1201,17 @@ function syncOverviewSignals(panel, app, envelope, ctx) {
     panel.querySelector('#overview-rejects-guidance').textContent = next.message;
     const action = panel.querySelector('#overview-rejects-action');
     action.textContent = next.action;
+    const settingsSection = rejects.some(row => row.reason === 'pool-saturated') ? 'scaling' : 'resources';
     action.href = next.route === 'fleet' ? '/' : next.route === 'replicas'
-      ? '#overview-replicas-list' : `/apps/${app.slug}/${next.route}`;
+      ? '#overview-replicas-list' : next.route === 'configuration' ? `/apps/${app.slug}/settings/${settingsSection}` : `/apps/${app.slug}/${next.route}`;
     if (next.route === 'replicas') action.removeAttribute('data-nav');
     else action.dataset.nav = '';
   }
-  renderOverviewHealth(panel, app, state, null, false, false);
+  renderAppHealth(app, state, null, false, false);
 }
 
-function renderOverviewHealth(panel, app, envelope, metrics, metricsStale, envelopeStale) {
-  const box = panel.querySelector('#overview-health');
+function renderAppHealth(app, envelope, metrics, metricsStale, envelopeStale) {
+  const box = document.getElementById('overview-health');
   if (!box) return;
   const processUnit = capacityProcessUnit(app, metrics);
   const processes = `${processUnit}s`;
@@ -1148,13 +1230,25 @@ function renderOverviewHealth(panel, app, envelope, metrics, metricsStale, envel
     title = 'Health data may be out of date';
     detail = 'The latest health check did not complete. The page will check again; use the logs before acting on these values.';
     action = ['View logs', `/apps/${app.slug}/logs`];
-  } else if (app.deployment_repair_required && !app.deploying) {
+  } else if (app.deploying || status === 'deploying') {
+    title = 'Deployment in progress';
+    detail = status === 'running'
+      ? 'The previous release is still serving while the new version is prepared.'
+      : 'The new version is being prepared. Follow its progress in deployment history.';
+    level = 'progress';
+    action = ['View deployment', `/apps/${app.slug}/deployments`];
+  } else if (app.deployment_repair_required) {
     const repair = appAttention(app);
     title = repair.label;
     detail = repair.detail;
     level = repair.severity === 'danger' ? 'danger' : 'watch';
     action = ['Review deployments', `/apps/${app.slug}/deployments`];
-  } else if (status === 'crashed' || status === 'failed') {
+  } else if (status === 'failed') {
+    title = 'App is unavailable';
+    detail = 'A data producer or deployment failed. Review the failure before starting the app again.';
+    level = 'danger';
+    action = ['Review deployments', `/apps/${app.slug}/deployments`];
+  } else if (status === 'crashed') {
     title = 'App is unavailable';
     detail = 'Review the startup error and logs before restarting.';
     level = 'danger';
@@ -1177,27 +1271,50 @@ function renderOverviewHealth(panel, app, envelope, metrics, metricsStale, envel
     title = 'App is serving with waits';
     detail = `${deferred} render-capacity wait ${deferred === 1 ? 'signal' : 'signals'} in the last 10 minutes; these do not mean failed sessions.`;
     action = ['Review signals', '#overview-rejects-by-reason'];
-  } else if (replicas && replicas.length > 0 && ready < replicas.length) {
+  } else if (status === 'running' && replicas && replicas.length > 0 && ready < replicas.length) {
     title = `Some ${processes} are not serving`;
     detail = `${ready} of ${replicas.length} ${processes} running. Inspect the process list below.`;
     action = [`Inspect ${processes}`, '#overview-replicas-list'];
+  } else if (status === 'running' && app.last_deployment_status === 'failed') {
+    title = 'Latest deployment failed';
+    detail = 'The previous release is still serving.';
+    action = ['Review deployment', `/apps/${app.slug}/deployments`];
   } else if (status === 'running') {
     title = 'App is serving normally';
     detail = replicas?.length ? `${ready} ${ready === 1 ? processUnit : processes} running; no recent admission issue reported.`
       : `No recent admission issue reported. Waiting for live ${processUnit} metrics.`;
     level = 'healthy';
   } else if (status === 'idle' || status === 'hibernated') {
-    title = 'App is idle';
-    detail = 'It may need time to start when the next visitor opens it.';
+    title = 'Ready to wake';
+    detail = 'Open the app to start it. The first visit may take a moment.';
+    level = 'quiet';
   } else if (status === 'deploying' || status === 'starting' || status === 'waking') {
     title = 'App is starting';
+    level = 'progress';
     detail = `Watch ${processUnit} readiness and startup logs.`;
     action = ['View logs', `/apps/${app.slug}/logs`];
   } else if (status === 'stopped' || status === 'suspended') {
-    title = 'App is not serving';
+    title = 'App is stopped';
+    level = 'quiet';
     detail = 'Start the app when it should be available to visitors.';
   }
   box.dataset.level = level;
+  box.hidden = awaitingFirstDeploy(app) || firstDeployFailed(app);
+  const error = box.querySelector('#overview-health-error');
+  if (error) {
+    const message = ['crashed', 'failed'].includes(status) && !app.deploying ? (app.last_error || '').trim() : '';
+    error.hidden = !message;
+    setText(error, message);
+  }
+  // Logs is always one tap away in the header. Keep this slot for a specific
+  // next step, and route to Overview when the target panel is not visible.
+  if (action?.[1] === `/apps/${app.slug}/logs`) action = null;
+  if (action?.[1] === `/apps/${app.slug}/deployments`
+      && (document.getElementById('app-detail-view')?.dataset.appPage === 'deployments'
+        || document.getElementById('app-detail-release')?.hidden === false)) action = null;
+  if (action?.[1].startsWith('#') && document.getElementById('detail-overview-panel')?.hidden) {
+    action = [action[0], `/apps/${app.slug}`];
+  }
   setText(box.querySelector('#overview-health-title'), title);
   setText(box.querySelector('#overview-health-detail'), detail);
   setText(box.querySelector('#overview-health-freshness'), metricsStale
@@ -1246,7 +1363,9 @@ function refreshTrends(slug, initiator = null) {
       target?.focus({ preventScroll: true });
     }
   };
-  return Promise.resolve().then(() => fetch(`/api/apps/${slug}/metrics/history`, { credentials: 'include' }))
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  return Promise.resolve().then(() => fetch(`/api/apps/${encodeURIComponent(slug)}/metrics/history`, { credentials: 'include', signal: controller.signal }))
     .then((r) => {
       if (!r.ok) throw new Error(`History request failed (${r.status})`);
       return r.json();
@@ -1264,21 +1383,34 @@ function refreshTrends(slug, initiator = null) {
           [key, Array.isArray(values) ? values.slice(first) : values])) };
       const card = renderTrendsCard(document, recent, Number(container.dataset.cpuCapacityCores));
       if (!card) {
-        if (initiator) {
-          const note = document.createElement('p');
-          note.className = 'trends-empty';
-          note.textContent = 'Metrics history is disabled.';
-          note.tabIndex = -1;
-          container.replaceChildren(note, announcement);
-          announcement.textContent = 'Metrics history is disabled.';
-          focus(note);
-          return;
-        }
-        container.hidden = true;
-        return;
+        container.hidden = false;
+        const heading = document.createElement('h2'); heading.textContent = 'Resource history';
+        const note = document.createElement('p'); note.className = 'trends-empty'; note.textContent = 'Metrics history is disabled on this server.'; note.tabIndex = -1;
+        container.replaceChildren(heading, note);
+        if (announcement) { container.appendChild(announcement); announcement.textContent = 'Metrics history is disabled.'; focus(note); }
+        return true;
       }
+      const previous = container.querySelector('.trends-card');
+      const focusedLatest = document.activeElement === previous?.querySelector('.trends-latest');
+      const focusedChart = focusedLatest ? document.activeElement.dataset.returnChart
+        : previous?.contains(document.activeElement)
+          ? document.activeElement.closest('[data-history-chart]')?.dataset.historyChart : null;
+      const selectedTime = previous?.dataset.inspectTimestamp;
+      const selectedIndex = previous?.dataset.inspectIndex;
+      const inspecting = previous?.dataset.inspectActive === 'true';
       container.hidden = false;
       container.replaceChildren(card);
+      if (focusedChart || focusedLatest) {
+        const chart = [...card.querySelectorAll('[data-history-chart]')].find(el => el.dataset.historyChart === focusedChart);
+        chart?.focus({preventScroll: true});
+        // Restore the selected instant before focusing a contextual control.
+        if (inspecting) {
+          if (selectedTime && Number.isFinite(Number(selectedTime))) card.inspectTime?.(Number(selectedTime));
+          else if (selectedIndex != null) card.inspectIndex?.(Number(selectedIndex));
+        }
+        if (focusedLatest) card.querySelector('.trends-latest')?.focus({preventScroll: true});
+        if (!inspecting) card.finishInspection?.();
+      }
       if (initiator) {
         container.appendChild(announcement);
         announcement.textContent = 'Metrics history updated.';
@@ -1286,9 +1418,11 @@ function refreshTrends(slug, initiator = null) {
         heading.tabIndex = -1;
         focus(heading);
       }
+      return true;
     })
     .catch(() => {
       if (!current()) return;
+      container.querySelector(':scope > .trends-empty')?.remove();
       let state = container.querySelector('.trends-load-state');
       if (!state) {
         state = document.createElement('div');
@@ -1307,8 +1441,10 @@ function refreshTrends(slug, initiator = null) {
       state.append(message, retry);
       if (announcement) announcement.textContent = '';
       if (initiator) focus(retry);
+      return false;
     })
     .finally(() => {
+      clearTimeout(timeout);
       if (Number(container.dataset.historyRequest) !== request) return;
       delete container.dataset.historyRetryPending;
       container.removeAttribute('aria-busy');
@@ -1381,10 +1517,10 @@ function renderConfiguration(panel, app, ctx, envelope) {
   ctx.populateGeneralTab(app, envelope);
   ctx.populateAutoscaleTab(app);
   ctx.refreshEnvList(app.slug);
-  annotateFleetChanges(panel, envelope && envelope.fleet_state);
 }
 
-async function renderSchedules(panel, app, ctx, selectedScheduleID) {
+function renderSchedules(panel, app, ctx, selectedScheduleID, envelope) {
+  applyScheduleTimezone(document, envelope);
   ctx.setSettingsSlug(app.slug);
   const declared = app.schedule_capabilities || {};
   const canManage = typeof declared.can_manage === 'boolean'
@@ -1399,85 +1535,17 @@ async function renderSchedules(panel, app, ctx, selectedScheduleID) {
   });
 }
 
-function renderData(panel, app, ctx) {
-  ctx.setSettingsSlug(app.slug);
-  // Pass the fetched app (which carries can_manage from the GET envelope) so the
-  // upload form's write-permission check works on a direct deep-link, where the
-  // cached apps LIST (state.apps) is not yet populated.
-  ctx.refreshDataTab(app.slug, app);
-  ctx.loadSharedData(app.slug);
+function renderData(panel, app, ctx, envelope) {
+  return createDataViewer({panel, app, api: ctx.api,
+    canManage: ctx.canManageApp(ctx.state.user, app),
+    onUnauthorized: ctx.onUnauthorized, runtimeMode: envelope.runtime_mode});
 }
 
-function renderAccess(panel, app, ctx, envelope) {
+function renderAccess(panel, app, ctx) {
   ctx.setSettingsSlug(app.slug);
   ctx.populateAccessPanel(app);
   ctx.refreshMemberList();
   ctx.refreshGroupAccessList();
-  annotateFleetChanges(panel, envelope && envelope.fleet_state);
-}
-
-const FLEET_FIELD_TARGETS = {
-  visibility: 'input[name="access-level"]',
-  name: '#general-name',
-  description: '#general-description',
-  icon: '#general-icon-preview',
-  project: '#general-project',
-  usage_identity_mode: '#usage-privacy-mode',
-  hibernate_timeout_minutes: 'input[name="hibernate-mode"]',
-  replicas: '#scaling-replicas',
-  max_sessions_per_replica: '#scaling-cap',
-  render_seconds: '#render-seconds',
-  min_warm_replicas: '#min-warm-replicas',
-  memory_limit_mb: '#resources-memory',
-  cpu_quota_percent: '#resources-cpu',
-  worker_isolation: '#worker-isolation',
-  worker_grouped_size: '#worker-grouped-size',
-  worker_max_workers: '#worker-max-workers',
-  worker_warm_spares: '#worker-warm-spares',
-  autoscale: '#autoscale-options',
-};
-
-// Marks only persisted differences already proven by the server. Saving a new
-// edit is not called temporary until the next GET observes it against the last
-// successful fleet baseline.
-function annotateFleetChanges(panel, state) {
-  panel.querySelectorAll('.fleet-state-context, .fleet-field-state').forEach(el => el.remove());
-  panel.querySelectorAll('.fleet-temporary-field').forEach(el => el.classList.remove('fleet-temporary-field'));
-  if (!state || state.status !== 'temporary_changes' || !Array.isArray(state.changes)) return;
-
-  const visible = state.changes.filter(change => FLEET_FIELD_TARGETS[change.key]);
-  if (visible.length === 0) return;
-
-  const context = document.createElement('p');
-  context.className = 'fleet-state-context';
-  context.textContent = 'Fleet-managed values with temporary overrides are marked below, together with their declared values.';
-  panel.prepend(context);
-
-  for (const change of visible) {
-    const target = panel.querySelector(FLEET_FIELD_TARGETS[change.key]);
-    if (!target) continue;
-    let row = target.closest('.scaling-row');
-    if (!row) row = target.closest('.settings-block');
-    if (!row) continue;
-    row.classList.add('fleet-temporary-field');
-
-    const title = row.querySelector('.scaling-option-title, .settings-block-title, legend');
-    if (title && !title.querySelector('.fleet-field-badge')) {
-      const badge = document.createElement('span');
-      badge.className = 'fleet-field-state fleet-field-badge';
-      badge.textContent = 'Temporary';
-      title.append(badge);
-    }
-
-    const note = document.createElement('span');
-    note.className = 'fleet-field-state fleet-field-note';
-    note.append('Fleet value: ');
-    const value = document.createElement('strong');
-    value.textContent = formatFleetValue(change.key, change.fleet);
-    note.append(value);
-    const copyHost = row.querySelector('.scaling-row > span, .settings-block-desc') || row;
-    copyHost.append(note);
-  }
 }
 
 // Refreshes only fleet-derived presentation after a successful dashboard
@@ -1492,121 +1560,16 @@ export function refreshFleetSurfaces(doc, app, state) {
   if (overviewGrid) {
     overviewGrid.querySelector(':scope > .overview-fleet-state')?.remove();
     const card = makeFleetStateCard(doc, state, {
-      configurationHref: `/apps/${app.slug}/configuration`,
+      configurationHref: `/apps/${app.slug}/settings/general`,
       relativeTime,
     });
     overviewGrid.classList.toggle('has-fleet-state', !!card);
     if (card) overviewGrid.prepend(card);
   }
 
-  const configuration = doc.getElementById('detail-configuration-panel');
-  const access = doc.getElementById('detail-access-panel');
-  if (configuration) annotateFleetChanges(configuration, state);
-  if (access) annotateFleetChanges(access, state);
 }
 
-// renderTraces polls /api/apps/<slug>/traces every 5 s and renders recent
-// slow/error proxy spans. When tracing is disabled server-side the panel shows
-// a one-line empty state pointing operators at the config block; when enabled
-// but the ring buffer is empty (no slow/error requests yet) it explains how
-// admission to the buffer works so the absence of rows is not surprising.
+// Keep the diagnostic viewer lifecycle scoped to the current app panel.
 function renderTraces(panel, app, ctx) {
-  const candidateSession = new URLSearchParams(window.location.search).get('development_session_id') || '';
-  const session = /^[a-f0-9]{32}$/.test(candidateSession) ? candidateSession : '';
-  panel.innerHTML = `
-    ${session ? `<div class="observability-scope" role="status">
-      <span>Showing traces from one remote development session.</span>
-      <a href="/apps/${encodeURIComponent(app.slug)}/traces" data-nav>Show all traces</a>
-    </div>` : ''}
-    <div class="traces-toolbar">
-      <button id="traces-refresh" type="button" class="btn-row">Refresh</button>
-      <span id="traces-status" class="hibernate-status"></span>
-    </div>
-    <p id="traces-empty" class="env-empty" hidden></p>
-    <table id="traces-table" class="env-list" hidden>
-      <thead><tr>
-        <th>When</th><th>Method</th><th>Path</th><th>Status</th>
-        <th>Duration</th><th>Replica</th><th>Trace</th>
-      </tr></thead>
-      <tbody id="traces-tbody"></tbody>
-    </table>
-    <p id="traces-error" class="error" hidden></p>
-  `;
-  const tableEl   = document.getElementById('traces-table');
-  const tbodyEl   = document.getElementById('traces-tbody');
-  const emptyEl   = document.getElementById('traces-empty');
-  const errEl     = document.getElementById('traces-error');
-  const refreshEl = document.getElementById('traces-refresh');
-  const statusEl  = document.getElementById('traces-status');
-
-  // Track the last successful poll so the status line can report freshness
-  // ("updated Xs ago"), ticked once a second between the 5 s reloads.
-  let lastLoaded = null;
-  function paintStatus() {
-    if (statusEl) statusEl.textContent = formatPollStatus(lastLoaded);
-  }
-
-  async function load() {
-    errEl.hidden = true;
-    let r;
-    try {
-      const query = session ? `?development_session_id=${encodeURIComponent(session)}` : '';
-      r = await ctx.api(`/api/apps/${app.slug}/traces${query}`);
-    } catch {
-      errEl.textContent = 'Network error: could not load traces.';
-      errEl.hidden = false;
-      return;
-    }
-    if (r.status === 401) { ctx.onUnauthorized(); return; }
-    if (!r.ok) {
-      errEl.textContent = `Failed to load traces (HTTP ${r.status}).`;
-      errEl.hidden = false;
-      return;
-    }
-    let body;
-    try { body = await r.json(); } catch {
-      errEl.textContent = 'Invalid response from server.';
-      errEl.hidden = false;
-      return;
-    }
-    // A successful poll refreshes the status line even when tracing is
-    // disabled or the buffer is empty - those are the common steady states, and
-    // the operator still wants to see polling is alive.
-    lastLoaded = new Date();
-    paintStatus();
-    const spans = Array.isArray(body.spans) ? body.spans : [];
-    if (!body.enabled) {
-      tableEl.hidden = true;
-      emptyEl.hidden = false;
-      emptyEl.innerHTML =
-        'Tracing is disabled. Set <code>tracing.enabled: true</code> and ' +
-        '<code>tracing.otlp_endpoint</code> in <code>shinyhub.yaml</code> to ' +
-        'forward Shiny’s OpenTelemetry spans to your backend.';
-      return;
-    }
-    if (spans.length === 0) {
-      tableEl.hidden = true;
-      emptyEl.hidden = false;
-      emptyEl.textContent =
-        'No slow or error requests captured yet. Traces are retained when ' +
-        'a request exceeds the slow_request_ms threshold or returns 5xx.';
-      return;
-    }
-    emptyEl.hidden = true;
-    tableEl.hidden = false;
-    tbodyEl.innerHTML = '';
-    const linkTpl = typeof body.trace_link_template === 'string' ? body.trace_link_template : '';
-    for (const s of spans) {
-      tbodyEl.appendChild(makeTraceRow(document, s, linkTpl, lastLoaded));
-    }
-  }
-
-  refreshEl.addEventListener('click', load);
-  load();
-  // The 5 s network poll pauses while the tab is hidden and catches up with an
-  // immediate reload on return; the 1 s status tick is local-only text (no
-  // request), so it keeps running regardless of visibility.
-  const stopPoll = startVisiblePoll(document, 5000, load);
-  const statusTick = setInterval(paintStatus, 1000);
-  return () => { stopPoll(); clearInterval(statusTick); };
+  return createTracesViewer({ panel, app, api: ctx.api, onUnauthorized: ctx.onUnauthorized });
 }

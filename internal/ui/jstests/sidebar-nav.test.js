@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
 import {
   groupAppsByProject,
@@ -64,7 +65,7 @@ test('isPrimaryNavActive: contextual home and legacy Launchpad alias select Apps
   assert.equal(isPrimaryNavActive('/', '/home', 'operator'), true);
   assert.equal(isPrimaryNavActive('/apps', '/home', 'viewer'), true);
   assert.equal(isPrimaryNavActive('/apps', '/launchpad', 'admin'), true);
-  assert.equal(isPrimaryNavActive('/apps', '/apps/demo/logs', 'admin'), true);
+  assert.equal(isPrimaryNavActive('/apps', '/apps/demo/logs', 'admin'), false);
   assert.equal(isPrimaryNavActive('/apps', '/projects/analytics', 'admin'), true);
 });
 
@@ -223,4 +224,28 @@ test('highlightSidebarApp reopens the active app project without changing other 
   assert.equal(toggles[0].getAttribute('aria-expanded'), 'true');
   assert.equal(toggles[1].getAttribute('aria-expanded'), 'false');
   assert.equal(c.querySelector('.sidebar-app.active').dataset.appSlug, 'a');
+});
+
+// Exercise the real shell structure with the production renderer and route
+// predicates: app destinations must have one current link across the whole nav.
+test('nested Apps navigation has one selected destination across app switches and tabs', () => {
+  const doc = new JSDOM(readFileSync(new URL('../static/index.html', import.meta.url), 'utf8')).window.document;
+  const apps = doc.querySelector('#sidebar-apps');
+  assert.equal(apps.previousElementSibling.id, 'tab-apps');
+  assert.equal(apps.parentElement.parentElement.id, 'primary-nav');
+  renderSidebarApps(apps, [
+    { slug: 'demo', name: 'Demo', status: 'stopped' },
+    { slug: 'demo-long', name: 'Demo long', status: 'stopped' },
+  ], '/apps', badgeFor, doc);
+  for (const [path, expected] of [
+    ['/apps', '/apps'], ['/apps/demo', '/apps/demo'],
+    ['/apps/demo/logs', '/apps/demo'], ['/apps/demo-long/settings', '/apps/demo-long'],
+    ['/apps', '/apps'], ['/', '/'],
+  ]) {
+    const primary = [...doc.querySelectorAll('#primary-nav .nav-item')]
+      .filter(link => isPrimaryNavActive(link.getAttribute('href'), path, 'admin'));
+    highlightSidebarApp(apps, path);
+    const selected = [...primary, ...apps.querySelectorAll('[aria-current="page"]')];
+    assert.deepEqual(selected.map(link => link.getAttribute('href')), [expected], path);
+  }
 });

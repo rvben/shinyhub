@@ -199,7 +199,7 @@ export function createRouter(opts = {}) {
     // A guard may veto navigation (unsaved edits). replace:true navigations are
     // internal redirects (e.g. viewer bounced off a manager-only tab) and skip
     // the guard so they always complete.
-    if (!opts.replace && navGuard && !navGuard()) return Promise.resolve();
+    if (!opts.replace && navGuard && !navGuard(full)) return Promise.resolve();
     if (opts.replace) {
       history.replaceState({}, '', full);
     } else {
@@ -211,7 +211,7 @@ export function createRouter(opts = {}) {
   function onPopState() {
     // The history entry already changed by the time popstate fires. If the guard
     // vetoes, push the previous path back so the URL and view stay put.
-    if (navGuard && !navGuard()) {
+    if (navGuard && !navGuard(location.pathname + location.search)) {
       if (currentPath != null) history.pushState({}, '', currentPath);
       return;
     }
@@ -234,6 +234,20 @@ export function createRouter(opts = {}) {
     navigate(url.pathname + url.search);
   }
 
+  // Session termination invalidates both mounted and pending authenticated views.
+  // Keep the one pair of listeners; the next sign-in mounts the URL afresh.
+  function reset() {
+    generation++;
+    const previous = current;
+    current = null;
+    currentKey = null;
+    currentPath = null;
+    viewHealthy = false;
+    if (previous && typeof previous.unmount === 'function') {
+      try { previous.unmount(); } catch (error) { console.error('unmount', error); }
+    }
+  }
+
   function start() {
     if (!started) {
       window.addEventListener('popstate', onPopState);
@@ -243,5 +257,5 @@ export function createRouter(opts = {}) {
     return mount(location.pathname, location.search);
   }
 
-  return { register, navigate, start, setNavGuard };
+  return { register, navigate, start, reset, setNavGuard };
 }

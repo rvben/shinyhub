@@ -1098,11 +1098,20 @@ func streamRunLogs(cfg *cliConfig, slug string, schedID, runID int64, follow boo
 	sw := newStreamWriter(cmd.OutOrStdout(), currentFormat(), nil)
 	isSSE := strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")
 	scanner := bufio.NewScanner(resp.Body)
+	eventType := ""
 	for scanner.Scan() {
 		line := scanner.Text()
 		if isSSE {
-			if line == "" || strings.HasPrefix(line, ":") {
-				continue // blank separator or heartbeat comment
+			if line == "" {
+				eventType = ""
+				continue
+			}
+			if strings.HasPrefix(line, "event:") {
+				eventType = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+				continue
+			}
+			if strings.HasPrefix(line, ":") || eventType == "complete" {
+				continue // heartbeat or end-of-run control event
 			}
 			if !strings.HasPrefix(line, "data:") {
 				continue // ignore non-data SSE fields (event:, id:, retry:)

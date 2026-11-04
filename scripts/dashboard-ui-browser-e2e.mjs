@@ -3,6 +3,7 @@
 // Screenshots are opt-in local artifacts. Requires the render-driver Playwright install.
 import assert from 'node:assert/strict';
 import { checkShellConsistency } from './browser-shell-checks.mjs';
+import { checkSelectPickers } from './browser-select-checks.mjs';
 const shellOnly = process.env.SHINYHUB_E2E_SHELL_ONLY === '1';
 import { createServer } from 'node:http';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
@@ -79,6 +80,8 @@ for(const theme of ['light','dark']) for(const width of (shellOnly ? [1440,900,3
  await checkShellConsistency(page,origin,{role,width,theme,extraRoutes:['/apps','/tokens']});
  assert.deepEqual(errors,[],`${theme}/${width}: shell navigation page errors`);
  if(shellOnly){await context.close();continue;}
+ role='admin';
+ await checkSelectPickers(page,origin,{width,theme});
  for(const [name,path,click]of routes.filter(r=>!process.env.SHINYHUB_E2E_PAGES_FILTER||process.env.SHINYHUB_E2E_PAGES_FILTER.split(',').includes(r[0]))){role=name==='viewer'?'viewer':name==='login'?'guest':'admin';mode='ready';errors=[];
  await page.goto(origin+path,{waitUntil:'domcontentloaded'});await page.locator(`body[data-auth="${role==='guest'?'out':'in'}"]`).waitFor();await page.waitForTimeout(350);await page.evaluate(()=>document.fonts.ready);
  if(click){if(['profile','about'].includes(name)&&width<760)await page.locator('#sidebar-toggle').click();await page.locator(click).click();}

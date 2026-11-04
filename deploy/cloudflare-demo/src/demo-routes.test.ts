@@ -34,7 +34,9 @@ test("every shipped asset is admitted under unversioned and immutable URLs", () 
 });
 
 test("dashboard navigation and all curated apps and projects survive the cold entry flow", () => {
-  const pages = [...manifest.uiExact, ...manifest.apps.flatMap((slug) => [`/apps/${slug}`, `/apps/${slug}/logs`, `/app/${slug}/`, `/app/${slug}/nested/path`]),
+  const pages = [...manifest.uiExact, ...manifest.apps.flatMap((slug) => [`/apps/${slug}`, `/apps/${slug}/logs`,
+    ...['general', 'environment', 'resources', 'scaling', 'access', 'privacy'].map((section) => `/apps/${slug}/settings/${section}`),
+    `/apps/${slug}/schedules/1`, `/app/${slug}/`, `/app/${slug}/nested/path`]),
     ...manifest.projects.map((slug) => `/projects/${slug}`)];
   for (const path of pages) {
     assert.equal(classifyEdgeRequest(DEMO_HOST, path, "GET"), "forward", path);
@@ -48,7 +50,8 @@ test("dashboard navigation and all curated apps and projects survive the cold en
     assert.equal(classifyEdgeRequest(APP_HOST, path, "GET"), "forward");
     assert.equal(classifyEdgeRequest(APP_HOST, path, "POST"), "reject");
   }
-  for (const path of ["/apps/unknown", "/app/unknown/", "/projects/unknown", "/home/extra", "/apps/dash-demo/logs/extra"]) {
+  for (const path of ["/apps/unknown", "/app/unknown/", "/projects/unknown", "/home/extra", "/apps/dash-demo/logs/extra",
+    "/apps/dash-demo/settings/general/extra", "/apps/dash-demo/schedules/not-a-run"]) {
     assert.equal(classifyEdgeRequest(DEMO_HOST, path), "reject", path);
     assert.equal(safeDestination(path), null, path);
   }

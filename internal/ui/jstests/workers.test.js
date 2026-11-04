@@ -6,28 +6,28 @@ test('workerDisplay maps an up worker to a healthy badge', () => {
   const d = workerDisplay({ node_id: 'node-1', name: 'w1', tier: 'remote', status: 'up', version: 'v1.2.3' });
   assert.equal(d.node, 'w1 (node-1)');
   assert.equal(d.tier, 'remote');
-  assert.equal(d.statusText, 'up');
+  assert.equal(d.statusText, 'Online');
   assert.equal(d.statusClass, 'running');
   assert.equal(d.version, 'v1.2.3');
 });
 
 test('workerDisplay maps a down worker to a lost badge', () => {
   const d = workerDisplay({ node_id: 'node-2', tier: 'remote', status: 'down' });
-  assert.equal(d.statusText, 'down');
+  assert.equal(d.statusText, 'Offline');
   assert.equal(d.statusClass, 'lost');
 });
 
 test('workerDisplay maps a joining worker to a neutral (non-error) badge', () => {
   const d = workerDisplay({ node_id: 'node-j', tier: 'remote', status: 'joining' });
-  assert.equal(d.statusText, 'joining');
+  assert.equal(d.statusText, 'Joining');
   // Neutral, not the red "lost" class: joining is transitional, not a fault.
   assert.equal(d.statusClass, 'stopped');
 });
 
 test('workerDisplay shows "revoked" regardless of raw status', () => {
   const d = workerDisplay({ node_id: 'node-3', status: 'up', revoked: true });
-  assert.equal(d.statusText, 'revoked');
-  assert.equal(d.statusClass, 'lost');
+  assert.equal(d.statusText, 'Revoked');
+  assert.equal(d.statusClass, 'stopped');
 });
 
 test('workerDisplay falls back to node_id when name is absent', () => {
@@ -38,13 +38,13 @@ test('workerDisplay falls back to node_id when name is absent', () => {
 test('workerDisplay tolerates missing/empty fields', () => {
   const d = workerDisplay({});
   assert.equal(d.node, 'unknown');
-  assert.equal(d.tier, '-');
-  assert.equal(d.version, '-');
-  assert.equal(d.statusClass, 'stopped');
+  assert.equal(d.tier, 'Not reported');
+  assert.equal(d.version, 'Not reported');
+  assert.equal(d.statusClass, 'warning');
 });
 
 test('workerDisplay tolerates null input', () => {
   const d = workerDisplay(null);
   assert.equal(d.node, 'unknown');
-  assert.equal(d.statusClass, 'stopped');
+  assert.equal(d.statusClass, 'warning');
 });

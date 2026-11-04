@@ -7,8 +7,7 @@
 import { cpuSeverity } from './stat-format.js';
 import { fleetID } from './fleet-ui.js';
 
-// Wire statuses grouped into the four pulse buckets. Anything unmapped counts
-// as "idle" (stopped/unknown): present but not serving, and not an alarm.
+// Keep stopped, undeployed, and unknown apps distinct from an idle elastic pool.
 const HEALTHY = new Set(['running', 'healthy']);
 const SLEEPING = new Set(['hibernated', 'suspended']);
 const TRANSIENT = new Set(['deploying', 'waking', 'starting', 'booting', 'resuming']);
@@ -16,23 +15,31 @@ const ATTENTION = new Set(['crashed', 'degraded']);
 
 // pulseOrder is the segment order in the status bar: healthy leads, attention
 // anchors the far end so trouble reads at the same edge every time.
-export const pulseOrder = ['healthy', 'transient', 'sleeping', 'idle', 'attention'];
+export const pulseOrder = ['healthy', 'transient', 'sleeping', 'idle', 'stopped', 'awaiting', 'unknown', 'attention'];
 
 export const pulseMeta = {
   healthy: { label: 'Running', cssVar: '--green' },
   transient: { label: 'Working', cssVar: '--cyan-bright' },
   sleeping: { label: 'Sleeping', cssVar: '--standby' },
   idle: { label: 'Idle', cssVar: '--text-muted' },
+  stopped: { label: 'Stopped', cssVar: '--text-muted' },
+  awaiting: { label: 'Awaiting deployment', cssVar: '--text-muted' },
+  unknown: { label: 'Unknown', cssVar: '--yellow' },
   attention: { label: 'Needs attention', cssVar: '--red' },
 };
 
-function bucketOf(status) {
+function bucketOf(app) {
+  if (app.deploy_count != null && Number(app.deploy_count) === 0
+    && !app.release_number && !app.released_at && app.last_deployment_status !== 'succeeded') return 'awaiting';
+  const status = app.status;
   const s = (status || 'unknown').toLowerCase();
   if (ATTENTION.has(s)) return 'attention';
   if (HEALTHY.has(s)) return 'healthy';
   if (TRANSIENT.has(s)) return 'transient';
   if (SLEEPING.has(s)) return 'sleeping';
-  return 'idle';
+  if (s === 'stopped') return 'stopped';
+  if (s === 'idle') return 'idle';
+  return 'unknown';
 }
 
 const MIB = 1024 * 1024;
@@ -62,7 +69,7 @@ const TOP_CONSUMERS = 3;
  *   total:number,
  *   counts:Record<string,number>,
  *   segments:Array<{key:string,label:string,cssVar:string,count:number}>,
- *   verdict:{tone:'empty'|'nominal'|'warning'|'critical',headline:string,detail:string},
+ *   verdict:{tone:'empty'|'neutral'|'nominal'|'warning'|'critical',headline:string,detail:string},
  *   attention:Array<{slug:string,name:string,status:string,reason:string}>,
  *   resources:{state:string,scale:'limits'|'host'|'none',runningApps:number,
  *              runningReplicas:number,cpu:object,memory:object,
@@ -75,7 +82,7 @@ export function buildOverviewModel(apps, metricsInput, historyInput = {}) {
   const metricsState = normalizeMetricsState(metricsInput);
   const metrics = metricsState.metrics;
 
-  const counts = { healthy: 0, transient: 0, sleeping: 0, idle: 0, attention: 0 };
+  const counts = Object.fromEntries(pulseOrder.map((key) => [key, 0]));
   const attention = [];
 
   for (const app of list) {
@@ -83,7 +90,7 @@ export function buildOverviewModel(apps, metricsInput, historyInput = {}) {
     // recent deployment failed (which leaves the app "stopped" - indistinguish-
     // able from an intentionally-stopped app by status alone).
     const attn = needsAttention(app);
-    const bucket = attn ? 'attention' : app.deploying ? 'transient' : bucketOf(app.status);
+    const bucket = attn ? 'attention' : app.deploying ? 'transient' : bucketOf(app);
     counts[bucket] += 1;
     if (attn) {
       attention.push({
@@ -91,6 +98,11 @@ export function buildOverviewModel(apps, metricsInput, historyInput = {}) {
         name: app.name || app.slug,
         status: app.status,
         reason: attentionReason(app),
+        inspection: app.status === 'crashed'
+          ? { page: 'logs', label: 'View logs' }
+          : app.status === 'degraded'
+            ? { page: 'overview', label: 'Inspect app' }
+            : { page: 'deployments', label: 'Inspect deployment' },
         app,
       });
     }
@@ -797,6 +809,16 @@ function verdictFor(total, counts, attention, resources) {
       detail: partialDetail(resources),
     };
   }
+  if (counts.unknown) return {
+    tone: 'warning', headline: 'Some app states are unknown', detail: summaryLine(total, counts),
+  };
+  if (!counts.healthy) return {
+    tone: 'neutral',
+    headline: counts.transient ? 'Apps are updating'
+      : counts.sleeping === total ? 'All apps are sleeping'
+        : counts.idle === total ? 'Apps are ready on request' : 'No apps are running',
+    detail: summaryLine(total, counts),
+  };
   return {
     tone: 'nominal',
     headline: 'App health is stable',
@@ -843,6 +865,9 @@ function summaryLine(total, counts) {
   if (counts.transient) parts.push(`${counts.transient} working`);
   if (counts.sleeping) parts.push(`${counts.sleeping} sleeping`);
   if (counts.idle) parts.push(`${counts.idle} idle`);
+  if (counts.stopped) parts.push(`${counts.stopped} stopped`);
+  if (counts.awaiting) parts.push(`${counts.awaiting} awaiting deployment`);
+  if (counts.unknown) parts.push(`${counts.unknown} unknown`);
   return parts.join(' · ');
 }
 
@@ -861,7 +886,8 @@ function attentionReason(app) {
   if (s === 'crashed') return 'Crashed on startup';
   if (s === 'degraded') return 'Replicas lost';
   if ((app.last_deployment_status || '').toLowerCase() === 'failed') {
-    return Number(app.deploy_count) > 0 ? 'Last deployment failed' : 'First deployment failed';
+    return Number(app.deploy_count) > 0 || app.release_number || app.released_at
+      ? 'Last deployment failed' : 'First deployment failed';
   }
   return 'Needs attention';
 }

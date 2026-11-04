@@ -166,6 +166,28 @@ export function serializeLogEntries(entries) {
   }).join('\n');
 }
 
+// Presentation only: never normalize application text or use inferred dates
+// to reorder independent streams. Unknown and multiline formats stay raw.
+function logLineParts(line) {
+  if (/[\r\n]/.test(line)) return [{ text: line }];
+  const parts = [];
+  const timestamp = line.match(/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?(?=[ \t])/);
+  let rest = line;
+  if (timestamp) {
+    parts.push({ text: timestamp[0], role: 'timestamp' });
+    rest = line.slice(timestamp[0].length);
+  }
+  const severity = rest.match(/^([ \t]*)(\[(?:TRACE|DEBUG|INFO|NOTICE|WARN|WARNING|ERROR|FATAL|CRITICAL)\]|TRACE|DEBUG|INFO|NOTICE|WARN|WARNING|ERROR|FATAL|CRITICAL)(?=[ \t:]|$)/i);
+  if (severity && (timestamp || !severity[1])) {
+    if (severity[1]) parts.push({ text: severity[1] });
+    const level = severity[2].replace(/[\[\]]/g, '').toLowerCase();
+    parts.push({ text: severity[2], role: 'level', level });
+    rest = rest.slice(severity[0].length);
+  }
+  if (rest) parts.push({ text: rest });
+  return parts;
+}
+
 export function appendBoundedLogEntry(entries, entry, max = MAX_RENDERED_LOG_ENTRIES) {
   entries.push(entry);
   const removed = Math.max(0, entries.length - max);
@@ -259,6 +281,7 @@ export function createLogsViewer({
   } catch { /* location is optional in embedded/test contexts */ }
   panel.innerHTML = `
     <div class="logs-workspace">
+      <header class="app-tab-heading"><h2>Logs</h2></header>
       ${developmentSessionID ? `<div class="observability-scope" role="status">
         <span>Showing logs from one remote development session.</span>
         <a href="/apps/${encodeURIComponent(app.slug)}/logs" data-nav>Show all logs</a>
@@ -266,32 +289,47 @@ export function createLogsViewer({
       <div class="logs-toolbar" aria-label="Log controls">
         <div class="logs-toolbar-fields">
           <label class="logs-field">
-            <span>Sources</span>
+            <span>Source</span>
             <select id="logs-source" aria-label="Log sources"></select>
           </label>
           <label class="logs-field logs-search-field">
             <span>Search</span>
-            <input id="logs-search" type="search" placeholder="Filter visible logs" autocomplete="off">
+            <input id="logs-search" type="search" placeholder="Search loaded lines" autocomplete="off" aria-describedby="logs-output-summary">
           </label>
         </div>
-        <div class="logs-toolbar-actions">
-          <button id="logs-load-more" type="button" class="btn-row" hidden>Load older lines</button>
-          <button id="logs-pause" type="button" class="btn-row" aria-pressed="false">Pause live</button>
-          <button id="logs-copy" type="button" class="btn-row">Copy visible</button>
-          <button id="logs-download" type="button" class="btn-row">Download visible</button>
+      </div>
+      <div class="logs-pane-header">
+        <div class="logs-reading-context">
+          <p id="logs-stream-status" class="logs-stream-status">
+            <span class="logs-status-dot" aria-hidden="true"></span>
+            <span class="logs-status-text">Discovering log sources…</span>
+          </p>
+          <p id="logs-output-summary" class="logs-output-summary"></p>
+          <p id="logs-order" class="logs-order" hidden>Combined output · not globally time-sorted</p>
+          <div class="logs-history-actions">
+            <button id="logs-load-more" type="button" class="btn-row" hidden>Load older lines</button>
+            <button id="logs-clear-search" type="button" class="btn-row" hidden>Clear search</button>
+          </div>
+        </div>
+        <div class="logs-pane-actions">
+          <div class="logs-live-actions">
+            <button id="logs-jump" type="button" class="logs-jump btn-row" hidden>Jump to latest</button>
+            <button id="logs-pause" type="button" class="btn-row" aria-pressed="false">Pause live</button>
+          </div>
+          <div class="logs-toolbar-actions">
+            <button id="logs-copy" type="button" class="btn-row" disabled>Copy visible</button>
+            <button id="logs-download" type="button" class="btn-row" disabled>Download visible</button>
+          </div>
         </div>
       </div>
-      <div class="logs-stream-bar">
-        <p id="logs-stream-status" class="logs-stream-status">
-          <span class="logs-status-dot" aria-hidden="true"></span>
-          <span class="logs-status-text">Discovering log sources…</span>
-        </p>
-        <button id="logs-jump" type="button" class="logs-jump btn-row" hidden>Jump to latest</button>
+      <div id="logs-error" class="logs-error" hidden>
+        <p id="logs-error-message" role="alert"></p>
+        <button id="logs-retry" type="button" class="btn-row">Retry</button>
       </div>
       <section id="logs-external" class="logs-external" aria-label="External log access" hidden></section>
+      <p id="logs-feedback" class="logs-feedback" hidden></p>
       <div id="detail-logs-body" class="detail-logs-body" tabindex="0"
-           aria-label="Application log output"></div>
-      <p id="logs-output-summary" class="logs-output-summary"></p>
+           aria-label="Application log output" aria-describedby="logs-output-summary logs-order"></div>
       <p id="logs-announcement" class="sr-only" role="status" aria-live="polite"></p>
     </div>
   `;
@@ -308,7 +346,14 @@ export function createLogsViewer({
   const externalPanel = panel.querySelector('#logs-external');
   const output = panel.querySelector('#detail-logs-body');
   const summary = panel.querySelector('#logs-output-summary');
+  const order = panel.querySelector('#logs-order');
   const announcement = panel.querySelector('#logs-announcement');
+  const clearSearch = panel.querySelector('#logs-clear-search');
+  const errorPanel = panel.querySelector('#logs-error');
+  const errorMessage = panel.querySelector('#logs-error-message');
+  const retryButton = panel.querySelector('#logs-retry');
+  const feedback = panel.querySelector('#logs-feedback');
+  const workspace = panel.querySelector('.logs-workspace');
 
   let sources = normalizeLogSources(initialSources);
   let selected = 'all';
@@ -321,9 +366,18 @@ export function createLogsViewer({
   let staticTail = DEFAULT_LOG_TAIL;
   const fullyLoadedSourceIDs = new Set();
   let paused = false;
+  let pausedEntries = [];
+  let discovering = true;
+  let discoveryFailed = false;
+  let discoveryInFlight = null;
+  let loadingHistory = false;
+  let downloading = false;
+  const sourceFailures = new Map();
+  const staticLoading = new Set();
   let pendingWhilePaused = 0;
   let stickToBottom = true;
   let destroyed = false;
+  let layoutFrame = null;
   let renderScheduled = false;
   let cancelScheduledRender = null;
   let fullRenderPending = true;
@@ -345,6 +399,32 @@ export function createLogsViewer({
   const providerIdlePolls = new Map();
   const providerFailurePolls = new Map();
   const providerNextPollAt = new Map();
+
+  function fitOutput() {
+    layoutFrame = null;
+    if (destroyed) return;
+    // Use the document position so scrolling cannot change the pane's height.
+    // Its CSS minimum still allows page scrolling in short/zoomed viewports.
+    const top = output.getBoundingClientRect().top + (win.scrollY || 0);
+    const bottomSpace = parseFloat(win.getComputedStyle(workspace).paddingBottom) || 24;
+    const height = `${Math.max(0, win.innerHeight - top - bottomSpace)}px`;
+    if (workspace.style.getPropertyValue('--logs-available-height') !== height) {
+      workspace.style.setProperty('--logs-available-height', height);
+      if (stickToBottom) {
+        output.scrollTop = output.scrollHeight;
+        jumpButton.hidden = true;
+      }
+    }
+  }
+  function scheduleLayout() {
+    if (destroyed || layoutFrame != null) return;
+    if (typeof win.requestAnimationFrame === 'function') layoutFrame = win.requestAnimationFrame(fitOutput);
+    else fitOutput();
+  }
+  const layoutObserver = typeof win.ResizeObserver === 'function' ? new win.ResizeObserver(scheduleLayout) : null;
+  layoutObserver?.observe(workspace);
+  win.addEventListener('resize', scheduleLayout);
+  scheduleLayout();
 
   try {
     const requested = new URLSearchParams(win.location && win.location.search || '').get('log_source');
@@ -370,6 +450,22 @@ export function createLogsViewer({
   function announce(message) {
     announcement.textContent = '';
     win.setTimeout(() => { if (!destroyed) announcement.textContent = message; }, 0);
+  }
+
+  function showFeedback(message) {
+    if (destroyed) return;
+    feedback.textContent = message;
+    feedback.hidden = false;
+    announce(message);
+  }
+
+  function updateError() {
+    if (destroyed) return;
+    const failed = scopedSources().filter(source => sourceFailures.has(source.source_id));
+    errorMessage.textContent = discoveryFailed
+      ? (sources.length ? 'Could not refresh log sources. Showing known runs.' : 'Could not load log sources. Try again.')
+      : failed.length ? `Could not load output for ${failed.map(source => `replica #${source.replica}`).join(', ')}. Try again.` : '';
+    errorPanel.hidden = !errorMessage.textContent;
   }
 
   function atBottom() {
@@ -413,9 +509,23 @@ export function createLogsViewer({
     if (paused) {
       pendingWhilePaused++;
       pauseButton.textContent = `Resume (${pendingWhilePaused})`;
+      updateConnectionStatus();
       return;
     }
     scheduleRender();
+  }
+
+  function appendHighlighted(target, text, offset = 0, completeText = text) {
+    const query = searchInput.value.trim();
+    const index = query ? completeText.toLocaleLowerCase().indexOf(query.toLocaleLowerCase()) : -1;
+    const start = Math.max(0, index - offset);
+    const end = Math.min(text.length, index + query.length - offset);
+    if (index < 0 || end <= start) target.textContent = text;
+    else {
+      const match = doc.createElement('mark');
+      match.textContent = text.slice(start, end);
+      target.append(text.slice(0, start), match, text.slice(end));
+    }
   }
 
   function createEntryRow(entry) {
@@ -423,16 +533,25 @@ export function createLogsViewer({
     row.className = entry.kind === 'event' ? 'log-entry log-entry-event' : 'log-entry';
     if (entry.kind === 'event') {
       const message = doc.createElement('span');
-      message.textContent = entry.line;
+      appendHighlighted(message, entry.line);
       row.appendChild(message);
     } else {
       const source = doc.createElement('span');
-      source.className = `log-entry-source log-source-${entry.replica % 6}`;
-      source.textContent = `#${entry.replica}`;
+      source.className = 'log-entry-source';
+      const sourceText = `#${entry.replica}`;
+      const completeText = `${sourceText} ${entry.line}`;
+      appendHighlighted(source, sourceText, 0, completeText);
       source.title = `Replica #${entry.replica}`;
       const message = doc.createElement('span');
       message.className = 'log-entry-message';
-      message.textContent = entry.line;
+      let offset = sourceText.length + 1;
+      for (const part of logLineParts(entry.line)) {
+        const token = doc.createElement('span');
+        if (part.role) token.className = `log-entry-${part.role}${part.level ? ` log-level-${part.level}` : ''}`;
+        appendHighlighted(token, part.text, offset, completeText);
+        message.appendChild(token);
+        offset += part.text.length;
+      }
       row.append(source, message);
     }
     return row;
@@ -445,8 +564,13 @@ export function createLogsViewer({
       const empty = doc.createElement('p');
       empty.className = 'logs-output-empty';
       const scoped = scopedSources();
-      empty.textContent = logsEmptyMessage({
-        hasSearch: Boolean(searchInput.value),
+      empty.textContent = discovering ? 'Loading log sources…'
+        : discoveryFailed && !sources.length ? 'Log sources could not be loaded. Retry above to check again.'
+        : staticLoading.size && !entries.length ? 'Loading retained output…'
+        : scoped.some(source => sourceFailures.has(source.source_id)) && !entries.length ? 'Output could not be loaded. Retry above to check again.'
+        : !searchInput.value.trim() && scoped.length && scoped.every(source => !isLiveLogSource(source) && fullyLoadedSourceIDs.has(source.source_id)) ? 'No output was recorded for this run.'
+        : logsEmptyMessage({
+        hasSearch: Boolean(searchInput.value.trim()),
         truncated: logsAreTruncated(scoped, { trimmed, fullyLoadedSourceIDs }),
         canLoadMore: !loadMoreButton.hidden,
         hasScopedSources: scoped.length > 0,
@@ -496,7 +620,8 @@ export function createLogsViewer({
 
   function renderEntries(forceFull = false) {
     const query = searchInput.value;
-    const visible = filterLogEntries(entries, query);
+    const displayed = paused ? pausedEntries : entries;
+    const visible = filterLogEntries(displayed, query);
     const canAppend = !forceFull && query === renderedQuery;
     const wasFollowing = canAppend
       ? appendRenderedEntries(visible, query)
@@ -504,16 +629,17 @@ export function createLogsViewer({
     if (wasFollowing || stickToBottom) output.scrollTop = output.scrollHeight;
     const parts = [`${visible.length.toLocaleString()} visible line${visible.length === 1 ? '' : 's'}`];
     if (trimmed) parts.push(`${trimmed.toLocaleString()} older lines omitted from this session`);
-    if (query) parts.push(`${entries.length.toLocaleString()} buffered`);
-    // Separate from the trimmed note above: this flags server-side history
-    // that has never been fetched at all, which trimmed (client-side buffer
-    // eviction) does not cover. Suppressed once a search is active because
-    // logsEmptyMessage already carries the equivalent caveat for zero-match
-    // search results, and a non-empty search result mid-load is not truncated.
-    if (!query && logsAreTruncated(scopedSources(), { trimmed: 0, fullyLoadedSourceIDs })) {
+    if (query.trim()) parts.push(`of ${displayed.length.toLocaleString()} loaded`);
+    // Matches are limited to the loaded window too; keep that boundary visible
+    // even when a search has results.
+    if (logsAreTruncated(scopedSources(), { trimmed: 0, fullyLoadedSourceIDs })) {
       parts.push('showing recent history only');
     }
     summary.textContent = parts.join(' · ');
+    order.hidden = scopedSources().filter(source => !isExternalLogSource(source)).length < 2;
+    clearSearch.hidden = !query.trim();
+    copyButton.disabled = !visible.length;
+    updateDownloadControl();
     jumpButton.hidden = stickToBottom;
   }
 
@@ -619,7 +745,7 @@ export function createLogsViewer({
     const currentSources = sources.filter((source) => source.current);
     const liveCount = currentSources.filter(isLiveLogSource).length;
     all.value = 'all';
-    all.textContent = `All current replicas (${liveCount} live, ${currentSources.length} total)`;
+    all.textContent = sources.length ? `All current replicas (${liveCount} live)` : 'No log sources';
     const options = [all];
     for (const [label, grouped] of [
       ['Current runs', currentSources],
@@ -637,15 +763,17 @@ export function createLogsViewer({
       options.push(group);
     }
     sourceSelect.replaceChildren(...options);
-    if (prior === 'all' && currentSources.length === 0 && sources.length > 0) selected = sources[0].source_id;
+    if (currentSources.length === 0 && sources.length > 0 && (prior === 'all' || !sources.some(source => source.source_id === prior))) selected = sources[0].source_id;
     else selected = prior === 'all' || sources.some((s) => s.source_id === prior) ? prior : 'all';
     sourceSelect.value = selected;
+    sourceSelect.disabled = !sources.length;
     updateDownloadControl();
     renderExternalLogs();
     return selected !== prior;
   }
 
   function updateDownloadControl() {
+    if (downloading) return;
     const source = sources.find((item) => item.source_id === selected);
     if (selected !== 'all' && source && source.external_logs) {
       downloadButton.disabled = true;
@@ -654,7 +782,7 @@ export function createLogsViewer({
       return;
     }
     const retainedURL = selected === 'all' ? '' : retainedLogDownloadURL(app.slug, source);
-    downloadButton.disabled = selected !== 'all' && !retainedURL;
+    downloadButton.disabled = selected === 'all' ? !renderedEntries.length : !retainedURL;
     downloadButton.textContent = selected === 'all' ? 'Download visible' : 'Download retained run';
     downloadButton.title = selected === 'all'
       ? 'Save the currently buffered and filtered merged output'
@@ -677,11 +805,20 @@ export function createLogsViewer({
     const availableTotal = followable.length + inlineProvider.length;
     const totalDegraded = degradedCount + providerDegradedCount;
     const disconnectedCount = availableTotal - availableCount;
-    status.classList.toggle('is-connected', availableTotal > 0 && availableCount === availableTotal && totalDegraded === 0);
+    status.classList.toggle('is-connected', !paused && !discoveryFailed && availableTotal > 0 && availableCount === availableTotal && totalDegraded === 0);
+    status.classList.toggle('is-paused', paused);
     status.classList.toggle('is-degraded', totalDegraded > 0);
     status.classList.toggle('is-reconnecting', totalDegraded === 0 && disconnectedCount > 0);
-    pauseButton.disabled = availableTotal === 0;
-    if (live.length === 0) {
+    pauseButton.disabled = !paused && availableTotal === 0;
+    if (paused) {
+      statusText.textContent = pendingWhilePaused
+        ? `Paused · ${pendingWhilePaused.toLocaleString()} new line${pendingWhilePaused === 1 ? '' : 's'} received${pendingWhilePaused > entries.length ? ` · latest ${entries.length.toLocaleString()} buffered` : ''}`
+        : 'Paused · incoming lines will be buffered';
+    } else if (discoveryFailed) {
+      statusText.textContent = sources.length ? 'Source discovery unavailable · showing known runs' : 'Could not discover log sources';
+    } else if (discovering) {
+      statusText.textContent = 'Discovering log sources…';
+    } else if (live.length === 0) {
       statusText.textContent = scoped.length === 1 && isInlineProviderLogSource(scoped[0])
         ? `${titleCase(scoped[0].status)} · ${scoped[0].external_logs.provider === "systemd_journal" ? "Journal" : "CloudWatch"} logs available`
         : externalSources.length === scoped.length && scoped.length
@@ -903,9 +1040,12 @@ export function createLogsViewer({
       fullyLoadedSourceIDs.add(source.source_id);
       return;
     }
+    staticLoading.add(source.source_id);
+    updateLoadMoreControl();
     try {
       const lines = await fetchStaticLines(source, DEFAULT_LOG_TAIL);
       if (destroyed || generation !== scopeGeneration) return;
+      sourceFailures.delete(source.source_id);
       // Fewer lines than requested means the retained file is shorter than
       // the tail window, so this fetch already holds everything there is.
       if (lines.length < DEFAULT_LOG_TAIL) fullyLoadedSourceIDs.add(source.source_id);
@@ -916,7 +1056,14 @@ export function createLogsViewer({
       updateLoadMoreControl();
     } catch {
       if (destroyed || generation !== scopeGeneration) return;
-      addEntry({ kind: 'event', replica: source.replica, line: `Replica #${source.replica} log is unavailable` });
+      sourceFailures.set(source.source_id, true);
+    } finally {
+      if (!destroyed && generation === scopeGeneration) {
+        staticLoading.delete(source.source_id);
+        updateLoadMoreControl();
+        updateError();
+        scheduleRender(true);
+      }
     }
   }
 
@@ -934,25 +1081,36 @@ export function createLogsViewer({
     const source = sources.find((item) => item.source_id === selected);
     if (!source || !source.has_log || isLiveLogSource(source) ||
       isExternalLogSource(source) || isInlineProviderLogSource(source)) return;
-    if (staticTail >= MAX_LOG_TAIL) return;
+    if (staticTail >= MAX_LOG_TAIL || loadingHistory || staticLoading.has(source.source_id)) return;
     const generation = scopeGeneration;
     const requestedTail = nextLoadMoreTail(staticTail);
+    loadingHistory = true;
+    feedback.hidden = true;
     loadMoreButton.disabled = true;
     loadMoreButton.textContent = 'Loading…';
     try {
       const lines = await fetchStaticLines(source, requestedTail);
       if (destroyed || generation !== scopeGeneration) return;
       staticTail = requestedTail;
+      sourceFailures.delete(source.source_id);
+      updateError();
       if (lines.length < requestedTail) fullyLoadedSourceIDs.add(source.source_id);
       else fullyLoadedSourceIDs.delete(source.source_id);
       entries = lines.map((line) => ({ kind: 'line', source_id: source.source_id, replica: source.replica, line }));
       trimmed = 0;
       scheduleRender(true);
-      announce(`Loaded ${lines.length.toLocaleString()} lines for replica ${source.replica}.`);
+      showFeedback(`Loaded ${lines.length.toLocaleString()} lines for replica ${source.replica}.`);
     } catch {
-      if (!destroyed) announce('Could not load more log history.');
+      if (!destroyed && generation === scopeGeneration) {
+        sourceFailures.set(source.source_id, 'history');
+        updateError();
+        showFeedback('Could not load older lines. Your loaded output is still available.');
+      }
     } finally {
-      if (!destroyed) updateLoadMoreControl();
+      if (!destroyed && generation === scopeGeneration) {
+        loadingHistory = false;
+        updateLoadMoreControl();
+      }
     }
   }
 
@@ -963,7 +1121,8 @@ export function createLogsViewer({
       !fullyLoadedSourceIDs.has(source.source_id) && staticTail < MAX_LOG_TAIL;
     loadMoreButton.hidden = !eligible;
     if (!eligible) return;
-    loadMoreButton.disabled = false;
+    loadMoreButton.disabled = loadingHistory || staticLoading.has(source.source_id);
+    if (loadingHistory) return;
     loadMoreButton.textContent = `Load older lines (up to ${nextLoadMoreTail(staticTail).toLocaleString()})`;
   }
 
@@ -1080,6 +1239,8 @@ export function createLogsViewer({
     closeStreams();
     abortProviderReads();
     loadedSources.clear();
+    sourceFailures.clear();
+    staticLoading.clear();
     providerCursors.clear();
     providerLoading.clear();
     providerConnected.clear();
@@ -1091,11 +1252,18 @@ export function createLogsViewer({
     entries = [];
     trimmed = 0;
     staticTail = DEFAULT_LOG_TAIL;
+    loadingHistory = false;
     fullyLoadedSourceIDs.clear();
     pendingWhilePaused = 0;
-    pauseButton.textContent = paused ? 'Resume' : 'Pause live';
+    paused = false;
+    pausedEntries = [];
+    stickToBottom = true;
+    pauseButton.textContent = 'Pause live';
+    pauseButton.setAttribute('aria-pressed', 'false');
+    feedback.hidden = true;
     for (const source of scopedSources()) loadSource(source, scopeGeneration);
     updateConnectionStatus();
+    updateError();
     updateLoadMoreControl();
     scheduleRender(true);
     // Source identity and output must change atomically. Waiting for the next
@@ -1164,20 +1332,35 @@ export function createLogsViewer({
   }
 
   async function refreshSources(markChanges = true) {
+    if (discoveryInFlight) return discoveryInFlight;
+    discoveryInFlight = discoverSources(markChanges);
+    try { return await discoveryInFlight; }
+    finally { discoveryInFlight = null; }
+  }
+
+  async function discoverSources(markChanges) {
+    const wasUnavailable = discoveryFailed || discovering;
     try {
       const query = developmentSessionID ? `?development_session_id=${encodeURIComponent(developmentSessionID)}` : '';
       const resp = await api(`/api/apps/${encodeURIComponent(app.slug)}/logs/sources${query}`);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const payload = await resp.json();
       if (destroyed) return false;
-      reconcileSources(payload && payload.sources, markChanges);
+      if (!Array.isArray(payload?.sources)) throw new Error('Invalid log sources');
+      discoveryFailed = false;
+      discovering = false;
+      reconcileSources(payload.sources, markChanges);
+      updateError();
+      if (wasUnavailable) scheduleRender(true);
       if (markChanges) scheduleNextProviderPoll();
       return true;
     } catch {
-      status.classList.add('is-reconnecting');
-      statusText.textContent = sources.length
-        ? 'Source discovery unavailable · showing known instances'
-        : 'Could not discover log sources';
+      if (destroyed) return false;
+      discovering = false;
+      discoveryFailed = true;
+      updateConnectionStatus();
+      updateError();
+      scheduleRender(true);
       return false;
     }
   }
@@ -1191,7 +1374,33 @@ export function createLogsViewer({
     const source = sources.find((item) => item.source_id === selected);
     announce(selected === 'all' ? 'Showing all current replica runs' : `Showing ${source ? formatLogSourceLabel(source) : 'selected log run'}`);
   });
-  searchInput.addEventListener('input', () => scheduleRender(true));
+  searchInput.addEventListener('input', () => {
+    feedback.hidden = true;
+    scheduleRender(true);
+  });
+  clearSearch.addEventListener('click', () => {
+    searchInput.value = '';
+    scheduleRender(true);
+    searchInput.focus();
+  });
+  retryButton.addEventListener('click', async () => {
+    feedback.hidden = true;
+    retryButton.disabled = true;
+    retryButton.textContent = 'Retrying…';
+    const generation = scopeGeneration;
+    try {
+      await refreshSources(true);
+      if (destroyed || generation !== scopeGeneration) return;
+      await Promise.all(scopedSources().filter(source => sourceFailures.has(source.source_id)).map(source =>
+        sourceFailures.get(source.source_id) === 'history' ? loadMoreStaticHistory() : loadStaticSource(source, generation)));
+    } finally {
+      if (!destroyed) {
+        retryButton.disabled = false;
+        retryButton.textContent = 'Retry';
+        if (errorPanel.hidden) searchInput.focus();
+      }
+    }
+  });
   loadMoreButton.addEventListener('click', () => {
     loadMoreStaticHistory();
   });
@@ -1203,16 +1412,20 @@ export function createLogsViewer({
     paused = !paused;
     pauseButton.setAttribute('aria-pressed', String(paused));
     if (paused) {
+      pausedEntries = entries.slice();
       pauseButton.textContent = 'Resume';
       announce('Live display paused. Incoming logs will continue buffering.');
     } else {
       const count = pendingWhilePaused;
+      const retained = Math.min(count, entries.length);
       pendingWhilePaused = 0;
+      pausedEntries = [];
       pauseButton.textContent = 'Pause live';
       stickToBottom = true;
       scheduleRender(true);
-      announce(`Live display resumed${count ? ` with ${count} buffered lines` : ''}.`);
+      announce(`Live display resumed${retained ? ` with ${retained} buffered lines` : ''}.${count > retained ? ` ${count - retained} older lines were omitted.` : ''}`);
     }
+    updateConnectionStatus();
   });
   output.addEventListener('scroll', () => {
     stickToBottom = atBottom();
@@ -1240,12 +1453,13 @@ export function createLogsViewer({
   }
   doc.addEventListener('visibilitychange', handleVisibilityChange);
   copyButton.addEventListener('click', async () => {
-    const text = serializeLogEntries(filterLogEntries(entries, searchInput.value));
+    flushScheduledRender();
+    const text = serializeLogEntries(renderedEntries);
     try {
       await win.navigator.clipboard.writeText(text);
-      announce('Visible logs copied.');
+      showFeedback('Visible logs copied.');
     } catch {
-      announce('Could not copy logs.');
+      showFeedback('Could not copy logs. Select the output to copy it manually.');
     }
   });
   function saveBlob(blob, filename) {
@@ -1263,6 +1477,7 @@ export function createLogsViewer({
         const source = sources.find((item) => item.source_id === selected);
         const url = retainedLogDownloadURL(app.slug, source);
         if (!url) throw new Error('no retained log');
+        downloading = true;
         downloadButton.disabled = true;
         downloadButton.textContent = 'Downloading…';
         const resp = await api(url);
@@ -1271,16 +1486,18 @@ export function createLogsViewer({
         if (destroyed) return;
         const identity = source.run_id || (source.legacy ? 'legacy' : source.source_id);
         saveBlob(blob, `${app.slug}-replica-${source.replica}-${identity}.log`);
-        announce('Complete retained run downloaded.');
+        showFeedback('Complete retained run downloaded.');
         return;
       }
-      const text = serializeLogEntries(filterLogEntries(entries, searchInput.value));
+      flushScheduledRender();
+      const text = serializeLogEntries(renderedEntries);
       const blob = new win.Blob([text + (text ? '\n' : '')], { type: 'text/plain;charset=utf-8' });
       saveBlob(blob, `${app.slug}-logs-visible.log`);
-      announce('Visible merged logs downloaded.');
+      showFeedback('Visible merged logs downloaded.');
     } catch {
-      announce('Could not download logs.');
+      showFeedback('Could not download logs. Try again.');
     } finally {
+      downloading = false;
       if (!destroyed) updateDownloadControl();
     }
   });
@@ -1299,6 +1516,9 @@ export function createLogsViewer({
 
   return () => {
     destroyed = true;
+    layoutObserver?.disconnect();
+    win.removeEventListener('resize', scheduleLayout);
+    if (layoutFrame != null) win.cancelAnimationFrame(layoutFrame);
     if (cancelScheduledRender) cancelScheduledRender();
     doc.removeEventListener('visibilitychange', handleVisibilityChange);
     abortProviderReads();

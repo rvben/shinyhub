@@ -54,7 +54,7 @@ test('an app that has never been deployed has no release strip', () => {
   assert.equal(host.childNodes.length, 0);
 });
 
-test('a CLI deploy reads as one sentence with the exact time, age, and actor', () => {
+test('a CLI deploy leads with age while preserving the exact time and actor', () => {
   const model = releaseStripModel(app(), NOW);
   assert.equal(model.versionLabel, 'v1');
   assert.equal(model.versionTitle, 'bundle 1790170029453');
@@ -69,15 +69,17 @@ test('a CLI deploy reads as one sentence with the exact time, age, and actor', (
   assert.equal(host.querySelector('.release-version').title, 'bundle 1790170029453');
   const time = host.querySelector('time');
   assert.equal(time.getAttribute('datetime'), expected.datetime);
-  assert.equal(time.textContent, expected.absolute);
+  assert.equal(time.textContent, expected.relative);
+  assert.equal(time.title, expected.absolute);
+  assert.match(time.getAttribute('aria-label'), /3m ago/);
   assert.equal(
     host.querySelector('.release-summary').textContent.replace(/\s+/g, ' ').trim(),
-    `Deployed ${expected.absolute} (3m ago) via ShinyHub CLI by admin`,
+    `Deployed 3m ago via ShinyHub CLI by admin`,
   );
   const history = host.querySelector('a.release-history');
   assert.equal(history.getAttribute('href'), '/apps/demo/deployments');
   assert.ok(history.hasAttribute('data-nav'), 'history link routes through the SPA router');
-  assert.equal(history.textContent.replace(/\s+/g, ' ').trim(), '1 deploy · History');
+  assert.equal(history.textContent.replace(/\s+/g, ' ').trim(), 'Deployments');
 });
 
 test('the deploy source is never repeated inside the strip', () => {
@@ -98,9 +100,9 @@ test('a CI deploy links the pipeline and shows the revision and change once', ()
     assert.equal(a.getAttribute('target'), '_blank');
     assert.match(a.getAttribute('rel'), /noopener/);
   }
-  assert.match(summary.textContent.replace(/\s+/g, ' '), /\(3m ago\) by GitLab pipeline #412 abcdef12 · main · MR !87$/);
+  assert.match(summary.textContent.replace(/\s+/g, ' '), /3m ago by GitLab pipeline #412 abcdef12 · main · MR !87$/);
   assert.equal(host.querySelector('.release-revision').textContent, 'abcdef12 · main');
-  assert.equal(host.querySelector('a.release-history').textContent.replace(/\s+/g, ' ').trim(), '14 deploys · History');
+  assert.equal(host.querySelector('a.release-history').textContent.replace(/\s+/g, ' ').trim(), 'Deployments');
   assert.equal(host.textContent.includes('Open pipeline'), false, 'the pipeline label is already the link');
 });
 
@@ -111,7 +113,7 @@ test('a rollback reads as a rollback, not a deploy', () => {
   }), NOW);
   assert.equal(model.verb, 'Rolled back');
   const host = render(model);
-  assert.match(host.querySelector('.release-summary').textContent.replace(/\s+/g, ' ').trim(), /^Rolled back .+ \(3m ago\) by admin$/);
+  assert.match(host.querySelector('.release-summary').textContent.replace(/\s+/g, ' ').trim(), /^Rolled back 3m ago by admin$/);
 });
 
 test('a deploy whose source was not recorded still shows version and time, without a source', () => {
@@ -119,7 +121,7 @@ test('a deploy whose source was not recorded still shows version and time, witho
   assert.equal(host.hidden, false);
   assert.equal(host.querySelector('.release-source'), null);
   assert.equal(host.textContent.includes('Source not recorded'), false);
-  assert.match(host.querySelector('.release-summary').textContent.replace(/\s+/g, ' ').trim(), /^Deployed .+ \(3m ago\)$/);
+  assert.match(host.querySelector('.release-summary').textContent.replace(/\s+/g, ' ').trim(), /^Deployed 3m ago$/);
 });
 
 test('missing release number and timestamp are omitted, not rendered as placeholders', () => {
@@ -167,4 +169,10 @@ test('re-rendering an unchanged release keeps the existing nodes', () => {
   renderReleaseStrip(d, host, releaseStripModel(app({ deploy_count: 2, release_number: 2 }), NOW));
   assert.notEqual(host.querySelector('time'), before);
   assert.equal(host.querySelector('.release-version').textContent, 'v2');
+});
+
+
+test('a failed attempt never masquerades as the serving release timestamp', () => {
+  const model = releaseStripModel(app({ released_at: null, last_deployed_at: DEPLOYED_AT, last_deployment_status: 'failed' }), NOW);
+  assert.equal(model.time, null);
 });

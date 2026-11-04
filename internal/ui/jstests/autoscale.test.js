@@ -439,9 +439,8 @@ function autoscaleFormDom({
       <input id="autoscale-enabled" type="checkbox" ${enabled ? 'checked' : ''}>
       <input id="autoscale-min" type="number" value="${min}">
       <input id="autoscale-max" type="number" value="${max}">
-      <input type="radio" name="autoscale-target-mode" value="default" ${targetMode === 'default' ? 'checked' : ''}>
-      <input type="radio" name="autoscale-target-mode" value="custom" ${targetMode === 'custom' ? 'checked' : ''}>
-      <input id="autoscale-target" type="number" value="${target}">
+      <input type="hidden" id="autoscale-target-mode" value="${targetMode === 'default' ? 'inherit' : targetMode}">
+      <input id="autoscale-target" type="number" value="${target === '' ? '' : Number(target) * 100}">
     </form>
   `);
   return dom.window.document;

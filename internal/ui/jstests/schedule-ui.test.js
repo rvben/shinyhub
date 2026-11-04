@@ -13,12 +13,14 @@ import {
   formatAge,
   formatDuration,
   runTriggerLabel,
+  scheduleTimingLabel,
   runDurationSeconds,
   deployTriggerLabel,
   producerCompatibilityState,
   scheduleDetailSignature,
   scheduleState,
   scheduleSummary,
+  createScheduleRequestGate,
 } from '../static/views/schedule-ui.js';
 
 test('dstAdvisoryText: returns the advisory string when present', () => {
@@ -64,6 +66,10 @@ test('scheduleState prioritises live work, disabled state, and freshness excepti
     key: 'paused', label: 'Paused', tone: 'quiet', attention: false,
   });
   assert.equal(scheduleState({ enabled: true, active_run_id: 14, stale: true }).key, 'running');
+  assert.equal(scheduleState({ enabled: false, active_run_id: 14 }).key, 'running');
+  assert.equal(scheduleState({ enabled: false, refreshing: true }).key, 'running');
+  assert.equal(scheduleState({ enabled: false }).key, 'paused');
+  assert.equal(scheduleState({ enabled: true, retired: true, active_run_id: 14 }).key, 'retired');
   assert.equal(scheduleState({ enabled: true, stale: true }).key, 'stale');
   assert.equal(scheduleState({ enabled: true, last_run_status: 'failed' }).attention, true);
   assert.equal(scheduleState({ enabled: true, last_run_status: 'skipped_overlap' }).label, 'Skipped');
@@ -74,9 +80,32 @@ test('run trigger labels match the backend scheduler vocabulary', () => {
   assert.equal(runTriggerLabel('schedule'), 'Scheduled');
   assert.equal(runTriggerLabel('cron'), 'Scheduled');
   assert.equal(runTriggerLabel('manual'), 'Manual');
+  assert.equal(runTriggerLabel('deploy'), 'Deployment');
   assert.equal(runTriggerLabel('register'), 'On registration');
   assert.equal(runTriggerLabel('missed'), 'Missed run');
   assert.equal(runTriggerLabel('unexpected'), 'Unknown');
+});
+
+test('simple schedule timing labels describe only supported cron patterns', () => {
+  for (const [cron, label] of [
+    ['* * * * *', 'Every minute'],
+    ['*/1 * * * *', 'Every minute'],
+    ['*/15 * * * *', 'Every 15 minutes'],
+    ['0 5 * * *', 'Daily at 05:00'],
+    ['59 23 * * *', 'Daily at 23:59'],
+    ['5 9 * * 0', 'Every Sunday at 09:05'],
+    ['30 12 * * 6', 'Every Saturday at 12:30'],
+    [' 0\t5 * * * ', 'Daily at 05:00'],
+  ]) assert.equal(scheduleTimingLabel(cron), label, cron);
+});
+
+test('unsupported or invalid timing expressions retain the exact original cron', () => {
+  for (const cron of [
+    '0 5 * * 1-5', '0 5 1 * *', '0 5 * 1 *', '0,30 * * * *',
+    '@daily', '0 0 5 * * *', '*/0 * * * *', '*/59 * * * *', '*/7 * * * *', '*/60 * * * *',
+    '60 5 * * *', '0 24 * * *', '0 5 * * 7', '0 5 * * MON',
+    ' 0 5 * * 1-5 ', '',
+  ]) assert.equal(scheduleTimingLabel(cron), cron);
 });
 
 test('detail signature ignores age-only polling changes but tracks real outcomes', () => {
@@ -136,9 +165,48 @@ test('scheduleSummary counts operational state and selects the earliest enabled 
   assert.equal(summary.total, 3);
   assert.equal(summary.enabled, 2);
   assert.equal(summary.running, 1);
+  assert.equal(summary.activeCount, 1);
   assert.equal(summary.attention, 1);
   assert.equal(summary.compatible, 0);
   assert.equal(summary.nextFire.toISOString(), '2026-08-25T12:00:00.000Z');
+});
+
+test('schedule summary counts each active schedule once and excludes retired timers', () => {
+  const summary = scheduleSummary([
+    { enabled: true, active_run_id: 14, latest_activation: { status: 'pending' }, next_fire: '2026-08-25T13:00:00Z' },
+    { enabled: false, active_run_id: 15, next_fire: '2026-08-25T11:00:00Z' },
+    { enabled: true, retired: true, next_fire: '2026-08-25T10:00:00Z' },
+  ]);
+  assert.equal(summary.total, 3);
+  assert.equal(summary.enabled, 1);
+  assert.equal(summary.running, 2);
+  assert.equal(summary.activating, 1);
+  assert.equal(summary.activeCount, 2);
+  assert.equal(summary.nextFire.toISOString(), '2026-08-25T13:00:00.000Z');
+});
+
+test('schedule request gates isolate list and history work and invalidate superseded requests', () => {
+  const list = createScheduleRequestGate();
+  const history = createScheduleRequestGate();
+  const firstList = list.begin();
+  const firstHistory = history.begin();
+  const latestList = list.begin();
+  assert.equal(firstList.signal.aborted, true);
+  assert.equal(list.isCurrent(firstList), false);
+  assert.equal(list.isCurrent(latestList), true);
+  assert.equal(firstHistory.signal.aborted, false);
+  assert.equal(history.isCurrent(firstHistory), true);
+  history.invalidate();
+  assert.equal(firstHistory.signal.aborted, true);
+  assert.equal(history.isCurrent(firstHistory), false);
+  assert.equal(list.isCurrent(latestList), true);
+  list.invalidate();
+  assert.equal(latestList.signal.aborted, true);
+  assert.equal(list.isCurrent(latestList), false);
+  const remounted = list.begin();
+  assert.equal(list.isCurrent(remounted), true);
+  assert.equal(remounted.signal.aborted, false);
+  list.invalidate();
 });
 
 test('schedule copy remains honest about post-success behavior', () => {

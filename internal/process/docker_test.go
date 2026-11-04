@@ -814,7 +814,7 @@ func TestDockerRuntime_RunOnce_SharedMountIsReadOnly(t *testing.T) {
 	}
 }
 
-// A fast job can exit before wait or attach arrives. Docker must retain it
+// A fast job can exit before wait or log collection arrives. Docker must retain it
 // until both the exit result and final output have reached the caller.
 func TestDockerRuntimeRunOnce_RetainsFastExitUntilCollected(t *testing.T) {
 	for _, code := range []int{0, 5} {
@@ -844,6 +844,12 @@ func TestDockerRuntimeRunOnce_RetainsFastExitUntilCollected(t *testing.T) {
 				json.NewEncoder(w).Encode(map[string]int{"StatusCode": code})
 			})
 			mux.HandleFunc("/containers/fast/attach", func(w http.ResponseWriter, r *http.Request) {
+				t.Error("attach cannot reliably replay an already-exited job")
+			})
+			mux.HandleFunc("/containers/fast/logs", func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Query().Get("follow") != "1" {
+					t.Errorf("expected following GET logs, got %s %s", r.Method, r.URL)
+				}
 				<-waited // delay the final log until the wait request has completed
 				if removed.Load() {
 					http.NotFound(w, r)

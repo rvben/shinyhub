@@ -910,6 +910,9 @@ func TestSchedules_RunLogs_PlainTextWhenNotFollowing(t *testing.T) {
 	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
 		t.Errorf("follow=true Content-Type = %q, want text/event-stream", ct)
 	}
+	if !strings.HasSuffix(rr.Body.String(), "event: complete\ndata:\n\n") {
+		t.Errorf("completed run missing terminal event: %q", rr.Body.String())
+	}
 }
 
 // TestSchedules_RunLogs_FollowStopsWhenRunFinishes asserts that a follow=true
@@ -965,15 +968,21 @@ func TestSchedules_RunLogs_FollowStopsWhenRunFinishes(t *testing.T) {
 		})
 	}()
 
-	done := make(chan error, 1)
+	done := make(chan string, 1)
 	go func() {
-		_, rerr := io.ReadAll(resp.Body)
-		done <- rerr
+		body, rerr := io.ReadAll(resp.Body)
+		if rerr != nil {
+			done <- "read error: " + rerr.Error()
+			return
+		}
+		done <- string(body)
 	}()
 
 	select {
-	case <-done:
-		// Stream closed after the run finished: correct.
+	case output := <-done:
+		if !strings.HasSuffix(output, "event: complete\ndata:\n\n") {
+			t.Errorf("live run did not finish with a terminal event: %q", output)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("follow stream did not close after the run reached a terminal state")
 	}

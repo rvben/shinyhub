@@ -88,14 +88,14 @@ test('an {old,new} field renders as a before -> after transition', () => {
 	assert.deepEqual(auditDetailEntries({
 		action: 'update_app',
 		detail: JSON.stringify({memory_limit_mb: {old: 256, new: 512}}),
-	}), [{label: 'Memory limit mb', value: '256 → 512'}]);
+	}), [{label: 'Memory limit', value: '256 MiB → 512 MiB', isChange: true}]);
 });
 
 test('a plain "key=value" detail string parses into fields', () => {
 	assert.deepEqual(auditDetailEntries({
 		action: 'grant_access',
 		detail: 'user_id=4 role=manager',
-	}), [{label: 'User id', value: '4'}, {label: 'Role', value: 'manager'}]);
+	}), [{label: 'User ID', value: '4'}, {label: 'Role', value: 'manager'}]);
 });
 
 test('free-form text detail that fits neither shape renders verbatim', () => {
@@ -120,4 +120,29 @@ test('a detail_error object renders as a single flagged entry', () => {
 		action: 'update_app',
 		detail: JSON.stringify({detail_error: 'json: unsupported type: chan int'}),
 	}), [{label: 'Detail unavailable', value: 'json: unsupported type: chan int', isError: true}]);
+});
+
+test('resource changes distinguish defaults, no limit and measured units', () => {
+ assert.deepEqual(auditDetailEntries({action:'update_app',detail:{memory_limit_mb:{old:null,new:0},cpu_quota_percent:{old:100,new:200}}}),[
+  {label:'Memory limit',value:'Server default → No limit',isChange:true},{label:'CPU limit',value:'100% → 200%',isChange:true}]);
+});
+
+for (const action of ['schedule_activation_outcome', 'support_session.start', 'support_session.stop']) {
+  for (const encoded of [false, true]) test(`${action} exposes a recording failure before its allowlist (${encoded ? 'JSON' : 'object'})`, () => {
+    const detail = {detail_error:'encoding failed', token:'must not leak', reason:'untrustworthy partial field'};
+    assert.deepEqual(auditDetailEntries({action, detail:encoded ? JSON.stringify(detail) : detail}), [
+      {label:'Detail unavailable',value:'encoding failed',isError:true},
+    ]);
+  });
+}
+
+test('only recorded before/after pairs count as changes, not arrows in ordinary text', () => {
+  assert.deepEqual(auditDetailEntries({action:'update_app',detail:{
+    description:{old:'Before',new:'After'},note:'East → West',labels:['old','new'],replicas:{new:2},
+  }}), [
+    {label:'Description',value:'Before → After',isChange:true},
+    {label:'Note',value:'East → West'},
+    {label:'Labels',value:'["old","new"]'},
+    {label:'Replicas',value:'none → 2',isChange:true},
+  ]);
 });

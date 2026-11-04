@@ -79,6 +79,11 @@ func (s *Server) handleListAuditEvents(w http.ResponseWriter, r *http.Request) {
 	filter := db.AuditEventFilter{
 		Action: strings.TrimSpace(r.URL.Query().Get("action")),
 		RunID:  strings.TrimSpace(r.URL.Query().Get("run")),
+		Search: strings.TrimSpace(r.URL.Query().Get("q")),
+	}
+	if len(filter.Search) > 200 {
+		writeError(w, http.StatusBadRequest, "audit search must be 200 bytes or fewer")
+		return
 	}
 	if len(filter.RunID) > 128 {
 		writeError(w, http.StatusBadRequest, "invalid audit run filter")
@@ -108,6 +113,7 @@ func (s *Server) handleListAuditEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
+	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"events":   events,
 		"total":    total,

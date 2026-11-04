@@ -4,12 +4,13 @@ import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
 import { renderReplicaHeat, updateCPUMeter } from '../static/views/cpu-capacity.js';
 
-test('replica diagnostics use a native disclosure available from every app tab', () => {
+test('replica diagnostics use a native disclosure below the task-focused app header', () => {
   const html = readFileSync(new URL('../static/index.html', import.meta.url), 'utf8');
   const doc = new JSDOM(html).window.document;
   const strip = doc.getElementById('app-detail-cpu-heat');
   const details = strip.closest('details');
-  assert.ok(details.closest('.app-detail-header'));
+  assert.ok(details.closest('.app-technical-summary'));
+  assert.equal(details.closest('.app-detail-header'), null);
   assert.equal(details.open, false);
   assert.match(details.querySelector('summary').textContent, /Inspect replica CPU and autoscaling/);
   assert.equal(strip.closest('.settings-tab-panel'), null);

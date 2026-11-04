@@ -30,6 +30,23 @@ cmd = "python helpers/fetch.py"
 timeout_seconds = 600
 ```
 
+## Inspecting configuration in the dashboard
+
+The app sidebar groups editable settings under **Settings**: General, Environment,
+Resources, Scaling, Access and Privacy. Each page has its own URL and preserves
+drafts when you move between settings pages. Autoscale and hibernation belong to
+Scaling; advanced runtime controls belong to Resources.
+
+Settings show saved values and server-default hints. The **Custom limit** switch
+selects an app value rather than the server default. **Saved runtime behavior**
+on Scaling summarises the saved worker, autoscale and hibernation policy.
+
+Save or discard changes within each section. Saving in the dashboard does not
+update configuration files: declared values are reapplied on the next deployment
+or fleet apply. Make lasting changes in the owning file. Removing a key does not
+generally clear its saved value. File-defined environment variables take precedence
+over stored variables with the same name.
+
 ## Strict-mode parsing
 
 Unknown top-level keys, unknown fields inside any section, and unknown

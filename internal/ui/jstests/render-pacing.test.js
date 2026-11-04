@@ -192,3 +192,10 @@ test('a non-object block is treated as absent', () => {
   );
   assert.equal(renderPacingAdvice(1.5, undefined), 'Saving turns pacing on at 1.5s per render.');
 });
+
+// A successful save can omit runtime estimates, but the persisted cost is known.
+test('a saved cost without host estimates describes current state without inventing capacity', () => {
+  const saved = { render_seconds: 1.5 };
+  assert.equal(renderPacingAdvice(1.5, saved), 'Pacing is on.');
+  assert.equal(renderPacingAdvice(2, saved), 'Saving changes pacing from 1.5s to 2s per render.');
+});

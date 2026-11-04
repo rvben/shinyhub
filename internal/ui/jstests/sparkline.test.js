@@ -171,3 +171,13 @@ test('renderSparkline on an empty series omits the polyline', () => {
   assert.equal(svg.tagName.toLowerCase(), 'svg');
   assert.equal(svg.querySelector('polyline'), null);
 });
+
+test('timestamp coordinates preserve uneven intervals instead of redistributing samples', () => {
+  assert.deepEqual(sparklinePoints([0,5,10],{width:100,height:20,timestamps:[0,1,10]}),['0,20','10,10','100,0']);
+});
+
+test('an elapsed collection gap breaks even a stepped series', () => {
+  const svg=renderSparkline(doc(),[1,1,2,2],{width:100,height:20,timestamps:[0,10,90,100],gapThreshold:15,step:true});
+  assert.equal(svg.querySelectorAll('.sparkline-series').length,2);
+  assert.equal(svg.querySelectorAll('.sparkline-series')[0].getAttribute('points'),'0,20 10,20 10,20');
+});

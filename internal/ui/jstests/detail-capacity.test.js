@@ -76,3 +76,31 @@ test('disabled retry focus is restored after the browser drops focus during the 
   assert.equal(doc.activeElement.tagName, 'SUMMARY');
   assert.equal(doc.getElementById('app-detail-metrics-message').textContent, 'Live metrics updated.');
 });
+
+test('metric hierarchy preserves the full readable value and survives subsequent updates', () => {
+  const doc=fixture().window.document;
+  renderDetailCapacity(doc,metrics,2,off);
+  const cpu=doc.getElementById('app-detail-cpu');
+  assert.equal(cpu.querySelector('.metric-number').textContent,'1.0');
+  assert.equal(cpu.querySelector('.metric-unit').textContent,' / 8 cores');
+  assert.equal(cpu.textContent,'1.0 / 8 cores');
+  const number=cpu.querySelector('.metric-number');
+  renderDetailCapacity(doc,metrics,2,off);
+  assert.equal(cpu.querySelector('.metric-number'),number);
+  renderDetailCapacity(doc,{...metrics,cpu_cores:null},2,off);
+  assert.equal(cpu.textContent,'—');assert.equal(cpu.children.length,0);
+});
+
+test('sleeping and stopped apps do not claim the backend lacks resource monitoring', () => {
+  const dom = fixture();
+  try {
+    const doc = dom.window.document;
+    for (const status of ['running', 'hibernated', 'stopped']) {
+      renderDetailCapacity(doc, {status, metrics_available:false, replicas:[]}, 2, off);
+      for (const id of ['app-detail-cpu', 'app-detail-ram']) {
+        assert.equal(!!doc.getElementById(id).title, status === 'running');
+      }
+      assert.equal(!!doc.getElementById('app-detail-cpu-context').textContent, status === 'running');
+    }
+  } finally { dom.window.close(); }
+});

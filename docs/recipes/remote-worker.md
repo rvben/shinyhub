@@ -129,3 +129,25 @@ Verify:
 - `make test-remote-e2e` runs this whole path hermetically on a single host with
   a real Docker daemon: control plane plus worker, deploy, bundle-dedup,
   tunnel routing, restart re-adoption, and worker-loss handling.
+
+## Troubleshooting
+
+In **Workers**, open **Connection details** to compare the node ID and address
+with the worker's startup log. Search accepts names, node IDs, addresses, tiers,
+and versions. A tier is the deployment target used to place app replicas.
+
+- **Offline:** check that the worker process is running, then inspect its log for
+  heartbeat, connection, or certificate errors. Verify that the worker can reach
+  the hub's `worker.listen_addr` and trusts its CA. Heartbeats travel from the
+  worker to that listener; the advertised address is the reverse route for app
+  traffic, so check both directions if apps remain unreachable.
+- **Joining:** registration succeeded, but the hub has not received a heartbeat.
+  Check the worker log and its connection to the worker API listener.
+- **Revoked:** the hub refuses this worker's credentials. Repeatedly restarting
+  it will not restore access; arrange a fresh join with the hub administrator.
+- **Clock ahead:** check time synchronization on both hosts before comparing
+  heartbeat ages or investigating certificate validity.
+
+The dashboard displays the last loaded inventory during a connection failure.
+Its heartbeat ages continue advancing, but statuses cannot be confirmed until a
+refresh succeeds. Exact heartbeat times include the browser's local time zone.

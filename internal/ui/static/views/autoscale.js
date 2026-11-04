@@ -364,32 +364,33 @@ export function readAutoscaleForm(doc) {
   const min = parseReplicaBound(doc.getElementById('autoscale-min').value);
   const max = parseReplicaBound(doc.getElementById('autoscale-max').value);
   if (min === null) {
-    return { payload: null, error: 'Min replicas must be a whole number between 0 and 1000.' };
+    return { payload: null, error: 'Min replicas must be a whole number between 0 and 1000.', fieldId: 'autoscale-min' };
   }
   if (max === null) {
-    return { payload: null, error: 'Max replicas must be a whole number between 0 and 1000.' };
+    return { payload: null, error: 'Max replicas must be a whole number between 0 and 1000.', fieldId: 'autoscale-max' };
   }
   if (enabled) {
     if (min < 1) {
-      return { payload: null, error: 'Min replicas must be at least 1 when autoscale is enabled.' };
+      return { payload: null, error: 'Min replicas must be at least 1 when autoscale is enabled.', fieldId: 'autoscale-min' };
     }
     if (max < min) {
-      return { payload: null, error: 'Max replicas must be greater than or equal to min replicas.' };
+      return { payload: null, error: 'Max replicas must be greater than or equal to min replicas.', fieldId: 'autoscale-max' };
     }
   }
-  const targetMode = doc.querySelector('input[name="autoscale-target-mode"]:checked');
+  const targetMode = doc.getElementById('autoscale-target-mode');
   if (!targetMode) {
-    return { payload: null, error: 'Pick a target session load option.' };
+    return { payload: null, error: 'Pick a target session load option.', fieldId: 'autoscale-target' };
   }
   let target;
-  if (targetMode.value === 'default') {
+  if (targetMode.value === 'inherit') {
     // 0 is the API's sentinel for "inherit the runtime default"; see
     // effective_autoscale_target in internal/api/apps.go handleGetApp.
     target = 0;
   } else {
-    const t = Number(doc.getElementById('autoscale-target').value.trim());
-    if (!Number.isFinite(t) || t <= 0 || t > 1) {
-      return { payload: null, error: 'Target session load must be a number between 0 and 1.' };
+    const raw = doc.getElementById('autoscale-target').value.trim();
+    const t = raw === '' ? NaN : Number(raw) / 100;
+    if (!Number.isFinite(t) || t < 0.01 || t > 1) {
+      return { payload: null, error: 'Target session load must be from 1% to 100%.', fieldId: 'autoscale-target' };
     }
     target = t;
   }

@@ -36,10 +36,10 @@ export function createSidebarDrawer(opts) {
       trap = createFocusTrap(sidebar, ownerDoc);
       trap.activate();
     }
-    // Move focus into the drawer so keyboard/screen-reader users land inside it
-    // rather than on the hamburger in the (now inert-adjacent) top bar.
+    // Orient app navigation at the current destination. Focusing it also
+    // reveals settings below the fold in the drawer's scrollable nav region.
     if (sidebar) {
-      const first = sidebar.querySelector('#primary-nav a:not([hidden]), #sidebar-apps a:not([hidden]), .identity-card:not([hidden]), .sidebar-about:not([hidden])');
+      const first = sidebar.querySelector('#app-context-nav:not([hidden]) [aria-current="page"]') || sidebar.querySelector('#app-context-nav:not([hidden]) .app-context-back') || sidebar.querySelector('#primary-nav a:not([hidden]), #sidebar-apps a:not([hidden]), .identity-card:not([hidden]), .sidebar-about:not([hidden])');
       if (first && typeof first.focus === 'function') first.focus();
     }
   }
