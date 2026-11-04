@@ -43,6 +43,7 @@ export function assertPageHeader(snapshot, label = '') {
   assert.ok(snapshot, `${label}: page header observation must return a result`);
   const s = snapshot, context = `${label} ${s.path}`;
   const near = (a, b) => Math.abs(a - b) <= 1;
+  const compactApp = s.identityIcon && s.width <= 640;
   assert.equal(s.overflow, false, `${context}: page must not overflow horizontally`);
   assert.equal(s.filtersInHeader, 0, `${context}: filters must be separate from page actions`);
   assert.equal(s.overflowingText.length, 0, `${context}: title and description text must fit their containers`);
@@ -64,8 +65,15 @@ export function assertPageHeader(snapshot, label = '') {
     assert.ok(near(c.height, s.controlHeight), `${context}: ${c.label} must share the page control height (${c.height})`);
     assert.ok(c.left >= s.header.left - 1 && c.right <= s.header.right + 1, `${context}: ${c.label} must fit the header`);
     if (!s.stacked) assert.ok(near(c.top, s.header.top), `${context}: ${c.label} must align to the header top`);
-    else assert.ok(c.top >= s.intro.bottom + 11, `${context}: stacked actions need at least 12px below the title`);
+    else {
+      // The compact app identity uses an 8px mobile gap; workspace headers use 12px.
+      const gap = compactApp ? 8 : 12;
+      assert.ok(c.top >= s.intro.bottom + gap - 1, `${context}: stacked actions need at least ${gap}px below the title`);
+    }
   }
-  if (s.controls.length) assert.ok(near(s.controls.at(-1).right, s.header.right), `${context}: actions must align to the page's right edge`);
+  if (s.controls.length) {
+    if (compactApp) assert.ok(near(s.controls[0].left, s.header.left), `${context}: compact app actions align below the identity`);
+    else assert.ok(near(s.controls.at(-1).right, s.header.right), `${context}: actions must align to the page's right edge`);
+  }
   for (const f of s.filters) assert.ok(f.top >= s.header.bottom, `${context}: filters must follow the header`);
 }

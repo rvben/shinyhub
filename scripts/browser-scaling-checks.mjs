@@ -41,15 +41,16 @@ export async function checkBrowserScaling({ browser, context, page, host, userna
       dialogs.push(dialog.message());
       await dialog.accept();
     });
-    await operator.goto(host + '/login?next=' + encodeURIComponent('/apps/browser/configuration'));
+    await operator.goto(host + '/login?next=' + encodeURIComponent('/apps/browser/settings/scaling'));
     await operator.locator('body[data-auth="out"]').waitFor();
     await operator.locator('#login-form').getByLabel('Username', { exact: true }).fill(username);
     await operator.locator('#login-form').getByLabel('Password', { exact: true }).fill(password);
     await operator.getByRole('button', { name: 'Sign in', exact: true }).click();
-    await operator.waitForURL(host + '/apps/browser/configuration');
+    await operator.waitForURL(host + '/apps/browser/settings/scaling');
     await poll(async () => await operator.locator('#scaling-replicas').inputValue().catch(() => '') === '1',
       'scaling form populated');
     const save = async (field, value, expected) => {
+      if (field === '#scaling-cap') await operator.getByRole('combobox', { name: 'Session limit policy', exact: true }).selectOption('custom');
       await operator.locator(field).fill(String(value));
       const response = operator.waitForResponse(response => response.request().method() === 'PATCH'
         && new URL(response.url()).pathname === '/api/apps/browser');

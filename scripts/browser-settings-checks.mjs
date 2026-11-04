@@ -19,17 +19,17 @@ export async function checkBrowserSettings({ browser, page, host, username, pass
     await check('dashboard environment deletion defers application and preserves the live Shiny session', async () => {
       await request('PUT', '/api/apps/browser/env/LIVE_EDIT_TEST', { value: 'saved', secret: false });
       const before = await api('');
-      await operator.goto(host + '/login?next=' + encodeURIComponent('/apps/browser/configuration'));
+      await operator.goto(host + '/login?next=' + encodeURIComponent('/apps/browser/settings/environment'));
       await operator.locator('body[data-auth="out"]').waitFor();
       await operator.locator('#login-form').getByLabel('Username', { exact: true }).fill(username);
       await operator.locator('#login-form').getByLabel('Password', { exact: true }).fill(password);
       await operator.getByRole('button', { name: 'Sign in', exact: true }).click();
-      await operator.waitForURL(host + '/apps/browser/configuration');
+      await operator.waitForURL(host + '/apps/browser/settings/environment');
       const row = operator.locator('#env-list tbody tr').filter({ hasText: 'LIVE_EDIT_TEST' });
       await row.waitFor();
       const response = operator.waitForResponse(response => response.request().method() === 'DELETE'
         && new URL(response.url()).pathname === '/api/apps/browser/env/LIVE_EDIT_TEST');
-      await row.getByRole('button', { name: 'Delete', exact: true }).click();
+      await row.getByRole('button', { name: 'Delete LIVE_EDIT_TEST', exact: true }).click();
       const result = await response;
       assert.equal(result.status(), 204);
       assert.equal(new URL(result.request().url()).search, '', 'deletion does not request an implicit restart');
@@ -86,13 +86,14 @@ export async function checkBrowserSettings({ browser, page, host, username, pass
       assert.equal((await api('')).replicas_status[0].pid, before.replicas_status[0].pid);
     });
     await check('dashboard resource save preserves concurrent sibling settings and the Shiny session', async () => {
-      await operator.reload();
-      await poll(() => operator.locator('#resources-memory').isVisible(), 'resource form loaded');
+      await operator.goto(host + '/apps/browser/settings/resources');
+      await operator.locator('#resources-save-btn').waitFor();
       const before = await api('');
       const memory = before.app.effective_memory_limit_mb;
       await request('PATCH', '/api/apps/browser', { memory_limit_mb: memory });
       const cpu = before.resource_enforcement?.cpu ? before.app.effective_cpu_quota_percent : 150;
-      await operator.locator('#resources-cpu').fill(String(cpu));
+      await operator.locator('#resources-cpu-mode').selectOption('custom');
+      await operator.getByRole('spinbutton', { name: 'Custom CPU limit', exact: true }).fill(String(cpu / 100));
       const response = operator.waitForResponse(r => r.request().method() === 'PATCH' && new URL(r.url()).pathname === '/api/apps/browser');
       await operator.locator('#resources-save-btn').click();
       const result = await response;
@@ -105,6 +106,8 @@ export async function checkBrowserSettings({ browser, page, host, username, pass
     });
 
     await check('dashboard environment application failures remain visible and preserve the live session', async () => {
+      await operator.goto(host + '/apps/browser/settings/environment');
+      await operator.locator('#env-add-btn').waitFor();
       await operator.route('**/api/apps/browser/env/apply', route => route.fulfill({
         status: 500, contentType: 'application/json',
         body: JSON.stringify({ error: 'Applying saved environment failed', restart_error: 'runtime refused stop' }),
@@ -152,7 +155,7 @@ export async function checkBrowserSettings({ browser, page, host, username, pass
       assert.equal((await groupedState()).worker_pool.workers.find(w => w.slot_id === worker.slot_id)?.pid, worker.pid);
     });
     await check('dashboard grouped capacity increases and decreases preserve assigned workers', async () => {
-      await operator.goto(host + '/apps/settings-grouped/configuration');
+      await operator.goto(host + '/apps/settings-grouped/settings/scaling');
       await poll(async () => await operator.locator('#worker-isolation').inputValue().catch(() => '') === 'grouped', 'grouped controls populated');
       let calculation = 1;
       for (const [field, value, payload] of [
@@ -178,6 +181,7 @@ export async function checkBrowserSettings({ browser, page, host, username, pass
     });
     await check('explicit dashboard environment application drains a grouped Shiny session before restarting', async () => {
       await request('PUT', '/api/apps/settings-grouped/env/EXPLICIT_EDIT_TEST', { value: 'saved', secret: false });
+      await operator.goto(host + '/apps/settings-grouped/settings/environment');
       const response = operator.waitForResponse(r => r.request().method() === 'POST' && new URL(r.url()).pathname === '/api/apps/settings-grouped/env/apply');
       await operator.locator('#env-apply-btn').click();
       await poll(async () => (await groupedState()).worker_pool?.workers.some(w => w.status === 'draining'), 'grouped worker draining');

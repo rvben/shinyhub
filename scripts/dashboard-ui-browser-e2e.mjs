@@ -75,7 +75,7 @@ for(const theme of ['light','dark']) for(const width of (shellOnly ? [1440,900,3
  const context=await browser.newContext({viewport:{width,height:1000},userAgent:'shinyhub-ui-audit'});await context.addInitScript(t=>localStorage.setItem('shinyhub-theme',t),theme);
  const page=await context.newPage();let errors=[];page.on('pageerror',e=>errors.push(e.message));
  role='admin';mode='ready';
- await checkShellConsistency(page,origin,{role,width,theme,extraRoutes:routes.filter(([name,,click])=>!click&&!['viewer','login'].includes(name)).map(([,path])=>path)});
+ await checkShellConsistency(page,origin,{role,width,theme,extraRoutes:[...routes.filter(([name,,click])=>!click&&!['viewer','login'].includes(name)).map(([,path])=>path),...['general','environment','resources','scaling','access','privacy'].map(section=>`/apps/forecast/settings/${section}`)]});
  role='viewer';
  await checkShellConsistency(page,origin,{role,width,theme,extraRoutes:['/apps','/tokens']});
  assert.deepEqual(errors,[],`${theme}/${width}: shell navigation page errors`);
