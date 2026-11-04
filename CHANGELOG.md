@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- Give each app a consistent workspace header and contextual navigation, with focused settings pages for general information, environment, resources, scaling, access, and privacy.
+- Add real-backend acceptance journeys, responsive page and form checks in both themes, accessibility scans, and retained CI diagnostics.
+
+### Changed
+
+- Refine the Apps list and deployment journey, app overview and resource history, Logs, Traces, Usage, Schedules, and Data pages.
+- Streamline Identity, Workers, Audit Log, personal tokens, announcements, profile editing, and account, administration, and help navigation.
+
+### Fixed
+
+- Reject damaged ZIP uploads with a recoverable validation error, and allow choosing another bundle without restarting app creation.
+- Protect shared-data unmounting while apps or scheduled jobs are using the mount, and preserve the source app's data.
+- Preserve announcement edits after uncertain saves and concurrent changes, and make retries idempotent.
+- Correct audit change counts, accessible control names, light-theme delete-action contrast, project deep links, and overview graph layout at intermediate widths.
+
+### Upgrade notice
+
+This release adds announcement-save receipts to the database schema. Back up the database before upgrading; older binaries reject the newer schema, so downgrading requires restoring the pre-upgrade database.
+
 ## [0.22.0](https://github.com/rvben/shinyhub/compare/v0.21.5...v0.22.0) - 2026-10-30
 
 ### Added
