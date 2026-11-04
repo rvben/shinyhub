@@ -93,3 +93,25 @@ func TestStreamedCapacityIsDeferredRatherThanStaleSavedPlan(t *testing.T) {
 		t.Fatalf("capacity can be mistaken for a stale saved plan: %v", err)
 	}
 }
+
+func TestConsumeDeployEventsUnknownOutcome(t *testing.T) {
+	for _, body := range []string{"", `{"type":`, `{"type":"result","result":null}`, `{"type":"result","result":[]}`} {
+		t.Run(body, func(t *testing.T) {
+			_, err := consumeDeployEvents(deployEventResponse(body), formatTable, io.Discard, io.Discard, true, "forecast")
+			if err == nil || !strings.Contains(err.Error(), "outcome is unknown") {
+				t.Fatalf("error = %v", err)
+			}
+			var hinted *hintedMsgError
+			if !errors.As(err, &hinted) || !strings.Contains(hinted.hint, "shinyhub apps show forecast") || !strings.Contains(hinted.hint, "before deploying again") {
+				t.Fatalf("missing recovery hint: %#v", err)
+			}
+		})
+	}
+}
+
+func TestConsumeDeployEventsInterruptedAfterPublication(t *testing.T) {
+	_, err := consumeDeployEvents(deployEventResponse(`{"type":"phase","phase":"commit","status":"completed"}`), formatTable, io.Discard, io.Discard, true, "forecast")
+	if err == nil || !strings.Contains(err.Error(), "was published") {
+		t.Fatalf("error = %v", err)
+	}
+}

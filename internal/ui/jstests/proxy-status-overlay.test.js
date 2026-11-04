@@ -192,6 +192,7 @@ function mount({
     button: () => el(`#${RELOAD_ID}`),
     openLink: () => el(`#${OPEN_ID}`),
     restartButton: () => el(`#${RESTART_ID}`),
+    keepButton: () => el('#shinyhub-status-keep'),
     actionVisible: (id) => {
       const action = el(`#${id}`);
       return !!action && action.style.display !== 'none';
@@ -231,7 +232,7 @@ test('first connection retries stop at the capacity budget', async () => {
 test('a jQuery Shiny connected event preserves the interrupted-session path', async () => {
   const h = mount({ connectedViaJQuery: true, statuses: [200] });
   await h.disconnect();
-  assert.equal(h.title(), 'This session was interrupted');
+  assert.equal(h.title(), 'Your dashboard is ready to reopen');
   assert.equal(h.timers.length, 0);
 });
 
@@ -249,7 +250,7 @@ test('an upgraded Shiny socket shows its exact connection ID after interruption'
   socket.end();
   await h.disconnect();
   assert.equal(h.connectionID(), `Connection ID: ${id}`);
-  assert.equal(h.title(), 'This session was interrupted');
+  assert.equal(h.title(), 'Your dashboard is ready to reopen');
 });
 
 test('a failed upgrade and unrelated socket never display a guessed ID', async () => {
@@ -364,7 +365,7 @@ test('a recovered app offers a new session while preserving the old results', as
   assert.match(h.title(), /Connection interrupted/);
 
   await h.fireTimer();
-  assert.equal(h.title(), 'This session was interrupted');
+  assert.equal(h.title(), 'Your dashboard is ready to reopen');
   assert.equal(h.spinnerVisible(), false, 'the wait is over');
   assert.equal(h.statusDot().style.background, 'rgb(251, 191, 36)', 'interruption uses the amber warning state');
   assert.match(h.statusDot().style.animation, /shinyhub-ready-pulse/, 'the decision state announces its arrival');
@@ -438,9 +439,9 @@ test('the recovered decision traps focus and Escape reveals the snapshot', async
   h.openLink().dispatchEvent(new h.window.KeyboardEvent('keydown', {
     key: 'Tab', shiftKey: true, bubbles: true, cancelable: true,
   }));
-  assert.equal(h.document.activeElement, h.restartButton(), 'Shift+Tab wraps to the final recovery action');
+  assert.equal(h.document.activeElement, h.keepButton(), 'Shift+Tab wraps to the final recovery action');
 
-  h.restartButton().dispatchEvent(new h.window.KeyboardEvent('keydown', {
+  h.keepButton().dispatchEvent(new h.window.KeyboardEvent('keydown', {
     key: 'Tab', bubbles: true, cancelable: true,
   }));
   assert.equal(h.document.activeElement, h.openLink(), 'Tab wraps back to the safest action');
@@ -516,7 +517,7 @@ test('a deleted app is terminal, not a slow restart', async () => {
   assert.equal(h.buttonVisible(), false, 'no reload button: there is nothing to reload into');
 });
 
-test('it gives up after the budget and says how long it waited', async () => {
+test('it gives up after the budget and explains how to preserve the results', async () => {
   const h = mount({ statuses: [503, 503, 503], pollMs: 1000, maxPolls: 3 });
   await h.disconnect();
   assert.match(h.title(), /Connection interrupted/, 'precondition: waiting');
@@ -525,8 +526,9 @@ test('it gives up after the budget and says how long it waited', async () => {
   assert.match(h.title(), /Connection interrupted/, 'still within the budget');
   await h.fireTimer();
 
-  assert.match(h.title(), /did not come back/);
-  assert.match(h.message(), /3 seconds/, 'the budget it actually spent, derived from the attributes');
+  assert.match(h.title(), /couldn’t reconnect yet/);
+  assert.match(h.message(), /previous results are still available/);
+  assert.equal(h.keepButton().style.display, 'inline-flex');
   assert.equal(h.timers.length, 0, 'give-up is terminal');
   assert.equal(h.buttonVisible(), true, 'a manual retry is still offered');
 });
@@ -541,7 +543,7 @@ test('a failed fetch counts as a miss, not as a crash', async () => {
 
   await h.fireTimer();
   await h.fireTimer();
-  assert.equal(h.title(), 'This session was interrupted', 'it recovers once the probe answers');
+  assert.equal(h.title(), 'Your dashboard is ready to reopen', 'it recovers once the probe answers');
 });
 
 test('a page that already carries the marker is handled on arrival', async () => {
@@ -602,7 +604,7 @@ test('a stalled Shiny reload eventually offers recovery instead of a permanent g
   assert.equal(h.overlay(), null, 'normal reloads have a grace period');
   assert.equal(await h.fireTimer(), 3000);
   assert.ok(h.overlay(), 'a marker still present after the grace period needs recovery');
-  assert.equal(h.title(), 'This session was interrupted');
+  assert.equal(h.title(), 'Your dashboard is ready to reopen');
   assert.equal(h.fetches.length, 1);
 });
 
@@ -618,7 +620,7 @@ test('a completed reload cancels its recovery timer', async () => {
 test('a restored page with a stale reload marker also offers recovery', async () => {
   const h = mount({ statuses: [200], preMarker: 'reloading' });
   await h.fireTimer();
-  assert.equal(h.title(), 'This session was interrupted');
+  assert.equal(h.title(), 'Your dashboard is ready to reopen');
 });
 
 test('a not-ready app can open a new session while preserving the old results', async () => {

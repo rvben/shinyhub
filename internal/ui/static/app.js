@@ -1,3 +1,5 @@
+import { uploadDeployment, deploymentOutcome } from '/static/views/deployment-upload.js';
+import { createAccessLists } from '/static/views/access-lists.js';
 import { mountAnnouncements } from '/static/views/announcements.js';
 import { createSessionController } from '/static/views/session-controller.js';
 import { createPersonActions } from '/static/views/person-actions.js';
@@ -82,7 +84,7 @@ import {
 } from '/static/views/schedule-ui.js';
 import { auditDetailEntries } from '/static/views/audit-detail.js';
 import { readAutoscaleForm, parseReplicaBound, renderAutoscaleSummary, summariseAutoscale } from '/static/views/autoscale.js';
-import { workerCapacityLine, keepWarmInertNote } from '/static/views/worker-isolation.js';
+import { workerCapacityLine, keepWarmInertNote, syncWorkerControls } from '/static/views/worker-isolation.js';
 import { parseRenderSeconds, renderPacingAdvice } from '/static/views/render-pacing.js';
 import { isInFlight, runInFlight } from '/static/views/in-flight.js';
 import { initTheme, getThemePreference, setThemePreference } from '/static/views/theme.js';
@@ -1063,6 +1065,7 @@ document.addEventListener('DOMContentLoaded', () => {
     state.sessionIdentity = {};
     closeNewTokenModal(true);
     closeNewAppModal(true);
+    resetDeployModal();
     closeDeployModal();
     sessionController.stop();
     workersLoadVersion += 1;
@@ -3633,6 +3636,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const currentReplicas = app.replicas ?? 1;
     replicasInput.value = String(currentReplicas);
     capInput.value = String(app.max_sessions_per_replica ?? 0);
+    capInput.dataset.inheritedCap = String(app.max_sessions_per_replica ? 0 : envelope?.effective_max_sessions_per_replica || 0);
     replicasInput.dataset.original = String(currentReplicas);
     replicasInput.dataset.appStatus = String(app.status ?? '');
     replicasInput.disabled = !canEdit;
@@ -4197,17 +4201,19 @@ document.addEventListener('DOMContentLoaded', () => {
     const c = parseInt(document.getElementById('scaling-cap').value, 10);
     if (!Number.isFinite(r) || r < 1) { el.textContent = ''; return; }
     if (!Number.isFinite(c) || c < 0) { el.textContent = ''; return; }
-    if (c === 0) {
-      el.innerHTML = `Admission ceiling: <strong>${r}</strong> replica${r === 1 ? '' : 's'} × runtime default cap.`;
-    } else {
-      el.innerHTML = `Admission ceiling: <strong>${r} × ${c} = ${r * c}</strong> concurrent new sessions before 503.`;
-    }
+    const inherited = Number(document.getElementById('scaling-cap').dataset.inheritedCap) || 0;
+    const effective = c || inherited;
+    el.textContent = effective > 0
+      ? `Session limit: ${r * effective} across ${r} replica${r === 1 ? '' : 's'} (${effective} per replica${c === 0 ? ', inherited from the server' : ''}). New viewers wait when capacity is full.`
+      : `Session limit: ${r} replica${r === 1 ? '' : 's'} using the server’s per-replica default. New viewers wait when capacity is full.`;
   }
 
   function updateWorkerCapacity() {
     const el = document.getElementById('worker-capacity');
     if (!el) return;
     const mode = document.getElementById('worker-isolation').value;
+    syncWorkerControls(document, mode);
+    document.getElementById('scaling-ceiling').hidden = mode !== 'multiplex';
     const gs = parseInt(document.getElementById('worker-grouped-size').value, 10);
     const mw = parseInt(document.getElementById('worker-max-workers').value, 10);
     // The per-session RAM estimate uses the configured memory limit so an
@@ -4218,7 +4224,7 @@ document.addEventListener('DOMContentLoaded', () => {
       Number.isFinite(gs) ? gs : 0,
       Number.isFinite(mw) ? mw : 0,
       Number.isFinite(memMB) ? memMB : 0,
-    );
+    ) || (mode === 'multiplex' ? 'Sessions share each replica. For independent session workers, choose Per session or Grouped.' : 'Worker limit is inherited from the server. New viewers wait when all workers are occupied.');
   }
 
   function onHibernateModeChange() {
@@ -4777,29 +4783,37 @@ document.addEventListener('DOMContentLoaded', () => {
     return p.split('/').map(encodeURIComponent).join('/');
   }
 
+  let dataRead = 0;
   async function refreshDataTab(slug, app) {
+    if (!slug || slug !== settingsSlug) return;
+    const scope = accessLists.capture();
+    const read = ++dataRead;
+    const current = () => scope() && read === dataRead;
     const tbody = document.getElementById('data-list');
-    tbody.innerHTML = '';
     const errEl = document.getElementById('data-error');
     setError(errEl, '');
 
     let resp;
     try {
-      resp = await api(`/api/apps/${encodeURIComponent(slug)}/data`);
+      resp = await api(`/api/apps/${encodeURIComponent(slug)}/data`, { signal: AbortSignal.timeout(20000) });
     } catch {
-      setError(errEl, 'Failed to load data files.');
+      if (current()) setError(errEl, 'Could not refresh data files. Check your connection and use Refresh data list to try again.');
       return;
     }
+    if (!current()) return;
     if (resp.status === 401) { await handleUnauthorized(); return; }
     if (!resp.ok) {
       let message = 'Failed to load data files.';
       try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
-      setError(errEl, message);
+      if (current()) setError(errEl, message);
       return;
     }
 
     let env;
-    try { env = await resp.json(); } catch { setError(errEl, 'Invalid response from server.'); return; }
+    try { env = await resp.json(); } catch { if (current()) setError(errEl, 'Could not read data files. Use Refresh data list to try again.'); return; }
+    if (!current()) return;
+    if (!Array.isArray(env) && !Array.isArray(env?.items)) { setError(errEl, 'Could not read data files. Use Refresh data list to try again.'); return; }
+    tbody.replaceChildren();
 
     // Standard {items,...} list envelope (quota_mb/used_bytes are sibling keys);
     // tolerate a bare array for resilience.
@@ -4859,6 +4873,8 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function deleteDataFile(slug, path, btn) {
+    if (settingsSlug !== slug || !btn.isConnected) return;
+    const current = accessLists.capture();
     if (!window.confirm(`Delete ${path}?`)) return;
     const errEl = document.getElementById('data-error');
     await runInFlight(btn, async () => {
@@ -4866,14 +4882,15 @@ document.addEventListener('DOMContentLoaded', () => {
       try {
         resp = await api(`/api/apps/${encodeURIComponent(slug)}/data/${encodeDataPath(path)}`, { method: 'DELETE' });
       } catch {
-        setError(errEl, 'Network error.');
+        if (current()) setError(errEl, 'Could not confirm deletion. Refresh the data list before trying again.');
         return;
       }
+      if (!current()) return;
       if (resp.status === 401) { await handleUnauthorized(); return; }
       if (!resp.ok && resp.status !== 204) {
         let message = 'Delete failed.';
         try { const b = await resp.json(); if (b && b.error) message = b.error; } catch { /* non-JSON */ }
-        setError(errEl, message);
+        if (current()) setError(errEl, message);
         return;
       }
       await refreshDataTab(slug);
@@ -4884,6 +4901,7 @@ document.addEventListener('DOMContentLoaded', () => {
     event.preventDefault();
     const slug = settingsSlug;
     if (!slug) return;
+    const current = accessLists.capture();
 
     const fileInput = document.getElementById('data-file-input');
     const destInput = document.getElementById('data-dest-input');
@@ -4893,7 +4911,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const errEl = document.getElementById('data-error');
 
     const file = fileInput.files[0];
-    if (!file) return;
+    if (!file || uploadBtn.disabled) return;
 
     const dest = destInput.value.trim() || file.name;
     const restart = restartInput.checked;
@@ -4911,14 +4929,23 @@ document.addEventListener('DOMContentLoaded', () => {
     xhr.setRequestHeader('X-CSRF-Token', readCookie('csrf_token'));
 
     xhr.upload.addEventListener('progress', e => {
-      if (e.lengthComputable) {
+      if (current() && e.lengthComputable) {
         progressEl.value = Math.round((e.loaded / e.total) * 100);
       }
     });
 
+    const uncertain = () => {
+      if (current()) setError(errEl, 'Could not confirm the upload. Your file is still selected. Refresh the data list to check whether it arrived before uploading again.');
+    };
+    xhr.onerror = uncertain;
+    xhr.ontimeout = uncertain;
+    xhr.onabort = uncertain;
+    xhr.timeout = 300000;
     xhr.onload = () => {
+      if (!current()) return;
       progressEl.hidden = true;
-      if (xhr.status >= 400) {
+      if (xhr.status === 401) { handleUnauthorized(); return; }
+      if (xhr.status < 200 || xhr.status >= 300) {
         let message = `Upload failed (${xhr.status} ${xhr.statusText})`;
         try {
           const b = JSON.parse(xhr.responseText);
@@ -4938,154 +4965,17 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     xhr.onloadend = () => {
+      if (!current()) return;
       uploadBtn.disabled = false;
       progressEl.hidden = true;
     };
 
-    xhr.send(file);
+    try { xhr.send(file); } catch { uncertain(); xhr.onloadend(); }
   }
 
-  async function refreshMemberList() {
-    if (!settingsSlug) return;
-    const list = document.getElementById('members-list');
-    list.innerHTML = '<li class="loading-placeholder">Loading…</li>';
-    let resp;
-    try {
-      resp = await api(`/api/apps/${settingsSlug}/members`);
-    } catch { list.innerHTML = ''; return; }
-    if (!resp.ok) { list.innerHTML = ''; return; }
-    const memBody = await resp.json();
-    // Standard {items,...} list envelope; tolerate a bare array for resilience.
-    const members = Array.isArray(memBody) ? memBody : (memBody && Array.isArray(memBody.items) ? memBody.items : []);
-    list.innerHTML = '';
-    for (const m of members) {
-      const li = document.createElement('li');
-      const nameSpan = document.createElement('span');
-      nameSpan.className = 'member-name';
-      nameSpan.textContent = m.username;
-      const roleSelect = document.createElement('select');
-      roleSelect.className = 'member-role member-role-select';
-      roleSelect.setAttribute('aria-label', `Role for ${m.username}`);
-      for (const role of ['viewer', 'manager']) {
-        const opt = document.createElement('option');
-        opt.value = role;
-        opt.textContent = role.charAt(0).toUpperCase() + role.slice(1);
-        if (m.role === role) opt.selected = true;
-        roleSelect.appendChild(opt);
-      }
-      roleSelect.dataset.previous = m.role;
-      roleSelect.addEventListener('change', () => updateMemberRole(m.user_id, m.username, roleSelect));
-      const revokeBtn = document.createElement('button');
-      revokeBtn.textContent = 'Revoke';
-      revokeBtn.setAttribute('aria-label', `Revoke access for ${m.username}`);
-      revokeBtn.addEventListener('click', () => runInFlight(revokeBtn, async () => {
-        const slug = settingsSlug;
-        if (!slug) return;
-        const error = document.getElementById('grant-error');
-        setError(error, '');
-        try {
-          const r = await api(`/api/apps/${slug}/members`, {
-            method: 'DELETE',
-            body: JSON.stringify({ user_id: m.user_id }),
-          });
-          if (slug !== settingsSlug) return;
-          if (r.status === 401) { await handleUnauthorized(); return; }
-          if (!r.ok) throw new Error('request failed');
-          li.remove();
-          flashToast(`Revoked access for ${m.username}`, 'success');
-          document.getElementById('grant-username').focus();
-        } catch {
-          if (slug === settingsSlug) setError(error, `Could not revoke access for ${m.username}. Refresh this page to check their access, then try again.`);
-        }
-      }));
-      li.appendChild(nameSpan);
-      li.appendChild(roleSelect);
-      li.appendChild(revokeBtn);
-      list.appendChild(li);
-    }
-  }
-
-  async function refreshGroupAccessList() {
-    if (!settingsSlug) return;
-    const list = document.getElementById('group-access-list');
-    if (!list) return;
-    list.innerHTML = '<li class="loading-placeholder">Loading…</li>';
-    let resp;
-    try {
-      resp = await api(`/api/apps/${settingsSlug}/group-access`);
-    } catch { list.innerHTML = ''; return; }
-    if (!resp.ok) { list.innerHTML = ''; return; }
-    const gaBody = await resp.json();
-    // Standard {items,...} list envelope; tolerate a bare array for resilience.
-    const rules = Array.isArray(gaBody) ? gaBody : (gaBody && Array.isArray(gaBody.items) ? gaBody.items : []);
-    list.innerHTML = '';
-    for (const rule of rules) {
-      const li = document.createElement('li');
-      const nameSpan = document.createElement('span');
-      nameSpan.className = 'member-name';
-      nameSpan.textContent = rule.group;
-      const roleSpan = document.createElement('span');
-      roleSpan.className = 'member-role';
-      roleSpan.textContent = rule.role;
-      if (rule.source === 'manifest') {
-        const tag = document.createElement('span');
-        tag.className = 'member-role';
-        tag.textContent = '(manifest)';
-        li.appendChild(nameSpan);
-        li.appendChild(roleSpan);
-        li.appendChild(tag);
-        list.appendChild(li);
-        continue; // manifest rules are managed by the bundle; not removable here
-      }
-      const removeBtn = document.createElement('button');
-      removeBtn.textContent = 'Remove';
-      removeBtn.setAttribute('aria-label', `Remove group rule ${rule.group}`);
-      removeBtn.addEventListener('click', () => runInFlight(removeBtn, async () => {
-        const slug = settingsSlug;
-        if (!slug) return;
-        try {
-          const r = await api(`/api/apps/${slug}/group-access/${encodeURIComponent(rule.group)}`, { method: 'DELETE' });
-          if (r.ok) li.remove();
-        } catch { /* network error, leave row in place */ }
-      }));
-      li.appendChild(nameSpan);
-      li.appendChild(roleSpan);
-      li.appendChild(removeBtn);
-      list.appendChild(li);
-    }
-  }
-
-  async function updateMemberRole(userId, username, selectEl) {
-    const slug = settingsSlug;
-    if (!slug) return;
-    const newRole = selectEl.value;
-    const previous = selectEl.dataset.previous || '';
-    const error = document.getElementById('grant-error');
-    setError(error, '');
-    selectEl.disabled = true;
-    let resp;
-    try {
-      resp = await api(`/api/apps/${slug}/members/${userId}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ role: newRole }),
-      });
-    } catch {
-      selectEl.disabled = false;
-      if (previous) selectEl.value = previous;
-      if (slug === settingsSlug) setError(error, `Could not update the role for ${username}. Check your connection and try again.`);
-      return;
-    }
-    selectEl.disabled = false;
-    if (slug !== settingsSlug) return;
-    if (resp.status === 401) { await handleUnauthorized(); return; }
-    if (!resp.ok) {
-      if (previous) selectEl.value = previous; // revert to last-known role
-      setError(error, `Could not update the role for ${username}. Refresh this page to check their role, then try again.`);
-      return;
-    }
-    selectEl.dataset.previous = newRole;
-    flashToast(`Updated ${username} to ${newRole}`, 'success');
-  }
+  const accessLists = createAccessLists({ document, request: api, onUnauthorized: handleUnauthorized, notify: flashToast });
+  const refreshMemberList = () => accessLists.refreshMembers();
+  const refreshGroupAccessList = () => accessLists.refreshGroups();
 
   logPaneClose.addEventListener('click', closeLogs);
 
@@ -5498,6 +5388,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Data tab: upload form submit.
   document.getElementById('data-upload-form').addEventListener('submit', uploadDataFile);
+  document.getElementById('data-refresh').addEventListener('click', event => runInFlight(event.currentTarget, () => refreshDataTab(settingsSlug)));
+  document.getElementById('members-refresh').addEventListener('click', refreshMemberList);
+  document.getElementById('groups-refresh').addEventListener('click', refreshGroupAccessList);
 
   // Visibility: explicit Save. (Previously auto-applied on radio change; now
   // consistent with every other settings tab.)
@@ -5548,6 +5441,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const grantBtn = document.getElementById('grant-btn');
     if (grantBtn.disabled || !settingsSlug) return;
     const slug = settingsSlug;
+    const current = accessLists.capture();
     const username = document.getElementById('grant-username').value.trim();
     const errEl = document.getElementById('grant-error');
     errEl.hidden = true;
@@ -5559,11 +5453,11 @@ document.addEventListener('DOMContentLoaded', () => {
       // Grant by username: the server resolves it to a user id under the same
       // manage-app authorization, so the UI never needs a separate user-lookup
       // (which would require broader privilege than managing this app).
-      const grantResp = await api(`/api/apps/${slug}/members`, {
-        method: 'POST',
+      const grantResp = await api(`/api/apps/${encodeURIComponent(slug)}/members`, {
+        method: 'POST', signal: AbortSignal.timeout(20000),
         body: JSON.stringify({ username }),
       });
-      if (slug !== settingsSlug) return;
+      if (!current()) return;
       if (grantResp.status === 401) { await handleUnauthorized(); return; }
       if (!grantResp.ok) {
         let grantMsg = grantResp.status === 404 ? 'User not found' : 'Grant failed';
@@ -5571,6 +5465,7 @@ document.addEventListener('DOMContentLoaded', () => {
           const j = await grantResp.json();
           if (j && j.error && grantResp.status !== 404) grantMsg = j.error;
         } catch { /* non-JSON */ }
+        if (!current()) return;
         errEl.textContent = grantMsg;
         errEl.hidden = false;
         flashToast(grantMsg, 'error');
@@ -5578,35 +5473,46 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       document.getElementById('grant-username').value = '';
       await refreshMemberList();
-      flashToast(`Granted ${username} as viewer`, 'success');
+      if (current()) flashToast(`Granted ${username} as viewer`, 'success');
     } catch {
-      if (slug === settingsSlug) setError(errEl, 'Could not grant access. Check your connection and try again.');
+      if (current()) setError(errEl, 'Could not confirm the access grant. Refresh members to check before trying again.');
     } finally {
-      grantBtn.disabled = false;
-      grantBtn.textContent = 'Grant';
+      if (current()) { grantBtn.disabled = false; grantBtn.textContent = 'Grant'; }
     }
   });
 
   // Group access: add a group rule (bound once; uses current settingsSlug at call time).
-  document.getElementById('group-access-add-btn')?.addEventListener('click', (event) => runInFlight(event.currentTarget, async () => {
+  document.getElementById('group-access-add-btn')?.addEventListener('click', async event => {
+    const button = event.currentTarget;
+    if (button.disabled) return;
     const nameEl = document.getElementById('group-access-name');
     const roleEl = document.getElementById('group-access-role');
     const errEl = document.getElementById('group-access-error');
     errEl.hidden = true;
     const group = nameEl.value.trim();
     if (!group || !settingsSlug) return;
+    const slug = settingsSlug;
+    const current = accessLists.capture();
+    button.disabled = true;
     try {
-      const resp = await api(`/api/apps/${settingsSlug}/group-access`, {
-        method: 'POST',
+      const resp = await api(`/api/apps/${encodeURIComponent(slug)}/group-access`, {
+        method: 'POST', signal: AbortSignal.timeout(20000),
         body: JSON.stringify({ group, role: roleEl.value }),
       });
-      if (!resp.ok) { errEl.textContent = 'Add failed'; errEl.hidden = false; return; }
+      if (!current()) return;
+      if (resp.status === 401) { await handleUnauthorized(); return; }
+      if (!resp.ok) {
+        const message = await errorMessage(resp, 'Could not add this group. Check its name and your permissions, then try again.');
+        if (current()) setError(errEl, message);
+        return;
+      }
       const warn = resp.headers.get('X-ShinyHub-Warning');
       if (warn) flashToast(warn, 'info');
       nameEl.value = '';
       await refreshGroupAccessList();
-    } catch { errEl.textContent = 'Network error'; errEl.hidden = false; }
-  }));
+    } catch { if (current()) setError(errEl, 'Could not confirm the new group rule. Refresh the access list to check, then try again.'); }
+    finally { if (current()) button.disabled = false; }
+  });
 
   // Danger zone: typed-confirmation unlocks the Delete button.
   document.getElementById('delete-confirm').addEventListener('input', (e) => {
@@ -5793,7 +5699,25 @@ document.addEventListener('DOMContentLoaded', () => {
     return `${(n / 1048576).toFixed(1)} MB`;
   }
 
+  function updateDeployMonitor(message) {
+    const monitor = document.getElementById('deploy-monitor');
+    monitor.hidden = !deployState;
+    document.getElementById('deploy-monitor-text').textContent = deployState
+      ? `${deployState.appName || deployState.slug}: ${message}` : '';
+  }
+
+  function revealDeployModal() {
+    deployModal.hidden = false;
+    modalTrap(deployModal).activate();
+    (deployState?.uploading ? deployCancel : deploySubmit.disabled ? deployPick : deploySubmit).focus();
+  }
+  document.getElementById('deploy-monitor-open').addEventListener('click', revealDeployModal);
+  document.getElementById('deploy-view-history').addEventListener('click', closeDeployModal);
+
   function resetDeployModal() {
+    document.getElementById('deploy-monitor').hidden = true;
+    document.getElementById('deploy-stage').textContent = '';
+    document.getElementById('deploy-view-history').hidden = true;
     deployErrorLogs.hidden = true;
     deployPick.disabled = deployFileInput.disabled = false;
     deploySummary.hidden = true;
@@ -5807,6 +5731,7 @@ document.addEventListener('DOMContentLoaded', () => {
     deploySubmit.disabled = true;
     deploySubmit.textContent = 'Deploy';
     deployCancel.textContent = 'Cancel';
+    deployModalClose.setAttribute('aria-label', 'Close deploy modal');
     deployFileInput.value = '';
     deployDropzone.classList.remove('dragover');
     if (deployState && deployState.xhr) {
@@ -5816,6 +5741,11 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function openDeployModal(app) {
+    if (deployState?.uploading) {
+      revealDeployModal();
+      if (deployState.slug !== app.slug) flashToast('Another deployment is in progress. Its status is shown here.', 'info');
+      return;
+    }
     resetDeployModal();
     deployState = { slug: app.slug, appName: app.name, blob: null, fileCount: 0, rejections: new Map(), xhr: null };
     deployAppName.textContent = app.name ? `: ${app.name}` : '';
@@ -5836,7 +5766,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function closeDeployModal() {
-    resetDeployModal();
+    if (!deployState?.uploading) resetDeployModal();
     deployModal.hidden = true;
     modalTrap(deployModal).release();
   }
@@ -5848,6 +5778,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const version = selection.selectionVersion = (selection.selectionVersion || 0) + 1;
     selection.blob = null;
     selection.completed = false;
+    selection.uncertain = false;
+    selection.outcome = null;
+    document.getElementById('deploy-stage').textContent = '';
+    document.getElementById('deploy-view-history').hidden = true;
     deploySubmit.disabled = true;
     deploySubmit.textContent = 'Deploy';
     deploySummary.hidden = true;
@@ -6141,120 +6075,87 @@ document.addEventListener('DOMContentLoaded', () => {
     renderDeploySummary(rootEntry.name + '/', blob.size, fileList.length, rejections, rules);
   }
 
-  function uploadBundle(slug, blob) {
-    return new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      const form = new FormData();
-      form.append('bundle', blob, 'bundle.zip');
-
-      xhr.open('POST', `/api/apps/${encodeURIComponent(slug)}/deploy`, true);
-      xhr.withCredentials = true;
-      xhr.setRequestHeader('X-Shinyhub-Deploy-Channel', 'dashboard');
-      const csrf = readCookie('csrf_token');
-      if (csrf) xhr.setRequestHeader('X-CSRF-Token', csrf);
-
-      xhr.upload.addEventListener('progress', (e) => {
-        if (!e.lengthComputable) return;
-        const pct = Math.floor((e.loaded / e.total) * 100);
-        deployProgressBar.value = pct;
-        deployProgressText.textContent = `${pct}%`;
-      });
-      xhr.addEventListener('load', () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          let body = {};
-          try { body = JSON.parse(xhr.responseText) || {}; }
-          catch { /* keep empty body; callers treat as no manifest */ }
-          resolve(body);
-        } else {
-          let msg = 'Deploy failed';
-          try {
-            const body = JSON.parse(xhr.responseText);
-            if (body && body.error) msg = body.error;
-          } catch { /* non-JSON; keep default */ }
-          const err = new Error(msg);
-          err.status = xhr.status;
-          reject(err);
-        }
-      });
-      xhr.addEventListener('error',  () => reject(new Error('Network error during upload')));
-      xhr.addEventListener('abort',  () => {
-        const err = new Error('Upload cancelled');
-        err.code = 'UPLOAD_CANCELLED';
-        reject(err);
-      });
-      xhr.addEventListener('timeout',() => reject(new Error('Upload timed out')));
-
-      deployState.xhr = xhr;
-      xhr.send(form);
-    });
-  }
-
   deploySubmit.addEventListener('click', async () => {
     if (!deployState || !deployState.blob || deployState.uploading) return;
-
-    // Re-entry: after a successful deploy this button becomes "View logs".
-    if (deployState.completed) {
-      const slug = deployState.slug;
+    if (deployState.completed || deployState.uncertain) {
+      const { slug, outcome, uncertain } = deployState;
       closeDeployModal();
-      openLogs(slug);
+      if (!uncertain && outcome?.openable) location.assign(`/app/${encodeURIComponent(slug)}/`);
+      else router.navigate(`/apps/${encodeURIComponent(slug)}${uncertain ? '/deployments' : ''}`);
       return;
     }
-
+    const upload = deployState;
+    const { slug, blob } = upload;
     setError(deployError, '');
     deploySubmit.disabled = true;
     deployErrorLogs.hidden = true;
-    deployCancel.textContent = 'Close';
+    deployCancel.textContent = 'Hide progress';
+    deployModalClose.setAttribute('aria-label', 'Hide deployment progress');
     deployProgressWrap.hidden = false;
     deployProgressBar.value = 0;
-    deployProgressText.textContent = '0%';
-
-    const { slug, blob } = deployState;
-    const upload = deployState;
-    const selectionVersion = upload.selectionVersion;
+    deployProgressBar.setAttribute('aria-label', 'Bundle upload progress');
+    deployProgressText.textContent = '0% uploaded';
+    const stage = document.getElementById('deploy-stage');
+    stage.textContent = 'Uploading the app bundle… You can hide this dialog and keep working.';
+    const history = document.getElementById('deploy-view-history');
+    history.href = `/apps/${encodeURIComponent(slug)}/deployments`;
+    history.hidden = false;
     upload.uploading = true;
+    upload.serverPhase = false;
     deployPick.disabled = deployFileInput.disabled = true;
-
-    let body;
+    updateDeployMonitor('Uploading…');
     try {
-      body = await uploadBundle(slug, blob);
+      const transfer = uploadDeployment({ slug, blob, csrf: readCookie('csrf_token'),
+        onUpload: percent => {
+          if (deployState !== upload || upload.serverPhase) return;
+          deployProgressBar.value = percent;
+          deployProgressText.textContent = `${percent}% uploaded`;
+        },
+        onPhase: event => {
+          if (deployState !== upload) return;
+          upload.serverPhase = true;
+          deployProgressBar.removeAttribute('value');
+          deployProgressBar.setAttribute('aria-label', 'Deployment in progress');
+          if (event.message) {
+            deployProgressText.textContent = event.message;
+            if (event.status !== 'progress') { stage.textContent = event.message; updateDeployMonitor(event.message); }
+          }
+        },
+      });
+      upload.xhr = transfer.xhr;
+      const body = await transfer.promise;
+      if (deployState !== upload) return;
+      upload.outcome = deploymentOutcome(body);
+      upload.completed = true;
+      stage.textContent = upload.outcome.title;
+      deployResult.querySelector('.deploy-result-heading').textContent = upload.outcome.title;
+      renderDeployResult(deployResult, deployResultList, [...upload.outcome.details, ...formatManifestSummary(body.manifest)]);
+      deploySubmit.textContent = upload.outcome.action;
+      deployErrorLogs.hidden = false;
+      updateDeployMonitor(upload.outcome.title);
+      // Refresh failure cannot turn a confirmed deployment into a failed one.
+      loadApps().catch(() => {});
     } catch (err) {
       if (deployState !== upload) return;
-      if (err.code === 'UPLOAD_CANCELLED') {
-        return; // closeDeployModal resets state
-      }
       if (err.status === 401) { await handleUnauthorized(); return; }
-      setError(deployError, err.message || 'Deploy failed');
+      upload.uncertain = !!err.uncertain;
+      const message = err.message || 'Could not confirm deployment. Check the app’s deployment history.';
+      setError(deployError, message);
+      stage.textContent = upload.uncertain ? 'Deployment needs checking.' : 'Deployment did not complete.';
+      deploySubmit.textContent = upload.uncertain ? 'Check deployment' : 'Try again';
       deployErrorLogs.hidden = false;
-      deploySubmit.disabled = false;
-      deployCancel.textContent = 'Cancel';
-      return;
+      updateDeployMonitor(stage.textContent);
     } finally {
       if (deployState === upload) {
         upload.uploading = false;
+        upload.xhr = null;
+        deployProgressWrap.hidden = true;
         deployPick.disabled = deployFileInput.disabled = false;
+        deploySubmit.disabled = false;
+        deployCancel.textContent = 'Done';
+        deployModalClose.setAttribute('aria-label', 'Close deploy modal');
       }
     }
-    if (deployState !== upload) return;
-    deployProgressText.textContent = 'Deployed';
-    await loadApps();
-    if (deployState !== upload || upload.selectionVersion !== selectionVersion) return;
-
-    // body.manifest is set when the bundle's shinyhub.toml applied [app]
-    // settings or [[schedule]] blocks; show it inside the modal so the
-    // operator can confirm what landed before jumping to logs. When the
-    // bundle has no manifest, fall back to the original auto-redirect
-    // behaviour so the no-config flow stays unchanged.
-    const summaryLines = formatManifestSummary(body && body.manifest);
-    if (summaryLines.length > 0) {
-      renderDeployResult(deployResult, deployResultList, summaryLines);
-      deployState.completed = true;
-      deploySubmit.disabled = false;
-      deploySubmit.textContent = 'View logs';
-      return;
-    }
-
-    closeDeployModal();
-    openLogs(slug);
   });
 
   deployModalClose.addEventListener('click', closeDeployModal);
@@ -6699,7 +6600,10 @@ document.addEventListener('DOMContentLoaded', () => {
   function showRouteError(err) {
     console.error('route mount failed', err);
     for (const s of document.querySelectorAll('main > section')) s.hidden = true;
-    if (routeErrorView) routeErrorView.hidden = false;
+    if (routeErrorView) {
+      routeErrorView.hidden = false;
+      document.getElementById('route-error-heading')?.focus({ preventScroll: true });
+    }
   }
   function clearRouteError() {
     if (routeErrorView) routeErrorView.hidden = true;
@@ -6724,7 +6628,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // settings edits, so the explicit-save model never silently loses work.
   router.setNavGuard(confirmDiscardIfDirty);
   window.addEventListener('beforeunload', (e) => {
-    if (!suppressUnloadGuard && (anySettingsDirty() || announcementEditor?.isDirty())) { e.preventDefault(); e.returnValue = ''; }
+    if (!suppressUnloadGuard && (anySettingsDirty() || announcementEditor?.isDirty() || deployState?.uploading)) { e.preventDefault(); e.returnValue = ''; }
   });
 
   function updateActiveNav(pathname) {
@@ -6771,7 +6675,21 @@ document.addEventListener('DOMContentLoaded', () => {
     showError: (m) => { if (appError) setError(appError, m); },
     updateActiveNav,
     syncSidebar,
-    setSettingsSlug: (slug) => { settingsSlug = slug; },
+    setSettingsSlug: (slug) => {
+      if (slug !== settingsSlug) {
+        document.getElementById('grant-btn').disabled = false;
+        document.getElementById('grant-btn').textContent = 'Grant';
+        document.getElementById('grant-username').value = '';
+        document.getElementById('group-access-name').value = '';
+        document.getElementById('group-access-add-btn').disabled = false;
+        document.getElementById('data-list').replaceChildren();
+        document.getElementById('data-upload-form').reset();
+        document.getElementById('data-upload-btn').disabled = false;
+        document.getElementById('data-progress').hidden = true;
+        setError(document.getElementById('data-error'), '');
+      }
+      settingsSlug = slug; accessLists.setApp(slug);
+    },
     populateGeneralTab,
     populateAutoscaleTab,
     populateAccessPanel,

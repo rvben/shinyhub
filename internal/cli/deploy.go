@@ -460,7 +460,7 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 
 	var out []byte
 	if streamed {
-		out, err = consumeDeployEvents(resp, format, stdOut, errW, quietFlag)
+		out, err = consumeDeployEvents(resp, format, stdOut, errW, quietFlag, slug)
 		if err != nil {
 			var status *httpStatusError
 			if errors.As(err, &status) && status.Status >= 500 {

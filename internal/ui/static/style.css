@@ -3088,7 +3088,7 @@ fieldset.settings-block { min-width: 0; }
 /* (Section-header typography for these is defined in the consolidated rule
    above, alongside legends and the env/danger headers.) */
 
-#members-list {
+.access-list {
   list-style: none;
   padding: 0;
   margin: 0;
@@ -3096,16 +3096,7 @@ fieldset.settings-block { min-width: 0; }
   flex-direction: column;
 }
 
-#members-list:empty::after {
-  content: 'No members';
-  display: block;
-  font-size: var(--fs-mono);
-  color: var(--text-muted);
-  padding: 0.35rem 0.7rem;
-  font-style: italic;
-}
-
-#members-list li {
+.access-list li {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -3114,16 +3105,16 @@ fieldset.settings-block { min-width: 0; }
   transition: background var(--ease);
 }
 
-#members-list li:hover { background: var(--surface-2); }
+.access-list li:hover { background: var(--surface-2); }
 
-#members-list li .member-name {
+.access-list li .member-name {
   color: var(--text);
   font-family: var(--mono);
   font-size: var(--fs-mono);
   letter-spacing: -0.01em;
 }
 
-#members-list li .member-role {
+.access-list li .member-role {
   color: var(--text-soft);
   font-size: var(--fs-meta);
   margin-left: 0.5rem;
@@ -3136,7 +3127,7 @@ fieldset.settings-block { min-width: 0; }
   text-transform: uppercase;
 }
 
-#members-list li button {
+.access-list li button {
   background: none;
   border: none;
   color: var(--text-muted);
@@ -3149,7 +3140,7 @@ fieldset.settings-block { min-width: 0; }
   transition: all var(--ease);
 }
 
-#members-list li button:hover {
+.access-list li button:hover {
   color: var(--red-text);
   background: var(--red-bg);
 }
@@ -8431,3 +8422,28 @@ a.lp-tile:hover .lp-tile-go { color: var(--cyan-bright); transform: translateX(3
 .announcement-editor input, .announcement-editor textarea { caret-color:var(--accent); }
 .announcement-editor input[type="checkbox"] { accent-color:var(--accent); }
 .announcement-editor input:disabled, .announcement-editor textarea:disabled, .announcement-editor select:disabled { opacity:.65; cursor:wait; }
+
+/* A deployment remains observable when its modal is hidden. */
+.deploy-monitor { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: .75rem; margin-block-end: 1rem; padding: 1rem; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+.deploy-monitor[hidden] { display: none; }
+.deploy-monitor span { flex: 1 1 16rem; overflow-wrap: anywhere; }
+.deploy-monitor button { min-height: 44px; padding-inline: 1rem; }
+#deploy-progress-text { white-space: normal; overflow-wrap: anywhere; }
+.lp-stale { margin-block: 1rem; }
+
+.scaling-row[hidden] { display: none; }
+
+.access-list li { gap: .5rem; flex-wrap: wrap; }
+.access-list .member-name { flex: 1 1 8rem; overflow-wrap: anywhere; min-width: 0; }
+.access-list li .member-role-select { width: auto; min-height: 44px; flex: 0 0 auto; text-transform: none; }
+.access-list li button { min-height: 44px; }
+.access-list [data-access-status] { color: var(--text-muted); font-size: var(--fs-body); }
+.access-list [data-access-status] span { flex: 1 1 12rem; }
+.access-list [data-access-status] button:hover { color: var(--cyan-bright); background: var(--accent-dim); }
+.grant-row { flex-wrap: wrap; }
+.grant-row input { flex: 1 1 12rem; min-width: 0; }
+.grant-row select { width: auto; flex: 0 1 9rem; min-height: 44px; }
+#members-refresh, #groups-refresh { align-self: flex-start; margin-bottom: .5rem; min-height: 44px; }
+.deploy-progress { flex-wrap: wrap; }
+.deploy-progress progress { min-width: 8rem; }
+#deploy-progress-text { flex: 1 1 12rem; text-align: start; }

@@ -2478,7 +2478,7 @@ func TestKeyboardFocusAndLabels(t *testing.T) {
 		"the per-row Reset password button must carry a per-user aria-label")
 	assertContains(t, "app.js", "`Delete user ${u.username}`",
 		"the per-row Delete button must carry a per-user aria-label")
-	assertContains(t, "app.js", "`Revoke access for ${m.username}`",
+	assertContains(t, "views/access-lists.js", "`Revoke access for ${member.username}`",
 		"the members-list Revoke button must carry a per-user aria-label")
 }
 
@@ -2704,11 +2704,11 @@ func TestUsersPageWiresRevokeSessions(t *testing.T) {
 // PATCH /api/apps/:slug/members/:user_id on change so a manager can promote or
 // demote members from the UI. See internal/api/router.go handleSetMemberRole.
 func TestMemberRoleDropdownWiring(t *testing.T) {
-	assertContains(t, "app.js", "async function updateMemberRole",
-		"the Access tab must define updateMemberRole so a manager can change a member's role")
-	assertContains(t, "app.js", "/members/${userId}",
+	assertContains(t, "app.js", "createAccessLists({ document, request: api",
+		"the Access tab must wire the app-scoped access controller")
+	assertContains(t, "views/access-lists.js", "suffix: `/${member.user_id}`",
 		"updateMemberRole must PATCH /api/apps/:slug/members/:user_id; see internal/api/router.go handleSetMemberRole")
-	assertContains(t, "app.js", "member-role-select",
+	assertContains(t, "views/access-lists.js", "member-role-select",
 		"refreshMemberList must render an editable role <select> per member so managers can promote/demote")
 }
 
@@ -2718,7 +2718,7 @@ func TestMemberRoleDropdownWiring(t *testing.T) {
 func TestGroupAccessSectionWiring(t *testing.T) {
 	assertContains(t, "index.html", `id="group-access-list"`,
 		"index.html must expose #group-access-list for the per-app group rules")
-	assertContains(t, "app.js", "async function refreshGroupAccessList",
+	assertContains(t, "app.js", "const refreshGroupAccessList",
 		"app.js must define refreshGroupAccessList to render group rules on the Access tab")
 	assertContains(t, "app.js", "/group-access",
 		"app.js must call /api/apps/:slug/group-access for group-rule CRUD")
@@ -2742,9 +2742,9 @@ func TestCanManageAppHonorsServerValue(t *testing.T) {
 // UI (they are managed by the bundle manifest; a UI removal would return on the
 // next deploy). See internal/api/apps.go applyManifestAccessGroups.
 func TestGroupAccessShowsManifestSource(t *testing.T) {
-	assertContains(t, "app.js", "rule.source",
+	assertContains(t, "views/access-lists.js", "rule.source",
 		"refreshGroupAccessList must read rule.source to distinguish manifest from manual rules")
-	assertContains(t, "app.js", "manifest",
+	assertContains(t, "views/access-lists.js", "manifest",
 		"manifest-sourced group rules must be labelled (e.g. \"(manifest)\") and not offer a Remove button")
 }
 

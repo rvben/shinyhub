@@ -1,3 +1,4 @@
+import { focusedKey, restoreFocus } from './focus-restore.js';
 // Viewer Apps view - an app-forward gallery built for one motion: find an app,
 // open it. “Launchpad” remains the internal surface name; the user-facing
 // navigation calls the destination Apps. Logic lives in
@@ -33,6 +34,9 @@ export function mountLaunchpad(ctx) {
   let query = '';
   const shownTiles = new Map();
   let model = null;
+  let loading = false;
+  let signature = '';
+  let stale = false;
 
   function stop() {
     disposed = true;
@@ -41,24 +45,45 @@ export function mountLaunchpad(ctx) {
 
   body.replaceChildren(skeleton());
 
+  function showFreshness(failed) {
+    stale = failed;
+    const notice = body.querySelector('.lp-stale');
+    if (!notice) return;
+    const ownsFocus = notice.contains(document.activeElement);
+    notice.hidden = !failed;
+    if (!failed && ownsFocus) {
+      const target = body.querySelector('.lp-search, .lp-empty-title');
+      if (target) { if (target.tagName !== 'INPUT') target.tabIndex = -1; target.focus(); }
+    }
+  }
+
   async function load(initial) {
+    if (loading || disposed) return;
+    loading = true;
     let apps = [];
     try {
-      const resp = await ctx.api('/api/apps');
+      const resp = await ctx.api('/api/apps', { signal: AbortSignal.timeout(20000) });
       if (disposed) return;
       if (resp.status === 401) { stop(); ctx.onUnauthorized(); return; }
-      if (!resp.ok) { if (initial) body.replaceChildren(errorState()); return; }
+      if (!resp.ok) throw new Error('unavailable');
       // Standard {items,...} list envelope; tolerate a bare array for resilience.
       const lpBody = (await resp.json()) || [];
-      apps = Array.isArray(lpBody) ? lpBody : (Array.isArray(lpBody.items) ? lpBody.items : []);
+      apps = Array.isArray(lpBody) ? lpBody : lpBody.items;
+      if (!Array.isArray(apps)) throw new Error('invalid response');
     } catch {
+      if (disposed) return;
       if (initial) body.replaceChildren(errorState());
+      else showFreshness(true);
       return;
-    }
+    } finally { loading = false; }
     if (disposed) return;
     ctx.state.apps = apps;
     if (typeof ctx.syncSidebar === 'function') ctx.syncSidebar();
     model = buildLaunchpadModel(apps, getRecent(recentKey));
+    showFreshness(false);
+    const nextSignature = JSON.stringify(model);
+    if (!initial && signature === nextSignature) return;
+    signature = nextSignature;
     const subtitle = body.querySelector('.lp-sub');
     if (subtitle) subtitle.textContent = workspaceText();
     // On the 20s background refresh, re-render only the results region so the
@@ -69,12 +94,30 @@ export function mountLaunchpad(ctx) {
     // the header rebuilt, so only take the partial path when apps are present.
     const results = (!initial && model.total > 0) ? body.querySelector('.lp-results') : null;
     if (results) renderResults(results);
-    else render();
+    else {
+      const ownedFocus = body.contains(document.activeElement);
+      render();
+      if (ownedFocus && document.activeElement === document.body) {
+        const target = body.querySelector('.lp-search, h2');
+        if (target) { target.tabIndex = target.tagName === 'INPUT' ? 0 : -1; target.focus(); }
+      }
+    }
   }
 
   function render() {
     const root = el('div', 'lp');
     root.appendChild(renderHeader());
+    const freshness = el('div', 'lp-stale');
+    freshness.hidden = !stale;
+    const message = el('p', 'hint', 'Could not refresh apps. Showing the last known list.');
+    message.setAttribute('role', 'status');
+    const retry = el('button', 'ov-btn', 'Try again');
+    retry.type = 'button'; retry.addEventListener('click', () => load(false));
+    freshness.append(message, retry); root.append(freshness);
+    const resultStatus = el('p', 'sr-only');
+    resultStatus.dataset.resultsStatus = 'true';
+    resultStatus.setAttribute('role', 'status');
+    root.append(resultStatus);
     if (model.total === 0) {
       root.appendChild(renderEmpty());
       body.replaceChildren(root);
@@ -84,6 +127,7 @@ export function mountLaunchpad(ctx) {
     renderResults(results);
     root.appendChild(results);
     body.replaceChildren(root);
+    announce(`${model.total} ${model.total === 1 ? 'app available' : 'apps available'}.`);
   }
 
   function renderHeader() {
@@ -110,6 +154,10 @@ export function mountLaunchpad(ctx) {
   }
 
   function renderResults(container) {
+    const key = focusedKey(container);
+    const before = [...container.querySelectorAll('[data-focus-key]')];
+    const index = before.findIndex(node => node === document.activeElement);
+    try {
     const q = query.trim().toLowerCase();
     container.replaceChildren();
     container.setAttribute('role', 'region');
@@ -119,6 +167,7 @@ export function mountLaunchpad(ctx) {
       const matches = model.groups
         .flatMap((g) => g.apps)
         .filter((t) => t.name.toLowerCase().includes(q) || t.description.toLowerCase().includes(q));
+      announce(`${matches.length} ${matches.length === 1 ? 'app matches' : 'apps match'} your search.`);
       if (matches.length === 0) {
         container.appendChild(el('p', 'lp-noresults', `No apps match "${query.trim()}".`));
         return;
@@ -127,6 +176,7 @@ export function mountLaunchpad(ctx) {
       return;
     }
 
+    announce(`${model.total} ${model.total === 1 ? 'app available' : 'apps available'}.`);
     if (model.recent.length > 0) {
       container.appendChild(sectionHead('Recently opened'));
       container.appendChild(grid(model.recent, 'recent'));
@@ -141,6 +191,7 @@ export function mountLaunchpad(ctx) {
           iconEmoji: g.iconEmoji,
           classPrefix: 'lp',
         });
+        disclosure.toggle.dataset.focusKey = `group:${g.project}`;
         disclosure.body.appendChild(grid(g.apps, `group:${g.project}`));
         container.appendChild(disclosure.root);
       } else if (model.recent.length > 0) {
@@ -151,6 +202,18 @@ export function mountLaunchpad(ctx) {
       }
       if (!g.showHeading) container.appendChild(grid(g.apps, `group:${g.project}`));
     }
+    } finally {
+      if (key && !restoreFocus(container, key)) {
+        const choices = [...container.querySelectorAll('a[data-focus-key], button[data-focus-key]')].filter(node => !node.closest('[hidden]'));
+        (choices[Math.min(Math.max(index, 0), choices.length - 1)] || body.querySelector('.lp-search'))?.focus();
+        announce('The app list changed. Your previous selection is no longer available.');
+      }
+    }
+  }
+
+  function announce(message) {
+    const status = body.querySelector('[data-results-status]');
+    if (status && status.textContent !== message) status.textContent = message;
   }
 
   // One page of tiles per section; "Show more" reveals the next page in place.
@@ -160,7 +223,7 @@ export function mountLaunchpad(ctx) {
     const fill = () => {
       g.replaceChildren();
       const count = windowCount(tiles.length, shownTiles.get(key), GRID_PAGE);
-      for (const t of tiles.slice(0, count)) g.appendChild(tile(t));
+      for (const t of tiles.slice(0, count)) g.appendChild(tile(t, key));
       const more = createShowMore(document, {
         hidden: tiles.length - count,
         page: GRID_PAGE,
@@ -172,17 +235,18 @@ export function mountLaunchpad(ctx) {
           if (next && next.tagName === 'A') next.focus();
         },
       });
-      if (more) g.appendChild(more);
+      if (more) { more.dataset.focusKey = `more:${key}`; g.appendChild(more); }
     };
     fill();
     return g;
   }
 
-  function tile(t) {
+  function tile(t, section) {
     const openable = t.readiness.openable;
     const node = document.createElement(openable ? 'a' : 'div');
     node.className = 'lp-tile' + (openable ? '' : ' lp-tile--down');
     if (openable) {
+      node.dataset.focusKey = `app:${section}:${t.slug}`;
       node.href = '/app/' + encodeURIComponent(t.slug) + '/';
       // A real navigation to the proxied app (no data-nav), recording the launch
       // first so "Recently opened" reflects it on return.

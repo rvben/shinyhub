@@ -1628,6 +1628,8 @@
   var autoSwitchTimer = null;
   var autoAttemptGeneration = "";
   var bookmarkSyncStatus = null;
+  var bookmarkSavedURL = "";
+  var bookmarkRecoveryStatus = null;
   var pageActive = true;
   var automaticallyUpdated = false;
   var versionSwitching = false;
@@ -2405,14 +2407,24 @@
     }
   }
 
+  function savedBookmark(status) {
+    return bookmarkCapabilities && bookmarkCapabilities.pendingSync &&
+      bookmarkCapabilities.session && status && status.pendingSync === true &&
+      status.state === "saved" && status.session === bookmarkCapabilities.session &&
+      Number.isInteger(status.syncRevision) &&
+      status.syncRevision >= bookmarkCapabilities.syncRevision;
+  }
+
+  function restorableView() {
+    return autoSwitchEnabled && pageActive && !snapshotActive && !bookmarkOpen &&
+      !chatOpen && !chatBusy && !sessionOpen && !bookmarkPending && !versionSwitching;
+  }
+
   function autoSwitchEligible() {
+    // An in-flight version switch rechecks this predicate before navigating.
     return autoSwitchEnabled && pageActive && document.hidden && hiddenSince !== null &&
       versionReady && !snapshotActive && !bookmarkOpen && !chatOpen && !chatBusy && !sessionOpen &&
-      !bookmarkPending && bookmarkCapabilities && bookmarkCapabilities.pendingSync &&
-      bookmarkCapabilities.session && bookmarkSyncStatus && bookmarkSyncStatus.pendingSync === true &&
-      bookmarkSyncStatus.state === "saved" && bookmarkSyncStatus.session === bookmarkCapabilities.session &&
-      Number.isInteger(bookmarkSyncStatus.syncRevision) &&
-      bookmarkSyncStatus.syncRevision >= bookmarkCapabilities.syncRevision;
+      !bookmarkPending && savedBookmark(bookmarkSyncStatus);
   }
 
   function considerAutomaticSwitch() {
@@ -3124,12 +3136,26 @@
     }
   }));
 
+  // The overlay owns recovery timing; the switcher owns the app's opt-in and
+  // work-in-progress guards. No owner, legacy adapter, or uncertain state means
+  // manual recovery. This handshake never changes generations or cookies.
+  window.addEventListener("shinyhub:session-recovery", guard(function (ev) {
+    if (ev.cancelable && restorableView() &&
+        savedBookmark(bookmarkRecoveryStatus) && bookmarkSavedURL === window.location.href) {
+      ev.preventDefault();
+    }
+  }));
+
   window.addEventListener(BOOKMARK_CAPABILITIES_EVENT, guard(function (ev) {
     var capabilities = validBookmarkCapabilities(ev && ev.detail);
     if (!capabilities) {
       return;
     }
-    if (bookmarkCapabilities && bookmarkCapabilities.session !== capabilities.session) bookmarkSyncStatus = null;
+    if (bookmarkCapabilities && bookmarkCapabilities.session !== capabilities.session) {
+      bookmarkSyncStatus = null;
+      bookmarkRecoveryStatus = null;
+      bookmarkSavedURL = "";
+    }
     bookmarkCapabilities = capabilities;
     root.classList.add("bookmark-ready");
     considerAutomaticSwitch();
@@ -3192,6 +3218,16 @@
     var detail = ev && ev.detail ? ev.detail : {};
     if (detail.version !== BOOKMARK_PROTOCOL_VERSION) return;
     if (detail.state !== "saved" && detail.state !== "error" && detail.state !== "pending") return;
+    // Disconnect marks live sync pending, but does not erase a URL that was
+    // already saved. Only the explicit disconnect reason can retain it; edits,
+    // errors, old adapters, and mismatched revisions invalidate recovery.
+    var saved = bookmarkRecoveryStatus || bookmarkSyncStatus;
+    bookmarkRecoveryStatus = detail.state === "pending" && detail.code === "disconnected" &&
+      savedBookmark(saved) && detail.pendingSync === true &&
+      detail.session === saved.session && detail.syncRevision === saved.syncRevision &&
+      Number.isInteger(detail.browserRevision) && detail.browserRevision === saved.browserRevision
+      ? saved : null;
+    if (detail.state === "saved") bookmarkSavedURL = window.location.href;
     bookmarkSyncStatus = detail;
     bookmarkSyncError = detail.state === "error";
     bookmarkSyncWarning.hidden = !bookmarkSyncError;

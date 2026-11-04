@@ -164,6 +164,10 @@
 
     <div class="app-content">
   <main>
+    <div id="deploy-monitor" class="deploy-monitor" hidden>
+      <span id="deploy-monitor-text" role="status"></span>
+      <button type="button" id="deploy-monitor-open" class="env-btn-secondary">View deployment</button>
+    </div>
     <section id="support-session-recovery" class="support-session-recovery" hidden
              role="region" aria-labelledby="support-session-recovery-heading">
       <svg class="support-session-recovery-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -203,7 +207,7 @@
 
     <section id="route-error-view" hidden aria-labelledby="route-error-heading">
       <div class="login-box">
-        <h1 id="route-error-heading">Something went wrong</h1>
+        <h1 id="route-error-heading" tabindex="-1">Something went wrong</h1>
         <p>This page failed to load. The rest of ShinyHub is unaffected.</p>
         <button type="button" id="route-error-reload">Reload</button>
       </div>
@@ -736,7 +740,7 @@
 
           <section class="settings-block">
             <h2 class="settings-block-title">Resources</h2>
-            <p class="settings-block-desc">Per-replica caps on memory and CPU. Enforced under the Docker runtime.</p>
+            <p class="settings-block-desc">Per-replica caps on memory and CPU. Enforcement depends on the runtime and host capabilities shown below.</p>
             <p id="resources-runtime-note" class="settings-inline-note" hidden></p>
             <div class="settings-block-body">
               <label class="scaling-row">
@@ -817,6 +821,8 @@
             <h2 class="settings-block-title">Scaling</h2>
             <p class="settings-block-desc">How many processes serve this app, and how many sessions each one admits.</p>
             <div class="settings-block-body">
+              <p id="scaling-ceiling" class="scaling-ceiling" aria-live="polite"></p>
+              <p id="worker-capacity" class="scaling-ceiling" aria-live="polite"></p>
               <label class="scaling-row">
                 <span>
                   <span class="scaling-option-title">Replicas</span>
@@ -828,7 +834,7 @@
               <label class="scaling-row">
                 <span>
                   <span class="scaling-option-title">Max sessions per replica</span>
-                  <span class="scaling-option-help">Per-replica admission cap for new cookieless sessions. <code>0</code> uses the runtime default (typically 10). Beyond the cap, new users get a 503 with Retry-After.</span>
+                  <span class="scaling-option-help">Maximum new sessions admitted by each replica. <code>0</code> inherits the server default. When the limit is reached, new viewers wait and retry automatically.</span>
                 </span>
                 <input id="scaling-cap" type="number" min="0" max="1000" step="1"
                        inputmode="numeric" autocomplete="off" aria-label="Maximum new sessions per replica">
@@ -868,8 +874,6 @@
                 <input id="worker-warm-spares" type="number" min="0" max="1000" step="1"
                        inputmode="numeric" autocomplete="off" aria-label="Warm isolated worker processes for this app">
               </label>
-              <p id="scaling-ceiling" class="scaling-ceiling" aria-live="polite"></p>
-              <p id="worker-capacity" class="scaling-ceiling" aria-live="polite"></p>
               <div class="env-form-actions">
                 <button id="scaling-save-btn" type="button" class="env-btn-primary" hidden disabled>Save</button>
                 <span id="scaling-dirty" class="settings-dirty" hidden>Unsaved changes</span>
@@ -1020,6 +1024,7 @@
             <div class="settings-block-body">
               <div class="env-header">
                 <p class="env-empty" id="data-empty" hidden>No files in this app's data dir.</p>
+                <button id="data-refresh" type="button" class="env-btn-secondary">Refresh data list</button>
                 <span id="data-quota" class="settings-meta"></span>
               </div>
               <table id="data-list-table" class="env-list" hidden>
@@ -1027,6 +1032,7 @@
                 <tbody id="data-list"></tbody>
               </table>
 
+              <p id="data-error" class="error" role="alert" hidden></p>
               <form id="data-upload-form" class="env-form" hidden>
                 <h3>Upload file</h3>
                 <div class="env-form-row">
@@ -1041,7 +1047,6 @@
                   <label><input type="checkbox" id="data-restart-input"><span>Restart app after upload</span></label>
                 </div>
                 <progress id="data-progress" max="100" value="0" aria-label="Upload progress" hidden></progress>
-                <p id="data-error" class="error" hidden></p>
                 <div class="env-form-actions">
                   <button id="data-upload-btn" type="submit" class="env-btn-primary">Upload</button>
                 </div>
@@ -1081,7 +1086,8 @@
             <h2 class="settings-block-title">Members</h2>
             <p class="settings-block-desc">People granted direct access. On a private app this is what admits them; the manager role also lets them deploy, configure, and manage members.</p>
             <div class="settings-block-body">
-              <ul id="members-list"></ul>
+              <button id="members-refresh" type="button" class="env-btn-secondary">Refresh members</button>
+              <ul id="members-list" class="access-list"></ul>
               <div class="grant-row">
                 <label for="grant-username" class="sr-only">Username to grant access</label>
                 <input id="grant-username" type="text" placeholder="username" autocomplete="off" aria-describedby="grant-error">
@@ -1096,17 +1102,18 @@
             <p class="settings-block-desc">Grant an IdP group viewer or manager access. Group access is additive and does not restrict a public or shared app.</p>
             <p id="group-access-sso-warning" class="settings-block-warning" hidden></p>
             <div class="settings-block-body">
-              <ul id="group-access-list"></ul>
+              <button id="groups-refresh" type="button" class="env-btn-secondary">Refresh groups</button>
+              <ul id="group-access-list" class="access-list"></ul>
               <div class="grant-row">
                 <label for="group-access-name" class="sr-only">Group name</label>
-                <input id="group-access-name" type="text" placeholder="group name" autocomplete="off">
+                <input id="group-access-name" aria-describedby="group-access-error" type="text" placeholder="group name" autocomplete="off">
                 <select id="group-access-role" aria-label="Group role">
                   <option value="viewer">Viewer</option>
                   <option value="manager">Manager</option>
                 </select>
                 <button id="group-access-add-btn" type="button" class="btn-primary">Add</button>
               </div>
-              <p id="group-access-error" class="error" hidden></p>
+              <p id="group-access-error" class="error" role="alert" hidden></p>
             </div>
           </section>
         </section>
@@ -1165,7 +1172,7 @@
                      autocomplete="off" spellcheck="false">
             </details>
 
-            <p id="new-app-error" class="error" hidden></p>
+            <p id="new-app-error" class="error" role="alert" hidden></p>
 
             <div class="modal-actions">
               <button type="button" id="new-app-cancel">Cancel</button>
@@ -1234,6 +1241,8 @@
           </li>
         </ul>
 
+        <p id="deploy-stage" class="hint" role="status"></p>
+        <a id="deploy-view-history" data-nav hidden>View deployment history</a>
         <div id="deploy-progress-wrap" class="deploy-progress" hidden>
           <progress id="deploy-progress-bar" max="100" value="0" aria-label="Upload progress"></progress>
           <span id="deploy-progress-text">0%</span>
@@ -1241,7 +1250,7 @@
 
         <div id="deploy-result" class="deploy-result" hidden>
           <p class="deploy-result-heading">Deploy succeeded.</p>
-          <ul id="deploy-result-list" class="deploy-result-list" aria-label="Manifest changes applied"></ul>
+          <ul id="deploy-result-list" class="deploy-result-list" aria-label="Deployment outcome and changes"></ul>
         </div>
 
         <p id="deploy-error" class="error" role="alert" hidden></p>

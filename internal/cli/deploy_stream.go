@@ -95,8 +95,23 @@ func (r *deployEventRenderer) stop() {
 // consumeDeployEvents returns the original deploy response JSON carried by the
 // terminal result event. Thus everything after the request keeps one response
 // shape whether the server streamed or used the legacy single JSON document.
-func consumeDeployEvents(resp *http.Response, format outputFormat, out, errOut io.Writer, quiet bool) ([]byte, error) {
+func consumeDeployEvents(resp *http.Response, format outputFormat, out, errOut io.Writer, quiet bool, slugs ...string) ([]byte, error) {
 	decoder := json.NewDecoder(resp.Body)
+	app := "APP"
+	if len(slugs) > 0 {
+		app = slugs[0]
+	}
+	published := false
+	uncertain := func(cause error) error {
+		message := "deployment outcome is unknown: " + cause.Error()
+		if published {
+			message = "deployment was published, but its final result could not be confirmed: " + cause.Error()
+		}
+		return &ExitCodeError{Code: 1, Kind: KindInternal, Err: &hintedMsgError{
+			msg:  message,
+			hint: fmt.Sprintf("check `shinyhub apps show %s` and deployment history before deploying again; do not assume the previous attempt failed", shellQuote(app)),
+		}}
+	}
 	encoder := json.NewEncoder(out)
 	var renderer *deployEventRenderer
 	if format != formatNDJSON && !quiet {
@@ -108,13 +123,10 @@ func consumeDeployEvents(resp *http.Response, format outputFormat, out, errOut i
 			if renderer != nil {
 				renderer.stop()
 			}
-			if err == io.EOF {
-				return nil, &ExitCodeError{Code: 1, Kind: KindInternal, Err: &hintedMsgError{
-					msg:  "deployment event stream ended without a result",
-					hint: "retry the deploy; if it repeats, compare the CLI and server versions with `shinyhub doctor`",
-				}}
-			}
-			return nil, fmt.Errorf("read deployment progress: %w", err)
+			return nil, uncertain(err)
+		}
+		if event.Type == deployevent.TypePhase && (event.Phase == "commit" || event.Phase == "handoff") && event.Status == deployevent.StatusCompleted {
+			published = true
 		}
 		if format == formatNDJSON {
 			if err := encoder.Encode(event); err != nil {
@@ -129,8 +141,9 @@ func consumeDeployEvents(resp *http.Response, format outputFormat, out, errOut i
 			if renderer != nil {
 				renderer.stop()
 			}
-			if len(event.Result) == 0 {
-				return nil, fmt.Errorf("deployment result event contained no result")
+			var result map[string]json.RawMessage
+			if json.Unmarshal(event.Result, &result) != nil || result == nil {
+				return nil, uncertain(fmt.Errorf("deployment result event contained no result"))
 			}
 			return event.Result, nil
 		case deployevent.TypeError:
