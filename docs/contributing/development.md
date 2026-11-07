@@ -115,6 +115,29 @@ explicit transient CPU-capacity refusals up to four attempts with a 30-second
 retry window; other deployment failures fail immediately. Capacity policy itself
 has a dedicated lifecycle gate.
 
+## Run backup, restore, and upgrade acceptance
+
+```bash
+git fetch --no-tags origin refs/tags/v0.22.0:refs/tags/v0.22.0
+npm run test:recovery
+```
+
+CI runs this alongside product acceptance. It builds the pinned 0.22.0 source
+release and the current checkout, then deploys a synthetic private Python Shiny
+app to a disposable SQLite hub. The test backs up the live source, stops it,
+empties its storage, and runs the current build's offline restore. It retains
+the fixture's configuration and encryption key, as a real restore requires,
+and restores at the original deployment paths.
+
+The test verifies sign-in with the original account, app settings, uploaded
+data, and serving the original deployment without uploading it again. A saved
+schedule verifies the exact decrypted secret without printing it. No browser,
+production backup, or existing service is needed. The recovery test always
+builds both binaries; it does not use `SHINYHUB_E2E_BINARY`. The archive and
+fixture are removed at cleanup; diagnostic logs use the same ignored results
+directory as product acceptance. When moving the recovery baseline, update
+the release tag and pinned commit together.
+
 ## Run the real-cluster Fargate smoke test
 
 Changes to the Fargate runtime or external log handoff should also compile and,

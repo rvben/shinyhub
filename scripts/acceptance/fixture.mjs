@@ -12,10 +12,12 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 export const items = body => Array.isArray(body) ? body : body.items;
+export const recoverySource = '0.22.0';
+const recoveryCommit = '4dcaf6359bb6320431f7cb99ba2c6d2cf4e7f729';
 
 // A fresh hub, private credentials and an ephemeral port for every invocation.
 // There is intentionally no existing-host or database override.
-export async function createFixture() {
+export async function createFixture({ recovery = false } = {}) {
   const results = resolve(root, 'loadtest/results');
   await mkdir(results, { recursive: true });
   const output = await mkdtemp(join(results, 'acceptance-'));
@@ -36,11 +38,15 @@ export async function createFixture() {
   const username = 'acceptance-admin', password = randomBytes(24).toString('hex');
   const accounts = { admin: { username, password } };
   let host, token, python;
-  const binary = process.env.SHINYHUB_E2E_BINARY ? resolve(process.env.SHINYHUB_E2E_BINARY) : join(state, 'shinyhub');
+  const override = !recovery && process.env.SHINYHUB_E2E_BINARY;
+  const binary = override ? resolve(override) : join(state, 'shinyhub');
+  const source = recovery ? join(state, 'shinyhub-previous') : binary;
+  const storage = join(state, 'storage');
+  const config = join(state, 'hub.yaml');
 
-  async function command(args, label) {
+  async function command(args, label, cwd = root) {
     const log = createWriteStream(join(output, label + '.log'), { mode: 0o600 });
-    const child = spawn(args[0], args.slice(1), { cwd: root, env, signal: abort.signal });
+    const child = spawn(args[0], args.slice(1), { cwd, env, signal: abort.signal });
     children.add(child);
     let stdout = '';
     child.stdout.on('data', chunk => { stdout += chunk; });
@@ -98,17 +104,54 @@ export async function createFixture() {
     return session.token;
   }
 
+  async function stop() {
+    if (server?.pid) {
+      const exited = once(server, 'close').catch(() => {});
+      if (server.exitCode === null && server.signalCode === null) {
+        try { process.kill(-server.pid, 'SIGTERM'); } catch { /* already stopped */ }
+        await Promise.race([exited, delay(15_000, undefined, { ref: false })]);
+      }
+      try { process.kill(-server.pid, 'SIGKILL'); } catch { /* group exited */ }
+      if (server.exitCode === null && server.signalCode === null) await exited;
+    }
+    server = undefined;
+  }
+
+  async function start(executable, label, readinessTimeout) {
+    const log = createWriteStream(join(output, label + '.log'), { mode: 0o600 });
+    server = spawn(executable, ['serve', '--config', config, '--no-browser'], { cwd: state, env, detached: true });
+    server.stdout.pipe(log, { end: false });
+    server.stderr.pipe(log, { end: false });
+    let spawnError;
+    server.on('error', error => { spawnError = error; });
+    server.once('close', () => log.end());
+    await poll(async () => {
+      if (spawnError) throw spawnError;
+      return fetch(host + '/activez', { headers: { 'User-Agent': 'shinyhub-acceptance-test' }, signal: AbortSignal.timeout(1000) }).then(r => r.ok).catch(() => false);
+    }, label + ' readiness', readinessTimeout);
+    token = await login('admin');
+  }
+
+  async function restoreBackup() {
+    assert.ok(recovery && server, 'restore requires the isolated recovery fixture');
+    const archive = join(state, 'backup.tar.gz');
+    await command([source, 'backup', '--config', config, '--out', archive], 'backup');
+    await stop();
+    // Restore at the original absolute paths, as required by the deployment
+    // records, but remove all source state so a partial restore cannot pass.
+    await rm(storage, { recursive: true });
+    await mkdir(storage, { mode: 0o700 });
+    await command([binary, 'restore', archive, '--config', config], 'restore');
+    // A live backup can carry the old server's 30-second ownership lease.
+    await start(binary, 'restored-server', 60_000);
+  }
+
   async function close() {
     clearTimeout(deadline);
     process.removeListener('SIGINT', onSignal);
     process.removeListener('SIGTERM', onSignal);
     for (const child of children) child.kill('SIGKILL');
-    if (server?.pid && server.exitCode === null) {
-      const exited = once(server, 'close').catch(() => {});
-      try { process.kill(-server.pid, 'SIGTERM'); } catch { /* already stopped */ }
-      await Promise.race([exited, delay(15_000, undefined, { ref: false })]);
-      try { process.kill(-server.pid, 'SIGKILL'); } catch { /* group exited */ }
-    }
+    await stop();
     if (collector) {
       collector.closeAllConnections();
       await new Promise(done => collector.close(done));
@@ -123,7 +166,18 @@ export async function createFixture() {
     python = await command(['uv', 'python', 'find', '--python-preference', 'managed',
       process.env.SHINYHUB_E2E_PYTHON || process.env.PYTHON_VERSION || '3.14+gil'], 'python');
     env.UV_PYTHON = python;
-    if (!process.env.SHINYHUB_E2E_BINARY) await command(['go', 'build', '-o', binary, './cmd/shinyhub'], 'build');
+    if (!override) await command(['go', 'build', '-o', binary, './cmd/shinyhub'], 'build');
+    if (recovery) {
+      const tag = 'refs/tags/v' + recoverySource;
+      const commit = await command(['git', 'rev-parse', '--verify', tag + '^{commit}'], 'recovery-source-tag')
+        .catch(error => { throw new Error(`Fetch the recovery baseline: git fetch --no-tags origin ${tag}:${tag}`, { cause: error }); });
+      assert.equal(commit, recoveryCommit, 'recovery baseline tag does not match the pinned release');
+      const tree = join(state, 'previous-source'), archive = join(state, 'previous-source.tar');
+      await mkdir(tree);
+      await command(['git', 'archive', '--format=tar', '--output=' + archive, commit], 'recovery-source-archive');
+      await command(['tar', '-xf', archive, '-C', tree], 'recovery-source-extract');
+      await command(['go', 'build', '-ldflags', '-X main.version=' + recoverySource, '-o', source, './cmd/shinyhub'], 'recovery-source-build', tree);
+    }
     const reservation = createServer();
     reservation.listen(0, '127.0.0.1');
     await once(reservation, 'listening');
@@ -139,22 +193,13 @@ export async function createFixture() {
     });
     collector.listen(0, '127.0.0.1');
     await once(collector, 'listening');
-    const config = join(state, 'hub.yaml'), passwordFile = join(state, 'password');
+    const passwordFile = join(state, 'password');
+    await mkdir(storage, { mode: 0o700 });
     await writeFile(passwordFile, password, { mode: 0o600 });
-    await writeFile(config, `server:\n  host: 127.0.0.1\n  port: ${port}\n  base_url: ${host}\n  shutdown_apps: stop\n  drain_timeout: 2s\n  update_capacity:\n    worker_cpu_request_cores: 0.1\n    reserved_cpu_cores: 0.1\nauth:\n  secret: ${randomBytes(32).toString('hex')}\ndatabase:\n  dsn: ${JSON.stringify(join(state, 'hub.db'))}\nstorage:\n  apps_dir: ${JSON.stringify(join(state, 'apps'))}\n  app_data_dir: ${JSON.stringify(join(state, 'app-data'))}\ntracing:\n  enabled: true\n  otlp_endpoint: http://127.0.0.1:${collector.address().port}\n  sample_ratio: 1\n  slow_request_ms: 1\nmetrics:\n  history_window: 15m\n  history_interval: 1s\n`, { mode: 0o600 });
-    await command([binary, 'init', '--config', config, '--admin-user', username, '--admin-password-file', passwordFile], 'init');
-    const log = createWriteStream(join(output, 'server.log'), { mode: 0o600 });
-    server = spawn(binary, ['serve', '--config', config, '--no-browser'], { cwd: state, env, detached: true });
-    server.stdout.pipe(log, { end: false });
-    server.stderr.pipe(log, { end: false });
-    let spawnError;
-    server.on('error', error => { spawnError = error; });
-    server.once('close', () => log.end());
-    await poll(async () => {
-      if (spawnError) throw spawnError;
-      return fetch(host + '/activez', { headers: { 'User-Agent': 'shinyhub-acceptance-test' }, signal: AbortSignal.timeout(1000) }).then(r => r.ok).catch(() => false);
-    }, 'hub readiness');
-    token = await login('admin');
+    await writeFile(config, `server:\n  host: 127.0.0.1\n  port: ${port}\n  base_url: ${host}\n  shutdown_apps: stop\n  drain_timeout: 2s\n  update_capacity:\n    worker_cpu_request_cores: 0.1\n    reserved_cpu_cores: 0.1\nauth:\n  secret: ${randomBytes(32).toString('hex')}\ndatabase:\n  dsn: ${JSON.stringify(join(storage, 'hub.db'))}\nstorage:\n  apps_dir: ${JSON.stringify(join(storage, 'apps'))}\n  app_data_dir: ${JSON.stringify(join(storage, 'app-data'))}\ntracing:\n  enabled: true\n  otlp_endpoint: http://127.0.0.1:${collector.address().port}\n  sample_ratio: 1\n  slow_request_ms: 1\nmetrics:\n  history_window: 15m\n  history_interval: 1s\n`, { mode: 0o600 });
+    await command([source, 'init', '--config', config, '--admin-user', username, '--admin-password-file', passwordFile], 'init');
+    await rm(passwordFile);
+    await start(source, 'server');
     const bundle = join(state, 'bundle.zip'), invalid = join(state, 'invalid.zip');
     await writeFile(invalid, 'not a ZIP');
     await command([python, '-c', 'import sys,zipfile\nfrom pathlib import Path\nwith zipfile.ZipFile(sys.argv[1],"w") as z:\n for p in Path(sys.argv[2]).iterdir():\n  z.write(p,p.name)', bundle, join(root, 'scripts/acceptance/fixtures')], 'bundle');
@@ -176,6 +221,6 @@ export async function createFixture() {
         return body;
       }
     };
-    return Object.assign(fixture, { host, bundle, invalid, upload });
+    return Object.assign(fixture, { host, bundle, invalid, upload, python, ...(recovery && { restoreBackup }) });
   } catch (error) { report.error = error.message; await close(); throw error; }
 }

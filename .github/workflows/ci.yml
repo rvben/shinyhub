@@ -247,7 +247,7 @@ jobs:
 
   test-acceptance:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-go
@@ -266,6 +266,11 @@ jobs:
           npx --no-install playwright install --with-deps chromium
       - name: Real-backend and responsive browser acceptance
         run: npm run test:acceptance
+      - name: Backup, restore, and upgrade acceptance
+        if: ${{ !cancelled() }}
+        run: |
+          git fetch --no-tags origin refs/tags/v0.22.0:refs/tags/v0.22.0
+          npm run test:recovery
       - name: Retain acceptance diagnostics
         if: always()
         uses: actions/upload-artifact@v6
