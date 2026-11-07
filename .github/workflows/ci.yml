@@ -271,12 +271,16 @@ jobs:
         run: |
           git fetch --no-tags origin refs/tags/v0.22.0:refs/tags/v0.22.0
           npm run test:recovery
+      - name: Live upgrade with real Shiny sessions
+        run: npm run test:live-upgrade
       - name: Retain acceptance diagnostics
         if: always()
         uses: actions/upload-artifact@v6
         with:
           name: acceptance-diagnostics
-          path: loadtest/results/acceptance-*/
+          path: |
+            loadtest/results/acceptance-*/
+            loadtest/results/browser-live-upgrade-*/
           if-no-files-found: ignore
           retention-days: 7
 

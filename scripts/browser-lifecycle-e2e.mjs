@@ -18,20 +18,23 @@ import { checkSessionRelays } from './browser-session-relay-checks.mjs';
 import { checkBookmarkContinuity } from './browser-bookmark-continuity-checks.mjs';
 import { checkReloadProducers } from './browser-reload-producer-checks.mjs';
 import { checkUpdateCapacity } from './browser-update-capacity-checks.mjs';
-const capacityMode = process.env.SHINYHUB_E2E_UPDATE_CAPACITY === '1';
-const producerReloadMode = process.env.SHINYHUB_E2E_RELOAD_PRODUCERS === '1';
-const relayMode = capacityMode || producerReloadMode || process.env.SHINYHUB_E2E_SESSION_RELAYS === '1';
+import { checkLiveUpgrade, installPreviousRelease } from './browser-live-upgrade-checks.mjs';
+const liveUpgradeMode = process.argv.includes('--live-upgrade');
+const capacityMode = !liveUpgradeMode && process.env.SHINYHUB_E2E_UPDATE_CAPACITY === '1';
+const producerReloadMode = !liveUpgradeMode && process.env.SHINYHUB_E2E_RELOAD_PRODUCERS === '1';
+const relayMode = liveUpgradeMode || capacityMode || producerReloadMode || process.env.SHINYHUB_E2E_SESSION_RELAYS === '1';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(new URL('../loadtest/render/driver/package.json', import.meta.url));
 const { chromium } = require('playwright');
 const results = join(root, 'loadtest/results');
 await mkdir(results, { recursive: true });
-const work = await mkdtemp(join(results, 'browser-lifecycle-'));
+const work = await mkdtemp(join(results, liveUpgradeMode ? 'browser-live-upgrade-' : 'browser-lifecycle-'));
 // Reload uses a Unix socket below state; repository paths can exceed macOS's
 // socket-path limit. mkdtemp creates a private directory on both native hosts.
 const state = await mkdtemp('/tmp/shinyhub-e2e-');
-const binary = process.env.SHINYHUB_E2E_BINARY ? resolve(process.env.SHINYHUB_E2E_BINARY) : join(work, 'shinyhub');
+const binaryOverride = !liveUpgradeMode && process.env.SHINYHUB_E2E_BINARY;
+const binary = binaryOverride ? resolve(binaryOverride) : join(liveUpgradeMode ? state : work, 'shinyhub');
 const config = join(state, 'shinyhub.yaml');
 const clientConfig = join(state, 'client.json');
 const passwordFile = join(state, 'password');
@@ -135,7 +138,15 @@ try {
   const python = (await command(['uv', 'python', 'find', '--python-preference', 'managed', pythonRequest], 'python-interpreter')).trim();
   assert.ok(python, 'selected Python interpreter was resolved');
   env.UV_PYTHON = python;
-  if (!process.env.SHINYHUB_E2E_BINARY) await command(['go', 'build', '-o', binary, './cmd/shinyhub'], 'build');
+  let successor, targetVersion;
+  if (liveUpgradeMode) {
+    successor = join(state, 'shinyhub-next');
+    targetVersion = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).version;
+    await command(['go', 'build', '-ldflags', '-X main.version=' + targetVersion, '-o', successor, './cmd/shinyhub'], 'build');
+    await installPreviousRelease({ root, state, command });
+  } else if (!binaryOverride) {
+    await command(['go', 'build', '-o', binary, './cmd/shinyhub'], 'build');
+  }
   report.binary_sha256 = createHash('sha256').update(await readFile(binary)).digest('hex');
   // Reserve an ephemeral loopback port; process readiness below detects a bind race.
   const reservation = createServer();
@@ -259,7 +270,13 @@ try {
     await page.getByRole('button', { name: 'Recalculate' }).click();
     await output(page, 'v1', 2, 500, original);
   });
-  if (capacityMode) {
+  if (liveUpgradeMode) {
+    await checkLiveUpgrade({ context, page, original, appURL, state, binary, successor, targetVersion,
+      config, command, request, check, output, sockets, report });
+    assert.deepEqual(report.browserErrors, [], 'no browser script errors');
+    report.status = 'passed';
+    console.log('BROWSER LIVE UPGRADE E2E PASS');
+  } else if (capacityMode) {
     await checkUpdateCapacity({ browser, context, page, original, appURL, host, app, work,
       binary, config, command, api, deploy, check, poll, output, sockets, report, username, password });
     assert.deepEqual(report.browserErrors, [], 'no browser script errors');

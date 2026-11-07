@@ -10,7 +10,8 @@
   "scripts": {
     "test": "node --test 'internal/ui/jstests/*.test.js'",
     "test:acceptance": "node scripts/acceptance-e2e.mjs",
-    "test:recovery": "node scripts/recovery-e2e.mjs"
+    "test:recovery": "node scripts/recovery-e2e.mjs",
+    "test:live-upgrade": "node scripts/browser-lifecycle-e2e.mjs --live-upgrade"
   },
   "devDependencies": {
     "axe-core": "^4.14.0",

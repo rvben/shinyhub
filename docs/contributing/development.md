@@ -138,6 +138,20 @@ fixture are removed at cleanup; diagnostic logs use the same ignored results
 directory as product acceptance. When moving the recovery baseline, update
 the release tag and pinned commit together.
 
+## Run live upgrade acceptance
+
+With the browser dependencies for product acceptance installed, run
+`npm run test:live-upgrade` on macOS or Linux. The test downloads the published
+0.22.0 binary and checks it against a pinned checksum. It starts a disposable
+native hub with `reload_sessions: preserve`, then replaces the binary and
+calls `shinyhub reload` while a private Python Shiny app is in use.
+
+CI checks that the new version takes over, authenticated HTTP requests
+succeed throughout the swap, and both new and existing browser sessions can
+recalculate. The existing session must retain the same WebSocket and reactive
+state beyond the drain deadline. Diagnostics go under the ignored
+`loadtest/results/browser-live-upgrade-*/` directory.
+
 ## Run the real-cluster Fargate smoke test
 
 Changes to the Fargate runtime or external log handoff should also compile and,
