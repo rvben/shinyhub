@@ -217,7 +217,7 @@ async function approve(client, pairingURL, userCode, username, password, screens
   await click(client, '#cli-connect-approve');
   await waitFor(client, visibleExpression('#cli-connect-success'), 'the connected confirmation');
   const success = await evaluate(client, `document.querySelector('#cli-connect-success')?.textContent.trim()`);
-  if (!success?.includes('return to your terminal')) throw new Error(`unclear success copy: ${JSON.stringify(success)}`);
+  if (!success?.toLowerCase().includes('return to your terminal')) throw new Error(`unclear success copy: ${JSON.stringify(success)}`);
 
   await waitFor(
     client,
@@ -249,6 +249,8 @@ async function revoke(client, tokenName) {
     return true;
   })()`);
   if (!clicked) throw new Error(`revoke button unavailable for ${tokenName}`);
+  await waitFor(client, visibleExpression('button[data-token-confirm]'), 'the inline revocation confirmation');
+  await click(client, 'button[data-token-confirm]');
   await waitFor(
     client,
     `!Array.from(document.querySelectorAll('[data-token-row] .token-name')).some(element => element.textContent === ${JSON.stringify(tokenName)})`,
@@ -336,8 +338,8 @@ async function verifyLiveLogs(client, target, expectedLine) {
   await waitFor(client, visibleExpression('#detail-logs-panel'), 'the app-detail logs panel');
   await waitFor(
     client,
-    `document.querySelector('#detail-tab-logs')?.getAttribute('aria-selected') === 'true'`,
-    'the Logs tab to become active',
+    `document.querySelector('#app-context-nav [data-app-section="logs"]')?.getAttribute('aria-current') === 'page'`,
+    'Logs to be the current app section',
   );
   await waitFor(
     client,
@@ -352,7 +354,7 @@ async function verifyLiveLogs(client, target, expectedLine) {
     outputLabel: document.querySelector('#detail-logs-body')?.getAttribute('aria-label'),
     pauseDisabled: document.querySelector('#logs-pause')?.disabled,
   }))()`);
-  if (initial.sourceOptions[0] !== 'All current replicas (2 live, 2 total)' ||
+  if (initial.sourceOptions[0] !== 'All current replicas (2 live)' ||
       !initial.sourceOptions.some(option => option.startsWith('Replica #0: Running')) ||
       !initial.sourceOptions.some(option => option.startsWith('Replica #1: Running')) ||
       initial.outputLabel !== 'Application log output' || initial.pauseDisabled !== false) {
@@ -406,9 +408,9 @@ async function verifyReconnectedLogs(client, target, expectedLine) {
   await assertExactReplicaLines(client, expectedLine, ['#1'], 'reconnect duplicated application output');
   const restored = await evaluate(client, `(() => ({
     hasPersistentSelection: new URL(location.href).searchParams.has('log_source'),
-    activeTab: document.querySelector('#detail-tab-logs')?.getAttribute('aria-selected'),
+    currentSection: document.querySelector('#app-context-nav [data-app-section="logs"]')?.getAttribute('aria-current'),
   }))()`);
-  if (!restored.hasPersistentSelection || restored.activeTab !== 'true') {
+  if (!restored.hasPersistentSelection || restored.currentSection !== 'page') {
     throw new Error(`reconnected logs lost navigation state: ${JSON.stringify(restored)}`);
   }
   await screenshot(client, screenshotPath);
@@ -453,7 +455,7 @@ async function verifyHistoricalLogs(client, target, expectedLine) {
     historyGroups: Array.from(document.querySelectorAll('#logs-source optgroup')).map(group => group.label),
     pauseDisabled: document.querySelector('#logs-pause')?.disabled,
   }))()`);
-  if (!history.hasPersistentSelection || history.sourceOptions[0] !== 'All current replicas (1 live, 2 total)' ||
+  if (!history.hasPersistentSelection || history.sourceOptions[0] !== 'All current replicas (1 live)' ||
       !history.sourceOptions.some(option => option.startsWith('Replica #0: Running')) ||
       !history.sourceOptions.some(option => option.startsWith('Replica #1:') && option.includes('Stopped')) ||
       !history.historyGroups.includes('Current runs') || history.pauseDisabled !== true) {
