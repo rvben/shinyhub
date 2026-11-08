@@ -259,7 +259,7 @@ func (s *Server) handleRecordAppFleetState(w http.ResponseWriter, r *http.Reques
 			writeError(w, http.StatusConflict, err.Error())
 			return
 		} else if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			writeInternal(w, r, "internal server error", err)
 			return
 		}
 	case fleetConvergenceIncomplete:
@@ -271,7 +271,7 @@ func (s *Server) handleRecordAppFleetState(w http.ResponseWriter, r *http.Reques
 			writeError(w, http.StatusConflict, err.Error())
 			return
 		} else if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			writeInternal(w, r, "internal server error", err)
 			return
 		}
 	default:

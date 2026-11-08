@@ -38,13 +38,13 @@ func (s *Server) handleGitHubLogin(w http.ResponseWriter, r *http.Request) {
 
 	stateBytes := make([]byte, 16)
 	if _, err := rand.Read(stateBytes); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	state := hex.EncodeToString(stateBytes)
 
 	if err := s.store.CreateOAuthStateWithReturnPath(state, providerGitHub, safeNextPath(r.URL.Query().Get("next"))); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 
@@ -113,7 +113,7 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		reqLog(r).Error("oauth_provision_user_failed", "provider", "github", "err", err)
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	if created {
@@ -138,7 +138,7 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 
 	_, err = s.setBrowserSession(w, r, user.ContextUser(), time.Time{})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 
@@ -159,13 +159,13 @@ func (s *Server) handleGoogleLogin(w http.ResponseWriter, r *http.Request) {
 
 	stateBytes := make([]byte, 16)
 	if _, err := rand.Read(stateBytes); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	state := hex.EncodeToString(stateBytes)
 
 	if err := s.store.CreateOAuthStateWithReturnPath(state, providerGoogle, safeNextPath(r.URL.Query().Get("next"))); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 
@@ -239,7 +239,7 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		reqLog(r).Error("oauth_provision_user_failed", "provider", "google", "err", err)
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	if created {
@@ -262,7 +262,7 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 
 	_, err = s.setBrowserSession(w, r, user.ContextUser(), time.Time{})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 

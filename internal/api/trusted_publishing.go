@@ -80,12 +80,12 @@ func (s *Server) handleTrustedPublishing(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not prepare deployment identity")
+		writeInternal(w, r, "could not prepare deployment identity", err)
 		return
 	}
 	raw, hash, err := generateAPIKey()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not issue deployment credential")
+		writeInternal(w, r, "could not issue deployment credential", err)
 		return
 	}
 	expires := time.Now().UTC().Add(trustedpublish.CredentialLifetime)

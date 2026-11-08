@@ -89,7 +89,7 @@ func (s *Server) HandleAppsJSON(w http.ResponseWriter, r *http.Request) {
 	limit, offset := parsePagination(r)
 	apps, err := s.listAppsVisibleTo(auth.UserFromContext(r.Context()), limit, offset)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, toBriefs(apps))

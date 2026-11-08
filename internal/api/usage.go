@@ -104,7 +104,7 @@ func (s *Server) handleAppUsage(w http.ResponseWriter, r *http.Request) {
 	}
 	report, err := s.store.AppUsageReport(r.Context(), app.ID, time.Duration(days)*24*time.Hour, string(identityMode), identityDetail)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	resp.Summary = report.Summary

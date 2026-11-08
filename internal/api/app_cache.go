@@ -1,7 +1,6 @@
 package api
 
 import (
-	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -36,8 +35,7 @@ func (s *Server) handleClearAppCache(w http.ResponseWriter, r *http.Request) {
 
 	inUse, err := s.store.AppCacheInUse(app.ID)
 	if err != nil {
-		slog.Error("result cache: clear: check in use", "slug", slug, "err", err)
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeInternal(w, r, "could not check whether the cache is in use", err)
 		return
 	}
 	if inUse || (s.manager != nil && s.manager.HoldsLiveProcess(slug)) {
@@ -50,16 +48,14 @@ func (s *Server) handleClearAppCache(w http.ResponseWriter, r *http.Request) {
 	if root := s.cfg.Storage.AppCacheDir; root != "" {
 		ids, err := storage.CacheNamespaceIDs(root, slug)
 		if err != nil {
-			slog.Error("result cache: clear: list", "slug", slug, "err", err)
-			writeError(w, http.StatusInternalServerError, "clear failed")
+			writeInternal(w, r, "could not list the cache", err)
 			return
 		}
 		if ids != nil {
 			cleared = ids
 		}
 		if err := storage.RemoveAppCache(root, slug); err != nil {
-			slog.Error("result cache: clear", "slug", slug, "err", err)
-			writeError(w, http.StatusInternalServerError, "clear failed")
+			writeInternal(w, r, "clear failed", err)
 			return
 		}
 	}

@@ -64,7 +64,7 @@ func (s *Server) handleRegisterFleetRun(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	if created {
@@ -109,7 +109,7 @@ func (s *Server) authorizedFleetRun(w http.ResponseWriter, r *http.Request) (*db
 		return nil, nil, false
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return nil, nil, false
 	}
 	credential := auth.CredentialInfoFromContext(r.Context())

@@ -50,7 +50,7 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 		items, err = s.store.ListProjectsVisibleToUser(u.ID)
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	if items == nil {
@@ -204,12 +204,12 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		IconEmoji:   derefStringOrEmpty(req.IconEmoji),
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	p, err := s.store.GetProject(req.Slug)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	if created {
@@ -261,7 +261,7 @@ func (s *Server) handlePatchProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	err = s.store.UpdateProject(db.UpdateProjectParams{
@@ -278,12 +278,12 @@ func (s *Server) handlePatchProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	p, err := s.store.GetProject(slug)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	changed := map[string]any{}
@@ -320,7 +320,7 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 	// merely invisible to the operator running the request.
 	n, err := s.store.CountAppsInProject(slug)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	if n > 0 {
@@ -336,7 +336,7 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	err = s.store.DeleteProject(slug)
@@ -345,7 +345,7 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	s.audit(r, db.AuditProjectDelete, "project", slug, projectAuditDetail(map[string]any{

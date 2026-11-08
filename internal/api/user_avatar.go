@@ -68,7 +68,7 @@ func (s *Server) handleGetOwnAvatar(w http.ResponseWriter, r *http.Request) {
 	}
 	data, err := s.store.GetUserAvatar(u.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	if len(data) == 0 {

@@ -71,12 +71,12 @@ func (s *Server) handleListAppEnv(w http.ResponseWriter, r *http.Request) {
 
 	vars, err := s.store.ListAppEnvVars(app.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "list env")
+		writeInternal(w, r, "list env", err)
 		return
 	}
 	bundle, err := s.servingBundleEnv(app.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "read serving bundle env")
+		writeInternal(w, r, "read serving bundle env", err)
 		return
 	}
 	items := make(map[string]envListItem, len(vars)+len(bundle))
@@ -151,7 +151,7 @@ func (s *Server) handleUpsertAppEnv(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.rejectBundleEnvEdit(w, app.ID, key) {
+	if s.rejectBundleEnvEdit(w, r, app.ID, key) {
 		return
 	}
 	var body upsertEnvRequest
@@ -169,7 +169,7 @@ func (s *Server) handleUpsertAppEnv(w http.ResponseWriter, r *http.Request) {
 	if existing == nil {
 		n, err := s.store.CountAppEnvVars(app.ID)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "count env vars")
+			writeInternal(w, r, "count env vars", err)
 			return
 		}
 		if n >= maxEnvKeysPerApp {
@@ -198,14 +198,14 @@ func (s *Server) handleUpsertAppEnv(w http.ResponseWriter, r *http.Request) {
 		if body.Secret {
 			ct, err := secrets.Encrypt(s.secretsKey, []byte(body.Value))
 			if err != nil {
-				writeError(w, http.StatusInternalServerError, "encrypt")
+				writeInternal(w, r, "encrypt", err)
 				return
 			}
 			storedValue = ct
 		}
 
 		if err := s.store.UpsertAppEnvVar(app.ID, key, storedValue, body.Secret); err != nil {
-			writeError(w, http.StatusInternalServerError, "store")
+			writeInternal(w, r, "store", err)
 			return
 		}
 
@@ -273,7 +273,7 @@ func (s *Server) handleDeleteAppEnv(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "env var not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "delete env var")
+		writeInternal(w, r, "delete env var", err)
 		return
 	}
 
@@ -463,10 +463,10 @@ func (s *Server) servingBundleEnv(appID int64) (map[string]string, error) {
 	return appenv.LoadBundle(deployment.BundleDir)
 }
 
-func (s *Server) rejectBundleEnvEdit(w http.ResponseWriter, appID int64, key string) bool {
+func (s *Server) rejectBundleEnvEdit(w http.ResponseWriter, r *http.Request, appID int64, key string) bool {
 	values, err := s.servingBundleEnv(appID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "read serving bundle env")
+		writeInternal(w, r, "read serving bundle env", err)
 		return true
 	}
 	if _, owned := values[key]; owned {

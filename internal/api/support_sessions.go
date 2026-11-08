@@ -133,7 +133,7 @@ func (s *Server) handleCreateSupportSession(w http.ResponseWriter, r *http.Reque
 			writeError(w, http.StatusNotFound, "user not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	if subject.PrincipalType == "service_account" || !auth.IsValidGlobalRole(subject.Role) {
@@ -146,7 +146,7 @@ func (s *Server) handleCreateSupportSession(w http.ResponseWriter, r *http.Reque
 			writeError(w, http.StatusNotFound, "app not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	canAccess := subject.Role == "admin" || subject.Role == "operator" || app.Access == "public" || app.Access == "shared"
@@ -154,7 +154,7 @@ func (s *Server) handleCreateSupportSession(w http.ResponseWriter, r *http.Reque
 		canAccess, err = s.store.UserCanAccessApp(req.AppSlug, subject.ID)
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	if !canAccess {
@@ -164,12 +164,12 @@ func (s *Server) handleCreateSupportSession(w http.ResponseWriter, r *http.Reque
 
 	sessionID, err := randomSupportCapability()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	launchCode, err := randomSupportCapability()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	launchHash := sha256.Sum256([]byte(launchCode))
@@ -202,7 +202,7 @@ func (s *Server) handleCreateSupportSession(w http.ResponseWriter, r *http.Reque
 			writeError(w, http.StatusConflict, "End the administrator's active support session before starting another one")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 
@@ -228,7 +228,7 @@ func (s *Server) handleGetCurrentSupportSession(w http.ResponseWriter, r *http.R
 	}
 	session, err := s.store.GetActiveSupportSessionForActor(admin.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
@@ -265,7 +265,7 @@ func (s *Server) handleDeleteCurrentSupportSession(w http.ResponseWriter, r *htt
 	}
 	_, err := s.store.StopActiveSupportSessionForActor(admin.ID, "ended_from_dashboard", s.ClientIP(r))
 	if err != nil && !errors.Is(err, db.ErrNotFound) {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
@@ -296,7 +296,7 @@ func (s *Server) handleListSupportSessionApps(w http.ResponseWriter, r *http.Req
 		if errors.Is(err, db.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "eligible user not found")
 		} else {
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			writeInternal(w, r, "internal server error", err)
 		}
 		return
 	}
@@ -314,7 +314,7 @@ func (s *Server) handleListSupportSessionApps(w http.ResponseWriter, r *http.Req
 		apps, err = s.store.ListAppsVisibleToUserLean(subject.ID, 0, 0)
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	items := make([]supportSessionApp, 0, len(apps))

@@ -19,7 +19,7 @@ func (s *Server) handleReconcileScheduleConvergence(w http.ResponseWriter, r *ht
 	defer release()
 	current, err := s.store.GetServingDeployment(app.ID)
 	if err != nil && !errors.Is(err, db.ErrNotFound) {
-		writeError(w, http.StatusInternalServerError, "resolve current deployment")
+		writeInternal(w, r, "resolve current deployment", err)
 		return
 	}
 	if errors.Is(err, db.ErrNotFound) {
@@ -28,7 +28,7 @@ func (s *Server) handleReconcileScheduleConvergence(w http.ResponseWriter, r *ht
 	}
 	results, err := s.reconcileAndDispatchScheduleConvergence(app.ID, current.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, results)
@@ -60,7 +60,7 @@ func (s *Server) handleRetryScheduleConvergence(w http.ResponseWriter, r *http.R
 	}
 	rows, err := s.store.ScheduleFreshnessByApp(app.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "resolve schedule convergence")
+		writeInternal(w, r, "resolve schedule convergence", err)
 		return
 	}
 	var obligationID *int64
@@ -79,7 +79,7 @@ func (s *Server) handleRetryScheduleConvergence(w http.ResponseWriter, r *http.R
 	// a later read/dispatch failure is advisory, never an ambiguous 5xx.
 	current, err := s.store.GetDeployObligation(*obligationID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "read schedule convergence")
+		writeInternal(w, r, "read schedule convergence", err)
 		return
 	}
 	if err := s.store.RetryDeployObligation(*obligationID); err != nil {
@@ -87,7 +87,7 @@ func (s *Server) handleRetryScheduleConvergence(w http.ResponseWriter, r *http.R
 			writeError(w, http.StatusConflict, "current schedule convergence is no longer failed")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "retry schedule convergence")
+		writeInternal(w, r, "retry schedule convergence", err)
 		return
 	}
 	current.Status = "pending"

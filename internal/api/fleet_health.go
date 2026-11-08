@@ -111,7 +111,7 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 	// ever starts surfacing Deploying, switch this call back to ListApps first.
 	apps, err := s.store.ListAppsLean(0, 0)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	resp := fleetHealthResponse{
@@ -128,7 +128,7 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	replicasByApp, err := s.store.ListReplicasForApps(appIDs)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	for _, a := range apps {
@@ -163,7 +163,7 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	counts, err := s.store.FleetReplicaCounts()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	for _, c := range counts {
@@ -211,7 +211,7 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 	// Degraded apps (apps with >=1 lost replica) + the actionable list.
 	lost, err := s.store.AppsWithLostReplicas()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	degradedSlugs := map[string]bool{}

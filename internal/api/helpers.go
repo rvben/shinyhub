@@ -41,6 +41,23 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	}{msg})
 }
 
+// writeInternal answers a server-side failure. The cause is logged with the
+// request id, method and path, and stays out of the body, where store or
+// filesystem errors could expose SQL text or server paths. The body carries msg,
+// a short description of what failed, plus the request id that finds the log
+// record.
+func writeInternal(w http.ResponseWriter, r *http.Request, msg string, err error) {
+	id := RequestIDFromContext(r.Context())
+	slog.Error("api: internal error", "request_id", id, "method", r.Method, "path", r.URL.Path,
+		"error", msg, "err", err)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusInternalServerError)
+	_ = json.NewEncoder(w).Encode(struct {
+		Error     string `json:"error"`
+		RequestID string `json:"request_id,omitempty"`
+	}{msg, id})
+}
+
 // writeErrorWithKind writes a JSON error response that also carries a stable
 // machine-readable failure classification: {"error": msg, "failure_kind": kind}.
 // Used by the deploy failure path so a CLI can distinguish a readiness timeout

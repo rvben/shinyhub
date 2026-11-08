@@ -54,7 +54,7 @@ func (s *Server) deploymentServiceAccount(w http.ResponseWriter, r *http.Request
 		return nil, false
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return nil, false
 	}
 	return account, true
@@ -66,7 +66,7 @@ func (s *Server) handleListServiceAccounts(w http.ResponseWriter, r *http.Reques
 	}
 	accounts, err := s.store.ListServiceAccounts()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	items := make([]serviceAccountResponse, 0, len(accounts))
@@ -97,7 +97,7 @@ func (s *Server) handleListServiceCredentials(w http.ResponseWriter, r *http.Req
 	}
 	credentials, err := s.store.ListServiceCredentials(account.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": credentials})
@@ -174,7 +174,7 @@ func (s *Server) handleCreateServiceCredential(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if exists, err := s.store.APIKeyNameExists(account.ID, req.Name); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	} else if exists {
 		writeError(w, http.StatusConflict, "credential name already in use")
@@ -182,7 +182,7 @@ func (s *Server) handleCreateServiceCredential(w http.ResponseWriter, r *http.Re
 	}
 	raw, hash, err := generateAPIKey()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	expiresAt := time.Now().UTC().Add(time.Duration(req.ExpiresInDays) * 24 * time.Hour)
@@ -200,7 +200,7 @@ func (s *Server) handleCreateServiceCredential(w http.ResponseWriter, r *http.Re
 			writeError(w, http.StatusConflict, "credential name already in use")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	s.logAuditEvent(r, db.AuditEventParams{UserID: &admin.ID, Action: "create_service_credential",
@@ -241,7 +241,7 @@ func (s *Server) handleDeleteServiceCredential(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	s.logAuditEvent(r, db.AuditEventParams{UserID: &admin.ID, Action: "delete_service_credential",

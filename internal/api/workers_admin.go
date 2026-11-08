@@ -51,7 +51,7 @@ func (s *Server) handleListWorkers(w http.ResponseWriter, r *http.Request) {
 	if s.workerReg != nil {
 		workers, err := s.store.ListWorkers()
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			writeInternal(w, r, "internal server error", err)
 			return
 		}
 		for _, wk := range workers {
@@ -79,7 +79,7 @@ func (s *Server) handleRevokeWorker(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "worker not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	// Revocation marks the worker down, but the down-timeout sweep skips workers

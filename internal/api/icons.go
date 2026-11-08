@@ -56,7 +56,7 @@ func (s *Server) handleGetAppIconState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	if state.AppID != app.ID {
@@ -143,7 +143,7 @@ func (s *Server) handlePutAppIconState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	if desired.AppID != app.ID || expected.AppID != app.ID || desired.Revision != iconStateResponse(*expected).Revision {
@@ -155,7 +155,7 @@ func (s *Server) handlePutAppIconState(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, db.ErrAppIconConflict) {
 			writeError(w, http.StatusConflict, "This app or its icon changed. Reload before changing or undoing the icon.")
 		} else {
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			writeInternal(w, r, "internal server error", err)
 		}
 		return
 	}
@@ -260,7 +260,7 @@ func (s *Server) handleSetAppIcon(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 
@@ -284,7 +284,7 @@ func (s *Server) handleGetAppIcon(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "no icon")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 
@@ -321,7 +321,7 @@ func (s *Server) handleClearAppIcon(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 

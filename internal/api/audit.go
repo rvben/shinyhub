@@ -105,12 +105,12 @@ func (s *Server) handleListAuditEvents(w http.ResponseWriter, r *http.Request) {
 	filter.Since, filter.Until = since, until
 	events, err := s.store.ListAuditEventsFiltered(filter, limit, offset)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	total, err := s.store.CountAuditEventsFiltered(filter)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")

@@ -31,7 +31,7 @@ func (s *Server) handleEnqueueRollingRestart(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	if !current.Prepared {
@@ -52,7 +52,7 @@ func (s *Server) handleEnqueueRollingRestart(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "enqueue rolling restart failed")
+		writeInternal(w, r, "enqueue rolling restart failed", err)
 		return
 	}
 	s.audit(r, "rolling_restart", "app", app.Slug, fmt.Sprintf(`{"activation_id":%d}`, a.ID))

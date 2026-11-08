@@ -193,14 +193,14 @@ func (s *Server) handleListSchedules(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := s.store.ListSchedulesByApp(app.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	// One extra query for the whole list, not one per schedule: freshness is
 	// what a caller would otherwise reconstruct from per-schedule run history.
 	fresh, err := s.store.ScheduleFreshnessByApp(app.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	byID := make(map[int64]db.ScheduleFreshness, len(fresh))
@@ -209,7 +209,7 @@ func (s *Server) handleListSchedules(w http.ResponseWriter, r *http.Request) {
 	}
 	activations, err := s.store.LatestScheduleActivationsByApp(app.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	latestActivation := make(map[int64]*db.ScheduleActivation)
@@ -300,7 +300,7 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.dischargeElasticOrphanRisk(app.ID); err != nil {
 		reqLog(r).Error("discharge elastic orphan-risk marker", "slug", app.Slug, "err", err)
-		writeError(w, http.StatusInternalServerError, "verify elastic worker lifetime")
+		writeInternal(w, r, "verify elastic worker lifetime", err)
 		return
 	}
 	if err := s.validateScheduleProducerTopology(app, deployTrigger, onSuccess); err != nil {
@@ -365,7 +365,7 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, db.ErrScheduleNameExists.Error())
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	postcommitWarning := ""
@@ -586,7 +586,7 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.dischargeElasticOrphanRisk(app.ID); err != nil {
 		reqLog(r).Error("discharge elastic orphan-risk marker", "slug", app.Slug, "err", err)
-		writeError(w, http.StatusInternalServerError, "verify elastic worker lifetime")
+		writeInternal(w, r, "verify elastic worker lifetime", err)
 		return
 	}
 	if err := s.validateScheduleProducerTopology(app, deployTrigger, normalizedAction); err != nil {
@@ -623,7 +623,7 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.store.UpdateSchedule(id, updateParams); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	// Series are keyed by schedule name, so a rename would otherwise leave the
@@ -638,7 +638,7 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	fresh, err := s.store.GetSchedule(id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "reload updated schedule: "+err.Error())
+		writeInternal(w, r, "reload updated schedule", err)
 		return
 	}
 	s.audit(r, "schedule_update", "schedule", fmt.Sprintf("%d", id), fmt.Sprintf(
@@ -859,7 +859,7 @@ func (s *Server) handleDeleteSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if repairRequired, err := s.store.ScheduleProducerRepairRequired(id); err != nil {
-		writeError(w, http.StatusInternalServerError, "check producer repair state: "+err.Error())
+		writeInternal(w, r, "check producer repair state", err)
 		return
 	} else if repairRequired {
 		writeError(w, http.StatusConflict, "cannot delete a producer with an unrepaired failed data write; run it successfully before deleting it")
@@ -867,7 +867,7 @@ func (s *Server) handleDeleteSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	deleted, err := s.store.DeleteScheduleIfIdle(id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	if !deleted {
@@ -918,7 +918,7 @@ func (s *Server) handleCancelScheduleActivation(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusConflict, "no queued activation to cancel")
 		return
 	case err != nil:
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	s.audit(r, "schedule_activation_cancel", "schedule", fmt.Sprintf("%d", id), fmt.Sprintf(
@@ -970,7 +970,7 @@ func (s *Server) handleRunSchedule(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "schedule admissions are temporarily unavailable; retry after reload or ownership handoff completes")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "failed to start run: "+err.Error())
+		writeInternal(w, r, "failed to start run", err)
 		return
 	}
 	s.audit(r, "schedule_run_manual", "schedule", fmt.Sprintf("%d", id), fmt.Sprintf(
@@ -1004,14 +1004,14 @@ func (s *Server) handleListScheduleRuns(w http.ResponseWriter, r *http.Request) 
 	limit, offset := paginationParams(r, 50, 200)
 	runs, err := s.store.ListScheduleRuns(id, limit, offset)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	// Run history can be large, so the page is fetched at the DB layer; report
 	// the full count separately for an accurate envelope total.
 	total, err := s.store.CountScheduleRuns(id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	writeListPage(w, runs, total, limit, offset, nil)
@@ -1051,7 +1051,7 @@ func (s *Server) handleCancelScheduleRun(w http.ResponseWriter, r *http.Request)
 	}
 	if s.jobs != nil {
 		if err := s.jobs.Cancel(runID); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeInternal(w, r, "internal server error", err)
 			return
 		}
 	}
@@ -1276,7 +1276,7 @@ func (s *Server) handleListSharedData(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := s.store.ListSharedDataSources(app.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	out := make([]sharedDataDTO, 0, len(rows))
@@ -1303,7 +1303,7 @@ func (s *Server) handleGrantSharedData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
-	app, ok = s.rereadAuthorizedApp(w, app.Slug, app.ID)
+	app, ok = s.rereadAuthorizedApp(w, r, app.Slug, app.ID)
 	if !ok {
 		return
 	}
@@ -1331,7 +1331,7 @@ func (s *Server) handleGrantSharedData(w http.ResponseWriter, r *http.Request) {
 	// schedule run they fully control. See A.2 in v0.2.2 audit.
 	ok, err = s.hasExplicitAccess(user, src)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	if !ok {
@@ -1340,7 +1340,7 @@ func (s *Server) handleGrantSharedData(w http.ResponseWriter, r *http.Request) {
 	}
 	releaseRuns, runErr := s.pauseSharedDataRuns(app.ID)
 	if runErr != nil {
-		s.sharedDataRunError(w, runErr)
+		s.sharedDataRunError(w, r, runErr)
 		return
 	}
 	defer releaseRuns()
@@ -1353,7 +1353,7 @@ func (s *Server) handleGrantSharedData(w http.ResponseWriter, r *http.Request) {
 			// the existing mount descriptor so the caller can act idempotently.
 			writeJSON(w, http.StatusOK, sharedDataDTO{SourceSlug: src.Slug, SourceID: src.ID})
 		default:
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeInternal(w, r, "internal server error", err)
 		}
 		return
 	}

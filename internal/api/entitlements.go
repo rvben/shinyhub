@@ -18,7 +18,7 @@ func (s *Server) entitlementAudit(r *http.Request) db.AuditEventParams {
 	return p
 }
 
-func entitlementError(w http.ResponseWriter, err error) {
+func entitlementError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, db.ErrNotFound):
 		writeError(w, http.StatusNotFound, "app, entitlement, or user not found")
@@ -27,7 +27,7 @@ func entitlementError(w http.ResponseWriter, err error) {
 	case errors.Is(err, db.ErrEntitlementLimit), errors.Is(err, db.ErrEntitlementInUse):
 		writeError(w, http.StatusConflict, err.Error())
 	default:
-		writeError(w, http.StatusInternalServerError, "app entitlement operation failed")
+		writeInternal(w, r, "app entitlement operation failed", err)
 	}
 }
 
@@ -46,7 +46,7 @@ func (s *Server) handleListAppEntitlements(w http.ResponseWriter, r *http.Reques
 	}
 	items, err := s.store.ListAppEntitlements(app.ID)
 	if err != nil {
-		entitlementError(w, err)
+		entitlementError(w, r, err)
 		return
 	}
 	limit, offset := parsePagination(r)
@@ -69,7 +69,7 @@ func (s *Server) handleDefineAppEntitlement(w http.ResponseWriter, r *http.Reque
 	}
 	err := s.store.DefineAppEntitlement(app.ID, db.DefineAppEntitlementParams{Name: chi.URLParam(r, "entitlement"), Description: req.Description}, s.entitlementAudit(r))
 	if err != nil {
-		entitlementError(w, err)
+		entitlementError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -81,7 +81,7 @@ func (s *Server) handleDeleteAppEntitlement(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if err := s.store.DeleteAppEntitlement(app.ID, chi.URLParam(r, "entitlement"), s.entitlementAudit(r)); err != nil {
-		entitlementError(w, err)
+		entitlementError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -131,12 +131,12 @@ func (s *Server) handleSetAppEntitlementGrant(w http.ResponseWriter, r *http.Req
 	}
 	principal, err := s.resolveEntitlementPrincipal(req)
 	if err != nil {
-		entitlementError(w, err)
+		entitlementError(w, r, err)
 		return
 	}
 	err = s.store.SetAppEntitlementGrant(app.ID, chi.URLParam(r, "entitlement"), principal, r.Method == http.MethodPost, s.entitlementAudit(r))
 	if err != nil {
-		entitlementError(w, err)
+		entitlementError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -149,7 +149,7 @@ func (s *Server) handleListAppEntitlementGrants(w http.ResponseWriter, r *http.R
 	}
 	items, err := s.store.ListAppEntitlementGrants(app.ID, 0)
 	if err != nil {
-		entitlementError(w, err)
+		entitlementError(w, r, err)
 		return
 	}
 	limit, offset := parsePagination(r)
@@ -165,23 +165,23 @@ func (s *Server) handleEffectiveAppEntitlements(w http.ResponseWriter, r *http.R
 	if raw := r.URL.Query().Get("user_id"); raw != "" {
 		id, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil || id <= 0 {
-			entitlementError(w, db.ErrInvalidEntitlement)
+			entitlementError(w, r, db.ErrInvalidEntitlement)
 			return
 		}
 		req.UserID = id
 	}
 	principal, err := s.resolveEntitlementPrincipal(req)
 	if err != nil {
-		entitlementError(w, err)
+		entitlementError(w, r, err)
 		return
 	}
 	if _, err := s.store.GetUserByID(principal.UserID); err != nil {
-		entitlementError(w, err)
+		entitlementError(w, r, err)
 		return
 	}
 	grants, err := s.store.ListAppEntitlementGrants(app.ID, principal.UserID)
 	if err != nil {
-		entitlementError(w, err)
+		entitlementError(w, r, err)
 		return
 	}
 	names := []string{}

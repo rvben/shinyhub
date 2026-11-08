@@ -104,7 +104,7 @@ func (s *Server) handleFleetScheduleStatus(w http.ResponseWriter, r *http.Reques
 	}
 	rows, err := s.store.ScheduleFreshness()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	filter := r.URL.Query().Get("slug")

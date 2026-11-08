@@ -114,8 +114,7 @@ func (a *WorkerAPI) HandleRegister(w http.ResponseWriter, r *http.Request) {
 		Version:       req.Version,
 	})
 	if err != nil {
-		slog.Error("worker register: persist failed", "err", err)
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeInternal(w, r, "could not register worker", err)
 		return
 	}
 	certPEM, err := a.ca.SignWorkerCSR(node.NodeID, []byte(req.CSRPEM), a.certTTL)
