@@ -70,10 +70,10 @@ jobs:
       - name: Vulnerability scan
         run: make vuln
 
-      - name: Build
-        run: |
-          go build -ldflags="-w" -o /tmp/shinyhub ./cmd/shinyhub
-          python3 scripts/check-sdk-linking.py /tmp/shinyhub
+      # The release build held to its size and package-init budgets, with the
+      # AWS operations it links checked against the allowlist.
+      - name: Artifact budgets
+        run: make check-artifact
 
   # The bookmark SDK supports Python 3.10, whose copy protocol differs from
   # newer interpreters. Keep that minimum-version compatibility exercised.

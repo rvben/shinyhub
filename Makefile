@@ -32,6 +32,13 @@ build-native-broker:
 build:
 	go build -o bin/shinyhub ./cmd/shinyhub
 
+# check-artifact builds the server with the release flags and holds the result
+# to its budgets: stripped size, package init time before main, and the AWS
+# operations linked in. The script documents the budgets and how to raise one.
+.PHONY: check-artifact
+check-artifact:
+	./scripts/check-artifact.sh
+
 clean:
 	rm -rf bin tmp
 

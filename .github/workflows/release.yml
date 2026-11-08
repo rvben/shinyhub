@@ -53,6 +53,11 @@ jobs:
       - name: Standard gate
         run: make check
 
+      # The release build held to its size and package-init budgets, with the
+      # AWS operations it links checked against the allowlist.
+      - name: Artifact budgets
+        run: make check-artifact
+
       - name: Python helper tests
         run: make test-py-bookmarks test-py-agent
 
