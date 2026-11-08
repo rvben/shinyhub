@@ -1606,79 +1606,16 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	var metricsLn net.Listener
 	var metricsReg *metrics.Registry
 	if cfg.Metrics.Enabled {
-		reg := metrics.New(version)
-		reg.RegisterDBStats(store.Stats)
-		metricsReg = reg
-		if usageRecorder != nil {
-			usageRecorder.SetMetrics(reg)
-		}
-		srv.SetMetrics(reg)
-		prx.SetRejectRecorder(reg)
-		reg.RegisterFleetGauges(fleetCounts(store))
-		reg.RegisterRetiredGauges(func() (int, int64, bool) { st := relayLeases.Status(); return st.Count, st.Sessions, st.Unknown })
-		// Schedule last-success gauge: DB-backed (restart-safe), one sample per
-		// schedule that has ever succeeded.
-		if err := reg.Register(metrics.NewScheduleFreshnessCollector(func() ([]metrics.ScheduleSample, error) {
-			rows, qerr := store.ScheduleFreshness()
-			if qerr != nil {
-				return nil, qerr
-			}
-			out := make([]metrics.ScheduleSample, len(rows))
-			for i, fr := range rows {
-				s := metrics.ScheduleSample{
-					Slug: fr.Slug, Name: fr.Name, Enabled: fr.Enabled,
-					ConsecutiveFailures: fr.ConsecutiveFailures,
-					ActivationStatus:    fr.ActivationStatus,
-					CapacityDeferrals:   fr.ActivationCapacityDeferrals,
-				}
-				if fr.LastFailureAt != nil {
-					s.LastFailureUnix = fr.LastFailureAt.Unix()
-				}
-				if fr.LastInterruptedAt != nil {
-					s.LastInterruptedUnix = fr.LastInterruptedAt.Unix()
-				}
-				if fr.LastSuccessAt != nil {
-					s.LastSuccessUnix = fr.LastSuccessAt.Unix()
-					s.OK = true
-				}
-				if fr.ActivationCreatedAt != nil {
-					s.ActivationCreatedUnix = fr.ActivationCreatedAt.Unix()
-				}
-				if fr.ActivationCapacityDeferredAt != nil {
-					s.CapacityDeferredUnix = fr.ActivationCapacityDeferredAt.Unix()
-				}
-				if fr.ActivationGeneration != nil {
-					s.ActivationGeneration = *fr.ActivationGeneration
-				}
-				out[i] = s
-			}
-			return out, nil
-		})); err != nil {
-			slog.Warn("register schedule freshness collector", "err", err)
-		}
-		// Per-app session gauges: sampled live from the proxy at scrape time so a
-		// Grafana panel can show sessions-vs-ceiling without polling the REST API.
-		// The admission ceiling is per-replica cap times the live replica count;
-		// uncapped pools emit only the sessions gauge (no meaningful ceiling).
-		if err := reg.Register(metrics.NewSessionGaugesCollector(func() []metrics.SessionSample {
-			stats := prx.PoolSessionSnapshot()
-			out := make([]metrics.SessionSample, 0, len(stats))
-			for slug, st := range stats {
-				out = append(out, metrics.SessionSample{
-					Slug: slug, Sessions: st.Sessions, Cap: st.Cap, Replicas: st.Replicas,
-				})
-			}
-			return out
-		})); err != nil {
-			slog.Warn("register session gauges collector", "err", err)
-		}
-		// Surface dropped audit events (e.g. disk full) as a counter so the
-		// silent loss of the compliance trail is alertable.
-		store.SetAuditErrorHook(reg.RecordAuditWriteError)
-		// Shared-log writers capture this recorder when they are created. Keep
-		// persistence health observable without importing Prometheus from db.
-		store.SetAppLogMetrics(reg)
-		metricsSrv, metricsLn, err = startMetricsListener(upg.Listen, cfg.Metrics.Addr, reg)
+		metricsReg = newServerMetrics(serverMetricsDeps{
+			version:       version,
+			logger:        logger,
+			store:         store,
+			srv:           srv,
+			prx:           prx,
+			usageRecorder: usageRecorder,
+			relayLeases:   relayLeases,
+		})
+		metricsSrv, metricsLn, err = startMetricsListener(upg.Listen, cfg.Metrics.Addr, metricsReg)
 		if err != nil {
 			return err
 		}
