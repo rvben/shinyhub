@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -30,11 +29,16 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	}
 }
 
-// writeError writes a JSON error response: {"error": "msg"}.
+// writeError writes a JSON error response: {"error": "msg"}. The message is
+// JSON-encoded rather than formatted, because it can carry request text (a
+// field name, a filename) holding bytes that Go quoting would turn into
+// escapes JSON does not allow.
 func writeError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	fmt.Fprintf(w, `{"error":%q}`+"\n", msg)
+	_ = json.NewEncoder(w).Encode(struct {
+		Error string `json:"error"`
+	}{msg})
 }
 
 // writeErrorWithKind writes a JSON error response that also carries a stable
