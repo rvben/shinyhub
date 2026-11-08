@@ -21,6 +21,15 @@ const shutdownDrainBudget = 20 * time.Second
 // hangs outside that inner budget (for example loops.Wait() itself).
 const shutdownWatchdogBudget = 30 * time.Second
 
+// Stop budgets for the background services in runServe's run group. A service
+// that uses the database gets the watchdog's budget, since the store closes
+// once shutdown stops waiting for it; a service holding only in-memory state
+// gets a short one.
+const (
+	serviceStoreStopBudget  = shutdownWatchdogBudget
+	serviceMemoryStopBudget = 5 * time.Second
+)
+
 // osExit is os.Exit behind a variable so a test can intercept the "give up
 // and exit non-zero" path without terminating the test process.
 var osExit = os.Exit

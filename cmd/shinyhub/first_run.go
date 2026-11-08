@@ -22,11 +22,15 @@ import (
 	"github.com/rvben/shinyhub/internal/cli"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/rungroup"
 )
 
 const (
 	firstRunExampleSlug = "shinyhub-tour"
 	firstRunExampleName = "ShinyHub Tour"
+	// firstRunStopBudget bounds how long shutdown waits for a cancelled
+	// example install to unwind out of the deploy pipeline.
+	firstRunStopBudget = 30 * time.Second
 )
 
 //go:embed example_app/*
@@ -42,23 +46,27 @@ type serveOptions struct {
 // It only runs after this process created a fresh local config and administrator,
 // and only for a loopback SQLite server. Restarts, explicit configs, environment-
 // driven deployments, Postgres, and remotely reachable servers are untouched.
+//
+// The install runs as a service in services because it writes through store:
+// stopping it cancels the install and waits for it, so the store is never
+// closed underneath it. It returns nil when the server is not eligible.
 func startFirstRunExperience(
-	ctx context.Context,
 	logger *slog.Logger,
+	services *rungroup.Group,
 	handler http.Handler,
 	store *db.Store,
 	cfg *config.Config,
 	ownerReady func() bool,
 	opts serveOptions,
-) {
+) *rungroup.Service {
 	if !eligibleForFirstRunExample(opts.FirstRun, cfg) {
-		return
+		return nil
 	}
 	if opts.ErrOut == nil {
 		opts.ErrOut = io.Discard
 	}
 
-	go func() {
+	return services.Go("first-run example", firstRunStopBudget, func(ctx context.Context) {
 		if opts.NoBrowser {
 			fmt.Fprintf(opts.ErrOut, "Open ShinyHub: %s\n", opts.FirstRun.URL)
 		} else if err := cli.OpenBrowserURL(opts.FirstRun.URL); err != nil {
@@ -84,7 +92,7 @@ func startFirstRunExperience(
 		}
 		appURL := strings.TrimRight(opts.FirstRun.URL, "/") + "/app/" + firstRunExampleSlug + "/"
 		fmt.Fprintf(opts.ErrOut, "✓ %s is live: %s\n", firstRunExampleName, appURL)
-	}()
+	})
 }
 
 func eligibleForFirstRunExample(result *setupResult, cfg *config.Config) bool {

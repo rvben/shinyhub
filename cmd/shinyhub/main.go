@@ -66,6 +66,7 @@ import (
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
 	"github.com/rvben/shinyhub/internal/proxytrust"
+	"github.com/rvben/shinyhub/internal/rungroup"
 	"github.com/rvben/shinyhub/internal/safego"
 	"github.com/rvben/shinyhub/internal/sandbox"
 	scalewayruntime "github.com/rvben/shinyhub/internal/scaleway"
@@ -1228,6 +1229,11 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 			slog.Warn("store close", "err", err)
 		}
 	}()
+	// Long-lived background services. The shutdown sequence stops each one at
+	// the point it must be gone; this deferred Stop, which runs before the
+	// store closes, joins whatever an early return left running.
+	services := rungroup.New(slog.Default())
+	defer services.Stop()
 	// On the shared-user native runtime a deployed app runs as the same OS user as this
 	// process, and a process environment is readable by any process of that
 	// user. auth.secret signs every session token and derives the key
@@ -1606,20 +1612,13 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	var usageRecorder *usage.Recorder
 	if cfg.Usage.Enabled {
 		usageRecorder = usage.NewRecorderWithPolicy(store, cfg.Server.InstanceID, usagePolicy)
-		usageCtx, cancelUsage := context.WithCancel(context.Background())
-		var usageWG sync.WaitGroup
-		usageWG.Add(1)
-		go func() {
-			defer usageWG.Done()
-			usageRecorder.Run(usageCtx)
-		}()
+		usageService := services.Go("usage recorder", serviceStoreStopBudget, usageRecorder.Run)
 		prx.SetUsageRecorder(usageRecorder)
 		var stopOnce sync.Once
 		stopUsage = func() {
 			stopOnce.Do(func() {
 				prx.SetUsageRecorder(nil)
-				cancelUsage()
-				usageWG.Wait()
+				usageService.Stop()
 			})
 		}
 		defer stopUsage()
@@ -1657,8 +1656,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// periodically upserts its local per-(app, replica) active-connection
 	// counts into replica_sessions so other instances can aggregate fleet
 	// load. Single-node deployments skip this entirely: no rows, no goroutine.
-	var reporterWG sync.WaitGroup
-	var reporterCancel context.CancelFunc
+	var reporterService *rungroup.Service
 	// Declared here, started once the /app/* chain below is wired (the recheck
 	// reuses that chain's store and user lookup so both decide alike).
 	var recheckWG sync.WaitGroup
@@ -1667,13 +1665,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		flushCh := make(chan string, 16)
 		prx.EnableImmediateFlush(flushCh)
 		reporter := proxy.NewSessionReporter(prx, store, cfg.Server.InstanceID, flushCh)
-		reporterCtx, cancelReporter := context.WithCancel(context.Background())
-		reporterCancel = cancelReporter
-		reporterWG.Add(1)
-		go func() {
-			defer reporterWG.Done()
-			reporter.Run(reporterCtx)
-		}()
+		reporterService = services.Go("session reporter", serviceStoreStopBudget, reporter.Run)
 		slog.Info("session reporter started",
 			"interval", proxy.ReporterInterval,
 			"stale_cutoff", proxy.ReplicaSessionStaleCutoff,
@@ -1713,22 +1705,17 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// placement registry. Single-node deployments skip this entirely: the
 	// deploy fast-path and RecoverProcesses remain the sole pool-population
 	// paths, byte-for-byte unchanged.
-	var syncerWG sync.WaitGroup
-	var syncerCancel context.CancelFunc
+	var syncerService *rungroup.Service
 	if isClustered(cfg) {
 		transportBuilder := worker.NewReplicaTransportBuilder(dialer, store)
 		syncer := proxy.NewPoolSyncer(prx, store, transportBuilder, slog.Default(), cfg.Auth.IdentityHeadersEnabled())
 		syncer.SetReplicaValidator(lifecycle.ReplicaRouteValidator(store, mgr))
 		syncer.SetReconcileGuard(srv.TryAcquireFleetReconciliation)
-		syncerCtx, cancelSyncer := context.WithCancel(context.Background())
-		syncerCancel = cancelSyncer
-		syncerWG.Add(1)
-		go func() {
-			defer syncerWG.Done()
-			syncer.Run(syncerCtx)
-		}()
+		syncerService = services.Go("pool syncer", serviceStoreStopBudget, syncer.Run)
 		// Wire the on-miss sync hook so a first-request for a freshly-started
 		// app is served immediately without waiting for the next background tick.
+		// It binds to the syncer's context so stopping the syncer ends it too.
+		syncerCtx := syncerService.Context()
 		prx.SetOnMissSync(func(slug string) {
 			syncer.SyncSlug(syncerCtx, slug)
 		})
@@ -2083,8 +2070,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// runs locally) with its own sampler instance so its CPU deltas are
 	// independent of the API's on-demand sampler. Cancelled + joined at shutdown
 	// so it stops cleanly on SIGTERM and on a tableflip re-exec.
-	var historyWG sync.WaitGroup
-	var historyCancel context.CancelFunc
+	var historyService *rungroup.Service
 	if cfg.Metrics.HistoryWindow > 0 {
 		histStore := history.NewStore(cfg.Metrics.HistoryWindow, cfg.Metrics.HistoryInterval)
 		srv.SetHistory(histStore)
@@ -2093,13 +2079,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 			histSampler = &process.RuntimeSampler{Runtime: rt}
 		}
 		collector := history.NewCollector(mgr, prx, histSampler, histStore, cfg.Metrics.HistoryInterval)
-		historyCtx, cancel := context.WithCancel(context.Background())
-		historyCancel = cancel
-		historyWG.Add(1)
-		go func() {
-			defer historyWG.Done()
-			collector.Run(historyCtx)
-		}()
+		historyService = services.Go("metrics history collector", serviceMemoryStopBudget, collector.Run)
 		slog.Info("metrics history collector started",
 			"window", cfg.Metrics.HistoryWindow, "interval", cfg.Metrics.HistoryInterval)
 	}
@@ -2369,7 +2349,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 			}
 			return pcts[0], nil
 		})
-		go wm.Run(ctx)
+		services.Go("cpu watermark", serviceMemoryStopBudget, wm.Run)
 		prx.SetCPUWatermark(wm)
 	}
 
@@ -3523,7 +3503,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		relayRPC.Commit()
 	}
 	reloadStartupReady.Store(true)
-	startFirstRunExperience(ctx, logger, srv.Router(), store, cfg, ownerAndReady, serveOpts)
+	firstRun := startFirstRunExperience(logger, services, srv.Router(), store, cfg, ownerAndReady, serveOpts)
 
 	select {
 	case err := <-serveErr:
@@ -3533,6 +3513,11 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		}
 	case <-upg.Exit():
 		slog.Info("shutdown/handoff initiated, draining")
+	}
+	// The example install deploys through the API and the store; end it
+	// before ownership and the HTTP server it goes through are torn down.
+	if firstRun != nil {
+		firstRun.Stop()
 	}
 	// Mark unready for both the signal and clean self-stop paths.
 	prx.SetDraining(true)
@@ -3572,23 +3557,20 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	awaitOwnershipStop(shutdownWatchdogBudget, stopOwnership, slog.Default())
 	// Stop the session reporter (clustered only). Cancel triggers a final
 	// flush so the last known counts are persisted before the store closes.
-	if reporterCancel != nil {
-		reporterCancel()
-		reporterWG.Wait()
+	if reporterService != nil {
+		reporterService.Stop()
 	}
 	// Stop the pool syncer (clustered only). Nil out the on-miss hook after
 	// the syncer goroutine exits so a late-arriving request cannot invoke
 	// SyncSlug with an already-cancelled context.
-	if syncerCancel != nil {
-		syncerCancel()
-		syncerWG.Wait()
+	if syncerService != nil {
+		syncerService.Stop()
 		prx.SetOnMissSync(nil)
 	}
 	// Stop the metrics-history collector. It only reads in-memory manager/proxy
 	// state, so ordering relative to the store close is not load-bearing.
-	if historyCancel != nil {
-		historyCancel()
-		historyWG.Wait()
+	if historyService != nil {
+		historyService.Stop()
 	}
 	// Drain in-flight scheduled job runs before the store closes.
 	jobsDrained := jobsMgr.Stop(shutdownCtx)

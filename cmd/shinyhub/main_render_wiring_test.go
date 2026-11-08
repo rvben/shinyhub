@@ -18,7 +18,7 @@ func TestMainWiresRenderAdmission(t *testing.T) {
 	for _, needle := range []string{
 		"admission.Detect(",          // effective cores are detected
 		"admission.NewWatermark(",    // the watermark is constructed
-		"wm.Run(ctx)",                // and its background sampler is started on the server ctx
+		"wm.Run)",                    // and its sampler runs as a service of the run group
 		"proxy.BuildAppLimiter(",     // per-app limiters are sized (now inside the factory)
 		"SetCPUWatermark(",           // and installed on the proxy
 		"SetAppAccessLookup(",        // the access-mode lookup is wired for per-principal fairness
