@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -40,15 +41,19 @@ func makeLocalGitRepo(t *testing.T) (url string, headSHA string) {
 		t.Skip("git not available")
 	}
 	repo := t.TempDir()
+	// run returns stdout only: the expected SHA must not pick up whatever a
+	// git wrapper on this machine prints to stderr.
 	run := func(args ...string) string {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = repo
 		cmd.Env = append(os.Environ(),
 			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
 			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
-		out, err := cmd.CombinedOutput()
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
 		if err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
+			t.Fatalf("git %v: %v\n%s", args, err, stderr.String())
 		}
 		return string(out)
 	}
@@ -105,6 +110,48 @@ func TestResolveGitSource_DefaultRefWhenEmpty(t *testing.T) {
 	}
 	if ref != "HEAD" {
 		t.Fatalf("ref = %q, want HEAD (default)", ref)
+	}
+}
+
+// The resolved commit must come from git's stdout alone. git writes
+// diagnostics (trace output, safe.directory and ownership warnings, hook
+// chatter) to stderr, and a combined read hands that text back as the commit
+// that fleet apply records for the deployment.
+func TestResolveGitSource_CommitIgnoresGitStderr(t *testing.T) {
+	url, head := makeLocalGitRepo(t)
+	// GIT_TRACE makes every git invocation below announce itself on stderr,
+	// the way a real warning would.
+	t.Setenv("GIT_TRACE", "1")
+	s := fleet.ParsedSource{Kind: fleet.SourceGit, GitURL: url, GitRef: "main"}
+	_, _, commit, cleanup, err := resolveGitSource(s)
+	if err != nil {
+		t.Fatalf("resolveGitSource: %v", err)
+	}
+	defer cleanup()
+	if commit != head {
+		t.Fatalf("commit = %q, want %q: git's stderr leaked into the resolved commit", commit, head)
+	}
+}
+
+// A git that prints something other than a commit SHA on stdout (a wrapper
+// that echoes a banner, a broken shim) must surface as an error instead of
+// being recorded as the deployed commit.
+func TestGitRevParseHEAD_RejectsNonSHAOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake git uses /bin/sh")
+	}
+	bin := t.TempDir()
+	fake := "#!/bin/sh\necho 'warning: not a commit'\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(fake), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	_, err := gitRevParseHEAD(t.TempDir())
+	if err == nil {
+		t.Fatal("gitRevParseHEAD accepted non-SHA output as the commit")
+	}
+	if !strings.Contains(err.Error(), "warning: not a commit") {
+		t.Fatalf("error %q should quote the unexpected output", err)
 	}
 }
 
