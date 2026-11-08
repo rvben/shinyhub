@@ -395,6 +395,24 @@ test-shell-completion-e2e:
 test-install-e2e:
 	./scripts/install-e2e.sh
 
+# verify-release-asset refuses a downloaded release asset unless checksums.txt
+# carries this repo's release-workflow signature for TAG and lists ASSET with a
+# matching hash. DIR holds ASSET, checksums.txt and checksums.txt.bundle. The
+# wheels job runs it before repackaging a binary for PyPI. Needs cosign.
+.PHONY: verify-release-asset
+verify-release-asset:
+	@test -n "$(DIR)" -a -n "$(ASSET)" -a -n "$(TAG)" \
+		|| { echo "usage: make verify-release-asset DIR=<dir> ASSET=<file> TAG=<vX.Y.Z>" >&2; exit 2; }
+	./scripts/verify-release-asset.sh "$(DIR)" "$(ASSET)" "$(TAG)"
+
+# test-release-asset-e2e runs verify-release-asset against a published release
+# (SHINYHUB_VERIFY_TAG, default the latest) and requires it to refuse a tampered
+# tarball, a re-signed-looking checksums.txt, the wrong tag and a missing
+# bundle or cosign. Needs gh, cosign and network access.
+.PHONY: test-release-asset-e2e
+test-release-asset-e2e:
+	./scripts/verify-release-asset-e2e.sh
+
 # Complete long-lived CLI contract gate. Requires uv, curl, and all four shells.
 test-cli-release-contract: test-cli-compatibility-e2e test-shell-completion-e2e
 

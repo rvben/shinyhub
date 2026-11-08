@@ -335,7 +335,12 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Download binary from GitHub Release
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      # The wheel republishes the binary on PyPI, so it must be the one the
+      # release job signed for this tag, not whatever the release holds now.
+      - name: Download and verify binary from GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -343,7 +348,8 @@ jobs:
           TAG="${GITHUB_REF_NAME}"
           TARBALL="shinyhub_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz"
           mkdir -p /tmp/dl
-          gh release download "$TAG" -p "$TARBALL" -D /tmp/dl
+          gh release download "$TAG" -p "$TARBALL" -p checksums.txt -p checksums.txt.bundle -D /tmp/dl
+          make verify-release-asset DIR=/tmp/dl ASSET="$TARBALL" TAG="$TAG"
           tar -xzf "/tmp/dl/$TARBALL" -C /tmp/dl
           install -m 755 /tmp/dl/shinyhub packaging/python/src/shinyhub/_binary/shinyhub
 
