@@ -1361,61 +1361,6 @@ type rawConfig struct {
 	Build       BuildConfig        `yaml:"build"`
 }
 
-// validTopLevelKeys is the set of accepted top-level YAML keys, mirroring the
-// rawConfig fields' yaml tags. TestValidTopLevelKeys_MatchRawConfig keeps the
-// two in sync, so adding a section to rawConfig without listing it here (which
-// would make configs using it error) is caught at test time.
-var validTopLevelKeys = map[string]bool{
-	"database": true, "server": true, "auth": true, "storage": true,
-	"lifecycle": true, "oauth": true, "runtime": true, "scheduler": true,
-	"defaults": true, "tracing": true, "metrics": true, "maintenance": true,
-	"usage": true, "branding": true, "worker": true, "build": true,
-}
-
-// runtimeSubKeys are the section names nested under `runtime:`. Placing one at
-// the top level is a common mistake; the unknown-key error hints at the correct
-// nesting for these.
-var runtimeSubKeys = map[string]bool{
-	"docker": true, "tiers": true, "autoscale": true, "fargate": true, "scaleway": true, "snapshot": true, "native": true,
-}
-
-// checkTopLevelKeys rejects any top-level YAML key that is not a known config
-// section, so a misplaced or misspelled key is a clear error rather than a
-// silent no-op. data is the raw config bytes (already known to decode as a
-// mapping, since the struct decode above succeeded).
-func checkTopLevelKeys(data []byte) error {
-	var top map[string]yaml.Node
-	if err := yaml.Unmarshal(data, &top); err != nil {
-		// A non-mapping document is already rejected by the struct decode.
-		return nil
-	}
-	var unknown []string
-	for k := range top {
-		if !validTopLevelKeys[k] {
-			unknown = append(unknown, k)
-		}
-	}
-	if len(unknown) == 0 {
-		return nil
-	}
-	slices.Sort(unknown)
-	parts := make([]string, 0, len(unknown))
-	for _, k := range unknown {
-		if runtimeSubKeys[k] {
-			parts = append(parts, fmt.Sprintf("%q (did you mean runtime.%s?)", k, k))
-		} else {
-			parts = append(parts, fmt.Sprintf("%q", k))
-		}
-	}
-	valid := make([]string, 0, len(validTopLevelKeys))
-	for k := range validTopLevelKeys {
-		valid = append(valid, k)
-	}
-	slices.Sort(valid)
-	return fmt.Errorf("config: unknown top-level key(s): %s; valid top-level keys are: %s",
-		strings.Join(parts, ", "), strings.Join(valid, ", "))
-}
-
 type rawMetricsConfig struct {
 	ProcessInterval string `yaml:"process_interval"`
 	Enabled         bool   `yaml:"enabled"`
@@ -1633,11 +1578,12 @@ func loadRaw(path string) (*Config, error) {
 			if derr := dec.Decode(raw); derr != nil {
 				return nil, fmt.Errorf("parse config: %w", derr)
 			}
-			// Reject misplaced/misspelled top-level keys (e.g. a `snapshot:` block
-			// that belongs under `runtime:`). YAML's recursive strict mode is too
-			// broad, so this is scoped to the top level - the level operators most
-			// often get wrong, where a silent drop is invisible.
-			if kerr := checkTopLevelKeys(data); kerr != nil {
+			// Reject misplaced and misspelled keys at every depth (a top-level
+			// `snapshot:` that belongs under `runtime:`, a `server.drian_timeout`
+			// typo). The struct decode above drops them without a word, which
+			// is a silent no-op the operator can only discover by noticing the
+			// setting never took effect.
+			if kerr := checkUnknownKeys(data); kerr != nil {
 				return nil, kerr
 			}
 			// Reject a trailing YAML document: the decode above read only the

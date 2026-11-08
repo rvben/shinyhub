@@ -38,6 +38,13 @@ A file explicitly selected with `--config` or `SHINYHUB_CONFIG` must exist.
 Without an explicit path, a missing `./shinyhub.yaml` permits environment-only
 configuration. An existing default file is still loaded and validated.
 
+A key the loader does not know is an error at every depth, not only at the top
+level. The error names the full path (`server.drian_timeout`) and, where it
+can, the key you probably meant: the closest spelling at that level, or the
+section that does accept that key when it was written under the wrong one
+(`defaults.timezone` points at `scheduler.timezone`). Fields that take
+arbitrary keys, such as `tracing.resource_attributes`, accept anything.
+
 Validation does not start listeners, open or migrate a database, launch apps,
 or modify server state. It does not verify DNS, certificate coverage, SSO,
 database connectivity, or runtime readiness. Continue to check `/readyz` after
