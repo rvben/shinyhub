@@ -69,10 +69,10 @@ func CanSlideSession(authTime time.Time) bool {
 	return authTime.IsZero() || time.Since(authTime) < AbsoluteSessionMaxAge
 }
 
-// bcryptCost is the password-hashing work factor. 12 is the OWASP-recommended
+// BcryptCost is the password-hashing work factor. 12 is the OWASP-recommended
 // minimum for current hardware; existing lower-cost hashes still verify since
 // bcrypt self-describes its cost in the hash.
-const bcryptCost = 12
+const BcryptCost = 12
 
 // MinPasswordLength follows NIST SP 800-63B's minimum for single-factor
 // passwords. ShinyHub's local login currently has no second factor, so shorter
@@ -94,7 +94,7 @@ func ValidateNewPassword(password string) error {
 }
 
 func HashPassword(password string) (string, error) {
-	b, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
+	b, err := bcrypt.GenerateFromPassword([]byte(password), BcryptCost)
 	if err != nil {
 		return "", err
 	}
