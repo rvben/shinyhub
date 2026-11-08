@@ -216,7 +216,7 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 			}
 
 			if resume && !IsDashboardPost(r, trustedProxies) {
-				http.Error(w, "reconnect must originate from the dashboard", http.StatusForbidden)
+				writeRequestError(w, r, http.StatusForbidden, "reconnect must originate from the dashboard")
 				return
 			}
 			// Validate only authenticated proxy assertions, before any account or
@@ -224,12 +224,12 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 			// as a partial membership list or retain stale roles for this request.
 			if !validUTF8HeaderValues(userVals) {
 				warnInvalidEncoding(r, cfg.UserHeader)
-				http.Error(w, "forward auth: user header must contain valid UTF-8", http.StatusBadRequest)
+				writeRequestError(w, r, http.StatusBadRequest, "forward auth: user header must contain valid UTF-8")
 				return
 			}
 			if !validUTF8HeaderValues(groupsVals) {
 				warnInvalidEncoding(r, cfg.GroupsHeader)
-				http.Error(w, "forward auth: groups header must contain valid UTF-8", http.StatusBadRequest)
+				writeRequestError(w, r, http.StatusBadRequest, "forward auth: groups header must contain valid UTF-8")
 				return
 			}
 			if !validUTF8HeaderValues(nameVals) {
@@ -247,11 +247,11 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 				user, err = store.CreateForwardAuthUser(username, cfg.DefaultRole)
 			}
 			if errors.Is(err, ErrReservedIdentity) {
-				http.Error(w, "forward auth: identity is reserved", http.StatusForbidden)
+				writeRequestError(w, r, http.StatusForbidden, "forward auth: identity is reserved")
 				return
 			}
 			if err != nil || user == nil {
-				http.Error(w, "forward auth: store error", http.StatusInternalServerError)
+				writeRequestError(w, r, http.StatusInternalServerError, "forward auth: store error")
 				return
 			}
 
@@ -261,7 +261,7 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 					// Strict mode: the operator requires the proxy to assert group
 					// membership on every request. A missing header is a proxy
 					// misconfiguration, so refuse rather than silently revoke.
-					http.Error(w, "forward auth: groups header required but missing", http.StatusForbidden)
+					writeRequestError(w, r, http.StatusForbidden, "forward auth: groups header required but missing")
 					return
 				}
 				// Default mode: an absent header means no groups, so we reconcile and
@@ -270,12 +270,12 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 				groups := parseGroups(strings.Join(vals, ","))
 				changed, err := groupsChanged(store, user.ID, groups)
 				if err != nil {
-					http.Error(w, "forward auth: groups error", http.StatusInternalServerError)
+					writeRequestError(w, r, http.StatusInternalServerError, "forward auth: groups error")
 					return
 				}
 				if changed {
 					if err := store.ReconcileUserFromGroups(user.ID, groups, cfg.GroupRoleMappings, cfg.DefaultRole); err != nil {
-						http.Error(w, "forward auth: reconcile error", http.StatusInternalServerError)
+						writeRequestError(w, r, http.StatusInternalServerError, "forward auth: reconcile error")
 						return
 					}
 					if fresh, err := store.GetForwardAuthUser(user.Username); err == nil && fresh != nil {
@@ -333,11 +333,11 @@ func ForwardAuthMiddleware(store ForwardAuthUserStore, cfg ForwardAuthConfig, tr
 							return
 						}
 					}
-					http.Error(w, "browser session required; open the dashboard to reconnect", http.StatusUnauthorized)
+					writeRequestError(w, r, http.StatusUnauthorized, "browser session required; open the dashboard to reconnect")
 					return
 				}
 				if err != nil {
-					http.Error(w, "could not verify browser session; try again", http.StatusServiceUnavailable)
+					writeRequestError(w, r, http.StatusServiceUnavailable, "could not verify browser session; try again")
 					return
 				}
 				if !accepted {

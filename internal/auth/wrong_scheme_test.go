@@ -58,8 +58,8 @@ func TestAPIKeyUnderBearerNamesTheTokenScheme(t *testing.T) {
 	if !strings.Contains(challenge, `error="invalid_request"`) {
 		t.Errorf("expected an invalid_request challenge, got %q", challenge)
 	}
-	if rec.Body.String() != "unauthorized\n" {
-		t.Errorf("the response body must not change, got %q", rec.Body.String())
+	if rec.Body.String() != `{"error":"unauthorized"}`+"\n" {
+		t.Errorf("the body must stay the generic rejection, got %q", rec.Body.String())
 	}
 }
 
