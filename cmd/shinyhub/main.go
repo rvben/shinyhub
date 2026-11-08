@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -36,7 +34,6 @@ import (
 	"github.com/rvben/shinyhub/internal/access"
 	"github.com/rvben/shinyhub/internal/activation"
 	"github.com/rvben/shinyhub/internal/api"
-	"github.com/rvben/shinyhub/internal/appenv"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/autoscale"
 	"github.com/rvben/shinyhub/internal/backup"
@@ -1372,183 +1369,22 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		return err
 	}
 
-	// Build one runtime per configured tier. The first tier is the default
-	// (config.Load synthesizes a single "local" tier from Mode when none are
-	// declared, so single-node behavior is unchanged). The default tier's
-	// runtime backs the Manager and every runtime-typed consumer (sampler,
-	// jobs, recovery lister, sweeper); additional tiers are registered so
-	// placement can route replicas to them.
-	defaultTier := cfg.Runtime.DefaultTierName()
-	// Find the full TierConfig for the default tier so LaunchType is carried through.
-	defaultTierCfg := config.TierConfig{Name: defaultTier, Runtime: cfg.Runtime.Mode}
-	for _, t := range cfg.Runtime.Tiers {
-		if t.Name == defaultTier {
-			defaultTierCfg = t
-			break
-		}
-	}
-	var rt process.Runtime
-	if defaultTierCfg.Runtime == "remote_docker" {
-		if workerReg == nil || dialer == nil {
-			return fmt.Errorf("tier %q requires worker hosting to be enabled", defaultTier)
-		}
-		rt = worker.NewRemoteRuntime(workerReg, defaultTier, dialer)
-	} else {
-		rt, err = buildRuntime(ctx, defaultTierCfg, cfg, bundleTokenKey)
-		if err != nil {
-			return err
-		}
-	}
-	slog.Info("runtime configured", "tier", defaultTier, "mode", defaultTierCfg.Runtime, "max_concurrent_builds", cfg.Runtime.MaxConcurrentBuilds)
-	deploy.SetMaxConcurrentBuilds(cfg.Runtime.MaxConcurrentBuilds)
-	mgr := process.NewManager(cfg.Storage.AppsDir, rt)
-	// Processes that survived the last shutdown are still running and still
-	// serving, but this Manager has not adopted them yet: RecoverProcesses does
-	// that from ownerRuntime.run, after ownership is acquired, while the listener is
-	// already answering. Declare the pass outstanding here - before anything can
-	// read the Manager - so a reader knows an absent entry means "not looked at"
-	// rather than "not running". RecoverProcesses clears it on every exit path.
-	mgr.MarkRecoveryPending()
-	mgr.SetDefaultTier(defaultTier)
-	mgr.SetStopGrace(cfg.Server.StopGrace)
-	mgr.SetLogMaxSize(int64(cfg.Storage.AppLogMaxSizeMB) << 20)
-	mgr.SetLogRunRecorder(process.LogRunRecorder{
-		Begin: func(run process.LogRun) error {
-			// AppID is absent only in local/test-style starts that are not backed by
-			// an app row. They still get immutable files, but cannot have DB history.
-			if run.AppID == 0 {
-				return nil
-			}
-			var deploymentID *int64
-			if run.DeploymentID != 0 {
-				id := run.DeploymentID
-				deploymentID = &id
-			}
-			return store.CreateAppLogRun(db.CreateAppLogRunParams{
-				RunID: run.RunID, AppID: run.AppID, ReplicaIndex: run.ReplicaIndex,
-				DeploymentID: deploymentID, AppVersion: run.AppVersion,
-				Tier: run.Tier, Status: string(run.Status), StartedAt: run.StartedAt,
-			})
-		},
-		Running: func(run process.LogRun) error {
-			if run.AppID == 0 {
-				return nil
-			}
-			externalLogs := ""
-			if run.ExternalLogs != nil {
-				encoded, err := json.Marshal(run.ExternalLogs)
-				if err != nil {
-					return fmt.Errorf("encode external log handoff: %w", err)
-				}
-				externalLogs = string(encoded)
-			}
-			return store.MarkAppLogRunRunning(run.RunID, run.Provider, externalLogs)
-		},
-		Finish: func(run process.LogRun) error {
-			if run.AppID == 0 {
-				return nil
-			}
-			return store.FinishAppLogRunWithExit(run.RunID, string(run.Status), run.FinishedAt,
-				run.OOMKilled, run.ExitCode, run.Signal, run.ExitReason)
-		},
+	mgr, err := newProcessManager(ctx, processManagerDeps{
+		cfg:            cfg,
+		store:          store,
+		workerReg:      workerReg,
+		dialer:         dialer,
+		bundleTokenKey: bundleTokenKey,
+		secretsKey:     secretsKey,
+		absAppDataDir:  absAppDataDir,
 	})
-	if store.IsPostgres() {
-		mgr.SetLogRunSinkFactory(func(run process.LogRun) (io.WriteCloser, error) {
-			if run.AppID == 0 {
-				return nil, nil
-			}
-			return store.NewAppLogWriter(run.RunID, db.AppLogRetentionBytes)
-		})
-	}
-	for _, tierCfg := range cfg.Runtime.Tiers {
-		if tierCfg.Name == defaultTier {
-			continue
-		}
-		if tierCfg.Runtime == "remote_docker" {
-			if workerReg == nil || dialer == nil {
-				return fmt.Errorf("tier %q requires worker hosting to be enabled", tierCfg.Name)
-			}
-			mgr.RegisterRuntime(tierCfg.Name, worker.NewRemoteRuntime(workerReg, tierCfg.Name, dialer))
-			slog.Info("remote runtime tier registered", "tier", tierCfg.Name, "mode", tierCfg.Runtime)
-			continue
-		}
-		tierRT, err := buildRuntime(ctx, tierCfg, cfg, bundleTokenKey)
-		if err != nil {
-			return err
-		}
-		mgr.RegisterRuntime(tierCfg.Name, tierRT)
-		slog.Info("runtime tier registered", "tier", tierCfg.Name, "mode", tierCfg.Runtime)
-	}
-	mgr.SetEnvResolver(func(slug string) ([]string, []string, error) {
-		app, err := store.GetApp(slug)
-		if err != nil {
-			return nil, nil, err
-		}
-		vars, err := store.ListAppEnvVars(app.ID)
-		if err != nil {
-			return nil, nil, err
-		}
-		env, secretEnv, err := appenv.Resolve(vars, secretsKey)
-		if err != nil {
-			return nil, nil, fmt.Errorf("resolve env for app %s: %w", slug, err)
-		}
-		return env, secretEnv, nil
-	})
-	mgr.SetSharedMountResolver(func(slug string) ([]process.SharedMount, error) {
-		app, err := store.GetApp(slug)
-		if err != nil {
-			return nil, err
-		}
-		rows, err := store.ListSharedDataSources(app.ID)
-		if err != nil {
-			return nil, err
-		}
-		out := make([]process.SharedMount, 0, len(rows))
-		for _, m := range rows {
-			out = append(out, process.SharedMount{
-				SourceSlug: m.SourceSlug,
-				HostPath:   filepath.Join(absAppDataDir, m.SourceSlug),
-			})
-		}
-		return out, nil
-	})
-	if err := mgr.SetAppDataRoot(absAppDataDir); err != nil {
-		return fmt.Errorf("set app data root: %w", err)
-	}
-	if err := mgr.SetAppCache(cfg.Storage.AppCacheDir, cfg.Storage.CacheMaxMB()); err != nil {
-		return fmt.Errorf("set app cache: %w", err)
+	if err != nil {
+		return err
 	}
 
-	// Tracing: shared ring buffer surfaced by the /traces handler, plus
-	// platform-default OTEL_* env vars injected into every app process so
-	// Shiny's built-in OpenTelemetry exporter reaches the configured backend
-	// without per-app configuration. Both are no-ops when cfg.Tracing.Enabled
-	// is false.
+	// Tracing: shared ring buffer surfaced by the /traces handler. It is a
+	// no-op when cfg.Tracing.Enabled is false.
 	traceBuffer := tracing.NewBuffer(cfg.Tracing.RingBufferSize, time.Duration(cfg.Tracing.SlowRequestMS)*time.Millisecond)
-	mgr.SetPlatformDefaultEnvResolver(func(slug string, replica int) []string {
-		env := tracing.EnvFor(cfg.Tracing, slug, replica)
-		// Identity: every app receives its verification key and its own
-		// slug, unconditionally (the key alone discloses nothing - it only
-		// verifies tokens that are never minted while forwarding is
-		// disabled - and unconditional injection means enabling the flag
-		// later doesn't strand running apps without a key). The numeric ID
-		// scopes the key so a delete-and-recreate under the same slug
-		// cannot inherit its predecessor's key.
-		app, err := store.GetApp(slug)
-		if err != nil {
-			slog.Warn("identity: resolve app for key derivation; skipping identity env", "slug", slug, "err", err)
-			return env
-		}
-		key := identity.DeriveKey(cfg.Auth.Secret, app.ID)
-		return append(env,
-			"SHINYHUB_IDENTITY_KEY="+hex.EncodeToString(key),
-			"SHINYHUB_APP_SLUG="+slug,
-		)
-	})
-	// The Enabled conjunct is belt-and-braces on top of config validation:
-	// wrapping apps that would export nowhere must be impossible.
-	mgr.SetAutoInstrumentAppsDefault(cfg.Tracing.Enabled && cfg.Tracing.AutoInstrumentApps)
-	mgr.SetAutoInstrumentExtraPackages(cfg.Tracing.AutoInstrumentExtraPackages)
 
 	prx := proxy.New()
 	prx.SetTracing(cfg.Tracing, traceBuffer)
@@ -2042,6 +1878,8 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// (the legacy field): a config that declares tiers:[{runtime:docker}]
 	// without setting runtime.mode must still pick the RuntimeSampler, not the
 	// host sampler.
+	defaultTierCfg := defaultTierConfig(cfg)
+	rt := mgr.RuntimeForTier(defaultTierCfg.Name)
 	var replicaSampler process.Sampler
 	if defaultTierCfg.Runtime == "docker" {
 		replicaSampler = &process.RuntimeSampler{Runtime: rt}

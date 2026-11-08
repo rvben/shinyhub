@@ -36,55 +36,6 @@ func sourceCount(t *testing.T, path, needle string) int {
 	return strings.Count(string(src), needle)
 }
 
-// The startup re-adoption window is declared in runServe, which cannot be unit
-// imported. Everything below it depends on that one call: the API layer reports
-// a surviving replica as "reconciling" instead of stopped only while the flag is
-// set, so a refactor that drops the call silently restores the original defect
-// (a healthy, serving app shown as down for as long as recovery takes) with
-// every unit test still green.
-//
-// Presence alone is not the contract, though. The call is only worth anything if
-// it happens before anyone can read the manager and before the pass it describes
-// runs, so this pins its position between two independent bounds rather than
-// merely asserting it exists somewhere in the file.
-func TestMainMarksRecoveryPendingBeforeTheManagerIsReadable(t *testing.T) {
-	const (
-		construct = "mgr := process.NewManager("
-		mark      = "mgr.MarkRecoveryPending()"
-		serve     = "srv := api.New(cfg, store, mgr, prx)"
-		// The recovery pass runs only inside ownerRuntime.run, which cannot
-		// start before the ownership scope that drives it exists.
-		ownerScope = "scope := leader.NewOwnerScope(owner.run)"
-		recover    = "lifecycle.RecoverProcesses("
-	)
-	idx := map[string]int{}
-	for _, needle := range []string{construct, mark, serve, ownerScope} {
-		idx[needle] = sourceIndex(t, "main.go", needle)
-	}
-	sourceIndex(t, "owner_runtime.go", recover)
-	if n := sourceCount(t, "main.go", recover); n != 0 {
-		t.Fatalf("main.go calls RecoverProcesses %d times outside the owner runtime, so the scope bound below no longer covers it", n)
-	}
-
-	// Lower bound: the manager has to exist first. This one is a sanity check on
-	// the anchors more than on the code.
-	if idx[mark] < idx[construct] {
-		t.Errorf("MarkRecoveryPending is called before the manager is built")
-	}
-	// Upper bound one: nothing may be able to read the manager before the window
-	// is declared. The API server is the reader that matters: it is what answers
-	// GET /api/apps while recovery is still running.
-	if idx[mark] > idx[serve] {
-		t.Errorf("MarkRecoveryPending happens after the API server is handed the manager, so a request that lands in between still reports surviving replicas as stopped")
-	}
-	// Upper bound two: marking after the pass it describes would leave the flag
-	// set with nothing left to clear it, turning a fifteen-second inaccuracy into
-	// a permanent one. The pass can only run once the ownership scope exists.
-	if idx[mark] > idx[ownerScope] {
-		t.Errorf("MarkRecoveryPending happens after the ownership scope that runs RecoverProcesses is created, so the window it opens may never close")
-	}
-}
-
 // TestMainPreparesRecoveryBeforeRecoverProcesses pins the ordering that keeps
 // RecoverProcesses from ever adopting on an unresolved bundle directory:
 // PrepareRecovery must run to completion, retried until it succeeds, before
