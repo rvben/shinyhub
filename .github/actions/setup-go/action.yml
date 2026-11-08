@@ -18,10 +18,13 @@ inputs:
     required: false
     default: ${{ github.job }}
 
+# The actions below are pinned to commits because the release workflow runs
+# this composite too, and a step that only runs at release time has no CI run
+# to catch a changed upstream tag before the tag is already pushed.
 runs:
   using: composite
   steps:
-    - uses: actions/setup-go@v7
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version-file: go.mod
         cache: false
@@ -36,7 +39,7 @@ runs:
     # unique); it exists so this job saves a fresh cache. restore-keys pick the
     # newest earlier cache, preferring the same job with the same dependency
     # set, then the same job with any dependency set, then any Go job.
-    - uses: actions/cache@v6
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           ${{ steps.go-env.outputs.gomodcache }}

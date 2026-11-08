@@ -63,10 +63,11 @@ test-race-api:
 	go test -race ./internal/api -count=1 -timeout $(RACE_TIMEOUT)
 
 # vuln scans the module (and its dependencies) against the Go vulnerability
-# database. Run via `go run` so no separate install step is needed and it works
-# the same locally and in CI.
+# database. govulncheck is a tool dependency in go.mod, so every run, locally,
+# in CI and at release time, uses the same go.sum-verified version, and the
+# dependency updater bumps it with the other Go modules.
 vuln:
-	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+	go tool govulncheck ./...
 
 # scan-image builds the container image and scans it for known HIGH/CRITICAL
 # CVEs with Trivy (base image layers + the embedded Go binary's dependencies).
@@ -127,14 +128,22 @@ test-js: node-deps
 	node --test internal/ui/jstests/*.test.js
 	SHINYHUB_INJECTED_SCRIPTS=min node --test $$(grep -l injected-script.js internal/ui/jstests/*.test.js)
 
+# worker-deps installs the demo Worker's own dependencies when they are missing.
+# The startup tests exercise the actual Containers SDK, so the Worker tests
+# need them the way the dashboard tests need jsdom; npm ci installs exactly
+# what the Worker's lock file names.
+.PHONY: worker-deps
+worker-deps:
+	@command -v npm >/dev/null 2>&1 || { echo "npm not found (Node 22.18+ required for Worker tests)"; exit 1; }
+	@if [ ! -d deploy/cloudflare-demo/node_modules/@cloudflare/containers ]; then npm --prefix deploy/cloudflare-demo ci --no-audit --no-fund --silent; fi
+
 # test-worker runs the unit tests for the Cloudflare demo Worker. The Worker
 # decides what reaches the demo container, and a request that reaches a sleeping
 # container wakes it, so its admission policy is a cost boundary and is tested
 # rather than only deployed. Node runs the TypeScript directly (type stripping,
-# unflagged since 22.18). Install deploy/cloudflare-demo dependencies with npm ci
-# first: startup regressions exercise the actual Containers SDK. The glob is
-# left unquoted for the shell to expand, as in test-js.
-test-worker:
+# unflagged since 22.18). The glob is left unquoted for the shell to expand, as
+# in test-js.
+test-worker: worker-deps
 	@command -v node >/dev/null 2>&1 || { echo "node not found (Node 22.18+ required for Worker tests)"; exit 1; }
 	@node -e 'const [maj,min]=process.versions.node.split(".").map(Number); if (maj<22 || (maj===22 && min<18)) { console.error(`Node $${process.versions.node} cannot run TypeScript tests directly (22.18+ required)`); process.exit(1); }'
 	node --test deploy/cloudflare-demo/src/*.test.ts
