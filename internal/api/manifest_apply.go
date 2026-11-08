@@ -461,7 +461,7 @@ func (s *Server) applyManifestScheduleReconciliation(r *http.Request, app *db.Ap
 		}
 		effectiveTZ := effectiveTZLabel(timezones[i], s.cfg.Scheduler.Location)
 		s.audit(r, auditAction, "schedule", fmt.Sprintf("%d", id),
-			fmt.Sprintf(`{"app":%q,"name":%q,"effective_timezone":%q}`, app.Slug, spec.Name, effectiveTZ))
+			db.AuditDetail(map[string]any{"app": app.Slug, "name": spec.Name, "effective_timezone": effectiveTZ}))
 
 		results = append(results, ManifestScheduleResult{Name: spec.Name, Action: resultAction, ScheduleID: id})
 	}
@@ -474,7 +474,7 @@ func (s *Server) applyManifestScheduleReconciliation(r *http.Request, app *db.Ap
 		}
 	}
 	for _, schedule := range retirements {
-		s.audit(r, "schedule_retire", "schedule", fmt.Sprintf("%d", schedule.ID), fmt.Sprintf(`{"app":%q,"name":%q}`, app.Slug, schedule.Name))
+		s.audit(r, "schedule_retire", "schedule", fmt.Sprintf("%d", schedule.ID), db.AuditDetail(map[string]any{"app": app.Slug, "name": schedule.Name}))
 		results = append(results, ManifestScheduleResult{Name: schedule.Name, Action: "retired", ScheduleID: schedule.ID})
 		if err := s.reloadScheduler(schedule.ID, app.Slug, schedule.Name); err != nil {
 			return results, err

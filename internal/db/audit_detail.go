@@ -23,6 +23,9 @@ import (
 // two stay distinguishable: a render failure produces a detail_error object
 // rather than the empty string, because a caller that meant to say something
 // and silently said nothing is the one case an audit trail must not hide.
+//
+// Facts only, never secrets: the column is readable by every admin and is
+// exported by GET /api/audit.
 func AuditDetail(fields map[string]any) string {
 	if len(fields) == 0 {
 		return ""

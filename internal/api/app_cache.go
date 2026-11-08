@@ -69,7 +69,7 @@ func (s *Server) handleClearAppCache(w http.ResponseWriter, r *http.Request) {
 		Action:       db.AuditCacheClear,
 		ResourceType: "app",
 		ResourceID:   slug,
-		Detail:       auditDetailJSON(map[string]any{"deployment_ids": cleared}),
+		Detail:       db.AuditDetail(map[string]any{"deployment_ids": cleared}),
 		IPAddress:    s.ClientIP(r),
 	})
 	w.WriteHeader(http.StatusNoContent)

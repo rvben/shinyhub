@@ -361,7 +361,7 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 // means the trail records only that some project changed - and for a delete the
 // slug it names no longer resolves to anything.
 func projectAuditDetail(fields map[string]any) string {
-	return auditDetailJSON(fields)
+	return db.AuditDetail(fields)
 }
 
 // projectDisplay is the slug -> display metadata map used to decorate app

@@ -476,7 +476,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		Action:       "create_app",
 		ResourceType: "app",
 		ResourceID:   req.Slug,
-		Detail: auditDetailJSON(map[string]any{
+		Detail: db.AuditDetail(map[string]any{
 			"name":     app.Name,
 			"access":   app.Access,
 			"owner_id": app.OwnerID,
@@ -3606,7 +3606,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for _, schedule := range prestartPlan.retirements {
-			s.audit(r, "schedule_retire", "schedule", fmt.Sprintf("%d", schedule.ID), fmt.Sprintf(`{"app":%q,"name":%q}`, app.Slug, schedule.Name))
+			s.audit(r, "schedule_retire", "schedule", fmt.Sprintf("%d", schedule.ID), db.AuditDetail(map[string]any{"app": app.Slug, "name": schedule.Name}))
 			manifestSummary.Schedules = append(manifestSummary.Schedules, ManifestScheduleResult{Name: schedule.Name, Action: "retired", ScheduleID: schedule.ID})
 		}
 		s.applyHandoffProxySettings(app)
@@ -3825,7 +3825,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			// The deployment id and content digest are what let a reader tie
 			// this event to a specific bundle on disk, and to the rollback that
 			// may later target it.
-			Detail: auditDetailJSON(map[string]any{
+			Detail: db.AuditDetail(map[string]any{
 				"deployment_id":  pendingDep.ID,
 				"version":        version,
 				"content_digest": pendingDep.ContentDigest,
@@ -4300,7 +4300,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 			// Which bundle the app landed on is the whole point of a rollback
 			// event; "targeted" distinguishes an operator naming a deployment
 			// from the default step back to the previous one.
-			Detail: auditDetailJSON(map[string]any{
+			Detail: db.AuditDetail(map[string]any{
 				"to_deployment_id": prev.ID,
 				"to_version":       prev.Version,
 				"targeted":         reqBody.DeploymentID != nil,
@@ -4539,7 +4539,7 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 			// after the pool came back. Recording where the app was separates a
 			// routine cycle of a healthy app from an operator reviving one that
 			// had crashed, which is the question an audit reader is asking.
-			Detail: auditDetailJSON(map[string]any{
+			Detail: db.AuditDetail(map[string]any{
 				"previous_status": previousStatus,
 				"replicas":        updatedApp.Replicas,
 			}),
@@ -4763,7 +4763,7 @@ func (s *Server) handleStopApp(w http.ResponseWriter, r *http.Request) {
 			Action:       "stop",
 			ResourceType: "app",
 			ResourceID:   slug,
-			Detail: auditDetailJSON(map[string]any{
+			Detail: db.AuditDetail(map[string]any{
 				"previous_status": previousStatus,
 			}),
 			IPAddress: s.ClientIP(r),
@@ -4828,7 +4828,7 @@ func (s *Server) handleSleepApp(w http.ResponseWriter, r *http.Request) {
 			Action:       "sleep",
 			ResourceType: "app",
 			ResourceID:   slug,
-			Detail: auditDetailJSON(map[string]any{
+			Detail: db.AuditDetail(map[string]any{
 				"previous_status":  previousStatus,
 				"worker_isolation": isolation,
 			}),

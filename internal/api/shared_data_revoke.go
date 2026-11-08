@@ -156,7 +156,7 @@ func (s *Server) handleRevokeSharedData(w http.ResponseWriter, r *http.Request) 
 		writeInternal(w, r, "app stopped, but the mount configuration could not be removed; retry unmount", err)
 		return
 	}
-	s.audit(r, "shared_data_revoke", "app", app.Slug, fmt.Sprintf(`{"source":%q}`, src.Slug))
+	s.audit(r, "shared_data_revoke", "app", app.Slug, db.AuditDetail(map[string]any{"source": src.Slug}))
 	// New executions now resolve only the remaining grants. Release these fences
 	// before the normal boot path reacquires consumer/producer lifetime locks.
 	releaseConsumers()

@@ -101,7 +101,7 @@ func (s *Server) handleRetryScheduleConvergence(w http.ResponseWriter, r *http.R
 		current = refreshed
 	}
 	s.audit(r, "schedule_convergence_retry", "schedule", fmt.Sprintf("%d", scheduleID),
-		fmt.Sprintf(`{"app":%q,"name":%q,"obligation_id":%d}`, app.Slug, schedule.Name, current.ID))
+		db.AuditDetail(map[string]any{"app": app.Slug, "name": schedule.Name, "obligation_id": current.ID}))
 	writeJSON(w, http.StatusAccepted, ScheduleConvergenceResult{
 		ScheduleID: scheduleID, Schedule: schedule.Name, ObligationID: current.ID,
 		Status: current.Status, RunID: current.ScheduleRunID, Warning: warning,
