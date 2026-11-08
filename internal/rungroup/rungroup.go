@@ -48,6 +48,13 @@ func (s *Service) Context() context.Context {
 	return s.ctx
 }
 
+// Done is closed once the service has returned. A caller that must not
+// proceed while the service is still running, even past its budget, waits on
+// it after a Stop that reported an overrun.
+func (s *Service) Done() <-chan struct{} {
+	return s.done
+}
+
 // Go starts run in a new goroutine under a fresh context that Stop cancels.
 // budget is how long a stop waits for run to return after cancellation. A
 // panic in run is logged and ends the service; a safego.Fatal panic still

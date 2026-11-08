@@ -184,6 +184,29 @@ func TestServiceContextIsCancelledByStop(t *testing.T) {
 	}
 }
 
+func TestDoneClosesOnlyOnceTheServiceHasReturned(t *testing.T) {
+	g, _ := newTestGroup()
+	release := make(chan struct{})
+	svc := g.Go("overruns", 10*time.Millisecond, func(ctx context.Context) {
+		<-ctx.Done()
+		<-release
+	})
+	if svc.Stop() {
+		t.Fatal("Stop reported a service that ignores cancellation as stopped")
+	}
+	select {
+	case <-svc.Done():
+		t.Fatal("Done closed while the service was still running past its budget")
+	default:
+	}
+	close(release)
+	select {
+	case <-svc.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("Done never closed after the service returned")
+	}
+}
+
 func TestPlanIsTheSumOfBudgets(t *testing.T) {
 	g, _ := newTestGroup()
 	g.Go("a", 2*time.Second, func(ctx context.Context) { <-ctx.Done() })

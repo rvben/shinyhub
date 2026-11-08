@@ -6,6 +6,8 @@ import (
 	"runtime"
 	"testing"
 	"time"
+
+	"github.com/rvben/shinyhub/internal/rungroup"
 )
 
 // TestAwaitShutdown_ReturnsTrueWhenStopFinishesInBudget proves the happy path:
@@ -146,5 +148,41 @@ func TestDrainOwnershipHandoff(t *testing.T) {
 				t.Fatalf("drainOwnershipHandoff = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// A service that reads the store must have returned before the store closes,
+// even when it overruns its stop budget: a sweep that outlives the store turns
+// every lookup into an error, and an access recheck reads an error as a
+// revocation.
+func TestStopBeforeStoreClosesWaitsPastTheBudget(t *testing.T) {
+	services := rungroup.New(readinessTestLogger())
+	release := make(chan struct{})
+	exited := make(chan struct{})
+	svc := services.Go("store reader", 10*time.Millisecond, func(ctx context.Context) {
+		<-ctx.Done()
+		<-release
+		close(exited)
+	})
+	returned := make(chan struct{})
+	go func() {
+		stopBeforeStoreCloses(svc, readinessTestLogger())
+		close(returned)
+	}()
+	select {
+	case <-returned:
+		t.Fatal("stopBeforeStoreCloses returned while the service was still running")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stopBeforeStoreCloses never returned after the service exited")
+	}
+	select {
+	case <-exited:
+	default:
+		t.Fatal("stopBeforeStoreCloses returned before the service body finished")
 	}
 }

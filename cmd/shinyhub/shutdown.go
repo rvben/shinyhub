@@ -6,6 +6,8 @@ import (
 	"os"
 	"runtime"
 	"time"
+
+	"github.com/rvben/shinyhub/internal/rungroup"
 )
 
 // shutdownDrainBudget bounds the work ownerWork's shutdown branch does before
@@ -29,6 +31,19 @@ const (
 	serviceStoreStopBudget  = shutdownWatchdogBudget
 	serviceMemoryStopBudget = 5 * time.Second
 )
+
+// stopBeforeStoreCloses stops a service whose work reads the store and keeps
+// waiting if it overruns its budget. A sweep that outlives the store turns
+// every lookup into an error, and an access recheck reads an error as a
+// revocation, so closing the store first would end sessions that are still
+// entitled. The overrun is logged by name before the wait continues.
+func stopBeforeStoreCloses(svc *rungroup.Service, log *slog.Logger) {
+	if svc.Stop() {
+		return
+	}
+	log.Error("waiting for a service that reads the store to exit before the store closes")
+	<-svc.Done()
+}
 
 // osExit is os.Exit behind a variable so a test can intercept the "give up
 // and exit non-zero" path without terminating the test process.

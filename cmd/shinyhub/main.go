@@ -1657,10 +1657,6 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// counts into replica_sessions so other instances can aggregate fleet
 	// load. Single-node deployments skip this entirely: no rows, no goroutine.
 	var reporterService *rungroup.Service
-	// Declared here, started once the /app/* chain below is wired (the recheck
-	// reuses that chain's store and user lookup so both decide alike).
-	var recheckWG sync.WaitGroup
-	var recheckCancel context.CancelFunc
 	if isClustered(cfg) {
 		flushCh := make(chan string, 16)
 		prx.EnableImmediateFlush(flushCh)
@@ -1685,18 +1681,18 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		prx.SetRetiringParent(fence)
 		var releaseOnce sync.Once
 		releaseRetiringParentFence = func() { releaseOnce.Do(func() { close(fence) }) }
-		go func() {
-			if err := upg.WaitForParent(ctx); err != nil {
+		services.Go("retiring parent wait", serviceMemoryStopBudget, func(wctx context.Context) {
+			if err := upg.WaitForParent(wctx); err != nil {
 				// Fail closed: an unconfirmed parent's sessions must not be
-				// mistaken for zero. No store access in this goroutine.
-				if ctx.Err() == nil {
+				// mistaken for zero. No store access in this service.
+				if wctx.Err() == nil {
 					logger.Error("cannot confirm retiring proxy exit; lifecycle changes remain fenced", "err", err)
 				}
 				return
 			}
 			relayLeases.Refresh()
 			close(done)
-		}()
+		})
 	}
 
 	// In clustered deployments every instance runs a pool syncer that
@@ -1927,18 +1923,15 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 				native.SetWorkloadObserver(collector.Observe)
 			}
 		}
-		metricsCtx, cancelMetrics := context.WithCancel(context.Background())
-		var metricsWG sync.WaitGroup
-		metricsWG.Add(1)
-		go func() {
-			defer metricsWG.Done()
-			collector.Run(metricsCtx)
-		}()
+		metricsService := services.Go("workload metrics", serviceMemoryStopBudget, collector.Run)
 		var stopOnce sync.Once
 		stopWorkloadMetrics = func() {
 			stopOnce.Do(func() {
-				cancelMetrics()
-				metricsWG.Wait()
+				// The final export runs only once sampling has stopped, so no
+				// observation lands after the flush.
+				if !metricsService.Stop() {
+					return
+				}
 				flushCtx, cancelFlush := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancelFlush()
 				if err := collector.Shutdown(flushCtx); err != nil {
@@ -2869,13 +2862,22 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		}
 
 		var loops sync.WaitGroup
+		// startLoop runs one owner loop for this ownership epoch. The shutdown
+		// branch below waits on loops before ownership is released, so every
+		// loop has returned before a successor can take over.
+		startLoop := func(run func()) {
+			loops.Add(1)
+			// rungroup:exempt: joined by loops.Wait in this epoch's shutdown branch, under the ownership watchdog
+			go func() {
+				defer loops.Done()
+				run()
+			}()
+		}
 		if retiringParentDone != nil && prx.RetiringParentAlive() {
 			// Recovery retains obsolete multiplex generations while the parent
 			// proxies them. Keep the lifecycle fence until cleanup finishes,
 			// so no new candidate or draining generation can enter this pass.
-			loops.Add(1)
-			go func() {
-				defer loops.Done()
+			startLoop(func() {
 				runRetiringParentCleanup(octx, retiringParentDone, recoveryInputs.Apps,
 					srv.TryAcquireAppOperation, func(recovered *db.App) error {
 						app, err := store.GetAppByID(recovered.ID)
@@ -2893,50 +2895,35 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 						releaseRetiringParentFence()
 						relaunchOwed()
 					})
-			}()
+			})
 		}
 		if monitor != nil {
-			loops.Add(1)
-			go func() { defer loops.Done(); monitor.Run(octx, monitorInterval) }()
+			startLoop(func() { monitor.Run(octx, monitorInterval) })
 			slog.Info("worker-down monitor started", "timeout", workerTimeout, "interval", monitorInterval, "retention", workerRetention)
 		}
-		loops.Add(1)
-		go func() { defer loops.Done(); watcher.Start(octx) }()
+		startLoop(func() { watcher.Start(octx) })
 		if !isClustered(cfg) {
-			loops.Add(1)
-			go func() { defer loops.Done(); activationCoordinator.Start(octx) }()
+			startLoop(func() { activationCoordinator.Start(octx) })
 			slog.Info("schedule activation coordinator started", "concurrency", 1)
 		}
 		// Database housekeeping (audit + schedule-run retention) runs on the owner
 		// only, so HA standbys never prune concurrently. A no-op unless retention
 		// is configured.
-		loops.Add(1)
-		go func() {
-			defer loops.Done()
-			runMaintenance(octx, store, mgr, appLogTelemetry, cfg.Maintenance, cfg.Usage)
-		}()
+		startLoop(func() { runMaintenance(octx, store, mgr, appLogTelemetry, cfg.Maintenance, cfg.Usage) })
 		// A file-backed SQLite database is only ever served by one process, so
 		// its WAL checkpoint and planner statistics belong with the owner loops.
-		loops.Add(1)
-		go func() {
-			defer loops.Done()
-			runSQLiteMaintenance(octx, store, cfg.Maintenance.Interval)
-		}()
-		loops.Add(1)
-		go func() { defer loops.Done(); srv.RunDevelopmentAppReaper(octx, time.Minute) }()
+		startLoop(func() { runSQLiteMaintenance(octx, store, cfg.Maintenance.Interval) })
+		startLoop(func() { srv.RunDevelopmentAppReaper(octx, time.Minute) })
 		// Restore serving floors independently of optional frozen warm-wake.
 		// Sequence the two passes so frozen restoration cannot claim a serving app.
-		loops.Add(1)
-		go func() {
-			defer loops.Done()
+		startLoop(func() {
 			watcher.RestoreWarmFloors(octx, previouslyRunning)
 			if cfg.Runtime.Snapshot.Enabled && cfg.Runtime.Snapshot.RestoreOnStartup {
 				watcher.RestoreWarm(octx)
 			}
-		}()
+		})
 		if controller != nil {
-			loops.Add(1)
-			go func() { defer loops.Done(); controller.Run(octx) }()
+			startLoop(func() { controller.Run(octx) })
 			slog.Info("autoscale controller started",
 				"scan_interval", cfg.Runtime.Autoscale.ScanInterval,
 				"cooldown", cfg.Runtime.Autoscale.Cooldown,
@@ -3000,6 +2987,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	electorCtx, cancelElector := context.WithCancel(context.Background())
 	electorDone := make(chan struct{})
 	var localLogMaintenanceWG sync.WaitGroup
+	// rungroup:exempt: joined through electorDone by stopOwnership, under the ownership watchdog that exits rather than close the store under it
 	go func() {
 		defer close(electorDone)
 		elector.Run(electorCtx)
@@ -3022,6 +3010,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	defer awaitOwnershipStop(shutdownWatchdogBudget, stopOwnership, slog.Default())
 	if cfg.Maintenance.AppLogRunRetentionCount > 0 {
 		localLogMaintenanceWG.Add(1)
+		// rungroup:exempt: joined by stopOwnership with the elector, under the same exit watchdog
 		go func() {
 			defer localLogMaintenanceWG.Done()
 			runLocalLogMaintenance(electorCtx, store, mgr, appLogTelemetry, cfg.Maintenance.Interval)
@@ -3073,16 +3062,13 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		}
 		return access.Recheck(store, appUserLookup, store.IsTokenRevoked, principal)
 	}
-	{
-		recheckCtx, cancelRecheck := context.WithCancel(context.Background())
-		recheckCancel = cancelRecheck
-		recheckWG.Add(1)
-		go func() {
-			defer recheckWG.Done()
-			prx.StartSessionRecheck(recheckCtx, every, reauthorize)
-		}()
-		slog.Info("session recheck started", "interval", every, "entitlements_only", !recheckAppSessions)
-	}
+	// A session-preserving reload replaces this service with relay
+	// authorization once the store is closed; whichever runs last is stopped
+	// before shutdown completes.
+	recheckService := services.Go("session recheck", serviceStoreStopBudget, func(rctx context.Context) {
+		prx.StartSessionRecheck(rctx, every, reauthorize)
+	})
+	slog.Info("session recheck started", "interval", every, "entitlements_only", !recheckAppSessions)
 	if !recheckAppSessions {
 		slog.Warn("general session recheck disabled; app entitlements still checked every 30s")
 	}
@@ -3318,6 +3304,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 
 	httpListener := newHandoffListener(ln, httpSrv)
 	serveErr := make(chan error, 1)
+	// rungroup:exempt: joined by httpSrv.Shutdown and the handoff listener's ServeDone
 	go func() {
 		slog.Info("listening", "version", version, "addr", addr)
 		close(readyCh)
@@ -3600,11 +3587,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 			// Legacy successors retain the process-exit fence and bounded drain.
 			if upg.(*upgrade.RepeatableUpgrader).SuccessorRelayAware() {
 				srv.Close()
-				if recheckCancel != nil {
-					recheckCancel()
-					recheckWG.Wait()
-					recheckCancel = nil
-				}
+				stopBeforeStoreCloses(recheckService, slog.Default())
 				client := newRelayClient(relayDir, cfg.Auth.Secret)
 				if usageRecorder != nil {
 					usageRecorder.RelayPersistence(client)
@@ -3619,13 +3602,9 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 				if err := store.Close(); err != nil {
 					return fmt.Errorf("close retiring database: %w", err)
 				}
-				authCtx, cancelAuth := context.WithCancel(context.Background())
-				recheckCancel = cancelAuth
-				recheckWG.Add(1)
-				go func() {
-					defer recheckWG.Done()
-					runRelayAuthorization(authCtx, prx, client, every, max(90*time.Second, 3*every))
-				}()
+				recheckService = services.Go("relay authorization", serviceMemoryStopBudget, func(actx context.Context) {
+					runRelayAuthorization(actx, prx, client, every, max(90*time.Second, 3*every))
+				})
 				upg.(*upgrade.RepeatableUpgrader).ReleaseUpgradeFence()
 				preservingReload = upg.(*upgrade.RepeatableUpgrader).RetireControlPlane()
 			}
@@ -3676,10 +3655,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	}
 	// Retiring proxies still enforce access revocations until their final
 	// connection closes. Join the sweep before its store is closed below.
-	if recheckCancel != nil {
-		recheckCancel()
-		recheckWG.Wait()
-	}
+	stopBeforeStoreCloses(recheckService, slog.Default())
 	// The tracer closes after every span producer (lifecycle watcher, job
 	// runs, proxied requests and upgraded sessions) has stopped, so spans
 	// ended during shutdown are exported. The flush gets its own bounded
