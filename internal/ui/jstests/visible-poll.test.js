@@ -17,7 +17,7 @@ function fakeDoc() {
       if (type === 'visibilitychange') listeners.delete(fn);
     },
     dispatch() {
-      for (const fn of [...listeners]) fn();
+      for (const fn of Array.from(listeners)) fn();
     },
     listenerCount() {
       return listeners.size;

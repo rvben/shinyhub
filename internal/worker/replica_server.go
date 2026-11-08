@@ -10,7 +10,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
 	"path/filepath"
 	"strconv"
@@ -21,6 +20,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/deploy"
+	"github.com/rvben/shinyhub/internal/httpbuf"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/storage"
 	"github.com/rvben/shinyhub/internal/worker/api"
@@ -476,7 +476,7 @@ func (s *replicaServer) handleData(w http.ResponseWriter, r *http.Request) {
 	}
 
 	target := &url.URL{Scheme: "http", Host: fmt.Sprintf("127.0.0.1:%d", rec.hostPort)}
-	rp := httputil.NewSingleHostReverseProxy(target)
+	rp := httpbuf.ReverseProxy(target)
 
 	// Strip the /v1/data/{token} prefix; forward only the app-relative path.
 	rest := chi.URLParam(r, "*")

@@ -80,7 +80,7 @@
     if (window.top !== window.self) {
       return;
     }
-  } catch (e) {
+  } catch (_) {
     return;
   }
 
@@ -108,7 +108,7 @@
     return function () {
       try {
         return fn.apply(null, arguments);
-      } catch (e) {
+      } catch (_) {
         // Deliberately swallowed. Navigation chrome failing is a missing
         // convenience; the same failure escaping into the page would be the
         // app breaking.
@@ -124,7 +124,7 @@
   function dismissed() {
     try {
       return window.sessionStorage.getItem(DISMISS_KEY) === "1";
-    } catch (e) {
+    } catch (_) {
       return false;
     }
   }
@@ -136,7 +136,7 @@
       } else {
         window.sessionStorage.removeItem(DISMISS_KEY);
       }
-    } catch (e) {
+    } catch (_) {
       /* not remembering is acceptable; showing it again is not a fault */
     }
   }
@@ -154,7 +154,7 @@
         }
       }
       return POSITIONS.indexOf(saved) === -1 ? "top-right" : saved;
-    } catch (e) {
+    } catch (_) {
       return "top-right";
     }
   }
@@ -162,7 +162,7 @@
   function rememberPosition(next) {
     try {
       window.localStorage.setItem(POSITION_KEY, next);
-    } catch (e) {
+    } catch (_) {
       /* placement persistence is convenience, never a page requirement */
     }
   }
@@ -930,7 +930,7 @@
       sheet.replaceSync(CSS.join("\n"));
       shadow.adoptedStyleSheets = [sheet];
       return;
-    } catch (e) {
+    } catch (_) {
       /* fall through */
     }
     try {
@@ -939,11 +939,11 @@
       for (var i = 0; i < CSS.length; i++) {
         try {
           el.sheet.insertRule(CSS[i], el.sheet.cssRules.length);
-        } catch (inner) {
+        } catch (_) {
           /* one unsupported rule must not cost the rest of the stylesheet */
         }
       }
-    } catch (e2) {
+    } catch (_) {
       /* unstyled chrome is still usable chrome */
     }
   }
@@ -1169,7 +1169,7 @@
             saved.width >= 360 && saved.width <= 960) {
           width = saved.width; expanded = saved.expanded === true;
         }
-      } catch (e) { /* Storage is optional in embedded apps and privacy modes. */ }
+      } catch (_) { /* Storage is optional in embedded apps and privacy modes. */ }
     }
     load();
 
@@ -1184,7 +1184,7 @@
     function clamp(value) { return Math.round(Math.max(360, Math.min(maximum(), value))); }
     function save() {
       try { window.sessionStorage.setItem(key, JSON.stringify({ width: width, expanded: expanded })); }
-      catch (e) { /* Resizing still works without storage. */ }
+      catch (_) { /* Resizing still works without storage. */ }
     }
     function update() {
       var mobile = window.innerWidth <= mobileWidth || unavailable && unavailable();
@@ -1688,7 +1688,7 @@
   function mobileViewport() {
     try {
       return typeof window.matchMedia === "function" && window.matchMedia("(max-width: 520px)").matches;
-    } catch (e) {
+    } catch (_) {
       return false;
     }
   }
@@ -2012,7 +2012,7 @@
       var copied = false;
       try {
         copied = document.execCommand("copy");
-      } catch (error) {
+      } catch (_) {
         copied = false;
       }
       document.body.removeChild(temporary);
@@ -2682,7 +2682,7 @@
         }
         if (automatic && !autoSwitchEligible()) { cancelVersionSwitch(); return; }
         if (automatic) {
-          try { window.sessionStorage.setItem(AUTO_UPDATE_KEY + currentSlug, JSON.stringify({ from: servedGeneration, to: activeGeneration, at: Date.now() })); } catch (e) {}
+          try { window.sessionStorage.setItem(AUTO_UPDATE_KEY + currentSlug, JSON.stringify({ from: servedGeneration, to: activeGeneration, at: Date.now() })); } catch (_) {}
         }
         clearVersionSwitchRequest();
         announcer.textContent = "Switching to the ready app version";
@@ -3499,7 +3499,7 @@
       updateLine.appendChild(updateDismiss);
       panel.insertBefore(updateLine, filterWrap);
     }
-  } catch (e) {}
+  } catch (_) {}
   updateSwitcherStatus();
   revealBar(true);
   if (typeof window.CustomEvent === "function") {

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { JSDOM, VirtualConsole } from 'jsdom';
 import { GROUP_ORDER_FIXTURE, GROUP_ORDER_EXPECTED } from './group-order-fixture.js';
+import { injectedScript } from './injected-script.js';
 
 // The app switcher is JavaScript ShinyHub splices into pages it did not write.
 // No Go test executes it: the Go side proves the tag is in the body, and stops
@@ -10,12 +11,15 @@ import { GROUP_ORDER_FIXTURE, GROUP_ORDER_EXPECTED } from './group-order-fixture
 // grouping, the dismissal - happens after that tag runs, which makes this file
 // the only place those are checked at all.
 //
-// These tests run the REAL shipped bytes, the same file inject.go embeds, in a
-// real DOM, driving the same contract the server provides: a data-nav-url that
-// answers with the caller's app list.
+// These tests run the script in a real DOM, driving the same contract the
+// server provides: a data-nav-url that answers with the caller's app list.
+// `script` is what gets evaluated: the readable source, or under
+// SHINYHUB_INJECTED_SCRIPTS=min the minified sibling inject.go embeds. `source`
+// is always the readable text, for the assertions that read it as text.
 
 const NAV_JS = new URL('../../appnav/assets/nav.js', import.meta.url);
 const source = readFileSync(NAV_JS, 'utf8');
+const script = injectedScript(NAV_JS);
 const chatSource = readFileSync(new URL('../../../packaging/python-agent/src/shinyhub_agent/www/chat.js', import.meta.url), 'utf8');
 // A renamed or emptied source would make every assertion below pass on an
 // empty document, which is the one outcome worse than failing.
@@ -169,7 +173,7 @@ function mount({
     if (v === null) tag.removeAttribute(k);
     else tag.setAttribute(k, v);
   }
-  tag.textContent = source;
+  tag.textContent = script;
   d.body.appendChild(tag);
 
   const q = (sel) => (shadow ? shadow.querySelector(sel) : null);
@@ -2122,7 +2126,7 @@ test('nothing is injected into a framed page', async () => {
   tag.id = TAG_ID;
   tag.setAttribute('data-nav-url', NAV_URL);
   tag.setAttribute('data-home-url', HOME_URL);
-  tag.textContent = source;
+  tag.textContent = script;
   fd.body.appendChild(tag);
 
   assert.equal(fd.getElementById(HOST_ID), null, 'the switcher mounted inside a frame');

@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -33,7 +34,7 @@ func (dst *Store) ImportFrom(src *Store) (map[string]int, error) {
 		return nil, err
 	}
 
-	tx, err := dst.db.Begin()
+	tx, err := dst.d.beginWrite(context.Background(), dst.rawDB(), 0)
 	if err != nil {
 		return nil, fmt.Errorf("begin: %w", err)
 	}
@@ -99,7 +100,7 @@ func (dst *Store) ImportFrom(src *Store) (map[string]int, error) {
 // importTargetTablePristine reports whether a locked target table still has
 // exactly the state produced by migrations. Most tables are empty; the fleet
 // run allocator has one canonical seed row.
-func importTargetTablePristine(tx *boundTx, table string) (bool, error) {
+func importTargetTablePristine(tx writeTx, table string) (bool, error) {
 	if table == "fleet_run_sequence" {
 		var rows, seeds int64
 		err := tx.QueryRow(`SELECT COUNT(*),
@@ -139,7 +140,7 @@ func srcTables(src *Store) ([]string, error) {
 // value to the target column's type. It copies only columns present in BOTH
 // schemas (their intersection), so a benign column difference does not abort the
 // migration.
-func copyTable(src *Store, tx *boundTx, dst *Store, table string) (int, error) {
+func copyTable(src *Store, tx writeTx, dst *Store, table string) (int, error) {
 	targetTypes, err := dst.columnTypes(table)
 	if err != nil {
 		return 0, err
@@ -264,7 +265,7 @@ func coerceForColumn(v any, pgType string) (any, error) {
 // the next natural insert does not collide. No-op for tables without an id
 // serial (composite/natural keys) - checked first so the MAX(id) subquery is
 // never parsed against a table that has no id column.
-func resetIDSequence(tx *boundTx, table string) error {
+func resetIDSequence(tx writeTx, table string) error {
 	// pg_get_serial_sequence errors (not returns NULL) if the column is absent,
 	// so confirm an id column exists first.
 	var hasID bool

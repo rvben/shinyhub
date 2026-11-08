@@ -2187,7 +2187,7 @@ const liveActivationOwnsReplica = `
 // the app forever, and the API's replica overlay then reported the wakeable app
 // as crashed.
 func (s *Store) MarkRecoveryHibernated(slug string) error {
-	tx, err := s.db.Begin()
+	tx, err := s.d.beginWrite(context.Background(), s.rawDB(), 0)
 	if err != nil {
 		return fmt.Errorf("begin recovery hibernate: %w", err)
 	}
@@ -2264,7 +2264,7 @@ func (s *Store) ParkStrandedReplicas() ([]ParkedReplica, error) {
 		  AND replicas.app_id IN (SELECT apps.id FROM apps WHERE apps.status IN ('hibernated', 'suspended', 'stopped'))` +
 		liveActivationOwnsReplica
 
-	tx, err := s.db.Begin()
+	tx, err := s.d.beginWrite(context.Background(), s.rawDB(), 0)
 	if err != nil {
 		return nil, fmt.Errorf("begin park stranded replicas: %w", err)
 	}
@@ -2608,7 +2608,7 @@ func (s *Store) CreateDeployment(p CreateDeploymentParams) (*Deployment, error) 
 	if err != nil {
 		return nil, err
 	}
-	tx, err := s.db.Begin()
+	tx, err := s.d.beginWrite(context.Background(), s.rawDB(), 0)
 	if err != nil {
 		return nil, fmt.Errorf("create deployment: begin: %w", err)
 	}
@@ -2675,7 +2675,7 @@ func (s *Store) BeginDeploymentWithOrigin(appID int64, version, bundleDir, runID
 	if err != nil {
 		return nil, fmt.Errorf("begin deployment: %w", err)
 	}
-	tx, err := s.db.Begin()
+	tx, err := s.d.beginWrite(context.Background(), s.rawDB(), 0)
 	if err != nil {
 		return nil, fmt.Errorf("begin deployment: %w", err)
 	}
@@ -3168,7 +3168,7 @@ func (s *Store) QuarantineAndFailDeploymentWithAppStatus(id int64, reason, lastE
 	if appStatus != "failed" && appStatus != "stopped" {
 		return fmt.Errorf("quarantine deployment %d: invalid app status %q", id, appStatus)
 	}
-	tx, err := s.db.Begin()
+	tx, err := s.d.beginWrite(context.Background(), s.rawDB(), 0)
 	if err != nil {
 		return fmt.Errorf("quarantine deployment %d: begin: %w", id, err)
 	}
@@ -5676,7 +5676,7 @@ type ApplyAppManifestSettingsParams struct {
 // Caller contract: manager.Stop(slug) has already run; no live
 // process holds a replica index that may be deleted.
 func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) (bool, error) {
-	tx, err := s.db.Begin()
+	tx, err := s.d.beginWrite(context.Background(), s.rawDB(), 0)
 	if err != nil {
 		return false, fmt.Errorf("begin: %w", err)
 	}

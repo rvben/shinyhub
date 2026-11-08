@@ -63,7 +63,7 @@
     var nav = (window.performance.getEntriesByType &&
       window.performance.getEntriesByType("navigation")[0]) || {};
     if (nav.type !== "reload") window.sessionStorage.removeItem(capacityKey);
-  } catch (e) {
+  } catch (_) {
     // Storage can be disabled by the browser; keep retrying within this page.
   }
 
@@ -109,7 +109,7 @@
       var last = Number(window.sessionStorage.getItem(recoveryKey));
       if (last && Date.now() - last < 60000) return false;
       return !window.dispatchEvent(new window.CustomEvent("shinyhub:session-recovery", { cancelable: true }));
-    } catch (e) { return false; }
+    } catch (_) { return false; }
   }
 
   function cancelRecoveryNotice() {
@@ -159,7 +159,7 @@
   function restoreView() {
     if (currentState !== "recovering" || !canRestore()) return false;
     try { window.sessionStorage.setItem(recoveryKey, String(Date.now())); }
-    catch (e) { return false; }
+    catch (_) { return false; }
     cancelRecoveryNotice();
     cancelProbe();
     stopPolling();
@@ -234,7 +234,7 @@
           target = rawURL + (rawURL.indexOf("?") < 0 ? "?" : "&") +
             "shinyhub_cid=" + id;
         }
-      } catch (e) {
+      } catch (_) {
         id = "";
         target = url;
       }
@@ -273,10 +273,10 @@
     var deadline = memoryDeadline;
     try {
       deadline = parseInt(window.sessionStorage.getItem(capacityKey) || "0", 10) || deadline;
-    } catch (e) {}
+    } catch (_) {}
     if (!deadline) {
       deadline = Date.now() + capacityBudgetMs;
-      try { window.sessionStorage.setItem(capacityKey, String(deadline)); } catch (e) {}
+      try { window.sessionStorage.setItem(capacityKey, String(deadline)); } catch (_) {}
     }
     memoryDeadline = deadline;
     return deadline;
@@ -284,7 +284,7 @@
 
   function clearCapacityDeadline() {
     memoryDeadline = 0;
-    try { window.sessionStorage.removeItem(capacityKey); } catch (e) {}
+    try { window.sessionStorage.removeItem(capacityKey); } catch (_) {}
   }
 
   function connected() {
@@ -313,7 +313,7 @@
     return function () {
       try {
         return fn.apply(null, arguments);
-      } catch (e) {
+      } catch (_) {
         // Deliberately swallowed. The app is already disconnected; a failure to
         // explain that must not add a second fault on top of the first.
         return undefined;
@@ -405,7 +405,7 @@
       for (var i = 0; i < rules.length; i++) {
         style.sheet.insertRule(rules[i], style.sheet.cssRules.length);
       }
-    } catch (e) {
+    } catch (_) {
       spinner.style.animation = "";
     }
   }

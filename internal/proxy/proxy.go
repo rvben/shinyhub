@@ -30,6 +30,7 @@ import (
 	"github.com/rvben/shinyhub/internal/approute"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
+	"github.com/rvben/shinyhub/internal/httpbuf"
 	"github.com/rvben/shinyhub/internal/proxytrust"
 	"github.com/rvben/shinyhub/internal/safego"
 	"github.com/rvben/shinyhub/internal/spanerr"
@@ -623,13 +624,15 @@ type Proxy struct {
 	// byte-for-byte unchanged.
 	onMissSync atomic.Pointer[onMissSyncFuncT]
 
-	// Phase 1 worker-isolation: per-client accounting.
-	//
-	// clients maps slug -> clientID -> *clientSlot. It lives under the SAME pool
-	// lock (p.mu) so reservation, binding, and accounting updates are atomic with
-	// respect to each other and to ServeHTTP's RLock path. A second lock would
-	// invert against ServeHTTP (which holds p.mu.RLock through activeConns bump)
-	// and deadlock.
+	// clients maps slug -> clientID -> *clientSlot, the per-client accounting
+	// for elastic workers. The map itself lives under the pool lock: binding and
+	// reservation add or remove slots under p.mu.Lock, and the routing path looks
+	// slots up under p.mu.RLock, so a slot cannot appear or vanish mid-route. The
+	// accounting inside a slot (liveConns and the grace timer) is guarded by the
+	// slot's own cs.mu, acquired only after p.mu or an accounting read stripe,
+	// so clientConnOpened and clientConnClosed run under a stripe plus cs.mu and
+	// unrelated clients and slugs proceed in parallel. The ordering is stated at
+	// clientSlot in elastic.go.
 	clients map[string]map[string]*clientSlot
 
 	// terminate is called (via goroutine, never inline under p.mu) when an elastic
@@ -2120,7 +2123,7 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base h
 // same forwarding, security and response-injection behavior as legacy active
 // registrations.
 func (p *Proxy) newReplicaBackend(pool *backendPool, slug string, index int, target *url.URL, targetURL string, base http.RoundTripper, deploymentID, ownerAppID int64) *replicaBackend {
-	rp := httputil.NewSingleHostReverseProxy(target)
+	rp := httpbuf.ReverseProxy(target)
 	slugCopy := slug
 	// Capture pre-response upstream failures (connection refused, timeout)
 	// onto the statusRecorder so the trace span surfaces span.Error.
@@ -2617,7 +2620,7 @@ func (p *Proxy) registerElasticWorker(slug string, slotID int, targetURL string,
 
 	slugCopy := slug
 
-	rp := httputil.NewSingleHostReverseProxy(target)
+	rp := httpbuf.ReverseProxy(target)
 	rp.ErrorHandler = func(w http.ResponseWriter, req *http.Request, err error) {
 		slog.Warn("proxy_upstream_error", "slug", slugCopy, "error", err.Error())
 		if sr, ok := w.(*statusRecorder); ok {

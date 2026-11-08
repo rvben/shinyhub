@@ -14,9 +14,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/announcementui"
 	"github.com/rvben/shinyhub/internal/appnav"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
+	"github.com/rvben/shinyhub/internal/envui"
 	"github.com/rvben/shinyhub/internal/favicon"
 	"github.com/rvben/shinyhub/internal/supportui"
 )
@@ -136,6 +138,29 @@ func TestOverlayCSPHash_MatchesEmbeddedScript(t *testing.T) {
 	body := snippet[openEnd+1 : len(snippet)-len("</script>")]
 	if body != overlayScript {
 		t.Fatalf("snippet body differs from the hashed script (%d vs %d bytes)", len(body), len(overlayScript))
+	}
+}
+
+// Each of these is spliced inline into an app page load, so its size is paid
+// by every visitor of every app on every visit. The readable source stays in
+// each package's assets directory; what ships is the minified sibling, and a
+// bound trips when an embed is pointed back at a source. The budgets sit just
+// above the minified sizes so that a large addition shows up here as a choice
+// rather than as silent page weight.
+func TestInjectedScripts_StayWithinInlineBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		script string
+		budget int
+	}{
+		{"app switcher", appnav.Script, 100_000},
+		{"status overlay", overlayScript, 20_000},
+		{"announcements", announcementui.Script, 11_000},
+		{"environment", envui.Script, 5_000},
+	} {
+		if n := len(tc.script); n > tc.budget {
+			t.Errorf("%s: %d embedded bytes, over its %d byte inline budget (regenerate with make ui-minify)", tc.name, n, tc.budget)
+		}
 	}
 }
 

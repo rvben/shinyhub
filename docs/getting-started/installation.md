@@ -101,6 +101,20 @@ you also want ShinyHub to start applications as containers.
 docker pull ghcr.io/rvben/shinyhub:latest
 ```
 
+The image manifests are signed with [cosign](https://github.com/sigstore/cosign)
+under the identity of this repository's release workflow, without a long-lived
+key. Verify a pulled image before running it:
+
+```bash
+cosign verify \
+  --certificate-identity-regexp '^https://github.com/rvben/shinyhub/\.github/workflows/release\.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/rvben/shinyhub:latest
+```
+
+Images from releases that predate the signing step carry no signature, and
+`cosign verify` then reports that no matching signatures were found.
+
 ## Build from source
 
 ```bash

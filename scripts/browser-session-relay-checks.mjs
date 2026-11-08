@@ -6,7 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 // Runs inside the real lifecycle harness with a disposable native app and
 // extension-free browser. All sessions carry visible random server identities.
 export async function checkSessionRelays({ context, page, original, appURL, host, state, app, work,
-  binary, config, command, api, request, deploy, check, poll, output, assertDisconnected, sockets, viewerID }) {
+  binary, config, command, request, deploy, check, poll, output, assertDisconnected, sockets, viewerID }) {
   const pidFile = join(state, 'hub.pid');
   const currentPID = async () => Number((await readFile(pidFile, 'utf8')).trim());
   const ready = async () => fetch(host + '/activez', { signal: AbortSignal.timeout(2000),

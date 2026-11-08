@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -95,12 +96,35 @@ func gitCloneCheckout(url, ref, subdir string) (string, error) {
 	return root, nil
 }
 
+// gitRevParseHEAD returns the commit the clone's HEAD points at. Only stdout
+// is read: git writes diagnostics to stderr, and a combined read would hand
+// a warning back as the deployed commit.
 func gitRevParseHEAD(dir string) (string, error) {
 	cmd := exec.Command("git", "rev-parse", "HEAD")
 	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		return "", gitCmdError("git rev-parse", err, out)
+		return "", gitCmdError("git rev-parse", err, stderr.Bytes())
 	}
-	return strings.TrimSpace(string(out)), nil
+	sha := strings.TrimSpace(string(out))
+	if !isCommitSHA(sha) {
+		return "", fmt.Errorf("git rev-parse: unexpected output %q, want a commit SHA", sha)
+	}
+	return sha, nil
+}
+
+// isCommitSHA reports whether s is a full SHA-1 or SHA-256 object name as
+// git prints it: lowercase hex, 40 or 64 characters.
+func isCommitSHA(s string) bool {
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }

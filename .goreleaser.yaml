@@ -1,9 +1,18 @@
 version: 2
 
+# The tagged tree is built as committed. A go.mod or go.sum that tidy would
+# change fails the release instead of being rewritten on the runner, where the
+# change would be invisible to CI and absent from the tag.
 before:
   hooks:
-    - go mod tidy
+    - go mod download
+    - go mod verify
+    - go mod tidy -diff
 
+# -trimpath keeps the runner's file system paths out of the binaries, so two
+# builds of the same tag produce the same bytes and stack traces carry module
+# paths rather than paths on the build host. The development Dockerfile builds
+# with the same flag.
 builds:
   - id: shinyhub
     main: ./cmd/shinyhub
@@ -12,6 +21,7 @@ builds:
       - CGO_ENABLED=0
     goos: [linux, darwin]
     goarch: [amd64, arm64]
+    flags: [-trimpath]
     ldflags:
       - -s -w -X main.version={{.Version}}
 
@@ -21,6 +31,7 @@ builds:
     env: [CGO_ENABLED=0]
     goos: [linux]
     goarch: [amd64, arm64]
+    flags: [-trimpath]
     ldflags: [-s -w]
 
 archives:
@@ -136,3 +147,18 @@ docker_manifests:
     image_templates:
       - "ghcr.io/rvben/shinyhub:{{ .Version }}-amd64"
       - "ghcr.io/rvben/shinyhub:{{ .Version }}-arm64"
+
+# Keyless (Sigstore) signatures over the published multi-arch manifests, bound
+# to this repo's release workflow like the checksum signature above. Signing by
+# digest rather than by tag means the signature stays valid for the exact image
+# even after a tag moves, and `cosign verify` can check a pulled image against
+# the workflow identity. The archive attestations in the release workflow cover
+# the binaries; this covers the image.
+docker_signs:
+  - cmd: cosign
+    artifacts: manifests
+    args:
+      - sign
+      - "--yes"
+      - "${artifact}@${digest}"
+    output: true

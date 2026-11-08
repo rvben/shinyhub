@@ -28,7 +28,8 @@ export function enhancePageHeaders(root) {
     let identity = host.querySelector(':scope > [data-page-identity]');
     if (!identity) {
       identity = host.ownerDocument.createElement('div');
-      for (const child of [...host.childNodes]) if (child !== actions) identity.append(child);
+      // Snapshot first: append() moves each node out of the live childNodes list.
+      for (const child of Array.from(host.childNodes)) if (child !== actions) identity.append(child);
     }
     const header = createPageHeader(host.ownerDocument, {identity, actions, className:host.className});
     host.replaceChildren(...header.childNodes);

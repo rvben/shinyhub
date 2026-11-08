@@ -576,6 +576,7 @@ Server-wide defaults in `shinyhub.yaml`:
 runtime:
   default_replicas: 1                       # applied to apps created without an override
   max_replicas: 32                          # admin-enforced steady-state replica bound
+  max_concurrent_builds: 2                  # dependency builds running at once on this host
   default_max_sessions_per_replica: 10      # fallback when an app has cap=0
 ```
 
@@ -584,8 +585,19 @@ A [scheduled serving-data roll](schedules.md#activating-refreshed-data-in-servin
 may temporarily admit one additional, memory-checked surge replica; it never
 changes the configured replica count.
 
+`runtime.max_concurrent_builds` bounds how many dependency builds (`uv sync`,
+`renv::restore`) run at once, so a `fleet apply` of many apps cannot start one
+resolver per app and starve the apps already serving. Deploys past the bound
+wait for a slot in arrival order and report the wait as its own `build_queue`
+phase in their progress stream: `Waiting for a build slot (N of M running, K
+queued)`, a heartbeat while queued, and `Build slot acquired after Xs` when
+the build gets through. The build timeout starts only once the slot is held,
+so queueing never fails a build. The default is half
+the cores the process may use, between 1 and 2 (a container CPU quota counts
+as its cores). `0` removes the cap.
+
 Corresponding env vars: `SHINYHUB_RUNTIME_DEFAULT_REPLICAS`,
-`SHINYHUB_RUNTIME_MAX_REPLICAS`,
+`SHINYHUB_RUNTIME_MAX_REPLICAS`, `SHINYHUB_RUNTIME_MAX_CONCURRENT_BUILDS`,
 `SHINYHUB_RUNTIME_DEFAULT_MAX_SESSIONS_PER_REPLICA`.
 
 Raising `default_max_sessions_per_replica` at the fleet level affects

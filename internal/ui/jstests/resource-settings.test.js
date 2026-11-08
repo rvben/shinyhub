@@ -18,7 +18,7 @@ test('clearing memory submits only the edited field and a clean form submits not
 
 import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
-import { directSettings, populateDirectSetting, installDirectSetting, refreshDirectSetting, readDirectSetting } from '../static/views/direct-setting.js';
+import { directSettings, populateDirectSetting, installDirectSetting, readDirectSetting } from '../static/views/direct-setting.js';
 const html = readFileSync(new URL('../static/index.html', import.meta.url), 'utf8');
 const appSource = readFileSync(new URL('../static/app.js', import.meta.url), 'utf8');
 const response = (body, status = 200) => ({ok:status < 400, status, json:async () => body});

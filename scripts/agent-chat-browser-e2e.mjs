@@ -16,7 +16,7 @@ const axe = rootRequire('axe-core');
 const assets = new Map(await Promise.all([
   ['/chat.js', '../packaging/python-agent/src/shinyhub_agent/www/chat.js'],
   ['/chat.css', '../packaging/python-agent/src/shinyhub_agent/www/chat.css'],
-  ['/nav.js', '../internal/appnav/assets/nav.js'],
+  ['/nav.js', '../internal/appnav/assets/nav.min.js'],
 ].map(async ([route, path]) => [route, await readFile(new URL(path, import.meta.url))])));
 
 function fixture(native, captureShadow = true) {

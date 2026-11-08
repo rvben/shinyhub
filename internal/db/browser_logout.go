@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -19,7 +20,7 @@ type BrowserLogoutCode struct {
 	NextPath string
 }
 
-func revokeBrowserTokens(tx *boundTx, tokens []TokenRevocation) (int, error) {
+func revokeBrowserTokens(tx writeTx, tokens []TokenRevocation) (int, error) {
 	count := 0
 	for _, token := range tokens {
 		res, err := tx.Exec(`INSERT INTO revoked_tokens (jti,user_id,expires_at)
@@ -42,7 +43,7 @@ func (s *Store) RevokeBrowserTokens(tokens []TokenRevocation, code *BrowserLogou
 	if len(tokens) == 0 && code == nil {
 		return 0, nil
 	}
-	tx, err := s.db.Begin()
+	tx, err := s.d.beginWrite(context.Background(), s.rawDB(), 0)
 	if err != nil {
 		return 0, err
 	}
@@ -81,7 +82,7 @@ func (s *Store) BrowserLogoutCodePending(hash string) (bool, error) {
 // FinishAppBrowserLogout is atomic, so a failed cleanup leaves its code retryable.
 // Only tokens belonging to the authenticated logout's recorded scope are revoked.
 func (s *Store) FinishAppBrowserLogout(hash, completion string, tokens []TokenRevocation) ([]int64, error) {
-	tx, err := s.db.Begin()
+	tx, err := s.d.beginWrite(context.Background(), s.rawDB(), 0)
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +123,7 @@ func (s *Store) FinishAppBrowserLogout(hash, completion string, tokens []TokenRe
 // ConsumeBrowserLogoutCompletion returns only the handoff's server-recorded
 // local return path, never a destination supplied by the bridge request.
 func (s *Store) ConsumeBrowserLogoutCompletion(hash, parent string) (string, error) {
-	tx, err := s.db.Begin()
+	tx, err := s.d.beginWrite(context.Background(), s.rawDB(), 0)
 	if err != nil {
 		return "", err
 	}

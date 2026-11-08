@@ -180,7 +180,7 @@ function logLineParts(line) {
   const severity = rest.match(/^([ \t]*)(\[(?:TRACE|DEBUG|INFO|NOTICE|WARN|WARNING|ERROR|FATAL|CRITICAL)\]|TRACE|DEBUG|INFO|NOTICE|WARN|WARNING|ERROR|FATAL|CRITICAL)(?=[ \t:]|$)/i);
   if (severity && (timestamp || !severity[1])) {
     if (severity[1]) parts.push({ text: severity[1] });
-    const level = severity[2].replace(/[\[\]]/g, '').toLowerCase();
+    const level = severity[2].replace(/[[\]]/g, '').toLowerCase();
     parts.push({ text: severity[2], role: 'level', level });
     rest = rest.slice(severity[0].length);
   }
@@ -250,7 +250,7 @@ function sourceStatusEvent(source, previous) {
 }
 
 async function mapWithConcurrency(items, limit, mapper) {
-  const results = new Array(items.length);
+  const results = Array.from({ length: items.length });
   let next = 0;
   async function worker() {
     while (next < items.length) {

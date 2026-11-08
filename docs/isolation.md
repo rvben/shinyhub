@@ -117,6 +117,10 @@ the app sees at start. The sandbox does not restrict network egress (Landlock
 is filesystem-only), so dependency downloads reach PyPI/CRAN or a configured
 private index normally.
 
+Builds are also bounded in number: at most `runtime.max_concurrent_builds`
+run on the host at once and the rest queue for a slot (see
+[Scaling](scaling.md#runtime-level-defaults)).
+
 ### Managed Python interpreters
 
 When no system Python satisfies a bundle's `requires-python`, uv downloads a

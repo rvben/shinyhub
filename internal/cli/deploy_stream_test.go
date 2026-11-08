@@ -40,6 +40,39 @@ func TestConsumeDeployEventsHumanProgressAndResult(t *testing.T) {
 	}
 }
 
+// A deploy queued behind the host's build gate reports the wait as its own
+// phase. Off a terminal, where progress heartbeats without elapsed time are
+// dropped, the start and completion of that phase must still print, or a
+// queued deploy in CI looks stalled.
+func TestConsumeDeployEventsShowsBuildQueueWaitOffTerminal(t *testing.T) {
+	resp := deployEventResponse(strings.Join([]string{
+		`{"type":"phase","phase":"build_queue","status":"started","message":"Waiting for a build slot (2 of 2 running, 1 queued)"}`,
+		`{"type":"phase","phase":"build_queue","status":"progress","message":"Still waiting for a build slot (2 of 2 running, 1 queued)","elapsed_seconds":15}`,
+		`{"type":"phase","phase":"build_queue","status":"completed","message":"Build slot acquired after 22s","elapsed_seconds":22}`,
+		`{"type":"phase","phase":"dependencies","status":"started","message":"Building python dependencies (budget 15m0s)"}`,
+		`{"type":"phase","phase":"dependencies","status":"completed","message":"Dependencies ready"}`,
+		`{"type":"result","result":{"deploy_count":1,"status":"deployed"}}`,
+	}, "\n"))
+	var progress bytes.Buffer
+	if _, err := consumeDeployEvents(resp, formatTable, io.Discard, &progress, false); err != nil {
+		t.Fatal(err)
+	}
+	got := progress.String()
+	for _, want := range []string{
+		"Waiting for a build slot (2 of 2 running, 1 queued)",
+		"Still waiting for a build slot (2 of 2 running, 1 queued)",
+		"Build slot acquired after 22s",
+		"Building python dependencies",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("progress missing %q:\n%s", want, got)
+		}
+	}
+	if queue, build := strings.Index(got, "Build slot acquired"), strings.Index(got, "Building python dependencies"); !(queue < build) {
+		t.Fatalf("the queue wait must be reported before the build it delayed:\n%s", got)
+	}
+}
+
 func TestConsumeDeployEventsNDJSONFailureIsTerminalAndNotDuplicated(t *testing.T) {
 	resp := deployEventResponse(strings.Join([]string{
 		`{"type":"phase","phase":"dependencies","status":"failed","message":"Python dependency build failed"}`,

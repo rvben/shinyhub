@@ -17,8 +17,15 @@ import (
 	"github.com/rvben/shinyhub/internal/slug"
 )
 
-//go:embed assets/environment.js
+// Script is the minified build of assets/environment.js; the source is where
+// to read how the badge behaves. Every page load on a labelled environment
+// carries it inline, so the minified sibling ships. go generate (or make
+// ui-minify) regenerates it and make ui-minify-check fails while it is stale.
+//
+//go:generate node ../../scripts/minify-injected.mjs assets/environment.js
+//go:embed assets/environment.min.js
 var Script string
+
 var CSPHash = func() string {
 	sum := sha256.Sum256([]byte(Script))
 	return "'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"

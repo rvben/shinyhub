@@ -1,4 +1,4 @@
-.PHONY: bootstrap build check clean test test-go test-race test-race-non-api test-race-api vuln scan-image test-js test-worker test-onboarding-e2e test-browser-onboarding-e2e test-browser-logs-e2e test-browser-app-nav-e2e test-browser-lifecycle-e2e test-cli-compatibility-e2e test-shell-completion-e2e test-cli-release-contract test-remote-e2e test-fargate-it test-provider-logs-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev dev-reset goreleaser-check release-notes release-patch release-minor release-major build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-check clispec-score test-identity test-py-identity test-py-bookmarks test-py-agent test-r-identity test-identity-conformance bootstrap-r-identity check-r-identity docs-r-identity render-rig-up render-rig-down load-test-render test-render-rig
+.PHONY: bootstrap build check clean test test-go test-race test-race-non-api test-race-api vuln scan-image node-deps lint-js ui-minify ui-minify-check test-js test-worker test-onboarding-e2e test-browser-onboarding-e2e test-browser-logs-e2e test-browser-app-nav-e2e test-browser-lifecycle-e2e test-cli-compatibility-e2e test-shell-completion-e2e test-cli-release-contract test-remote-e2e test-fargate-it test-provider-logs-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev dev-reset goreleaser-check release-notes release-patch release-minor release-major build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-check clispec-score test-identity test-py-identity test-py-bookmarks test-py-agent test-r-identity test-identity-conformance bootstrap-r-identity check-r-identity docs-r-identity render-rig-up render-rig-down load-test-render test-render-rig
 
 AIR_VERSION ?= v1.67.4
 AIR_BIN := $(CURDIR)/tmp/tools/air
@@ -6,6 +6,13 @@ CLISPEC ?= clispec
 CLISPEC_MIN_VERSION := 0.3.1
 RACE_TIMEOUT ?= 20m
 PYTHON_VERSION ?= 3.14+gil
+
+# Go commands build this module on its own. A go.work in a parent directory
+# (the main checkout's, when working in a nested worktree) would otherwise put
+# every go build, vet and test into workspace mode and reject this module as
+# not listed. A GOWORK already set in the environment wins; CI checks out no
+# go.work, so there this changes nothing.
+export GOWORK ?= off
 
 # bootstrap installs the exact project dependencies and a repo-local, pinned
 # live-reload binary. Nothing is written to a developer's global Go bin.
@@ -25,13 +32,20 @@ build-native-broker:
 build:
 	go build -o bin/shinyhub ./cmd/shinyhub
 
+# check-artifact builds the server with the release flags and holds the result
+# to its budgets: stripped size, package init time before main, and the AWS
+# operations linked in. The script documents the budgets and how to raise one.
+.PHONY: check-artifact
+check-artifact:
+	./scripts/check-artifact.sh
+
 clean:
 	rm -rf bin tmp
 
 test: test-go test-js test-worker
 
 # check is the fast, deterministic pre-PR gate contributors should run.
-check: fmt-check lint skill-lint test
+check: fmt-check lint lint-js ui-minify-check skill-lint test
 
 test-go:
 	go test ./... -count=1
@@ -56,10 +70,11 @@ test-race-api:
 	go test -race ./internal/api -count=1 -timeout $(RACE_TIMEOUT)
 
 # vuln scans the module (and its dependencies) against the Go vulnerability
-# database. Run via `go run` so no separate install step is needed and it works
-# the same locally and in CI.
+# database. govulncheck is a tool dependency in go.mod, so every run, locally,
+# in CI and at release time, uses the same go.sum-verified version, and the
+# dependency updater bumps it with the other Go modules.
 vuln:
-	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+	go tool govulncheck ./...
 
 # scan-image builds the container image and scans it for known HIGH/CRITICAL
 # CVEs with Trivy (base image layers + the embedded Go binary's dependencies).
@@ -80,24 +95,62 @@ scan-image:
 			image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 shinyhub-scan:latest; \
 	fi
 
-# test-js runs the JSDOM tests for UI assets. Requires Node 20+. Installs
-# devDependencies (jsdom, axe-core) the first time it runs; afterwards it's a no-op.
+# node-deps makes sure the pinned devDependencies (jsdom, axe-core, terser,
+# oxlint) are installed. Requires Node 20+. Installs them the first time a
+# Node-backed target runs; afterwards it's a no-op.
+node-deps:
+	@command -v node >/dev/null 2>&1 || { echo "node not found (Node 20+ required)"; exit 1; }
+	@if [ ! -d node_modules/jsdom ] || [ ! -d node_modules/axe-core ] || [ ! -d node_modules/terser ] || [ ! -d node_modules/oxlint ]; then npm install --no-audit --no-fund --silent; fi
+
+# lint-js runs oxlint over every JavaScript and TypeScript file in the repo:
+# the dashboard, the injected scripts, the SDK clients, the tests and the
+# harnesses. The rule set is oxlint's default correctness category plus the
+# settings in .oxlintrc.json, which also names what is generated or vendored
+# and therefore skipped. Warnings fail the target so a finding cannot linger.
+lint-js: node-deps
+	./node_modules/.bin/oxlint --deny-warnings
+
+# ui-minify regenerates the minified siblings of the scripts the proxy inlines
+# into app pages (the app switcher, the status overlay, the announcement banner,
+# the support rail, the environment badge). The Go packages embed the sibling,
+# so run this after editing one of those sources and commit the result: the
+# module must build from a clean clone without Node. scripts/minify-injected.mjs
+# lists the sources.
+ui-minify: node-deps
+	node scripts/minify-injected.mjs
+
+# ui-minify-check fails, naming the files, when a committed minified sibling no
+# longer matches its source. Part of check and CI so an edited source cannot
+# ship with the previous script still embedded.
+ui-minify-check: node-deps
+	node scripts/minify-injected.mjs --check
+
+# test-js runs the JSDOM tests for UI assets, then runs the tests that evaluate
+# an injected script a second time with SHINYHUB_INJECTED_SCRIPTS=min, so the
+# minified bytes the proxy actually embeds are proven to behave like the source.
 # The glob is left unquoted so the shell expands it to the matching files;
 # node --test does not expand glob patterns itself before Node 21, so quoting
 # would break on Node 20.
-test-js:
-	@command -v node >/dev/null 2>&1 || { echo "node not found (Node 20+ required for UI tests)"; exit 1; }
-	@if [ ! -d node_modules/jsdom ] || [ ! -d node_modules/axe-core ]; then npm install --no-audit --no-fund --silent; fi
+test-js: node-deps
 	node --test internal/ui/jstests/*.test.js
+	SHINYHUB_INJECTED_SCRIPTS=min node --test $$(grep -l injected-script.js internal/ui/jstests/*.test.js)
+
+# worker-deps installs the demo Worker's own dependencies when they are missing.
+# The startup tests exercise the actual Containers SDK, so the Worker tests
+# need them the way the dashboard tests need jsdom; npm ci installs exactly
+# what the Worker's lock file names.
+.PHONY: worker-deps
+worker-deps:
+	@command -v npm >/dev/null 2>&1 || { echo "npm not found (Node 22.18+ required for Worker tests)"; exit 1; }
+	@if [ ! -d deploy/cloudflare-demo/node_modules/@cloudflare/containers ]; then npm --prefix deploy/cloudflare-demo ci --no-audit --no-fund --silent; fi
 
 # test-worker runs the unit tests for the Cloudflare demo Worker. The Worker
 # decides what reaches the demo container, and a request that reaches a sleeping
 # container wakes it, so its admission policy is a cost boundary and is tested
 # rather than only deployed. Node runs the TypeScript directly (type stripping,
-# unflagged since 22.18). Install deploy/cloudflare-demo dependencies with npm ci
-# first: startup regressions exercise the actual Containers SDK. The glob is
-# left unquoted for the shell to expand, as in test-js.
-test-worker:
+# unflagged since 22.18). The glob is left unquoted for the shell to expand, as
+# in test-js.
+test-worker: worker-deps
 	@command -v node >/dev/null 2>&1 || { echo "node not found (Node 22.18+ required for Worker tests)"; exit 1; }
 	@node -e 'const [maj,min]=process.versions.node.split(".").map(Number); if (maj<22 || (maj===22 && min<18)) { console.error(`Node $${process.versions.node} cannot run TypeScript tests directly (22.18+ required)`); process.exit(1); }'
 	node --test deploy/cloudflare-demo/src/*.test.ts
@@ -408,8 +461,13 @@ test-provisioning:
 		echo "test-provisioning: skipping (needs Linux with Landlock, or Docker)"; \
 	fi
 
+# lint vets the tree as built, then once more with the build tags of the tests
+# that the default suite never compiles (integration = real AWS ECS, e2e =
+# proxy distribution). Without the second pass those tests rot silently when
+# the code they call is renamed.
 lint:
 	go vet ./...
+	go vet -tags "integration e2e" ./...
 
 # skill-lint runs static checks on the deploy-shinyhub skill: frontmatter,
 # example bundle present, referenced docs exist, no em/en dashes. No network or

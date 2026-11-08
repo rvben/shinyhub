@@ -184,7 +184,7 @@ function channelFactory() {
   return class {
     constructor(name) { this.name = name; peers.add(this); }
     postMessage(data) {
-      for (const peer of [...peers]) {
+      for (const peer of Array.from(peers)) {
         if (peer !== this && peer.name === this.name) peer.onmessage?.({ data });
       }
     }

@@ -2,7 +2,8 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {JSDOM} from 'jsdom';
-const script = readFileSync(new URL('../../envui/assets/environment.js',import.meta.url),'utf8');
+import {injectedScript} from './injected-script.js';
+const script = injectedScript(new URL('../../envui/assets/environment.js',import.meta.url));
 const links = JSON.parse(readFileSync(new URL('../../../testdata/environment-links.json',import.meta.url)));
 const routes = ['/login','/home','/launchpad','/apps','/identity','/users','/workers','/announcements','/audit-log','/tokens'];
 function mount(path='/app/finops/', options={}, configure=()=>{}) {

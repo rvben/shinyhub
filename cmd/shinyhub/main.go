@@ -758,6 +758,45 @@ func reconcileLocalAppLogFiles(store *db.Store, manager *process.Manager, teleme
 	}
 }
 
+// runSQLiteMaintenance keeps a file-backed SQLite database compact: promptly
+// and then on every interval it refreshes the planner's statistics, then
+// moves the write-ahead log into the database file and truncates the log.
+// Statistics come first so the rows they write are part of what gets
+// checkpointed and the pass ends with an empty log. The automatic checkpoint
+// never shrinks the log file, so without this pass an idle server keeps the
+// WAL of its busiest hour. Other backends return at once.
+func runSQLiteMaintenance(ctx context.Context, store *db.Store, interval time.Duration) {
+	if !store.IsSQLiteFile() {
+		return
+	}
+	if interval <= 0 {
+		interval = time.Hour
+	}
+	maintain := func() {
+		if err := store.Optimize(); err != nil {
+			slog.Warn("sqlite_optimize_failed", "err", err)
+		}
+		if res, err := store.CheckpointWAL(); err != nil {
+			slog.Warn("sqlite_wal_checkpoint_failed", "err", err)
+		} else if res.Blocked {
+			slog.Warn("sqlite_wal_checkpoint_blocked", "pending_frames", res.PendingFrames)
+		} else {
+			slog.Debug("sqlite_wal_truncated")
+		}
+	}
+	maintain()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			maintain()
+		}
+	}
+}
+
 // runLocalLogMaintenance reconciles every control-plane node's private disk.
 // Database deletion remains owner-only, but a former owner may retain files on
 // a standby; each node therefore removes database-orphaned files independently.
@@ -1362,7 +1401,8 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 			return err
 		}
 	}
-	slog.Info("runtime configured", "tier", defaultTier, "mode", defaultTierCfg.Runtime)
+	slog.Info("runtime configured", "tier", defaultTier, "mode", defaultTierCfg.Runtime, "max_concurrent_builds", cfg.Runtime.MaxConcurrentBuilds)
+	deploy.SetMaxConcurrentBuilds(cfg.Runtime.MaxConcurrentBuilds)
 	mgr := process.NewManager(cfg.Storage.AppsDir, rt)
 	// Processes that survived the last shutdown are still running and still
 	// serving, but this Manager has not adopted them yet: RecoverProcesses does
@@ -2895,6 +2935,13 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 			defer loops.Done()
 			runMaintenance(octx, store, mgr, appLogTelemetry, cfg.Maintenance, cfg.Usage)
 		}()
+		// A file-backed SQLite database is only ever served by one process, so
+		// its WAL checkpoint and planner statistics belong with the owner loops.
+		loops.Add(1)
+		go func() {
+			defer loops.Done()
+			runSQLiteMaintenance(octx, store, cfg.Maintenance.Interval)
+		}()
 		loops.Add(1)
 		go func() { defer loops.Done(); srv.RunDevelopmentAppReaper(octx, time.Minute) }()
 		// Restore serving floors independently of optional frozen warm-wake.
@@ -3002,11 +3049,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	}
 
 	mux := http.NewServeMux()
-	// Observe wraps the timeout handler (not the inner router) so server metrics
-	// and traces record the status/latency the client actually sees, including
-	// timeout 503s and recovered-panic 500s. It is a no-op unless metrics or
-	// tracing are enabled.
-	mux.Handle("/api/", bodyLimitHandler(srv.Observe(apiTimeoutHandler(srv.Router()))))
+	mux.Handle("/api/", apiHandler(srv))
 	// Re-resolve JWT-claimed users against the live DB on every /app/* hit
 	// so role demotions and account deletions take effect immediately.
 	// Without this an admin's still-valid JWT keeps the admin-bypass path
@@ -4020,8 +4063,8 @@ func apiTimeoutHandler(h http.Handler) http.Handler {
 //   - GET /api/apps/{slug}/logs and
 //     GET /api/apps/{slug}/schedules/{id}/runs/{run_id}/logs —
 //     server-sent log streams that stay open by design.
-//   - POST /api/apps/{slug}/deploy — bundle upload, body can be
-//     hundreds of MB.
+//   - POST /api/apps/{slug}/deploy and POST /api/apps/{slug}/drafts —
+//     bundle uploads, body can be hundreds of MB.
 //   - POST /api/apps/{slug}/restart, POST|PUT /api/apps/{slug}/rollback,
 //     POST /api/apps/{slug}/stop — pool swaps that stop and relaunch
 //     every replica under the per-slug deploy lock. These can
@@ -4053,7 +4096,7 @@ func isLongLivedAPIRoute(method, path string) bool {
 	switch sub {
 	case "logs":
 		return method == http.MethodGet
-	case "deploy", "restart", "stop":
+	case "deploy", "drafts", "restart", "stop":
 		return method == http.MethodPost
 	case "rollback":
 		return method == http.MethodPost || method == http.MethodPut
@@ -4075,6 +4118,17 @@ func isScheduleRunLogsPath(sub string) bool {
 		seg[0] == "schedules" && seg[1] != "" &&
 		seg[2] == "runs" && seg[3] != "" &&
 		seg[4] == "logs"
+}
+
+// apiHandler assembles the middleware chain mounted at /api/: the body cap
+// outermost so it sees the raw request body, then Observe around the timeout
+// handler (not the inner router) so server metrics and traces record the
+// status/latency the client actually sees, including timeout 503s and
+// recovered-panic 500s. Observe is a no-op unless metrics or tracing are
+// enabled. Tests build the production chain through this function so a route
+// exemption is proven against the same wrappers serve installs.
+func apiHandler(srv *api.Server) http.Handler {
+	return bodyLimitHandler(srv.Observe(apiTimeoutHandler(srv.Router())))
 }
 
 // maxAPIJSONBody caps the request body for ordinary JSON API endpoints so a
@@ -4099,8 +4153,9 @@ func bodyLimitHandler(next http.Handler) http.Handler {
 
 // isLargeUploadRoute reports whether method+path is a bulk-upload API route that
 // legitimately carries a body larger than maxAPIJSONBody and applies its own
-// size limit downstream: POST /api/apps/{slug}/deploy (bundle zip) and
-// PUT /api/apps/{slug}/data/<rel> (per-app data file).
+// size limit downstream: POST /api/apps/{slug}/deploy and
+// POST /api/apps/{slug}/drafts (bundle zip) and PUT /api/apps/{slug}/data/<rel>
+// (per-app data file).
 func isLargeUploadRoute(method, path string) bool {
 	const prefix = "/api/apps/"
 	if !strings.HasPrefix(path, prefix) {
@@ -4112,7 +4167,7 @@ func isLargeUploadRoute(method, path string) bool {
 		return false
 	}
 	sub := rest[slash+1:]
-	if sub == "deploy" {
+	if sub == "deploy" || sub == "drafts" {
 		return method == http.MethodPost
 	}
 	if method == http.MethodPut && strings.HasPrefix(sub, "data/") && len(sub) > len("data/") {

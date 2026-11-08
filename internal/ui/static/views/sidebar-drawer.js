@@ -54,7 +54,7 @@ export function createSidebarDrawer(opts) {
     if (trap) { trap.release(); trap = null; } // release() restores focus to the opener
   }
 
-  function toggleDrawer() { isOpen() ? close() : open(); }
+  function toggleDrawer() { if (isOpen()) close(); else open(); }
 
   // Post-mount hook: close after an allowed navigation. A vetoed navigation
   // never mounts, so this never fires and the drawer stays open.

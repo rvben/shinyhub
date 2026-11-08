@@ -4,7 +4,7 @@
 // is the renderer + the 10s liveness poll. All app/user-supplied text is set via
 // textContent / createElement, never innerHTML, so a malicious slug or crash
 // traceback can never inject markup.
-import { buildOverviewWorkspace, pulseMeta } from './overview-model.js';
+import { buildOverviewWorkspace } from './overview-model.js';
 import { formatBytes, formatCoreCapacity, formatCoreCount } from './stat-format.js';
 import { updateCPUMeter } from './cpu-capacity.js';
 import { formatStatus } from './status-label.js';

@@ -61,13 +61,6 @@ func (b *boundDB) QueryRowContext(ctx context.Context, query string, args ...any
 	b.observe(rebound)
 	return b.real.QueryRowContext(ctx, rebound, args...)
 }
-func (b *boundDB) Begin() (*boundTx, error) {
-	tx, err := b.real.Begin()
-	if err != nil {
-		return nil, err
-	}
-	return &boundTx{tx: tx, d: b.d}, nil
-}
 func (b *boundDB) PingContext(ctx context.Context) error { return b.real.PingContext(ctx) }
 func (b *boundDB) Close() error                          { return b.real.Close() }
 
@@ -75,6 +68,24 @@ func (b *boundDB) Close() error                          { return b.real.Close()
 type boundTx struct {
 	tx *sql.Tx
 	d  dialect
+}
+
+// beginReadSnapshot starts a read-only transaction so a group of queries
+// observes one consistent snapshot. Every writing transaction goes through
+// dialect.beginWrite instead: on SQLite a deferred transaction that reads and
+// then writes fails with SQLITE_BUSY_SNAPSHOT once another connection has
+// committed, and a transaction that never writes is the only kind for which a
+// deferred BEGIN is safe.
+func (s *Store) beginReadSnapshot(ctx context.Context) (*boundTx, error) {
+	opts := &sql.TxOptions{ReadOnly: true}
+	if s.IsPostgres() {
+		opts.Isolation = sql.LevelRepeatableRead
+	}
+	tx, err := s.db.real.BeginTx(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	return &boundTx{tx: tx, d: s.d}, nil
 }
 
 func (b *boundTx) Exec(query string, args ...any) (sql.Result, error) {
@@ -121,10 +132,13 @@ type writeTx interface {
 // ctx is the transaction's own context (callers pass a long-lived context such
 // as context.Background(), not an HTTP request context, since it governs COMMIT).
 type boundConn struct {
-	conn      *sql.Conn
-	d         dialect
-	ctx       context.Context
-	committed bool
+	conn *sql.Conn
+	d    dialect
+	ctx  context.Context
+	// done is set once the transaction has ended either way and the dedicated
+	// connection has gone back to the pool, so a deferred Rollback after
+	// Commit is a no-op instead of a statement on a released connection.
+	done bool
 }
 
 func (b *boundConn) Exec(query string, args ...any) (sql.Result, error) {
@@ -145,17 +159,34 @@ func (b *boundConn) QueryRow(query string, args ...any) *sql.Row {
 func (b *boundConn) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
 	return b.conn.QueryRowContext(ctx, b.d.rebind(query), args...)
 }
+
+// Commit ends the transaction and releases the connection. A COMMIT that fails
+// (the context is done, or SQLite reports BUSY while a checkpoint holds the
+// lock) leaves the transaction open on the connection, and the driver does not
+// reset sessions on reuse, so the next borrower would inherit it and its own
+// BEGIN IMMEDIATE would fail. Roll back explicitly before releasing, on a
+// context that cannot already be cancelled, and report the COMMIT error.
 func (b *boundConn) Commit() error {
+	if b.done {
+		return sql.ErrTxDone
+	}
 	_, err := b.conn.ExecContext(b.ctx, "COMMIT")
-	b.committed = true
+	if err != nil {
+		_, _ = b.conn.ExecContext(context.WithoutCancel(b.ctx), "ROLLBACK")
+	}
+	b.done = true
 	_ = b.conn.Close()
 	return err
 }
+
+// Rollback aborts the transaction and releases the connection. After Commit
+// (successful or not) the transaction has already ended, so it returns nil.
 func (b *boundConn) Rollback() error {
-	if b.committed {
+	if b.done {
 		return nil
 	}
-	_, err := b.conn.ExecContext(b.ctx, "ROLLBACK")
+	b.done = true
+	_, err := b.conn.ExecContext(context.WithoutCancel(b.ctx), "ROLLBACK")
 	_ = b.conn.Close()
 	return err
 }

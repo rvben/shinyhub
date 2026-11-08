@@ -155,9 +155,13 @@ func newLoginLimiter(store *db.Store, limit int, window time.Duration) rateLimit
 	return newLoginRateLimiter(limit, window)
 }
 
-// dummyHash is a pre-computed bcrypt hash used to ensure constant-time
-// response for unknown usernames, preventing timing-based enumeration.
-var dummyHash, _ = auth.HashPassword("dummy-sentinel-do-not-use")
+// dummyHash is a bcrypt hash of a discarded random value at auth.BcryptCost.
+// Login compares against it when the username is unknown so a miss costs the
+// same as a real password check, preventing timing-based user enumeration. It
+// is a literal rather than a hash computed at package init because that hash
+// cost every process linking this package about a quarter second before main
+// ran; TestDummyHashMatchesLiveCost pins the literal to the live cost.
+const dummyHash = "$2a$12$K7hzUcTJL3CmB7FqxwCBE.4QEpMvCYTCrXs0/jaBrBgcZNXARWoAC"
 
 type loginRequest struct {
 	Username string `json:"username"`

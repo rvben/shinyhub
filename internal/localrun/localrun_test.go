@@ -577,6 +577,10 @@ time.sleep(60)
 	}
 
 	cmd := exec.Command("python3", filepath.Join(dir, "leader.py"))
+	// Start from the temp dir like every other fixture: a python3 reached
+	// through a version-manager shim resolves its config from the working
+	// directory's ancestors, and the suite runs under a private HOME.
+	cmd.Dir = dir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)

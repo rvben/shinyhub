@@ -10,6 +10,9 @@ export async function startAuthenticatedRouter(router, win = window) {
     const search = params.toString();
     win.history.replaceState(null, '', win.location.pathname + (search ? '?' + search : '') + win.location.hash);
   }
+  // The class deliberately names control characters: a return path carrying one
+  // is rejected rather than normalised.
+  // eslint-disable-next-line no-control-regex
   if (raw && raw.startsWith('/') && !raw.startsWith('//') && !/[\\\x00-\x20\x7f]/.test(raw)) {
     const target = new URL(raw, win.location.origin);
     if (target.origin === win.location.origin && target.pathname !== '/' && target.pathname !== '/login') {

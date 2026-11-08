@@ -150,7 +150,7 @@ export default function () {
 
   let wsEstablished = false;
 
-  const res = ws.connect(target, wsParams, function (socket) {
+  ws.connect(target, wsParams, function (socket) {
     socket.on('open', () => {
       // Abort if no server frame arrives within LT_FIRST_MSG_TIMEOUT.
       socket.setTimeout(() => {

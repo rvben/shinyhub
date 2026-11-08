@@ -21,10 +21,15 @@ import (
 	"html"
 )
 
-// Script is the switcher client. See assets/nav.js for what it does and why it
-// is safe to run inside an app this server did not write.
+// Script is the switcher client: the minified build of assets/nav.js, which is
+// where to read what it does and why it is safe to run inside an app this
+// server did not write. The minified sibling ships because the script is
+// inlined into every page load under /app/. It is regenerated from the source
+// by go generate (or make ui-minify), and make ui-minify-check fails while it
+// is stale.
 //
-//go:embed assets/nav.js
+//go:generate node ../../scripts/minify-injected.mjs assets/nav.js
+//go:embed assets/nav.min.js
 var Script string
 
 // CSPHash is the CSP source expression admitting Script as an inline block. It

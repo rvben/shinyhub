@@ -42,7 +42,7 @@
   function emit(name, detail) {
     try {
       window.dispatchEvent(new CustomEvent(name, { detail: detail }));
-    } catch (error) {
+    } catch (_) {
       /* The bridge is optional chrome and must never interrupt the app. */
     }
   }
@@ -120,7 +120,7 @@
     var key = pair.split("=")[0];
     try {
       key = decodeURIComponent(key.replace(/\+/g, " "));
-    } catch (error) {
+    } catch (_) {
       return false;
     }
     return key === "_inputs_" || key === "_values_";
@@ -163,7 +163,7 @@
         window.history.replaceState(window.history.state, "", next);
       }
       return true;
-    } catch (error) {
+    } catch (_) {
       return false;
     }
   }
@@ -202,7 +202,7 @@
       // Default batching is essential: Shiny enqueues the original input after
       // its inputchanged handlers, so an event-priority send here would outrun it.
       window.Shiny.setInputValue(".shinyhub_bookmark_browser_revision", browserRevision);
-    } catch (error) { /* Keep pending until a later observation succeeds. */ }
+    } catch (_) { /* Keep pending until a later observation succeeds. */ }
   }
 
   function inputChanged(event) {
@@ -239,7 +239,7 @@
         { version: VERSION, syncRevision: revision },
         { priority: "event" }
       );
-    } catch (error) {
+    } catch (_) {
       /* The URL is already durable; discovery will reconcile the missing ack. */
     }
   }
@@ -253,7 +253,7 @@
       );
       discoveryAttempts = 0;
       return true;
-    } catch (error) {
+    } catch (_) {
       discoveryAttempts += 1;
       if (discoveryRetryTimer === null && discoveryAttempts < 20) {
         discoveryRetryTimer = window.setTimeout(function () {
@@ -316,7 +316,7 @@
     pendingRequest = { requestId: detail.requestId, kind: kind, revision: revision || 0, browserRevision: browserRevision };
     try {
       window.Shiny.setInputValue(REQUEST_INPUT, detail, { priority: "event" });
-    } catch (error) {
+    } catch (_) {
       pendingRequest = null;
       if (kind === "sync") {
         handleSyncFailure("dispatch_failed", "The app connection interrupted URL saving.");

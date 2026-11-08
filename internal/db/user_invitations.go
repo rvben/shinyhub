@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"time"
@@ -21,7 +22,7 @@ func (s *Store) CreateUserInvitation(inv UserInvitation, tokenHash string) error
 	if IsReservedUsername(inv.Username) {
 		return ErrReservedUsername
 	}
-	tx, err := s.db.Begin()
+	tx, err := s.d.beginWrite(context.Background(), s.rawDB(), 0)
 	if err != nil {
 		return err
 	}
@@ -85,7 +86,7 @@ func (s *Store) RevokeUserInvitation(id string) (bool, error) {
 }
 
 func (s *Store) AcceptUserInvitation(tokenHash, passwordHash string) (*User, error) {
-	tx, err := s.db.Begin()
+	tx, err := s.d.beginWrite(context.Background(), s.rawDB(), 0)
 	if err != nil {
 		return nil, err
 	}

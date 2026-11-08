@@ -37,6 +37,8 @@ lifecycle:
 
 defaults:
   app_visibility: private
+
+scheduler:
   timezone: Europe/Amsterdam
 
 maintenance:

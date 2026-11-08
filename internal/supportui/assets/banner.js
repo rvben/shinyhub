@@ -48,7 +48,6 @@
     button:hover { background: #fbbf24; box-shadow: 0 4px 14px rgba(245, 158, 11, .22); }
     button:focus-visible { outline: 3px solid #fff8e7; outline-offset: 2px; }
     button:disabled { cursor: wait; opacity: .66; box-shadow: none; }
-    .error { color: #f87171; font-size: 12px; margin-top: 2px; overflow-wrap: anywhere; }
     ::selection { background: #f59e0b; color: #21170a; }
     @media (max-width: 620px) {
       .rail { align-items: flex-start; gap: 9px; padding: 9px 10px; flex-wrap: wrap; }
@@ -112,11 +111,7 @@
   const detail = document.createElement("div");
   detail.className = "detail";
   detail.textContent = `${actor} is the administrator. Actions here can change ${subject}’s data.`;
-  const errorNode = document.createElement("div");
-  errorNode.className = "error";
-  errorNode.setAttribute("role", "alert");
-  errorNode.hidden = true;
-  copy.append(title, detail, errorNode);
+  copy.append(title, detail);
   const timerNode = document.createElement("div");
   timerNode.className = "timer";
   const live = document.createElement("span");
@@ -136,7 +131,6 @@
   const timer = timerNode;
   const status = live;
   const button = endButton;
-  const error = errorNode;
   let expiryStopAttempted = false;
   let lastAnnouncement = "";
 

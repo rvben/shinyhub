@@ -9,7 +9,7 @@ import { createServer } from 'node:net';
 import { createServer as createHTTPS } from 'node:https';
 import { request as httpRequest } from 'node:http';
 import { createRequire } from 'node:module';
-import { mkdtemp, mkdir, writeFile, readFile, cp } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';

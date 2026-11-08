@@ -44,6 +44,11 @@ type AppLogStats struct {
 // AppendAppLogChunk atomically adds one chunk and trims the oldest bytes until
 // the run is within maxBytes. Offsets are never renumbered during trimming,
 // which lets followers use one monotonic cursor for the lifetime of a run.
+//
+// The run row carries the retained size (app_log_runs.bytes_retained) and this
+// function is its only writer, so an append costs one indexed update instead
+// of a sum over every retained chunk, and trimming costs only the chunks it
+// removes. A redelivered chunk (same run and sequence) changes nothing.
 func (s *Store) AppendAppLogChunk(runID string, seq, startOffset int64, data []byte, maxBytes int64, createdAt time.Time) error {
 	defer s.timed("AppendAppLogChunk")()
 	if runID == "" || len(data) == 0 {
@@ -52,27 +57,40 @@ func (s *Store) AppendAppLogChunk(runID string, seq, startOffset int64, data []b
 	if maxBytes <= 0 {
 		maxBytes = AppLogRetentionBytes
 	}
-	tx, err := s.db.Begin()
+	tx, err := s.d.beginWrite(context.Background(), s.rawDB(), 0)
 	if err != nil {
 		return fmt.Errorf("append app log chunk begin: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 	endOffset := startOffset + int64(len(data))
-	if _, err := tx.Exec(`
+	res, err := tx.Exec(`
 		INSERT INTO app_log_chunks
 			(run_id, chunk_seq, start_offset, end_offset, data, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT (run_id, chunk_seq) DO NOTHING`,
-		runID, seq, startOffset, endOffset, data, createdAt.UnixMilli()); err != nil {
+		runID, seq, startOffset, endOffset, data, createdAt.UnixMilli())
+	if err != nil {
 		return fmt.Errorf("append app log chunk: %w", err)
+	}
+	inserted, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("append app log chunk result: %w", err)
+	}
+	if inserted == 0 {
+		return nil
 	}
 
 	var total int64
 	if err := tx.QueryRow(`
-		SELECT COALESCE(SUM(end_offset - start_offset), 0)
-		FROM app_log_chunks WHERE run_id = ?`, runID).Scan(&total); err != nil {
-		return fmt.Errorf("size app log chunks: %w", err)
+		UPDATE app_log_runs SET bytes_retained = bytes_retained + ?
+		WHERE run_id = ?
+		RETURNING bytes_retained`, len(data), runID).Scan(&total); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("append app log chunk: run %s does not exist", runID)
+		}
+		return fmt.Errorf("account app log chunk: %w", err)
 	}
+	afterInsert := total
 	for total > maxBytes {
 		var oldestSeq, oldestStart int64
 		var oldest []byte
@@ -98,6 +116,11 @@ func (s *Store) AppendAppLogChunk(runID string, seq, startOffset int64, data []b
 			return fmt.Errorf("trim app log chunk: %w", err)
 		}
 		total -= drop
+	}
+	if total != afterInsert {
+		if _, err := tx.Exec(`UPDATE app_log_runs SET bytes_retained = ? WHERE run_id = ?`, total, runID); err != nil {
+			return fmt.Errorf("account trimmed app log chunks: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("append app log chunk commit: %w", err)

@@ -1,0 +1,54 @@
+name: Set up Playwright with a cached browser
+description: >-
+  Installs Node and the render driver's locked Playwright, restores the
+  browser download from a cache keyed on the driver's lock file and the
+  browser, then installs the browser together with its system libraries.
+  Playwright skips a browser that is already present, so a restored cache
+  leaves only the system libraries to install, and the download no longer
+  repeats in every job that drives a browser. The driver package has no
+  install script, so the cache holds exactly the browser asked for.
+
+inputs:
+  browser:
+    description: The Playwright browser to install (chromium, firefox or webkit).
+    required: false
+    default: chromium
+  node-version:
+    description: The Node.js major version to set up.
+    required: false
+    default: "20"
+  root-dependencies:
+    description: >-
+      Also install the repository's root devDependencies, which the browser
+      scripts that import axe-core or the dashboard test helpers need.
+    required: false
+    default: "false"
+
+# The actions below are pinned to commits because the release workflow runs
+# this composite too, and a step that only runs at release time has no CI run
+# to catch a changed upstream tag before the tag is already pushed.
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Install the render driver's dependencies
+      shell: bash
+      run: npm --prefix loadtest/render/driver ci --ignore-scripts --no-audit --no-fund
+
+    - name: Install the root dependencies
+      if: inputs.root-dependencies == 'true'
+      shell: bash
+      run: npm ci --ignore-scripts --no-audit --no-fund
+
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/ms-playwright
+        key: playwright-${{ runner.os }}-${{ inputs.browser }}-${{ hashFiles('loadtest/render/driver/package-lock.json') }}
+
+    - name: Install the browser and its system libraries
+      shell: bash
+      working-directory: loadtest/render/driver
+      run: npx --no-install playwright install --with-deps "${{ inputs.browser }}"

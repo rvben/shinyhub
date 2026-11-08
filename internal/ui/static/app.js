@@ -4,7 +4,7 @@ import { installPasswordVisibility, profileFieldErrors, setProfileFieldError } f
 import { installAppContextNavigation } from '/static/views/app-context-nav.js';
 import { settingsRouteParams, isSameAppSettingsDestination } from '/static/views/app-detail-nav.js';
 import { directSettings, populateDirectSetting, installDirectSetting, refreshDirectSetting, readDirectSetting } from '/static/views/direct-setting.js';
-import { applyConfigurationContext, markConfigurationBehaviorStale, updateConfigurationDirty, updateWorkerFields, switchWorkerFields, usageModeLabel, environmentEditValue } from '/static/views/configuration-context.js';
+import { applyConfigurationContext, markConfigurationBehaviorStale, updateConfigurationDirty, updateWorkerFields, switchWorkerFields, environmentEditValue } from '/static/views/configuration-context.js';
 import { installMobileDisclosures } from '/static/views/mobile-disclosure.js';
 import { enhancePageHeaders, bindFilterBar, setFeedback } from '/static/views/page-components.js';
 import { deployCommands, cliSetupCommands } from '/static/views/deploy-commands.js';
@@ -2915,12 +2915,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // --- General tab ---
 
-  function hibernateModeFromValue(minutes) {
-    if (minutes === null || minutes === undefined) return 'default';
-    if (minutes === 0) return 'never';
-    return 'custom';
-  }
-
   // renderPacingBlock holds the server's render_pacing advisory for the app
   // currently open in Configuration, so the advice line can be recomputed on
   // every keystroke without refetching. It describes the SAVED render_seconds
@@ -4005,7 +3999,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const enabledInput = document.getElementById('autoscale-enabled');
     const minInput = document.getElementById('autoscale-min');
     const maxInput = document.getElementById('autoscale-max');
-    const targetInput = document.getElementById('autoscale-target');
     const canEdit = canManageApp(state.user, app);
 
     enabledInput.checked = !!app.autoscale_enabled;
@@ -6258,7 +6251,7 @@ document.addEventListener('DOMContentLoaded', () => {
       // native-only server never shows a dead button (see login-providers.js).
       applyLoginProviders(document, data);
       updateGroupAccessProviderHelp(data);
-    } catch (e) { updateGroupAccessProviderHelp(); }
+    } catch { updateGroupAccessProviderHelp(); }
   }
 
   // detailLastEnvelope is updated by renderOverview (via ctx.setDetailEnvelope)

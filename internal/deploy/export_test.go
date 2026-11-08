@@ -36,6 +36,15 @@ func SetRShinyInstalledForTest(installed bool) (restore func()) {
 	return func() { rShinyInstalledFn = orig }
 }
 
+// SetMaxConcurrentBuildsForTest resizes the host-wide build gate. Returns a
+// restore func that reinstalls the previous gate - pair with defer. Test use
+// only.
+func SetMaxConcurrentBuildsForTest(limit int) (restore func()) {
+	orig := activeBuildGate.Load()
+	activeBuildGate.Store(newBuildGate(limit))
+	return func() { activeBuildGate.Store(orig) }
+}
+
 // SetEnsureProjectForTest swaps the ensure-project hook. Returns a restore
 // func — pair with defer. Test use only.
 func SetEnsureProjectForTest(fn func(context.Context, string, []string) error) (restore func()) {

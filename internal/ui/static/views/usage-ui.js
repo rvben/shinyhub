@@ -137,7 +137,7 @@ function makeActivityChart(doc, days) {
   const dates = doc.createElement('div');
   dates.className = 'usage-chart-dates';
   dates.setAttribute('aria-hidden', 'true');
-  for (const index of [...new Set([0, Math.floor((days.length - 1) / 2), days.length - 1])]) {
+  for (const index of new Set([0, Math.floor((days.length - 1) / 2), days.length - 1])) {
     const label = doc.createElement('span');
     label.textContent = shortDate(days[index].date);
     dates.append(label);

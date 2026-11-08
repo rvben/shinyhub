@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -1009,6 +1010,11 @@ type RuntimeConfig struct {
 	Native          NativeRuntimeConfig
 	DefaultReplicas int
 	MaxReplicas     int
+	// MaxConcurrentBuilds is how many dependency builds (uv sync,
+	// renv::restore) may run on this host at once; further deploys queue for a
+	// slot and report the wait. Defaults to half the cores the process may
+	// use, between 1 and 2. 0 removes the cap.
+	MaxConcurrentBuilds int
 	// DefaultMaxSessionsPerReplica is the fallback session cap enforced by the
 	// proxy when an app's own max_sessions_per_replica is 0. Once every replica
 	// reaches this many active connections, new cookie-less requests are shed
@@ -1361,61 +1367,6 @@ type rawConfig struct {
 	Build       BuildConfig        `yaml:"build"`
 }
 
-// validTopLevelKeys is the set of accepted top-level YAML keys, mirroring the
-// rawConfig fields' yaml tags. TestValidTopLevelKeys_MatchRawConfig keeps the
-// two in sync, so adding a section to rawConfig without listing it here (which
-// would make configs using it error) is caught at test time.
-var validTopLevelKeys = map[string]bool{
-	"database": true, "server": true, "auth": true, "storage": true,
-	"lifecycle": true, "oauth": true, "runtime": true, "scheduler": true,
-	"defaults": true, "tracing": true, "metrics": true, "maintenance": true,
-	"usage": true, "branding": true, "worker": true, "build": true,
-}
-
-// runtimeSubKeys are the section names nested under `runtime:`. Placing one at
-// the top level is a common mistake; the unknown-key error hints at the correct
-// nesting for these.
-var runtimeSubKeys = map[string]bool{
-	"docker": true, "tiers": true, "autoscale": true, "fargate": true, "scaleway": true, "snapshot": true, "native": true,
-}
-
-// checkTopLevelKeys rejects any top-level YAML key that is not a known config
-// section, so a misplaced or misspelled key is a clear error rather than a
-// silent no-op. data is the raw config bytes (already known to decode as a
-// mapping, since the struct decode above succeeded).
-func checkTopLevelKeys(data []byte) error {
-	var top map[string]yaml.Node
-	if err := yaml.Unmarshal(data, &top); err != nil {
-		// A non-mapping document is already rejected by the struct decode.
-		return nil
-	}
-	var unknown []string
-	for k := range top {
-		if !validTopLevelKeys[k] {
-			unknown = append(unknown, k)
-		}
-	}
-	if len(unknown) == 0 {
-		return nil
-	}
-	slices.Sort(unknown)
-	parts := make([]string, 0, len(unknown))
-	for _, k := range unknown {
-		if runtimeSubKeys[k] {
-			parts = append(parts, fmt.Sprintf("%q (did you mean runtime.%s?)", k, k))
-		} else {
-			parts = append(parts, fmt.Sprintf("%q", k))
-		}
-	}
-	valid := make([]string, 0, len(validTopLevelKeys))
-	for k := range validTopLevelKeys {
-		valid = append(valid, k)
-	}
-	slices.Sort(valid)
-	return fmt.Errorf("config: unknown top-level key(s): %s; valid top-level keys are: %s",
-		strings.Join(parts, ", "), strings.Join(valid, ", "))
-}
-
 type rawMetricsConfig struct {
 	ProcessInterval string `yaml:"process_interval"`
 	Enabled         bool   `yaml:"enabled"`
@@ -1464,8 +1415,9 @@ type rawRuntimeConfig struct {
 	Native          rawNativeRuntimeConfig `yaml:"native"`
 	DefaultReplicas int                    `yaml:"default_replicas"`
 	MaxReplicas     int                    `yaml:"max_replicas"`
-	// Pointer so an explicit 0 (documented as "unlimited") is
+	// Pointers so an explicit 0 (documented as "unlimited" / "no cap") is
 	// distinguishable from the key being absent (apply the safe default).
+	MaxConcurrentBuilds          *int                     `yaml:"max_concurrent_builds"`
 	DefaultMaxSessionsPerReplica *int                     `yaml:"default_max_sessions_per_replica"`
 	DefaultWorkerIsolation       string                   `yaml:"default_worker_isolation"`
 	Tiers                        []rawTierConfig          `yaml:"tiers"`
@@ -1633,11 +1585,12 @@ func loadRaw(path string) (*Config, error) {
 			if derr := dec.Decode(raw); derr != nil {
 				return nil, fmt.Errorf("parse config: %w", derr)
 			}
-			// Reject misplaced/misspelled top-level keys (e.g. a `snapshot:` block
-			// that belongs under `runtime:`). YAML's recursive strict mode is too
-			// broad, so this is scoped to the top level - the level operators most
-			// often get wrong, where a silent drop is invisible.
-			if kerr := checkTopLevelKeys(data); kerr != nil {
+			// Reject misplaced and misspelled keys at every depth (a top-level
+			// `snapshot:` that belongs under `runtime:`, a `server.drian_timeout`
+			// typo). The struct decode above drops them without a word, which
+			// is a silent no-op the operator can only discover by noticing the
+			// setting never took effect.
+			if kerr := checkUnknownKeys(data); kerr != nil {
 				return nil, kerr
 			}
 			// Reject a trailing YAML document: the decode above read only the
@@ -2721,6 +2674,14 @@ func validateScaleway(s ScalewayRuntimeConfig) error {
 	return nil
 }
 
+// defaultMaxConcurrentBuilds leaves half the cores this process may use to
+// the apps already serving: a dependency build saturates a core and a fleet
+// apply would otherwise start one per app. GOMAXPROCS honours a container's
+// CPU quota, so the default follows the cgroup limit rather than the host.
+func defaultMaxConcurrentBuilds() int {
+	return max(1, min(2, runtime.GOMAXPROCS(0)/2))
+}
+
 func parseRuntime(r rawRuntimeConfig) (RuntimeConfig, error) {
 	rc := RuntimeConfig{
 		Mode: "native",
@@ -2791,6 +2752,14 @@ func parseRuntime(r rawRuntimeConfig) (RuntimeConfig, error) {
 	}
 	if rc.MaxReplicas <= 0 {
 		rc.MaxReplicas = 32
+	}
+	switch {
+	case r.MaxConcurrentBuilds == nil:
+		rc.MaxConcurrentBuilds = defaultMaxConcurrentBuilds()
+	case *r.MaxConcurrentBuilds < 0:
+		return RuntimeConfig{}, fmt.Errorf("runtime.max_concurrent_builds: must be 0 (no cap) or a positive count, got %d", *r.MaxConcurrentBuilds)
+	default:
+		rc.MaxConcurrentBuilds = *r.MaxConcurrentBuilds
 	}
 	// Profiling spike showed single-event-loop p99 stays healthy to c=10 and
 	// degrades sharply beyond that, with some apps erroring at c=30. 10 is
@@ -3551,6 +3520,16 @@ func applyEnvWith(cfg *Config, getConfigEnv func(string) string) error {
 		if n > 0 {
 			cfg.Runtime.MaxReplicas = n
 		}
+	}
+	if v := getConfigEnv("SHINYHUB_RUNTIME_MAX_CONCURRENT_BUILDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_MAX_CONCURRENT_BUILDS: %q is not an integer: %w", v, err)
+		}
+		if n < 0 {
+			return fmt.Errorf("SHINYHUB_RUNTIME_MAX_CONCURRENT_BUILDS: must be 0 (no cap) or a positive count, got %d", n)
+		}
+		cfg.Runtime.MaxConcurrentBuilds = n
 	}
 	if v := getConfigEnv("SHINYHUB_RUNTIME_DEFAULT_MAX_SESSIONS_PER_REPLICA"); v != "" {
 		n, err := strconv.Atoi(v)

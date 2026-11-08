@@ -2,9 +2,9 @@
 
 // Real-browser contract for the injected app switcher. jsdom runs no CSS, so
 // it cannot see that a panel fading in from `visibility: hidden` refuses focus
-// at the moment it opens. This serves the production nav.js to system Chrome
-// and asserts that opening each dialog moves keyboard focus inside it and that
-// Escape hands focus back to the control that opened it.
+// at the moment it opens. This serves the minified nav.min.js the proxy embeds
+// to system Chrome and asserts that opening each dialog moves keyboard focus
+// inside it and that Escape hands focus back to the control that opened it.
 
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
@@ -17,14 +17,14 @@ import { createRequire } from 'node:module';
 const driverRequire = createRequire(new URL('../loadtest/render/driver/package.json', import.meta.url));
 const { chromium } = driverRequire('playwright');
 
-const navSource = await readFile(new URL('../internal/appnav/assets/nav.js', import.meta.url));
+const navSource = await readFile(new URL('../internal/appnav/assets/nav.min.js', import.meta.url));
 if (!navSource.includes('shinyhub-app-nav')) {
-  throw new Error('nav.js does not look like the app switcher script');
+  throw new Error('nav.min.js does not look like the app switcher script');
 }
 
 const artifactDir = await mkdtemp(join(tmpdir(), 'shinyhub-app-nav-'));
 const bridgeSource = await readFile(new URL('../packaging/python-bookmarks/src/shinyhub_bookmarks/www/bridge.js', import.meta.url));
-const overlaySource = await readFile(new URL('../internal/proxy/assets/overlay.js', import.meta.url));
+const overlaySource = await readFile(new URL('../internal/proxy/assets/overlay.min.js', import.meta.url));
 let holdReadiness = false;
 let releaseReadiness;
 let switched = false;
