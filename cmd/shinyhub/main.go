@@ -1060,23 +1060,6 @@ func (cleaners appResourceCleaners) CleanupApp(ctx context.Context, appID int64)
 	return errors.Join(errs...)
 }
 
-// hostSampler samples PID-backed replicas (native) via gopsutil and reports
-// PID-less replicas (docker/remote/fargate handles, whose RunHandle carries a
-// ContainerID rather than a PID) as unmeasured without error: the zero Stats it
-// returns carries a nil CPU rate, so they render as "not available" rather than
-// as an idle app. Returning no error for the PID-less case is deliberate: the
-// status endpoint treats a sampler error as a dead replica, so a running replica
-// on a container/fargate tier must not be probed by PID (PID 0) and misreported
-// as stopped.
-type hostSampler struct{ gops process.GopsutilSampler }
-
-func (h *hostSampler) Sample(handle process.RunHandle) (process.Stats, error) {
-	if handle.PID == 0 {
-		return process.Stats{}, nil
-	}
-	return h.gops.Sample(handle)
-}
-
 func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) error {
 	environment, envErr := config.ServerEnvironment(serverConfigPath(), os.Environ())
 	if envErr != nil {
@@ -1669,23 +1652,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 
 	configureProxyObservability(logger, prx, srv, store, metricsReg)
 
-	// Choose the metrics sampler. A docker default tier samples container stats
-	// through the Runtime API. Otherwise use the host sampler, which reads host
-	// PIDs for native replicas and reports PID-less replicas (fargate/remote
-	// container handles) as zero usage without error, so a running replica on
-	// such a tier is never misreported as stopped by a failed PID probe.
-	// Compare the default tier's resolved runtime rather than cfg.Runtime.Mode
-	// (the legacy field): a config that declares tiers:[{runtime:docker}]
-	// without setting runtime.mode must still pick the RuntimeSampler, not the
-	// host sampler.
-	defaultTierCfg := defaultTierConfig(cfg)
-	rt := mgr.RuntimeForTier(defaultTierCfg.Name)
-	var replicaSampler process.Sampler
-	if defaultTierCfg.Runtime == "docker" {
-		replicaSampler = &process.RuntimeSampler{Runtime: rt}
-	} else {
-		replicaSampler = &hostSampler{}
-	}
+	replicaSampler, histSampler := replicaSamplers(cfg, mgr)
 	srv.SetSampler(replicaSampler)
 
 	// Start the in-memory metrics-history collector unless disabled
@@ -1697,10 +1664,6 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	if cfg.Metrics.HistoryWindow > 0 {
 		histStore := history.NewStore(cfg.Metrics.HistoryWindow, cfg.Metrics.HistoryInterval)
 		srv.SetHistory(histStore)
-		var histSampler process.Sampler = &process.GopsutilSampler{}
-		if defaultTierCfg.Runtime == "docker" {
-			histSampler = &process.RuntimeSampler{Runtime: rt}
-		}
 		collector := history.NewCollector(mgr, prx, histSampler, histStore, cfg.Metrics.HistoryInterval)
 		historyService = services.Go("metrics history collector", serviceMemoryStopBudget, collector.Run)
 		slog.Info("metrics history collector started",
