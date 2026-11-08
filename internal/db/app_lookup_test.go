@@ -102,25 +102,41 @@ func TestAppLookupPreparedStatementConcurrentAndFresh(t *testing.T) {
 	}
 }
 
+// BenchmarkGetAppBySlug measures the hot proxy lookup against an app with a
+// growing deployment history, because the lookup joins the deployment summary
+// and a per-lookup scan of that history is the regression this guards.
 func BenchmarkGetAppBySlug(b *testing.B) {
-	st := dbtest.New(b)
-	if err := st.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "admin"}); err != nil {
-		b.Fatal(err)
-	}
-	owner, err := st.GetUserByUsername("owner")
-	if err != nil {
-		b.Fatal(err)
-	}
-	for i := 0; i < 10; i++ {
-		if _, err := st.CreateApp(db.CreateAppParams{Slug: fmt.Sprintf("app-%d", i), Name: "App", OwnerID: owner.ID}); err != nil {
-			b.Fatal(err)
-		}
-	}
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if _, err := st.GetAppBySlug("app-5"); err != nil {
-			b.Fatal(err)
-		}
+	for _, deployments := range []int{0, 500, 5000} {
+		b.Run(fmt.Sprintf("deployments=%d", deployments), func(b *testing.B) {
+			st := dbtest.New(b)
+			if err := st.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "admin"}); err != nil {
+				b.Fatal(err)
+			}
+			owner, err := st.GetUserByUsername("owner")
+			if err != nil {
+				b.Fatal(err)
+			}
+			for i := 0; i < 10; i++ {
+				if _, err := st.CreateApp(db.CreateAppParams{Slug: fmt.Sprintf("app-%d", i), Name: "App", OwnerID: owner.ID}); err != nil {
+					b.Fatal(err)
+				}
+			}
+			target, err := st.GetAppBySlug("app-5")
+			if err != nil {
+				b.Fatal(err)
+			}
+			for i := 0; i < deployments; i++ {
+				if _, err := st.CreateDeployment(db.CreateDeploymentParams{AppID: target.ID, Version: fmt.Sprintf("v%d", i), BundleDir: fmt.Sprintf("/bundles/v%d", i), Status: "succeeded"}); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if _, err := st.GetAppBySlug("app-5"); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }
