@@ -413,6 +413,21 @@ verify-release-asset:
 test-release-asset-e2e:
 	./scripts/verify-release-asset-e2e.sh
 
+# wait-pypi blocks until PyPI's simple index, the API pip and uv resolve
+# against, lists every wheel and the sdist for VERSION. PyPI's JSON API can show
+# a version before the simple index serves it, so a release is installable from
+# PyPI only once this returns. WAIT_PYPI_TIMEOUT bounds the wait (default 900s).
+.PHONY: wait-pypi
+wait-pypi:
+	@test -n "$(VERSION)" || { echo "usage: make wait-pypi VERSION=<X.Y.Z>" >&2; exit 2; }
+	./scripts/wait-pypi.sh "$(VERSION)"
+
+# test-wait-pypi-e2e runs wait-pypi against local fixture indexes: complete,
+# missing a wheel, not JSON, and absent. Needs python3 and curl, no network.
+.PHONY: test-wait-pypi-e2e
+test-wait-pypi-e2e:
+	./scripts/wait-pypi-e2e.sh
+
 # Complete long-lived CLI contract gate. Requires uv, curl, and all four shells.
 test-cli-release-contract: test-cli-compatibility-e2e test-shell-completion-e2e
 

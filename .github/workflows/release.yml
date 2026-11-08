@@ -429,6 +429,33 @@ jobs:
         with:
           packages-dir: dist
 
+  # An accepted upload is not yet an installable release: the simple index pip
+  # and uv read can lag the upload. The release is green only once a clean
+  # install of exactly this version from PyPI runs.
+  pypi-installable:
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Wait for the simple index to list every file
+        run: make wait-pypi VERSION="${GITHUB_REF_NAME#v}"
+
+      - name: Install this version from PyPI
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          python -m venv /tmp/pypi-venv
+          /tmp/pypi-venv/bin/pip install --no-cache-dir --index-url https://pypi.org/simple/ "shinyhub==${VERSION}"
+          OUT="$(/tmp/pypi-venv/bin/shinyhub --version)"
+          echo "Installed binary reported: ${OUT}"
+          echo "${OUT}" | grep -qF "${VERSION}" \
+            || { echo "::error::shinyhub --version printed '${OUT}', not ${VERSION}"; exit 1; }
+
   # Publish the app-facing SDK, shinyhub-identity: the pure-Python helper a Shiny/
   # Streamlit/Dash app imports to read its forwarded identity (docs/identity.md).
   # It is deliberately a SEPARATE package from `shinyhub` - the main wheel bundles

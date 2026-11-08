@@ -79,6 +79,9 @@ jobs:
       - name: Installer
         run: make test-install-e2e
 
+      - name: PyPI index wait
+        run: make test-wait-pypi-e2e
+
   # The bookmark SDK supports Python 3.10, whose copy protocol differs from
   # newer interpreters. Keep that minimum-version compatibility exercised.
   test-python-bookmarks-minimum:
