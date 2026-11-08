@@ -69,7 +69,6 @@ import (
 	"github.com/rvben/shinyhub/internal/upgrade"
 	"github.com/rvben/shinyhub/internal/usage"
 	"github.com/rvben/shinyhub/internal/worker"
-	"github.com/rvben/shinyhub/internal/workloadmetrics"
 	"github.com/scaleway/scaleway-sdk-go/scw"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/hkdf"
@@ -1648,40 +1647,17 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		defer func() { _ = tracer.Shutdown(context.Background()) }()
 	}
 
-	var stopWorkloadMetrics func()
-	if cfg.Metrics.ProcessInterval > 0 {
-		// The ownership-lease ID defaults to hostname-PID and changes on restart.
-		// Counts need the stable server slot, while launch CPU streams stay unique.
-		listener := net.JoinHostPort(cfg.Server.Host, strconv.Itoa(cfg.Server.Port))
-		collector, setupErr := workloadmetrics.New(cfg.Tracing, cfg.Metrics.ProcessInterval, listener)
-		if setupErr != nil {
-			return fmt.Errorf("workload metrics setup: %w", setupErr)
-		}
-		for _, tier := range cfg.Runtime.Tiers {
-			if native, ok := mgr.RuntimeForTier(tier.Name).(interface {
-				SetWorkloadObserver(process.WorkloadObserver)
-			}); ok {
-				native.SetWorkloadObserver(collector.Observe)
-			}
-		}
-		metricsService := services.Go("workload metrics", serviceMemoryStopBudget, collector.Run)
-		var stopOnce sync.Once
-		stopWorkloadMetrics = func() {
-			stopOnce.Do(func() {
-				// The final export runs only once sampling has stopped, so no
-				// observation lands after the flush.
-				if !metricsService.Stop() {
-					return
-				}
-				flushCtx, cancelFlush := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancelFlush()
-				if err := collector.Shutdown(flushCtx); err != nil {
-					slog.Warn("workload metrics shutdown failed")
-				}
-			})
-		}
+	stopWorkloadMetrics, err := startWorkloadMetrics(workloadMetricsDeps{
+		cfg:      cfg,
+		mgr:      mgr,
+		services: services,
+		logger:   logger,
+	})
+	if err != nil {
+		return err
+	}
+	if stopWorkloadMetrics != nil {
 		defer stopWorkloadMetrics()
-		slog.Info("native workload metrics enabled", "interval", cfg.Metrics.ProcessInterval)
 	}
 
 	// Running with neither metrics nor tracing means no external visibility into
