@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -99,7 +100,7 @@ func (s *Store) CreateSupportSession(p CreateSupportSessionParams) error {
 	if p.ExpiresAt.IsZero() {
 		p.ExpiresAt = time.Now().UTC().Add(SupportSessionDuration)
 	}
-	tx, err := s.db.Begin()
+	tx, err := s.d.beginWrite(context.Background(), s.rawDB(), 0)
 	if err != nil {
 		return fmt.Errorf("create support session: %w", err)
 	}
@@ -358,7 +359,7 @@ func scanSupportSession(row supportSessionScanner) (*SupportSession, error) {
 }
 
 func (s *Store) stopSupportSession(id string, actorID *int64, reason, ipAddress string) (*SupportSession, error) {
-	tx, err := s.db.Begin()
+	tx, err := s.d.beginWrite(context.Background(), s.rawDB(), 0)
 	if err != nil {
 		return nil, err
 	}

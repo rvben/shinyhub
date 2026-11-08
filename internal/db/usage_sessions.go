@@ -369,16 +369,12 @@ func (s *Store) AppUsageReport(ctx context.Context, appID int64, window time.Dur
 	// Retention moves raw contributions into rollups atomically. Keep every
 	// report query on one snapshot so that move cannot double-count or lose
 	// sessions between the raw, peak, and rollup reads.
-	opts := &sql.TxOptions{ReadOnly: true}
-	if s.IsPostgres() {
-		opts.Isolation = sql.LevelRepeatableRead
-	}
-	tx, err := s.db.real.BeginTx(ctx, opts)
+	tx, err := s.beginReadSnapshot(ctx)
 	if err != nil {
 		return UsageReport{}, err
 	}
 	defer tx.Rollback() // read-only snapshot; release it on every return path.
-	return s.appUsageReport(ctx, &boundTx{tx: tx, d: s.d}, appID, window, identityMode, includeIdentities)
+	return s.appUsageReport(ctx, tx, appID, window, identityMode, includeIdentities)
 }
 
 type usageReportQueryer interface {
@@ -796,7 +792,7 @@ func (s *Store) FinalizeStaleUsageSessions() (int64, error) {
 }
 
 func (s *Store) rollupUsageBatch(retention time.Duration, limit int) (int64, error) {
-	tx, err := s.db.Begin()
+	tx, err := s.d.beginWrite(context.Background(), s.rawDB(), 0)
 	if err != nil {
 		return 0, fmt.Errorf("begin usage rollup: %w", err)
 	}

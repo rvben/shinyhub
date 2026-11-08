@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -43,7 +44,7 @@ type CreateAppLogRunParams struct {
 // makes a start attempt discoverable even when the runtime fails immediately.
 func (s *Store) CreateAppLogRun(p CreateAppLogRunParams) error {
 	defer s.timed("CreateAppLogRun")()
-	tx, err := s.db.Begin()
+	tx, err := s.d.beginWrite(context.Background(), s.rawDB(), 0)
 	if err != nil {
 		return fmt.Errorf("create app log run begin: %w", err)
 	}

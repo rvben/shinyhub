@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"fmt"
 	"math"
 )
@@ -34,7 +35,7 @@ func (s *Store) UpsertReplicaSessions(instanceID string, rows []ReplicaSessionRo
 		return nil
 	}
 	dbNow := s.d.nowEpoch()
-	tx, err := s.db.Begin()
+	tx, err := s.d.beginWrite(context.Background(), s.rawDB(), 0)
 	if err != nil {
 		return fmt.Errorf("upsert replica sessions begin tx: %w", err)
 	}

@@ -52,7 +52,7 @@ func (s *Store) AppendAppLogChunk(runID string, seq, startOffset int64, data []b
 	if maxBytes <= 0 {
 		maxBytes = AppLogRetentionBytes
 	}
-	tx, err := s.db.Begin()
+	tx, err := s.d.beginWrite(context.Background(), s.rawDB(), 0)
 	if err != nil {
 		return fmt.Errorf("append app log chunk begin: %w", err)
 	}

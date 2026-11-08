@@ -1017,7 +1017,7 @@ func retireScheduleTx(tx writeTx, appID, id int64) error {
 // set for one candidate deployment. The recorded bit distinguishes a genuine
 // empty set from a deployment created before snapshot support.
 func (s *Store) RecordDeploymentScheduleSnapshot(deploymentID, appID int64) error {
-	tx, err := s.db.Begin()
+	tx, err := s.d.beginWrite(context.Background(), s.rawDB(), 0)
 	if err != nil {
 		return fmt.Errorf("record deployment schedule snapshot: begin: %w", err)
 	}

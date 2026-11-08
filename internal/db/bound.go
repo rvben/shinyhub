@@ -61,13 +61,6 @@ func (b *boundDB) QueryRowContext(ctx context.Context, query string, args ...any
 	b.observe(rebound)
 	return b.real.QueryRowContext(ctx, rebound, args...)
 }
-func (b *boundDB) Begin() (*boundTx, error) {
-	tx, err := b.real.Begin()
-	if err != nil {
-		return nil, err
-	}
-	return &boundTx{tx: tx, d: b.d}, nil
-}
 func (b *boundDB) PingContext(ctx context.Context) error { return b.real.PingContext(ctx) }
 func (b *boundDB) Close() error                          { return b.real.Close() }
 
@@ -75,6 +68,24 @@ func (b *boundDB) Close() error                          { return b.real.Close()
 type boundTx struct {
 	tx *sql.Tx
 	d  dialect
+}
+
+// beginReadSnapshot starts a read-only transaction so a group of queries
+// observes one consistent snapshot. Every writing transaction goes through
+// dialect.beginWrite instead: on SQLite a deferred transaction that reads and
+// then writes fails with SQLITE_BUSY_SNAPSHOT once another connection has
+// committed, and a transaction that never writes is the only kind for which a
+// deferred BEGIN is safe.
+func (s *Store) beginReadSnapshot(ctx context.Context) (*boundTx, error) {
+	opts := &sql.TxOptions{ReadOnly: true}
+	if s.IsPostgres() {
+		opts.Isolation = sql.LevelRepeatableRead
+	}
+	tx, err := s.db.real.BeginTx(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	return &boundTx{tx: tx, d: s.d}, nil
 }
 
 func (b *boundTx) Exec(query string, args ...any) (sql.Result, error) {

@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"time"
@@ -138,7 +139,7 @@ func (s *Store) DeleteDeploymentReplicas(deploymentID int64) error {
 // and without advancing apps.active_deployment_id. The new owner calls this
 // only after predecessor handlers have drained behind the exclusive fence.
 func (s *Store) RepairDeploymentGenerationLedger() error {
-	tx, err := s.db.Begin()
+	tx, err := s.d.beginWrite(context.Background(), s.rawDB(), 0)
 	if err != nil {
 		return fmt.Errorf("repair deployment generation ledger: begin: %w", err)
 	}

@@ -448,7 +448,7 @@ func (s *Store) Migrate() error {
 		if applied[m.version] {
 			continue
 		}
-		tx, err := s.db.Begin()
+		tx, err := s.d.beginWrite(context.Background(), s.rawDB(), 0)
 		if err != nil {
 			return fmt.Errorf("migrate %s: begin: %w", m.name, err)
 		}
@@ -487,7 +487,7 @@ func (s *Store) adoptLegacySchema(migrations []migration) error {
 			baselined++
 			continue
 		}
-		tx, err := s.db.Begin()
+		tx, err := s.d.beginWrite(context.Background(), s.rawDB(), 0)
 		if err != nil {
 			return fmt.Errorf("adopt %s: begin: %w", m.name, err)
 		}
