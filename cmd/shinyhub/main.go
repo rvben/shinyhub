@@ -758,6 +758,45 @@ func reconcileLocalAppLogFiles(store *db.Store, manager *process.Manager, teleme
 	}
 }
 
+// runSQLiteMaintenance keeps a file-backed SQLite database compact: promptly
+// and then on every interval it refreshes the planner's statistics, then
+// moves the write-ahead log into the database file and truncates the log.
+// Statistics come first so the rows they write are part of what gets
+// checkpointed and the pass ends with an empty log. The automatic checkpoint
+// never shrinks the log file, so without this pass an idle server keeps the
+// WAL of its busiest hour. Other backends return at once.
+func runSQLiteMaintenance(ctx context.Context, store *db.Store, interval time.Duration) {
+	if !store.IsSQLiteFile() {
+		return
+	}
+	if interval <= 0 {
+		interval = time.Hour
+	}
+	maintain := func() {
+		if err := store.Optimize(); err != nil {
+			slog.Warn("sqlite_optimize_failed", "err", err)
+		}
+		if res, err := store.CheckpointWAL(); err != nil {
+			slog.Warn("sqlite_wal_checkpoint_failed", "err", err)
+		} else if res.Blocked {
+			slog.Warn("sqlite_wal_checkpoint_blocked", "pending_frames", res.PendingFrames)
+		} else {
+			slog.Debug("sqlite_wal_truncated")
+		}
+	}
+	maintain()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			maintain()
+		}
+	}
+}
+
 // runLocalLogMaintenance reconciles every control-plane node's private disk.
 // Database deletion remains owner-only, but a former owner may retain files on
 // a standby; each node therefore removes database-orphaned files independently.
@@ -2894,6 +2933,13 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		go func() {
 			defer loops.Done()
 			runMaintenance(octx, store, mgr, appLogTelemetry, cfg.Maintenance, cfg.Usage)
+		}()
+		// A file-backed SQLite database is only ever served by one process, so
+		// its WAL checkpoint and planner statistics belong with the owner loops.
+		loops.Add(1)
+		go func() {
+			defer loops.Done()
+			runSQLiteMaintenance(octx, store, cfg.Maintenance.Interval)
 		}()
 		loops.Add(1)
 		go func() { defer loops.Done(); srv.RunDevelopmentAppReaper(octx, time.Minute) }()

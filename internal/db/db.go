@@ -203,8 +203,14 @@ func isMemoryDSN(dsn string) bool {
 // withPragmas appends the durability/concurrency pragmas modernc applies on
 // every pooled connection. Setting them via the DSN (rather than a one-shot
 // PRAGMA Exec) guarantees every connection in the pool is configured, not just
-// the first. journal_mode=WAL is omitted for memory DBs, which do not support
-// it.
+// the first.
+//
+// File-backed databases additionally run in WAL mode with a bounded log: the
+// automatic PASSIVE checkpoint every 1000 pages keeps the log short while the
+// server is busy, journal_size_limit lets the file shrink back to 64 MiB after
+// a burst, and CheckpointWAL truncates it to zero on the maintenance interval.
+// Each connection gets a 16 MiB page cache and keeps temporary tables and
+// indices in memory. Memory databases support none of these settings.
 func withPragmas(dsn string) string {
 	pragmas := []string{
 		"_pragma=busy_timeout(5000)",
@@ -212,7 +218,13 @@ func withPragmas(dsn string) string {
 		"_pragma=synchronous(NORMAL)",
 	}
 	if !isMemoryDSN(dsn) {
-		pragmas = append(pragmas, "_pragma=journal_mode(WAL)")
+		pragmas = append(pragmas,
+			"_pragma=journal_mode(WAL)",
+			"_pragma=wal_autocheckpoint(1000)",
+			"_pragma=journal_size_limit(67108864)",
+			"_pragma=cache_size(-16384)",
+			"_pragma=temp_store(MEMORY)",
+		)
 	}
 	sep := "?"
 	if strings.Contains(dsn, "?") {
@@ -580,6 +592,9 @@ func (s *Store) Close() error {
 	}
 	s.appLogFanoutsMu.Unlock()
 	s.appLogFanoutsWG.Wait()
+	if err := s.Optimize(); err != nil {
+		slog.Warn("sqlite_optimize_on_close_failed", "err", err)
+	}
 	return s.db.Close()
 }
 
