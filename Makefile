@@ -7,6 +7,13 @@ CLISPEC_MIN_VERSION := 0.3.1
 RACE_TIMEOUT ?= 20m
 PYTHON_VERSION ?= 3.14+gil
 
+# Go commands build this module on its own. A go.work in a parent directory
+# (the main checkout's, when working in a nested worktree) would otherwise put
+# every go build, vet and test into workspace mode and reject this module as
+# not listed. A GOWORK already set in the environment wins; CI checks out no
+# go.work, so there this changes nothing.
+export GOWORK ?= off
+
 # bootstrap installs the exact project dependencies and a repo-local, pinned
 # live-reload binary. Nothing is written to a developer's global Go bin.
 bootstrap:
@@ -438,8 +445,13 @@ test-provisioning:
 		echo "test-provisioning: skipping (needs Linux with Landlock, or Docker)"; \
 	fi
 
+# lint vets the tree as built, then once more with the build tags of the tests
+# that the default suite never compiles (integration = real AWS ECS, e2e =
+# proxy distribution). Without the second pass those tests rot silently when
+# the code they call is renamed.
 lint:
 	go vet ./...
+	go vet -tags "integration e2e" ./...
 
 # skill-lint runs static checks on the deploy-shinyhub skill: frontmatter,
 # example bundle present, referenced docs exist, no em/en dashes. No network or

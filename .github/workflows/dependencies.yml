@@ -32,8 +32,7 @@ jobs:
       validation-command: >-
         npm ci &&
         (cd deploy/cloudflare-demo && npm ci && npm run check) &&
-        go vet ./... &&
-        go vet -tags "integration e2e" ./... &&
+        make lint &&
         make test &&
         make vuln &&
         go build -o /tmp/shinyhub ./cmd/shinyhub
@@ -44,6 +43,7 @@ jobs:
       merge-method: squash
       allowed-paths: >-
         .github/actions/setup-go/action.yml
+        .github/actions/setup-playwright/action.yml
         .github/workflows/*.yaml
         .github/workflows/*.yml
         cmd/shinyhub/example_app/pyproject.toml

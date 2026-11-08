@@ -5,6 +5,13 @@ on:
   push:
     branches: [main]
 
+# A pull request keeps one run, for its newest push, and cancels the run it
+# superseded. A push to main keeps a run of its own, so the result for a
+# commit is never lost to the next push.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
@@ -27,8 +34,10 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
 
+      # go vet over the tree and, with their build tags, over the gated tests
+      # that the default suite never compiles.
       - name: Lint
-        run: go vet ./...
+        run: make lint
 
       # oxlint over every JavaScript and TypeScript file; warnings fail the
       # step so a finding cannot linger.
@@ -43,12 +52,6 @@ jobs:
       # would ship the previous script.
       - name: Minified injected scripts match their sources
         run: make ui-minify-check
-
-      # Compile-check the build-tag-gated tests (integration = real AWS ECS,
-      # e2e = proxy distribution). They never run in the default suite, so
-      # without this they silently rot when the code they call is renamed.
-      - name: Vet gated tests (integration, e2e)
-        run: go vet -tags "integration e2e" ./...
 
       - name: Test (Go)
         run: make test-go
@@ -100,7 +103,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-go
-      - uses: actions/setup-node@v7
+      - uses: ./.github/actions/setup-playwright
         with:
           node-version: "24"
       - uses: actions/setup-python@v7
@@ -244,15 +247,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: ./.github/actions/setup-playwright
         with:
-          node-version: "20"
-      - name: Install browser test dependencies
-        run: |
-          npm ci --ignore-scripts --no-audit --no-fund
-          npm --prefix loadtest/render/driver ci --ignore-scripts --no-audit --no-fund
-          cd loadtest/render/driver
-          npx --no-install playwright install --with-deps chromium
+          root-dependencies: "true"
       - name: Verify shared shell across routes and display states
         run: make test-browser-shell-e2e
 
@@ -262,19 +259,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-go
-      - uses: actions/setup-node@v7
-        with:
-          node-version: "20"
       - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
       - uses: astral-sh/setup-uv@v7
-      - name: Install acceptance dependencies
-        run: |
-          npm ci --ignore-scripts --no-audit --no-fund
-          npm --prefix loadtest/render/driver ci --ignore-scripts --no-audit --no-fund
-          cd loadtest/render/driver
-          npx --no-install playwright install --with-deps chromium
+      - uses: ./.github/actions/setup-playwright
+        with:
+          root-dependencies: "true"
       - name: Real-backend and responsive browser acceptance
         run: npm run test:acceptance
       - name: Backup, restore, and upgrade acceptance
@@ -304,15 +295,10 @@ jobs:
         browser: [chromium, firefox, webkit]
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: ./.github/actions/setup-playwright
         with:
-          node-version: "20"
-      - name: Install browser test dependencies
-        run: |
-          npm ci --ignore-scripts --no-audit --no-fund
-          npm --prefix loadtest/render/driver ci --ignore-scripts --no-audit --no-fund
-          cd loadtest/render/driver
-          npx --no-install playwright install --with-deps "${{ matrix.browser }}"
+          browser: ${{ matrix.browser }}
+          root-dependencies: "true"
       - name: Verify charts, accessibility, host isolation and recovery
         env:
           SHINYHUB_E2E_BROWSER: ${{ matrix.browser }}
@@ -323,41 +309,29 @@ jobs:
   # starts the embedded binary, drives the hosted Chrome already present on the
   # runner through sign-in + CLI pairing, deploys, revokes, and reconnects.
   # This guards packaging and browser session restoration in one user journey.
+  # The short browser checks (lifecycle, logs, app switcher, agent chat) share
+  # the job; the two long lifecycle variants have jobs of their own below so
+  # that they overlap with this one instead of following it.
   test-browser-onboarding-e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
       - uses: ./.github/actions/setup-go
 
-      - uses: actions/setup-node@v7
-        with:
-          node-version: "20"
-
       - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
 
-      - name: Install uv
-        run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - uses: astral-sh/setup-uv@v7
 
-      - name: Install Chromium system dependencies
-        run: |
-          cd loadtest/render/driver
-          npm ci --no-audit --no-fund
-          npx --no-install playwright install-deps chromium
+      - uses: ./.github/actions/setup-playwright
+        with:
+          root-dependencies: "true"
 
       - name: Real Shiny browser lifecycle E2E
         run: make test-browser-lifecycle-e2e
-
-      - name: Repeated reload and bookmark continuity E2E
-        run: make test-browser-session-relays-e2e
-
-      - name: Scheduled producer and reload handoff E2E
-        run: make test-browser-reload-producers-e2e
 
       - name: App-detail logs browser E2E
         run: make test-browser-logs-e2e
@@ -371,6 +345,48 @@ jobs:
       - name: Browser onboarding E2E (installed wheel)
         run: make test-browser-onboarding-e2e
 
+  # The lifecycle harness run with the session-relay flag: repeated reloads,
+  # relay admission and refusal, revocation and bookmark continuity.
+  test-browser-session-relays-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/setup-go
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - uses: astral-sh/setup-uv@v7
+
+      - uses: ./.github/actions/setup-playwright
+
+      - name: Repeated reload and bookmark continuity E2E
+        run: make test-browser-session-relays-e2e
+
+  # The lifecycle harness run with the reload-producer flag: a real cron
+  # producer overlapping a scheduled roll and an acknowledged reload.
+  test-browser-reload-producers-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/setup-go
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - uses: astral-sh/setup-uv@v7
+
+      - uses: ./.github/actions/setup-playwright
+
+      - name: Scheduled producer and reload handoff E2E
+        run: make test-browser-reload-producers-e2e
+
   # Long-lived remote CLI contract. The previous release is a checksum-pinned
   # shipped binary, not a rebuild of an old tag: current connect/doctor/deploy/
   # recovery run against that server, then its CLI logs in to and deploys on the
@@ -383,10 +399,7 @@ jobs:
 
       - uses: ./.github/actions/setup-go
 
-      - name: Install uv
-        run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - uses: astral-sh/setup-uv@v7
 
       - name: Previous/current CLI-server compatibility E2E
         run: make test-cli-compatibility-e2e
@@ -440,10 +453,7 @@ jobs:
 
       - uses: ./.github/actions/setup-go
 
-      - name: Install uv
-        run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - uses: astral-sh/setup-uv@v7
 
       - name: Skill smoke (deploy example app)
         run: make skill-smoke
@@ -461,10 +471,7 @@ jobs:
 
       - uses: ./.github/actions/setup-go
 
-      - name: Install uv
-        run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - uses: astral-sh/setup-uv@v7
 
       - name: Build-provisioning gate (sandboxed uv sync)
         run: make test-provisioning
@@ -488,10 +495,7 @@ jobs:
           python-version: "3.14"
           freethreaded: false
 
-      - name: Install uv
-        run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - uses: astral-sh/setup-uv@v7
 
       - uses: r-lib/actions/setup-r@v2
         id: setup-r
@@ -560,3 +564,42 @@ jobs:
 
       - name: Build and scan the container image
         run: make scan-image
+
+  # The one check for branch rules to require. It fails when any job it needs
+  # did not succeed (failed, was cancelled or was skipped), so a job renamed
+  # above cannot drop out of the rules unnoticed. A job added above must be
+  # added to this list.
+  ci-ok:
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - test
+      - test-python-bookmarks-minimum
+      - test-python-runtime
+      - test-worker
+      - test-race
+      - test-race-api
+      - test-postgres
+      - test-remote-e2e
+      - test-handoff
+      - test-browser-shell
+      - test-acceptance
+      - test-browser-agent-charts
+      - test-browser-onboarding-e2e
+      - test-browser-session-relays-e2e
+      - test-browser-reload-producers-e2e
+      - test-cli-compatibility-e2e
+      - test-shell-completion-e2e
+      - test-ha
+      - skill-smoke
+      - test-provisioning
+      - test-identity
+      - iac-validate
+      - scan-image
+    steps:
+      - name: Every job succeeded
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          jq -r 'to_entries[] | "\(.value.result)\t\(.key)"' <<< "$RESULTS"
+          jq -e 'all(.[]; .result == "success")' <<< "$RESULTS" > /dev/null
