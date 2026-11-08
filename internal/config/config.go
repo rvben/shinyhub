@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -1009,6 +1010,11 @@ type RuntimeConfig struct {
 	Native          NativeRuntimeConfig
 	DefaultReplicas int
 	MaxReplicas     int
+	// MaxConcurrentBuilds is how many dependency builds (uv sync,
+	// renv::restore) may run on this host at once; further deploys queue for a
+	// slot and report the wait. Defaults to half the cores the process may
+	// use, between 1 and 2. 0 removes the cap.
+	MaxConcurrentBuilds int
 	// DefaultMaxSessionsPerReplica is the fallback session cap enforced by the
 	// proxy when an app's own max_sessions_per_replica is 0. Once every replica
 	// reaches this many active connections, new cookie-less requests are shed
@@ -1409,8 +1415,9 @@ type rawRuntimeConfig struct {
 	Native          rawNativeRuntimeConfig `yaml:"native"`
 	DefaultReplicas int                    `yaml:"default_replicas"`
 	MaxReplicas     int                    `yaml:"max_replicas"`
-	// Pointer so an explicit 0 (documented as "unlimited") is
+	// Pointers so an explicit 0 (documented as "unlimited" / "no cap") is
 	// distinguishable from the key being absent (apply the safe default).
+	MaxConcurrentBuilds          *int                     `yaml:"max_concurrent_builds"`
 	DefaultMaxSessionsPerReplica *int                     `yaml:"default_max_sessions_per_replica"`
 	DefaultWorkerIsolation       string                   `yaml:"default_worker_isolation"`
 	Tiers                        []rawTierConfig          `yaml:"tiers"`
@@ -2667,6 +2674,14 @@ func validateScaleway(s ScalewayRuntimeConfig) error {
 	return nil
 }
 
+// defaultMaxConcurrentBuilds leaves half the cores this process may use to
+// the apps already serving: a dependency build saturates a core and a fleet
+// apply would otherwise start one per app. GOMAXPROCS honours a container's
+// CPU quota, so the default follows the cgroup limit rather than the host.
+func defaultMaxConcurrentBuilds() int {
+	return max(1, min(2, runtime.GOMAXPROCS(0)/2))
+}
+
 func parseRuntime(r rawRuntimeConfig) (RuntimeConfig, error) {
 	rc := RuntimeConfig{
 		Mode: "native",
@@ -2737,6 +2752,14 @@ func parseRuntime(r rawRuntimeConfig) (RuntimeConfig, error) {
 	}
 	if rc.MaxReplicas <= 0 {
 		rc.MaxReplicas = 32
+	}
+	switch {
+	case r.MaxConcurrentBuilds == nil:
+		rc.MaxConcurrentBuilds = defaultMaxConcurrentBuilds()
+	case *r.MaxConcurrentBuilds < 0:
+		return RuntimeConfig{}, fmt.Errorf("runtime.max_concurrent_builds: must be 0 (no cap) or a positive count, got %d", *r.MaxConcurrentBuilds)
+	default:
+		rc.MaxConcurrentBuilds = *r.MaxConcurrentBuilds
 	}
 	// Profiling spike showed single-event-loop p99 stays healthy to c=10 and
 	// degrades sharply beyond that, with some apps erroring at c=30. 10 is
@@ -3497,6 +3520,16 @@ func applyEnvWith(cfg *Config, getConfigEnv func(string) string) error {
 		if n > 0 {
 			cfg.Runtime.MaxReplicas = n
 		}
+	}
+	if v := getConfigEnv("SHINYHUB_RUNTIME_MAX_CONCURRENT_BUILDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_RUNTIME_MAX_CONCURRENT_BUILDS: %q is not an integer: %w", v, err)
+		}
+		if n < 0 {
+			return fmt.Errorf("SHINYHUB_RUNTIME_MAX_CONCURRENT_BUILDS: must be 0 (no cap) or a positive count, got %d", n)
+		}
+		cfg.Runtime.MaxConcurrentBuilds = n
 	}
 	if v := getConfigEnv("SHINYHUB_RUNTIME_DEFAULT_MAX_SESSIONS_PER_REPLICA"); v != "" {
 		n, err := strconv.Atoi(v)

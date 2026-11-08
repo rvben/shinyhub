@@ -1401,7 +1401,8 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 			return err
 		}
 	}
-	slog.Info("runtime configured", "tier", defaultTier, "mode", defaultTierCfg.Runtime)
+	slog.Info("runtime configured", "tier", defaultTier, "mode", defaultTierCfg.Runtime, "max_concurrent_builds", cfg.Runtime.MaxConcurrentBuilds)
+	deploy.SetMaxConcurrentBuilds(cfg.Runtime.MaxConcurrentBuilds)
 	mgr := process.NewManager(cfg.Storage.AppsDir, rt)
 	// Processes that survived the last shutdown are still running and still
 	// serving, but this Manager has not adopted them yet: RecoverProcesses does

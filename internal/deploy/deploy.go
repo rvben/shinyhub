@@ -778,11 +778,6 @@ func buildEnvironment(p Params, appType string, buildTimeout time.Duration) (err
 		attribute.String("shinyhub.deploy.build_tool", buildTool))
 	defer func() { end(err) }()
 
-	// The build deadline is its own, never TraceCtx's: a deploy outlives the
-	// request that started it.
-	ctx, cancel := context.WithTimeout(context.Background(), buildTimeout)
-	defer cancel()
-
 	// The build executes deployer-controlled code that must see the same
 	// per-app env the app process receives at start (e.g. private
 	// package-index credentials stored as app env vars). A resolver failure
@@ -793,6 +788,49 @@ func buildEnvironment(p Params, appType string, buildTimeout time.Duration) (err
 	if err != nil {
 		return fmt.Errorf("resolve app env: %w", err)
 	}
+
+	// Only a bounded number of builds run on the host at once. A build that
+	// finds the gate full waits its turn and says so in the deploy's progress
+	// stream, so the operator sees "queued", not a stalled deploy. The wait is
+	// its own phase: every consumer already renders a phase's start, heartbeat
+	// and completion, so the queue shows up in a terminal spinner, in CI logs
+	// and in the dashboard without any of them learning a new event shape.
+	gate := activeBuildGate.Load()
+	queued := time.Now()
+	waitedAtGate := false
+	release, err := gate.acquire(context.Background(), buildProgressInterval, func(running, waiting int, waited time.Duration) {
+		slog.Info("deploy: waiting for a build slot", "slug", p.Slug, "running", running, "limit", gate.limit(), "waiting", waiting, "waited", waited.Round(time.Second))
+		occupancy := fmt.Sprintf("(%d of %d running, %d queued)", running, gate.limit(), waiting)
+		if !waitedAtGate {
+			waitedAtGate = true
+			p.report(deployevent.Phase("build_queue", deployevent.StatusStarted, "Waiting for a build slot "+occupancy))
+			return
+		}
+		e := deployevent.Phase("build_queue", deployevent.StatusProgress, "Still waiting for a build slot "+occupancy)
+		e.ElapsedSeconds = int64(waited.Seconds())
+		p.report(e)
+	})
+	if err != nil {
+		return fmt.Errorf("wait for build slot: %w", err)
+	}
+	defer release()
+	if waitedAtGate {
+		waited := time.Since(queued)
+		slog.Info("deploy: build slot acquired", "slug", p.Slug, "waited", waited.Round(time.Second))
+		message := "Build slot acquired"
+		if waited >= time.Second {
+			message += fmt.Sprintf(" after %s", waited.Round(time.Second))
+		}
+		e := deployevent.Phase("build_queue", deployevent.StatusCompleted, message)
+		e.ElapsedSeconds = int64(waited.Seconds())
+		p.report(e)
+	}
+
+	// The build deadline is its own, never TraceCtx's: a deploy outlives the
+	// request that started it. It starts here, once the gate has opened, so
+	// time spent queued behind other builds never counts against the budget.
+	ctx, cancel := context.WithTimeout(context.Background(), buildTimeout)
+	defer cancel()
 
 	start := time.Now()
 	p.report(deployevent.Phase("dependencies", deployevent.StatusStarted,

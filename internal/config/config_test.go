@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -736,6 +737,59 @@ func TestConfig_RuntimeReplicaEnvOverride(t *testing.T) {
 	}
 	if cfg.Runtime.MaxReplicas != 24 {
 		t.Fatalf("env MaxReplicas: got %d, want 24", cfg.Runtime.MaxReplicas)
+	}
+}
+
+// The build cap defaults to half the cores the process may use, at least one
+// and at most two, so a fleet apply cannot start one uv sync per app.
+func TestConfig_RuntimeMaxConcurrentBuildsDefault(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := max(1, min(2, runtime.GOMAXPROCS(0)/2))
+	if cfg.Runtime.MaxConcurrentBuilds != want {
+		t.Fatalf("default MaxConcurrentBuilds: got %d, want %d on %d procs", cfg.Runtime.MaxConcurrentBuilds, want, runtime.GOMAXPROCS(0))
+	}
+}
+
+func TestConfig_RuntimeMaxConcurrentBuilds(t *testing.T) {
+	for _, tc := range []struct {
+		yaml string
+		want int
+	}{
+		{"max_concurrent_builds: 3", 3},
+		{"max_concurrent_builds: 0", 0},
+	} {
+		path := writeYAML(t, "runtime:\n  "+tc.yaml+"\nauth:\n  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n")
+		cfg, err := config.Load(path)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.yaml, err)
+		}
+		if cfg.Runtime.MaxConcurrentBuilds != tc.want {
+			t.Fatalf("%s: MaxConcurrentBuilds = %d, want %d", tc.yaml, cfg.Runtime.MaxConcurrentBuilds, tc.want)
+		}
+	}
+	path := writeYAML(t, "runtime:\n  max_concurrent_builds: -1\nauth:\n  secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n")
+	if _, err := config.Load(path); err == nil || !strings.Contains(err.Error(), "runtime.max_concurrent_builds") {
+		t.Fatalf("a negative cap must be rejected by name, got %v", err)
+	}
+}
+
+func TestConfig_RuntimeMaxConcurrentBuildsEnvOverride(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	t.Setenv("SHINYHUB_RUNTIME_MAX_CONCURRENT_BUILDS", "4")
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Runtime.MaxConcurrentBuilds != 4 {
+		t.Fatalf("env MaxConcurrentBuilds: got %d, want 4", cfg.Runtime.MaxConcurrentBuilds)
+	}
+	t.Setenv("SHINYHUB_RUNTIME_MAX_CONCURRENT_BUILDS", "-2")
+	if _, err := config.Load(""); err == nil || !strings.Contains(err.Error(), "SHINYHUB_RUNTIME_MAX_CONCURRENT_BUILDS") {
+		t.Fatalf("a negative env cap must be rejected by name, got %v", err)
 	}
 }
 
