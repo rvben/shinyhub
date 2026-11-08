@@ -6,16 +6,20 @@ import (
 	"os"
 	"testing"
 
+	"github.com/rvben/shinyhub/internal/testhome"
 	"github.com/spf13/cobra"
 )
 
 // TestMain prevents the test runner's own CI markers from changing the output
-// assumptions of tests that intentionally exercise ordinary piped output.
-// Individual CI-format tests opt back in with t.Setenv.
+// assumptions of tests that intentionally exercise ordinary piped output
+// (individual CI-format tests opt back in with t.Setenv), and gives the suite
+// a private home directory so the credentials store, shell completion files
+// and the local-run data locks under os.UserCacheDir never touch the
+// developer's real profile.
 func TestMain(m *testing.M) {
 	_ = os.Unsetenv("CI")
 	_ = os.Unsetenv("GITLAB_CI")
-	os.Exit(m.Run())
+	os.Exit(testhome.Run(m))
 }
 
 // forceWriters points cmd and every descendant at w so captured output is
