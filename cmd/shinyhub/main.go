@@ -1614,31 +1614,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		}
 		srv.SetMetrics(reg)
 		prx.SetRejectRecorder(reg)
-		// Fleet gauges read live counts from the store at scrape time, so
-		// "apps/replicas running right now" is answerable from Prometheus alone.
-		reg.RegisterFleetGauges(
-			func() float64 {
-				n, err := store.CountRunningApps()
-				if err != nil {
-					return 0
-				}
-				return float64(n)
-			},
-			func() float64 {
-				n, err := store.CountRunningReplicas()
-				if err != nil {
-					return 0
-				}
-				return float64(n)
-			},
-			func() float64 {
-				n, err := store.CountCrashedApps()
-				if err != nil {
-					return 0
-				}
-				return float64(n)
-			},
-		)
+		reg.RegisterFleetGauges(fleetCounts(store))
 		reg.RegisterRetiredGauges(func() (int, int64, bool) { st := relayLeases.Status(); return st.Count, st.Sessions, st.Unknown })
 		// Schedule last-success gauge: DB-backed (restart-safe), one sample per
 		// schedule that has ever succeeded.

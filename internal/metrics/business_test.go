@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -88,31 +89,48 @@ func TestRecordReplicaRestart_Increments(t *testing.T) {
 }
 
 // TestRegisterFleetGauges_ReflectsCallbacks proves the fleet gauges report
-// whatever the wired callbacks return at scrape time, so "how many apps/replicas
+// whatever the wired query returns at scrape time, so "how many apps/replicas
 // are running right now" is answerable from Prometheus alone.
 func TestRegisterFleetGauges_ReflectsCallbacks(t *testing.T) {
 	reg := New("test")
-	apps, replicas, crashed := 3.0, 7.0, 2.0
-	reg.RegisterFleetGauges(
-		func() float64 { return apps },
-		func() float64 { return replicas },
-		func() float64 { return crashed },
-	)
+	counts := FleetCounts{AppsRunning: 3, ReplicasRunning: 7, AppsCrashed: 2}
+	reg.RegisterFleetGauges(func() (FleetCounts, error) { return counts, nil })
 
-	if v, ok := sampleValue(t, reg, "shinyhub_apps_running", nil); !ok || v != 3 {
-		t.Fatalf("shinyhub_apps_running = %v (ok=%v), want 3", v, ok)
-	}
-	if v, ok := sampleValue(t, reg, "shinyhub_replicas_running", nil); !ok || v != 7 {
-		t.Fatalf("shinyhub_replicas_running = %v (ok=%v), want 7", v, ok)
-	}
-	if v, ok := sampleValue(t, reg, "shinyhub_apps_crashed", nil); !ok || v != 2 {
-		t.Fatalf("shinyhub_apps_crashed = %v (ok=%v), want 2", v, ok)
+	for name, want := range map[string]float64{
+		"shinyhub_apps_running":       3,
+		"shinyhub_replicas_running":   7,
+		"shinyhub_apps_crashed":       2,
+		"shinyhub_fleet_collector_up": 1,
+	} {
+		if v, ok := sampleValue(t, reg, name, nil); !ok || v != want {
+			t.Fatalf("%s = %v (ok=%v), want %v", name, v, ok, want)
+		}
 	}
 
 	// Gauges are evaluated lazily at scrape time, so a later change is reflected.
-	apps = 5
+	counts.AppsRunning = 5
 	if v, _ := sampleValue(t, reg, "shinyhub_apps_running", nil); v != 5 {
 		t.Fatalf("shinyhub_apps_running after change = %v, want 5", v)
+	}
+}
+
+// A fleet with nothing crashed and a fleet that cannot be counted are
+// different facts. shinyhub_apps_crashed is the primary alert target, so a
+// failed count must leave the series absent and say so through
+// fleet_collector_up, never report 0 and clear the alert mid-outage.
+func TestRegisterFleetGauges_QueryErrorIsVisible(t *testing.T) {
+	reg := New("test")
+	reg.RegisterFleetGauges(func() (FleetCounts, error) {
+		return FleetCounts{}, errors.New("database is locked")
+	})
+
+	if v, ok := sampleValue(t, reg, "shinyhub_fleet_collector_up", nil); !ok || v != 0 {
+		t.Errorf("shinyhub_fleet_collector_up = %v (ok=%v), want 0 on query error", v, ok)
+	}
+	for _, name := range []string{"shinyhub_apps_running", "shinyhub_replicas_running", "shinyhub_apps_crashed"} {
+		if v, ok := sampleValue(t, reg, name, nil); ok {
+			t.Errorf("%s = %v on query error, want the series absent", name, v)
+		}
 	}
 }
 

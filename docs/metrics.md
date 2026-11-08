@@ -274,6 +274,8 @@ alert; the retry and overflow results are useful early warnings.
 |---|---|---|---|
 | `shinyhub_apps_running` | gauge | - | Apps currently in the running state (evaluated at scrape time). |
 | `shinyhub_replicas_running` | gauge | - | App replicas currently running (evaluated at scrape time). |
+| `shinyhub_apps_crashed` | gauge | - | Apps in the crashed state: they exhausted their restart budget and serve nothing. The primary fleet alert target. |
+| `shinyhub_fleet_collector_up` | gauge | - | 1 when the scrape-time fleet count query succeeded, 0 when it failed. On 0 the three fleet gauges above are absent for that scrape rather than reading as zero. |
 | `shinyhub_deploys_total` | counter | `result` | Deployments by outcome (`success` / `failure`). Alert on a rising failure rate. |
 | `shinyhub_generation_handoffs_total` | counter | `outcome` | Generation handoff events from a closed vocabulary: `success`, `deferred`, `explicit_downtime`, `candidate_failure`, `cutover_repair`, `forced_retirement`, or `cleanup_deferred`. |
 | `shinyhub_generation_draining` | gauge | - | Old generations currently draining on this control-plane process. |
@@ -467,6 +469,18 @@ groups:
         expr: sum(increase(shinyhub_generation_handoffs_total{outcome="explicit_downtime"}[15m])) > 0
         annotations:
           summary: "A deploy used the explicit stop-first fallback"
+
+      - alert: ShinyHubAppsCrashed
+        expr: max(shinyhub_apps_crashed) > 0
+        annotations:
+          summary: "An app exhausted its restart budget and is serving nothing"
+
+      - alert: ShinyHubFleetMetricsUnavailable
+        # Without this, a database outage silences ShinyHubAppsCrashed.
+        expr: min(shinyhub_fleet_collector_up) == 0
+        for: 5m
+        annotations:
+          summary: "Fleet health gauges cannot be read from the database"
 
       - alert: ShinyHubReplicaFlapping
         expr: increase(shinyhub_replica_restarts_total[10m]) > 5

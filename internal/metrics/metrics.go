@@ -405,24 +405,15 @@ func (r *Registry) RecordReplicaRestart() {
 	r.replicaRestarts.Inc()
 }
 
-// RegisterFleetGauges registers GaugeFuncs reporting the live count of running
-// apps, running replicas, and crashed apps. The callbacks are evaluated lazily
-// at scrape time, so the reported values always reflect current fleet state.
-// shinyhub_apps_crashed is the primary alert target: a non-zero value means one
-// or more apps exhausted their restart budget and are serving nothing.
-func (r *Registry) RegisterFleetGauges(appsRunning, replicasRunning, appsCrashed func() float64) {
-	r.reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-		Name: "shinyhub_apps_running",
-		Help: "Number of apps currently in the running state.",
-	}, appsRunning))
-	r.reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-		Name: "shinyhub_replicas_running",
-		Help: "Number of app replicas currently running.",
-	}, replicasRunning))
-	r.reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-		Name: "shinyhub_apps_crashed",
-		Help: "Number of apps currently in the crashed state (exhausted restart budget, serving nothing).",
-	}, appsCrashed))
+// RegisterFleetGauges registers the gauges reporting the live count of
+// running apps, running replicas, and crashed apps. query is evaluated lazily
+// at scrape time, so the reported values always reflect current fleet state;
+// when it fails the three gauges are absent and shinyhub_fleet_collector_up
+// is 0. shinyhub_apps_crashed is the primary alert target: a non-zero value
+// means one or more apps exhausted their restart budget and are serving
+// nothing.
+func (r *Registry) RegisterFleetGauges(query func() (FleetCounts, error)) {
+	r.reg.MustRegister(&fleetCollector{query: query})
 }
 
 // RecordAuditWriteError increments the counter of audit events that failed to
