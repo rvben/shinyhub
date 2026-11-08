@@ -121,10 +121,13 @@ type writeTx interface {
 // ctx is the transaction's own context (callers pass a long-lived context such
 // as context.Background(), not an HTTP request context, since it governs COMMIT).
 type boundConn struct {
-	conn      *sql.Conn
-	d         dialect
-	ctx       context.Context
-	committed bool
+	conn *sql.Conn
+	d    dialect
+	ctx  context.Context
+	// done is set once the transaction has ended either way and the dedicated
+	// connection has gone back to the pool, so a deferred Rollback after
+	// Commit is a no-op instead of a statement on a released connection.
+	done bool
 }
 
 func (b *boundConn) Exec(query string, args ...any) (sql.Result, error) {
@@ -145,17 +148,34 @@ func (b *boundConn) QueryRow(query string, args ...any) *sql.Row {
 func (b *boundConn) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
 	return b.conn.QueryRowContext(ctx, b.d.rebind(query), args...)
 }
+
+// Commit ends the transaction and releases the connection. A COMMIT that fails
+// (the context is done, or SQLite reports BUSY while a checkpoint holds the
+// lock) leaves the transaction open on the connection, and the driver does not
+// reset sessions on reuse, so the next borrower would inherit it and its own
+// BEGIN IMMEDIATE would fail. Roll back explicitly before releasing, on a
+// context that cannot already be cancelled, and report the COMMIT error.
 func (b *boundConn) Commit() error {
+	if b.done {
+		return sql.ErrTxDone
+	}
 	_, err := b.conn.ExecContext(b.ctx, "COMMIT")
-	b.committed = true
+	if err != nil {
+		_, _ = b.conn.ExecContext(context.WithoutCancel(b.ctx), "ROLLBACK")
+	}
+	b.done = true
 	_ = b.conn.Close()
 	return err
 }
+
+// Rollback aborts the transaction and releases the connection. After Commit
+// (successful or not) the transaction has already ended, so it returns nil.
 func (b *boundConn) Rollback() error {
-	if b.committed {
+	if b.done {
 		return nil
 	}
-	_, err := b.conn.ExecContext(b.ctx, "ROLLBACK")
+	b.done = true
+	_, err := b.conn.ExecContext(context.WithoutCancel(b.ctx), "ROLLBACK")
 	_ = b.conn.Close()
 	return err
 }
