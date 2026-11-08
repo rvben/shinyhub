@@ -79,16 +79,13 @@ func configureProxyAdmission(cfg *config.Config, store *db.Store, srv *api.Serve
 		prx.SetCPUWatermark(wm)
 	}
 
+	routing := appRoutingLookups(store, srv.DeployInFlight)
+
 	// Size a per-app limiter for every app that has opted into pacing
 	// (render_seconds > 0). Apps at the default 0 get no limiter, so this is a
 	// no-op today. The access-mode lookup lets per-principal fairness key
 	// correctly.
-	prx.SetAppAccessLookup(func(slug string) string {
-		if a, err := store.GetAppBySlug(slug); err == nil {
-			return a.Access
-		}
-		return "" // unknown: the charge-point plan treats this as the conservative case
-	})
+	prx.SetAppAccessLookup(routing.access)
 	renderApps, err := store.ListApps(0, 0) // limit <= 0 means all apps (queries.go ListApps)
 	if err != nil {
 		return fmt.Errorf("list apps for render-admission sizing: %w", err)
@@ -114,24 +111,9 @@ func configureProxyAdmission(cfg *config.Config, store *db.Store, srv *api.Serve
 
 	// Let the proxy render a clear status page (instead of the endless loading
 	// spinner) when a request hits an app that is crashed or stopped, and the
-	// deploying wait page while a deployment is in flight. MissStatus reports
-	// "deploying" from the pending deployment row, which GetAppBySlug already
-	// joins in, so this costs no extra query; DeployInFlight (a map read)
-	// keeps a stale pending row from masking a stopped/crashed app.
-	prx.SetAppStatusLookup(func(slug string) (string, string) {
-		app, err := store.GetAppBySlug(slug)
-		if err != nil {
-			return "", ""
-		}
-		return app.MissStatus(srv.DeployInFlight(slug))
-	})
-	prx.SetAppNameLookup(func(slug string) string {
-		app, err := store.GetAppBySlug(slug)
-		if err != nil {
-			return ""
-		}
-		return app.Name
-	})
+	// deploying wait page while a deployment is in flight.
+	prx.SetAppStatusLookup(routing.status)
+	prx.SetAppNameLookup(routing.name)
 
 	prx.SetVersionSwitchLookup(versionSwitchPolicyLookup(store))
 
@@ -139,6 +121,50 @@ func configureProxyAdmission(cfg *config.Config, store *db.Store, srv *api.Serve
 	// warm resume serves inline (no loading-page round-trip). 0 disables it.
 	prx.SetWakeHoldTimeout(cfg.Lifecycle.WakeHold)
 	return nil
+}
+
+// appRoutingSource is the only app read the per-request proxy lookups may
+// make. It excludes the full app lookup on purpose: that one counts the app's
+// deployment history, a cost that grows with every release.
+type appRoutingSource interface {
+	GetAppRoutingBySlug(slug string) (*db.AppRouting, error)
+}
+
+// routingLookups are the per-request answers the proxy asks of the store. Each
+// answers empty when the app cannot be read, which the proxy treats as unknown.
+type routingLookups struct {
+	access func(slug string) string
+	name   func(slug string) string
+	status func(slug string) (status, reason string)
+}
+
+// appRoutingLookups builds the proxy's per-request lookups. The status lookup
+// reports "deploying" from a pending deployment row, and asks deployInFlight
+// (a map read) so a stale pending row cannot mask a stopped or crashed app.
+func appRoutingLookups(routes appRoutingSource, deployInFlight func(slug string) bool) routingLookups {
+	return routingLookups{
+		access: func(slug string) string {
+			a, err := routes.GetAppRoutingBySlug(slug)
+			if err != nil {
+				return "" // unknown: the charge-point plan treats this as the conservative case
+			}
+			return a.Access
+		},
+		name: func(slug string) string {
+			a, err := routes.GetAppRoutingBySlug(slug)
+			if err != nil {
+				return ""
+			}
+			return a.Name
+		},
+		status: func(slug string) (string, string) {
+			a, err := routes.GetAppRoutingBySlug(slug)
+			if err != nil {
+				return "", ""
+			}
+			return a.MissStatus(deployInFlight(slug))
+		},
+	}
 }
 
 // versionSwitchPolicyLookup answers the version-switch policy declared by the

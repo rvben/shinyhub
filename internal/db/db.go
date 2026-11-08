@@ -93,14 +93,38 @@ func (s *Store) IsPostgres() bool {
 	return isPG
 }
 
+// preparedStmt prepares a hot lookup once per store (and sql.DB prepares per
+// pooled connection as needed). A failed preparation is retried on the next
+// call, so an early lookup before migration or a transient database error
+// cannot poison the store. It caches SQL execution machinery, never results,
+// so it holds no authorization data.
+type preparedStmt struct {
+	mu   sync.Mutex
+	stmt *sql.Stmt
+}
+
+func (p *preparedStmt) get(s *Store, query string) (*sql.Stmt, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.stmt == nil {
+		stmt, err := s.db.real.Prepare(s.d.rebind(query))
+		if err != nil {
+			return nil, err
+		}
+		p.stmt = stmt
+	}
+	return p.stmt, nil
+}
+
 type Store struct {
 	db *boundDB
 	d  dialect
 
-	// Retain the hot app lookup statement, never its results. The sql.DB owns
-	// its per-connection driver statements and closes them with the store.
-	appLookupMu   sync.Mutex
-	appLookupStmt *sql.Stmt
+	// Retain the hot app lookup statements, never their results. The sql.DB
+	// owns their per-connection driver statements and closes them with the
+	// store.
+	appLookup        preparedStmt
+	appRoutingLookup preparedStmt
 
 	// memory marks an in-memory SQLite store. Such a store is pinned to a single
 	// connection (see isMemoryDSN), which is what lets DeserializeSQLite treat

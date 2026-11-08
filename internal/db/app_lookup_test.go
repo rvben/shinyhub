@@ -21,11 +21,17 @@ func TestAppLookupRecoversAfterPreparationFailure(t *testing.T) {
 	if _, err := st.GetAppBySlug("missing"); err == nil {
 		t.Fatal("lookup before migration should fail")
 	}
+	if _, err := st.GetAppRoutingBySlug("missing"); err == nil {
+		t.Fatal("routing lookup before migration should fail")
+	}
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.GetAppBySlug("missing"); !errors.Is(err, db.ErrNotFound) {
 		t.Fatalf("lookup after migration: %v", err)
+	}
+	if _, err := st.GetAppRoutingBySlug("missing"); !errors.Is(err, db.ErrNotFound) {
+		t.Fatalf("routing lookup after migration: %v", err)
 	}
 }
 
