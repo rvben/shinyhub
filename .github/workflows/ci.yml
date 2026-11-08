@@ -559,15 +559,18 @@ jobs:
       - name: Terraform fmt/init/validate
         run: make iac-validate
 
-  # Build the container image and scan it for HIGH/CRITICAL CVEs (base layers +
-  # embedded Go binary deps) with Trivy. Complements `make vuln` (Go source).
-  # docker is preinstalled on ubuntu-latest, so `make scan-image` runs the scan
-  # via the aquasec/trivy container without a separate install step.
+  # Build the image a release ships (release-built binary in
+  # Dockerfile.goreleaser) and scan it for HIGH/CRITICAL CVEs (base layers +
+  # the Go binary's stdlib and deps) with Trivy. Complements `make vuln` (Go
+  # source). docker is preinstalled on ubuntu-latest, so `make scan-image` runs
+  # the scan via the pinned Trivy container without a separate install step.
   scan-image:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/setup-go
 
       - name: Build and scan the container image
         run: make scan-image
