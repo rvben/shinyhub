@@ -100,7 +100,7 @@ func TestFailover_StandbyTakesOverAndRoutes(t *testing.T) {
 
 	var readyA, readyB atomic.Bool
 
-	// ownerWork mirrors the production readiness portion: close the gate, run the
+	// makeOwnerWork mirrors ownerRuntime.run's readiness portion: close the gate, run the
 	// fail-closed registry refresh, open the gate, then hold until ownership is
 	// lost. Uses the real refreshUntilReady + Registry.Refresh.
 	makeOwnerWork := func(reg *worker.Registry, ready *atomic.Bool) func(context.Context, int64) {

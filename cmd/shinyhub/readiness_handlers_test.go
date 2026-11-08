@@ -261,7 +261,7 @@ func TestActivezHandler_ReflectsOwnerAndReadyPredicate(t *testing.T) {
 		}
 	}
 
-	// Owner but not yet ready (ownerWork running, index refresh in progress).
+	// Owner but not yet ready (ownerRuntime.run running, index refresh in progress).
 	check("owner+not-ready", http.StatusServiceUnavailable, `{"active":false}`)
 
 	// Owner and ready (index refreshed, gate open).

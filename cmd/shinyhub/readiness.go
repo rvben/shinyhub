@@ -10,7 +10,7 @@ import (
 // ownerAndReadyPredicate returns the gate the mutation endpoints use: true only
 // when this instance is the elected owner AND its worker routing index has been
 // refreshed for the current ownership span. Both are required - the elector
-// reports ownership before ownerWork refreshes the index, so gating on ownership
+// reports ownership before ownerRuntime.run refreshes the index, so gating on ownership
 // alone would admit owner-only mutations (deploy/placement, worker register/
 // heartbeat) against a stale index. Kept as a single constructor so the wiring
 // cannot silently drop the readiness half.
@@ -18,7 +18,7 @@ func ownerAndReadyPredicate(isOwner func() bool, ready *atomic.Bool) func() bool
 	return func() bool { return isOwner() && ready.Load() }
 }
 
-// registryRefreshBackoff is how long ownerWork waits between failed registry
+// registryRefreshBackoff is how long ownerRuntime.run waits between failed registry
 // refreshes before retrying, while the readiness gate stays closed.
 const registryRefreshBackoff = 2 * time.Second
 

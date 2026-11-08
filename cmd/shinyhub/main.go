@@ -1412,7 +1412,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	mgr := process.NewManager(cfg.Storage.AppsDir, rt)
 	// Processes that survived the last shutdown are still running and still
 	// serving, but this Manager has not adopted them yet: RecoverProcesses does
-	// that from ownerWork, after ownership is acquired, while the listener is
+	// that from ownerRuntime.run, after ownership is acquired, while the listener is
 	// already answering. Declare the pass outstanding here - before anything can
 	// read the Manager - so a reader knows an absent entry means "not looked at"
 	// rather than "not running". RecoverProcesses clears it on every exit path.
@@ -2482,23 +2482,15 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		})
 	}
 
-	// reconcileCleaner is captured by ownerWork for owner-scoped cleanup so only
+	// reconcileCleaner is handed to the owner runtime for owner-scoped cleanup so only
 	// the lease holder mutates retained cloud resources.
 	var reconcileCleaner lifecycle.AppSecretsCleaner
 	if len(managedResourceCleaners) > 0 {
 		reconcileCleaner = managedResourceCleaners
 	}
 
-	// Worker-down monitor: object created here, loop started inside ownerWork.
+	// Worker-down monitor: object created here, loop started as owner work.
 	// Only relevant when worker hosting is enabled.
-	const (
-		workerTimeout   = 90 * time.Second
-		monitorInterval = 30 * time.Second
-		// workerRetention is how long a down, non-revoked worker row with no
-		// live replicas is kept before being reaped. It is far longer than the
-		// down timeout so a briefly-flapping worker is never tombstoned.
-		workerRetention = 24 * time.Hour
-	)
 	var monitor *lifecycle.WorkerDownMonitor
 	if workerReg != nil {
 		monitor = lifecycle.NewWorkerDownMonitor(store, workerTimeout, workerRetention, workerReg.Reap, func(slug string, index int, expectURL string) {
@@ -2548,7 +2540,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// Replica autoscaling is opt-in per app and gated by a global switch. When
 	// enabled, the controller evaluates opted-in apps on its own interval and
 	// drives the same incremental scale primitives the API exposes; it never
-	// scales worker hosts. The loop is started inside ownerWork.
+	// scales worker hosts. The loop is started inside ownerRuntime.run.
 	var controller *autoscale.Controller
 	if cfg.Runtime.Autoscale.Enabled {
 		runtimeMax := cfg.Runtime.MaxReplicas
@@ -2585,375 +2577,29 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		}
 	}
 
-	// ownerWork runs the owner-only startup and background loops for one span of
-	// ownership. It performs the destructive boot-time reconciles/sweeps
-	// exactly once (deferred until ownership so a coexisting new instance never
-	// fails the old owner's in-flight deploy), starts the owner-scoped background loops
-	// bound to octx, then blocks until ownership is lost and stops them.
-	// jobsMgr/sched/watcher/monitor/controller are created once above and reused
-	// across spans (the scheduler supports stop/start cycles).
-	// ownerReady is true only while this instance is the owner AND its worker
-	// routing index has been refreshed for the current ownership span. The
-	// mutation gates require it (not just IsOwner): the elector flips IsOwner true
-	// before ownerWork runs, so without this a freshly-acquired owner could admit
-	// deploy-placement / worker mutations against a stale index.
-	var ownerReady atomic.Bool
-	// handoffIncomplete records that an ownership handoff drain gave up with
-	// work still running; see drainOwnershipHandoff.
-	var handoffIncomplete atomic.Bool
-	ownerWork := func(octx context.Context, epoch int64) {
-		ownerReady.Store(false)       // closed at the start of every ownership span
-		defer ownerReady.Store(false) // and on span exit (ownership lost / shutdown)
-		slog.Info("became control-plane owner", "epoch", epoch, "instance", cfg.Server.InstanceID)
-		retryOwnerStep := func(label string, fn func() error) bool {
-			for {
-				if err := fn(); err == nil {
-					return true
-				} else {
-					slog.Error(label, "err", err)
-				}
-				select {
-				case <-octx.Done():
-					return false
-				case <-time.After(registryRefreshBackoff):
-				}
-			}
-		}
-
-		// Reconcile the environment-managed deploy credential before opening the
-		// owner readiness gate. Standbys authenticate against the same database but
-		// never write this singleton configuration state themselves.
-		for {
-			if err := syncDeployCredential(); err == nil {
-				break
-			} else {
-				slog.Error("reconcile deploy token configuration", "err", err)
-			}
-			select {
-			case <-octx.Done():
-				return
-			case <-time.After(registryRefreshBackoff):
-			}
-		}
-
-		// Rebuild the worker routing index from the authoritative DB so this new
-		// active reflects every worker row the previous owner wrote before it died.
-		// Fail-closed: retry until it succeeds or ownership is lost, so owner work
-		// (placement-affecting reconciles, loops, and admitted mutations) never runs
-		// on a stale index. A persistent failure means the DB is unusable, where no
-		// owner work could function anyway.
-		if workerReg != nil && !refreshUntilReady(octx, workerReg, registryRefreshBackoff, slog.Default()) {
-			return // lost ownership before a fresh index; start no owner work
-		}
-		// Rewrite any legacy relative bundle_dir rows to their canonical absolute
-		// path under the configured apps_dir. Idempotent; must run before recovery
-		// so process adoption sees absolute paths.
-		if err := lifecycle.NormalizeBundleDirs(store, cfg.Storage.AppsDir); err != nil {
-			slog.Error("bundle_dir backfill", "err", err)
-		}
-		// Fence startup's destructive reconciliation/adoption across every app.
-		// This waits for lifecycle handlers that may still be unwinding on a
-		// retiring process, including handlers that outlived HTTP shutdown.
-		var releaseStartupFence func()
-		if !retryOwnerStep("acquire startup app-operation fence", func() error {
-			var err error
-			releaseStartupFence, err = srv.AcquireFleetAppOperations()
-			return err
-		}) {
-			return
-		}
-		startupFenceHeld := true
-		defer func() {
-			if startupFenceHeld {
-				releaseStartupFence()
-			}
-		}()
-		// A Docker one-shot producer survives a control-plane crash. Force-remove
-		// every such orphan and retry on any daemon uncertainty before recovery can
-		// adopt or boot a consumer over data that is still being mutated.
-		for {
-			fenceCtx, cancelFence := context.WithTimeout(octx, 60*time.Second)
-			containerErr := lifecycle.FenceOrphanScheduleContainersForTiers(mgr, cfg.Runtime.TierOrder())
-			taskErr := lifecycle.FenceOrphanScheduleTasksForTiers(fenceCtx, mgr, cfg.Runtime.TierOrder())
-			cancelFence()
-			if containerErr == nil && taskErr == nil {
-				break
-			}
-			slog.Error("fence orphan schedule producers", "container_err", containerErr, "task_err", taskErr)
-			select {
-			case <-octx.Done():
-				return
-			case <-time.After(registryRefreshBackoff):
-			}
-		}
-		var appsForPublicationFence []*db.App
-		if !retryOwnerStep("list apps for publication recovery fence", func() error {
-			var err error
-			appsForPublicationFence, err = store.ListApps(0, 0)
-			return err
-		}) {
-			return
-		}
-		appIDsForPublicationFence := make([]int64, 0, len(appsForPublicationFence))
-		for _, app := range appsForPublicationFence {
-			appIDsForPublicationFence = append(appIDsForPublicationFence, app.ID)
-		}
-		var releasePublicationFences func()
-		if !retryOwnerStep("acquire publication recovery fences", func() error {
-			var err error
-			releasePublicationFences, err = jobsMgr.AcquirePublicationRecoveryFences(octx, appIDsForPublicationFence)
-			return err
-		}) {
-			return
-		}
-		publicationFencesHeld := true
-		defer func() {
-			if publicationFencesHeld {
-				releasePublicationFences()
-			}
-		}()
-		// A previous owner may have completed while we waited for its physical
-		// writer lock. Only rows still running now are truly interrupted/uncertain.
-		var interruptedRuns []db.ScheduleRunTransition
-		if !retryOwnerStep("terminalize inherited schedule runs", func() error {
-			var err error
-			interruptedRuns, err = store.MarkRunningSchedulesInterrupted()
-			return err
-		}) {
-			return
-		} else if len(interruptedRuns) > 0 {
-			slog.Warn("terminalized inherited schedule runs", "count", len(interruptedRuns))
-			jobsMgr.ReportScheduleRunTransitions(interruptedRuns...)
-		}
-		// Resolve interrupted deployments before recovery. Fail closed and retry:
-		// a candidate producer may already have published incompatible shared data,
-		// in which case prior consumers must never be adopted.
-		for {
-			if err := lifecycle.ReconcileInflightDeployments(store); err == nil {
-				break
-			} else {
-				slog.Error("reconcile interrupted deployments", "err", err)
-			}
-			select {
-			case <-octx.Done():
-				return
-			case <-time.After(registryRefreshBackoff):
-			}
-		}
-		// Migrations may have completed while a predecessor owner still had an
-		// admitted legacy deploy handler. The exclusive startup fence above now
-		// proves those writers are gone, so repair tokens and active pointers from
-		// the final succeeded ledger before process recovery consults them.
-		if !retryOwnerStep("repair deployment generation ledger", store.RepairDeploymentGenerationLedger) {
-			return
-		}
-		// Finish any app deletion interrupted between the 'deleting' tombstone and
-		// the row removal. Reconcile first so freshly-cleaned slugs are not flagged
-		// as orphans by the next step.
-		lifecycle.ReconcileDeletingApps(octx, store, cfg, reconcileCleaner)
-		// Report (do not delete) slug dirs with no owning row. Run AFTER
-		// ReconcileDeletingApps so freshly-cleaned slugs are not reported.
-		lifecycle.LogOrphanAppDirs(store, cfg)
-		// Resolve every running app and its active bundle directory before
-		// recovery mutates anything. Fail closed and retry: a mid-scan database
-		// error must never fall through as an unresolved bundle directory, which
-		// would let validateNativeProcessIdentity skip its cwd check and adopt a
-		// reused PID on port evidence alone, or make reAdoptFrozenWarmReplica fail
-		// closed and rewrite a still-SIGSTOPped frozen-warm row to stopped.
-		var recoveryInputs *lifecycle.RecoveryInputs
-		if !retryOwnerStep("prepare process recovery", func() error {
-			var err error
-			recoveryInputs, err = lifecycle.PrepareRecovery(store)
-			return err
-		}) {
-			return
-		}
-		// Re-adopt any processes that survived a server restart. Must run after
-		// ReconcileInflightDeployments so recovery adopts the last-good deployment,
-		// not a half-applied one.
-		var previouslyRunning []*db.App
-		if !retryOwnerStep("list apps for startup warm floors", func() error {
-			var err error
-			previouslyRunning, err = store.ListRunningApps()
-			return err
-		}) {
-			return
-		}
-		lifecycle.RecoverProcesses(store, mgr, prx, cfg.Runtime.DefaultMaxSessionsPerReplica, cfg.Auth.IdentityHeadersEnabled(), cfg.Runtime.DefaultWorkerIsolation, watcher, recoveryInputs)
-		// Stop any native processes in the Manager that belong to elastic-mode
-		// apps. Elastic workers are ephemeral and must not be re-adopted; the
-		// pool starts empty and clients trigger fresh spawns on next request.
-		lifecycle.ReapElasticOrphans(store, mgr, cfg.Runtime.DefaultWorkerIsolation)
-		// Apps that ran elastic workers under a version without durable worker
-		// identities carry an orphan-risk marker. With every known worker
-		// stopped, a free consumer-lifetime lock proves no unknown one survived,
-		// and the marker no longer needs to block producer schedules.
-		lifecycle.DischargeElasticOrphanRisk(store, jobsMgr)
-		// Remove ShinyHub-managed containers no live replica re-adopted across
-		// every configured local container tier. Shared Docker daemons are
-		// deduplicated by endpoint.
-		if err := lifecycle.SweepOrphanContainersForTiersWithGenerations(store, mgr, cfg.Runtime.TierOrder()); err != nil {
-			// An orphan may still hold an old result cache namespace open, so
-			// pruning waits for the next deploy or retirement instead.
-			slog.Warn("container sweep incomplete; skipping startup result cache prune", "err", err)
-		} else {
-			lifecycle.PruneAppCaches(store, cfg.Storage.AppCacheDir)
-		}
-		// Sweep orphan Fargate tasks across ALL registered tiers.
-		sweepCtx, cancelSweep := context.WithTimeout(octx, 60*time.Second)
-		for _, tierName := range cfg.Runtime.TierOrder() {
-			tierRT := mgr.RuntimeForTier(tierName)
-			if fts, ok := tierRT.(lifecycle.FargateTaskSweeper); ok {
-				lifecycle.SweepOrphanFargateTasks(sweepCtx, mgr, fts)
-			}
-		}
-		cancelSweep()
-
-		// A crash may leave an activation marked running. Process/container
-		// recovery above has adopted or swept any surviving surge first; generation
-		// stamps then let the retried rollout skip canonical slots already replaced.
-		if !isClustered(cfg) {
-			if n, err := store.RequeueRunningScheduleActivations(time.Now().UTC()); err != nil {
-				slog.Error("requeue interrupted schedule activations", "err", err)
-			} else if n > 0 {
-				slog.Info("requeued interrupted schedule activations", "count", n)
-			}
-		}
-		// Start the scheduler before opening owner readiness. Admissions are
-		// temporarily reopened while every recovery fence is still held so missed
-		// and obligation dispatch can register durably but cannot cross a physical
-		// writer/consumer boundary. A transient scheduler load failure is retried
-		// within this ownership span rather than leaving a permanently green owner
-		// with dead cron processing.
-		jobsMgr.ResumeAdmissions()
-		if !retryOwnerStep("start scheduler", func() error { return sched.Start(octx) }) {
-			sched.Stop()
-			if err := jobsMgr.InterruptAndDrain(context.Background()); err != nil {
-				slog.Error("drain scheduled jobs after failed owner startup", "err", err)
-			}
-			return
-		}
-		// Ownership may have been cancelled between the successful Start call and
-		// this continuation. Never briefly advertise readiness or release the
-		// recovery fences for an already-retired owner.
-		if octx.Err() != nil {
-			sched.Stop()
-			if err := jobsMgr.InterruptAndDrain(context.Background()); err != nil {
-				slog.Error("drain scheduled jobs after ownership loss during startup", "err", err)
-			}
-			return
-		}
-		slog.Info("scheduler started")
-		releasePublicationFences()
-		publicationFencesHeld = false
-		releaseStartupFence()
-		startupFenceHeld = false
-		if warning := srv.UpdateCPUCapacityWarning(); warning != "" {
-			slog.Warn("live-update capacity after worker recovery", "warning", warning)
-		}
-		ownerReady.Store(true) // recovery complete and worker index is fresh
-		// A settings redeploy whose process exited before reporting is still
-		// owed; serve it now that this owner can boot pools. The scan retries
-		// through transient store failures, so it runs beside the owner's
-		// loops instead of delaying them.
-		relaunchOwed := func() { safego.Go("relaunch owed redeploys", srv.RelaunchOwedRedeploys) }
-		if !prx.RetiringParentAlive() {
-			relaunchOwed()
-		}
-
-		var loops sync.WaitGroup
-		// startLoop runs one owner loop for this ownership epoch. The shutdown
-		// branch below waits on loops before ownership is released, so every
-		// loop has returned before a successor can take over.
-		startLoop := func(run func()) {
-			loops.Add(1)
-			// rungroup:exempt: joined by loops.Wait in this epoch's shutdown branch, under the ownership watchdog
-			go func() {
-				defer loops.Done()
-				run()
-			}()
-		}
-		if retiringParentDone != nil && prx.RetiringParentAlive() {
-			// Recovery retains obsolete multiplex generations while the parent
-			// proxies them. Keep the lifecycle fence until cleanup finishes,
-			// so no new candidate or draining generation can enter this pass.
-			startLoop(func() {
-				runRetiringParentCleanup(octx, retiringParentDone, recoveryInputs.Apps,
-					srv.TryAcquireAppOperation, func(recovered *db.App) error {
-						app, err := store.GetAppByID(recovered.ID)
-						if errors.Is(err, db.ErrNotFound) {
-							return nil
-						}
-						if err != nil {
-							return err
-						}
-						// Parent exit is confirmed; the separate lifecycle fence
-						// stays held until every app in this pass is processed.
-						lifecycle.CleanupObsoleteDeploymentGenerationsAfterParent(store, mgr, prx, app)
-						return nil
-					}, func() {
-						releaseRetiringParentFence()
-						relaunchOwed()
-					})
-			})
-		}
-		if monitor != nil {
-			startLoop(func() { monitor.Run(octx, monitorInterval) })
-			slog.Info("worker-down monitor started", "timeout", workerTimeout, "interval", monitorInterval, "retention", workerRetention)
-		}
-		startLoop(func() { watcher.Start(octx) })
-		if !isClustered(cfg) {
-			startLoop(func() { activationCoordinator.Start(octx) })
-			slog.Info("schedule activation coordinator started", "concurrency", 1)
-		}
-		// Database housekeeping (audit + schedule-run retention) runs on the owner
-		// only, so HA standbys never prune concurrently. A no-op unless retention
-		// is configured.
-		startLoop(func() { runMaintenance(octx, store, mgr, appLogTelemetry, cfg.Maintenance, cfg.Usage) })
-		// A file-backed SQLite database is only ever served by one process, so
-		// its WAL checkpoint and planner statistics belong with the owner loops.
-		startLoop(func() { runSQLiteMaintenance(octx, store, cfg.Maintenance.Interval) })
-		startLoop(func() { srv.RunDevelopmentAppReaper(octx, time.Minute) })
-		// Restore serving floors independently of optional frozen warm-wake.
-		// Sequence the two passes so frozen restoration cannot claim a serving app.
-		startLoop(func() {
-			watcher.RestoreWarmFloors(octx, previouslyRunning)
-			if cfg.Runtime.Snapshot.Enabled && cfg.Runtime.Snapshot.RestoreOnStartup {
-				watcher.RestoreWarm(octx)
-			}
-		})
-		if controller != nil {
-			startLoop(func() { controller.Run(octx) })
-			slog.Info("autoscale controller started",
-				"scan_interval", cfg.Runtime.Autoscale.ScanInterval,
-				"cooldown", cfg.Runtime.Autoscale.Cooldown,
-				"default_target", cfg.Runtime.Autoscale.DefaultTarget)
-		}
-
-		<-octx.Done()
-		ownerReady.Store(false) // close admission before waiting for local handlers
-		slog.Info("releasing control-plane ownership loops", "epoch", epoch)
-		sched.Stop() // restartable on the next acquisition
-		loops.Wait() // watcher/monitor/autoscale fully stopped
-		// Job cancellation must never wait behind the fleet fence: a successor
-		// request can hold fleet-SH while waiting for this owner's publication
-		// lock. Drain first, then use fleet-EX to close the remaining HTTP/lifecycle
-		// handoff. Successor startup independently waits physical writer locks.
-		// Both steps share one bounded drainCtx so neither can hang the handoff
-		// indefinitely. The exclusive fleet fence drains requests admitted before
-		// handoff (including uploads not yet at an app lock) while the successor
-		// is still excluded, so their durable terminal state lands before a new
-		// scheduler can reconcile running rows. When either step gives up at the
-		// deadline, the lease is left to expire on its TTL instead of being
-		// released, so a successor never overlaps goroutines still writing.
-		drainCtx, cancelDrain := context.WithTimeout(context.Background(), shutdownDrainBudget)
-		defer cancelDrain()
-		if !drainOwnershipHandoff(drainCtx, jobsMgr.InterruptAndDrain, srv.AcquireFleetHandoffBarrier, registryRefreshBackoff, slog.Default()) {
-			handoffIncomplete.Store(true)
-		}
+	owner := &ownerRuntime{
+		cfg:                        cfg,
+		store:                      store,
+		srv:                        srv,
+		mgr:                        mgr,
+		prx:                        prx,
+		jobsMgr:                    jobsMgr,
+		sched:                      sched,
+		watcher:                    watcher,
+		workerReg:                  workerReg,
+		monitor:                    monitor,
+		controller:                 controller,
+		activationCoordinator:      activationCoordinator,
+		reconcileCleaner:           reconcileCleaner,
+		appLogTelemetry:            appLogTelemetry,
+		syncDeployCredential:       syncDeployCredential,
+		retiringParentDone:         retiringParentDone,
+		releaseRetiringParentFence: releaseRetiringParentFence,
 	}
+	ownerReady := &owner.ready
+	handoffIncomplete := &owner.handoffIncomplete
 
-	scope := leader.NewOwnerScope(ownerWork)
+	scope := leader.NewOwnerScope(owner.run)
 	elector := leader.New(store, leader.Config{
 		InstanceID: cfg.Server.InstanceID,
 		TTL:        cfg.Server.LeaseTTL,
@@ -2973,9 +2619,9 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	watcher.SetIsOwner(elector.IsOwner)
 
 	// Gate mutations on owner AND ready: the elector reports IsOwner true before
-	// ownerWork refreshes the registry, so admitting owner-only mutations (main-API
+	// ownerRuntime.run refreshes the registry, so admitting owner-only mutations (main-API
 	// deploy/placement, worker register/heartbeat) must wait for the fresh index.
-	ownerAndReady := ownerAndReadyPredicate(elector.IsOwner, &ownerReady)
+	ownerAndReady := ownerAndReadyPredicate(elector.IsOwner, ownerReady)
 	srv.SetOwnership(func() bool { return ownerAndReady() && !srv.AppOperationsPaused() })
 	srv.SetOwnerLease(func() *db.OwnerLease {
 		return &db.OwnerLease{Instance: cfg.Server.InstanceID, Epoch: elector.Epoch()}
@@ -3001,7 +2647,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		localLogMaintenanceWG.Wait()
 		scope.Stop()
 	}
-	// stopOwnership can hang (ownerWork's shutdown branch above blocking on
+	// stopOwnership can hang (ownerRuntime.run's shutdown branch blocking on
 	// loops.Wait(), a slow drain, or the fence retry), and letting that hang
 	// propagate here would race runServe's deferred store.Close() against a
 	// goroutine still using the store. awaitOwnershipStop is idempotent to call
@@ -3277,7 +2923,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// routable DB replica rows before the listener starts serving, so a ZDT
 	// successor process can route requests to already-running app processes
 	// immediately. Without this the pool is empty until RecoverProcesses runs
-	// inside ownerWork (~10s after boot), causing 10-18s of loading-page
+	// inside ownerRuntime.run (~10s after boot), causing 10-18s of loading-page
 	// degradation on every handoff.
 	//
 	// Clustered deployments already have a periodic PoolSyncer that runs from

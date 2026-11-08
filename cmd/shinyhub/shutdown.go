@@ -10,14 +10,14 @@ import (
 	"github.com/rvben/shinyhub/internal/rungroup"
 )
 
-// shutdownDrainBudget bounds the work ownerWork's shutdown branch does before
+// shutdownDrainBudget bounds the work ownerRuntime.run's shutdown branch does before
 // releasing ownership: draining scheduled jobs and acquiring the fleet
 // mutation fence share this single deadline, so together they can never hang
 // the ownership handoff indefinitely.
 const shutdownDrainBudget = 20 * time.Second
 
 // shutdownWatchdogBudget bounds stopOwnership itself (elector shutdown, the
-// ownerWork goroutine returning, and scope.Stop()). It is larger than
+// ownerRuntime.run goroutine returning, and scope.Stop()). It is larger than
 // shutdownDrainBudget so the drain budget above normally fires first and logs
 // a more specific cause; this is the last-resort backstop for anything that
 // hangs outside that inner budget (for example loops.Wait() itself).

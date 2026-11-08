@@ -8,9 +8,9 @@ import (
 	"testing"
 )
 
-// exemptMarker is the comment that admits a bare go statement in runServe. It
-// must say how that goroutine is joined before the store closes, since nothing
-// else in runServe will.
+// exemptMarker is the comment that admits a bare go statement in the server's
+// startup and ownership code. It must say how that goroutine is joined before
+// the store closes, since nothing else will.
 const exemptMarker = "rungroup:exempt"
 
 // runServe's background work runs as services of its run group, which joins
@@ -20,19 +20,31 @@ const exemptMarker = "rungroup:exempt"
 // own join (the HTTP serve, the elector and its watchdog, the ownership-epoch
 // loops) say so with an exemption comment on the line above.
 func TestRunServeStartsBackgroundWorkThroughTheRunGroup(t *testing.T) {
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "main.go", nil, parser.ParseComments)
-	if err != nil {
-		t.Fatalf("parse main.go: %v", err)
+	for _, target := range []struct{ file, fn string }{
+		{"main.go", "runServe"},
+		{"owner_runtime.go", "run"},
+	} {
+		t.Run(target.file+":"+target.fn, func(t *testing.T) {
+			checkGoStatementsAreJoined(t, target.file, target.fn)
+		})
 	}
-	var runServe *ast.FuncDecl
+}
+
+func checkGoStatementsAreJoined(t *testing.T, path, fnName string) {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	var fn *ast.FuncDecl
 	for _, decl := range file.Decls {
-		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "runServe" {
-			runServe = fn
+		if d, ok := decl.(*ast.FuncDecl); ok && d.Name.Name == fnName {
+			fn = d
 		}
 	}
-	if runServe == nil {
-		t.Fatal("main.go has no runServe")
+	if fn == nil {
+		t.Fatalf("%s has no func %s", path, fnName)
 	}
 
 	exemptLines := map[int]string{}
@@ -44,28 +56,26 @@ func TestRunServeStartsBackgroundWorkThroughTheRunGroup(t *testing.T) {
 		}
 	}
 
-	var bare, exempt int
-	ast.Inspect(runServe.Body, func(n ast.Node) bool {
+	var seen int
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		stmt, ok := n.(*ast.GoStmt)
 		if !ok {
 			return true
 		}
+		seen++
 		line := fset.Position(stmt.Pos()).Line
 		reason, ok := exemptLines[line-1]
 		switch {
 		case !ok:
-			bare++
-			t.Errorf("main.go:%d starts a goroutine outside the run group; use services.Go, or mark it %q with how it is joined", line, "// "+exemptMarker+": <join>")
+			t.Errorf("%s:%d starts a goroutine outside the run group; use services.Go, or mark it %q with how it is joined", path, line, "// "+exemptMarker+": <join>")
 		case reason == "":
-			t.Errorf("main.go:%d is exempt from the run group without saying how it is joined", line)
-		default:
-			exempt++
+			t.Errorf("%s:%d is exempt from the run group without saying how it is joined", path, line)
 		}
 		return true
 	})
-	// The check must have seen the exempt goroutines it is meant to tolerate,
-	// or a parse that matched nothing would pass vacuously.
-	if bare == 0 && exempt == 0 {
-		t.Fatal("found no go statements in runServe at all; the scan is not looking at the right function")
+	// Each scanned function holds at least one exempt goroutine, so seeing
+	// none means the scan is not looking at the code it is meant to guard.
+	if seen == 0 {
+		t.Fatalf("found no go statements in %s %s at all; the scan is not looking at the right function", path, fnName)
 	}
 }
