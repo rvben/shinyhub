@@ -30,6 +30,7 @@ import (
 	"github.com/rvben/shinyhub/internal/approute"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
+	"github.com/rvben/shinyhub/internal/httpbuf"
 	"github.com/rvben/shinyhub/internal/proxytrust"
 	"github.com/rvben/shinyhub/internal/safego"
 	"github.com/rvben/shinyhub/internal/spanerr"
@@ -2120,7 +2121,7 @@ func (p *Proxy) RegisterReplica(slug string, index int, targetURL string, base h
 // same forwarding, security and response-injection behavior as legacy active
 // registrations.
 func (p *Proxy) newReplicaBackend(pool *backendPool, slug string, index int, target *url.URL, targetURL string, base http.RoundTripper, deploymentID, ownerAppID int64) *replicaBackend {
-	rp := httputil.NewSingleHostReverseProxy(target)
+	rp := httpbuf.ReverseProxy(target)
 	slugCopy := slug
 	// Capture pre-response upstream failures (connection refused, timeout)
 	// onto the statusRecorder so the trace span surfaces span.Error.
@@ -2617,7 +2618,7 @@ func (p *Proxy) registerElasticWorker(slug string, slotID int, targetURL string,
 
 	slugCopy := slug
 
-	rp := httputil.NewSingleHostReverseProxy(target)
+	rp := httpbuf.ReverseProxy(target)
 	rp.ErrorHandler = func(w http.ResponseWriter, req *http.Request, err error) {
 		slog.Warn("proxy_upstream_error", "slug", slugCopy, "error", err.Error())
 		if sr, ok := w.(*statusRecorder); ok {
