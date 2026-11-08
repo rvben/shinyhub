@@ -147,7 +147,7 @@ export async function verifiedSmoke(env = process.env) {
   const stop = () => controller.abort(new Error("Verification interrupted"));
   process.once("SIGTERM", stop);
   process.once("SIGINT", stop);
-  let session, socket, child, streamFailure, primaryFailure;
+  let session, socket, child, streamFailure, primaryFailure, cleanupFailure;
   try {
     session = await api(endpoint, "POST", { filters: [] });
     socket = new WebSocket(session.url, "trace-v1");
@@ -199,13 +199,16 @@ export async function verifiedSmoke(env = process.env) {
     process.removeListener("SIGTERM", stop);
     process.removeListener("SIGINT", stop);
     if (session) {
+      // A failed tail cleanup is the run's error only when the smoke itself
+      // passed; otherwise the primary failure propagates and this is logged.
       try { await api(`${endpoint}/${encodeURIComponent(session.id)}`, "DELETE"); }
       catch (error) {
-        if (!primaryFailure) throw error;
-        console.error(error.message);
+        if (primaryFailure) console.error(error.message);
+        else cleanupFailure = error;
       }
     }
   }
+  if (cleanupFailure) throw cleanupFailure;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

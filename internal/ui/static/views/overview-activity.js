@@ -209,10 +209,10 @@ function resourceHref(resourceType, resourceID, action, availableAppSlugs) {
   const value = stringValue(action).toLowerCase();
   let tab = 'overview';
   if (/^(deploy|rollback|deploy_rejected_quota)$/.test(value)) tab = 'deployments';
-  else if (/^env\./.test(value) || value === 'update_app') tab = 'configuration';
+  else if (value.startsWith('env.') || value === 'update_app') tab = 'configuration';
   else if (/^(data\.|shared_data_)/.test(value)) tab = 'data';
   else if (/access|member|group/.test(value)) tab = 'access';
-  else if (/^schedule_/.test(value)) tab = 'schedules';
+  else if (value.startsWith('schedule_')) tab = 'schedules';
   return `/apps/${encodeURIComponent(resourceID)}/${tab}`;
 }
 

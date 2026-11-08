@@ -296,7 +296,7 @@ export function renderAutoscaleSummary(dl, s) {
       warn.textContent =
         'Autoscale is enabled for this app but the global controller is disabled ' +
         '(runtime.autoscale.enabled=false); no scaling will occur.';
-      dl.parentNode ? dl.parentNode.appendChild(warn) : dl.appendChild(warn);
+      (dl.parentNode || dl).appendChild(warn);
     }
   }
 }

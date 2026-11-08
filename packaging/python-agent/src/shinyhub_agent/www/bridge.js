@@ -137,7 +137,7 @@
           arguments: argumentsValue,
           action: action
         }, { priority: "event" });
-      } catch (error) {
+      } catch (_) {
         clearTimeout(timer);
         pending.delete(requestId);
         reject(new Error("The app session is unavailable."));
@@ -166,7 +166,7 @@
         }).catch(function () {
           dispatch("shinyhub:agent:webmcp", { available: false, name: tool.name });
         });
-      } catch (error) {
+      } catch (_) {
         dispatch("shinyhub:agent:webmcp", { available: false, name: tool.name });
       }
     });
@@ -194,7 +194,7 @@
     });
     try {
       window.Shiny.setInputValue(".shinyhub_agent_discover", { version: VERSION, nonce: Date.now() }, { priority: "event" });
-    } catch (error) { /* on-flushed publication still supplies capabilities */ }
+    } catch (_) { /* on-flushed publication still supplies capabilities */ }
     return true;
   }
 

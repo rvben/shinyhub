@@ -30,6 +30,11 @@ jobs:
       - name: Lint
         run: go vet ./...
 
+      # oxlint over every JavaScript and TypeScript file; warnings fail the
+      # step so a finding cannot linger.
+      - name: Lint (JavaScript)
+        run: make lint-js
+
       - name: Skill lint
         run: make skill-lint
 

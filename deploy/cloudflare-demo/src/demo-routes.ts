@@ -21,6 +21,9 @@ export function canonicalDemoPath(pathname: string): string | null {
   if (!pathname.startsWith("/") || /%2f|%5c/i.test(pathname)) return null;
   let path: string;
   try { path = decodeURIComponent(pathname); } catch { return null; }
+  // The class deliberately names control characters: a path carrying one is
+  // refused, not normalised.
+  // eslint-disable-next-line no-control-regex
   if (/[\x00-\x1f\x7f\\]/.test(path) || path.includes("//") || /%[0-9a-f]{2}/i.test(path)) return null;
   if (path.split("/").some((segment) => segment === "." || segment === "..")) return null;
   return path;

@@ -45,8 +45,9 @@ Before opening a pull request:
 make check
 ```
 
-That deterministic gate checks formatting, Go vet, skill metadata, the
-minified injected scripts, Go tests, and dashboard JavaScript tests.
+That deterministic gate checks formatting, Go vet, oxlint over the JavaScript
+and TypeScript, skill metadata, the minified injected scripts, Go tests, and
+dashboard JavaScript tests.
 Specialized integration targets remain separate because they require Docker,
 uv, R, or cloud infrastructure.
 

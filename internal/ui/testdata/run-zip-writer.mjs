@@ -9,13 +9,15 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import vm from 'node:vm';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const writerSrc = readFileSync(path.join(__dirname, '..', 'static', 'zip-writer.js'), 'utf8');
-// Indirect eval runs in global scope; the IIFE attaches buildZipNative to globalThis.
-(0, eval)(writerSrc);
+const writerPath = path.join(__dirname, '..', 'static', 'zip-writer.js');
+// Runs the script in this process's global scope, as a browser would; the IIFE
+// attaches buildZipNative to globalThis.
+vm.runInThisContext(readFileSync(writerPath, 'utf8'), { filename: writerPath });
 
 let manifestJSON = '';
 for await (const chunk of process.stdin) manifestJSON += chunk;

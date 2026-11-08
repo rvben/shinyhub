@@ -1,4 +1,4 @@
-.PHONY: bootstrap build check clean test test-go test-race test-race-non-api test-race-api vuln scan-image node-deps ui-minify ui-minify-check test-js test-worker test-onboarding-e2e test-browser-onboarding-e2e test-browser-logs-e2e test-browser-app-nav-e2e test-browser-lifecycle-e2e test-cli-compatibility-e2e test-shell-completion-e2e test-cli-release-contract test-remote-e2e test-fargate-it test-provider-logs-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev dev-reset goreleaser-check release-notes release-patch release-minor release-major build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-check clispec-score test-identity test-py-identity test-py-bookmarks test-py-agent test-r-identity test-identity-conformance bootstrap-r-identity check-r-identity docs-r-identity render-rig-up render-rig-down load-test-render test-render-rig
+.PHONY: bootstrap build check clean test test-go test-race test-race-non-api test-race-api vuln scan-image node-deps lint-js ui-minify ui-minify-check test-js test-worker test-onboarding-e2e test-browser-onboarding-e2e test-browser-logs-e2e test-browser-app-nav-e2e test-browser-lifecycle-e2e test-cli-compatibility-e2e test-shell-completion-e2e test-cli-release-contract test-remote-e2e test-fargate-it test-provider-logs-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev dev-reset goreleaser-check release-notes release-patch release-minor release-major build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-check clispec-score test-identity test-py-identity test-py-bookmarks test-py-agent test-r-identity test-identity-conformance bootstrap-r-identity check-r-identity docs-r-identity render-rig-up render-rig-down load-test-render test-render-rig
 
 AIR_VERSION ?= v1.67.4
 AIR_BIN := $(CURDIR)/tmp/tools/air
@@ -31,7 +31,7 @@ clean:
 test: test-go test-js test-worker
 
 # check is the fast, deterministic pre-PR gate contributors should run.
-check: fmt-check lint ui-minify-check skill-lint test
+check: fmt-check lint lint-js ui-minify-check skill-lint test
 
 test-go:
 	go test ./... -count=1
@@ -80,12 +80,20 @@ scan-image:
 			image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 shinyhub-scan:latest; \
 	fi
 
-# node-deps makes sure the pinned devDependencies (jsdom, axe-core, terser) are
-# installed. Requires Node 20+. Installs them the first time a Node-backed
-# target runs; afterwards it's a no-op.
+# node-deps makes sure the pinned devDependencies (jsdom, axe-core, terser,
+# oxlint) are installed. Requires Node 20+. Installs them the first time a
+# Node-backed target runs; afterwards it's a no-op.
 node-deps:
 	@command -v node >/dev/null 2>&1 || { echo "node not found (Node 20+ required)"; exit 1; }
-	@if [ ! -d node_modules/jsdom ] || [ ! -d node_modules/axe-core ] || [ ! -d node_modules/terser ]; then npm install --no-audit --no-fund --silent; fi
+	@if [ ! -d node_modules/jsdom ] || [ ! -d node_modules/axe-core ] || [ ! -d node_modules/terser ] || [ ! -d node_modules/oxlint ]; then npm install --no-audit --no-fund --silent; fi
+
+# lint-js runs oxlint over every JavaScript and TypeScript file in the repo:
+# the dashboard, the injected scripts, the SDK clients, the tests and the
+# harnesses. The rule set is oxlint's default correctness category plus the
+# settings in .oxlintrc.json, which also names what is generated or vendored
+# and therefore skipped. Warnings fail the target so a finding cannot linger.
+lint-js: node-deps
+	./node_modules/.bin/oxlint --deny-warnings
 
 # ui-minify regenerates the minified siblings of the scripts the proxy inlines
 # into app pages (the app switcher, the status overlay, the announcement banner,

@@ -909,7 +909,7 @@
             saved.width >= 360 && saved.width <= 960) {
           width = saved.width; expanded = saved.expanded === true;
         }
-      } catch (e) { /* Storage is optional in embedded apps and privacy modes. */ }
+      } catch (_) { /* Storage is optional in embedded apps and privacy modes. */ }
     }
     load();
 
@@ -924,7 +924,7 @@
     function clamp(value) { return Math.round(Math.max(360, Math.min(maximum(), value))); }
     function save() {
       try { window.sessionStorage.setItem(key, JSON.stringify({ width: width, expanded: expanded })); }
-      catch (e) { /* Resizing still works without storage. */ }
+      catch (_) { /* Resizing still works without storage. */ }
     }
     function update() {
       var mobile = window.innerWidth <= mobileWidth || unavailable && unavailable();
@@ -1203,9 +1203,13 @@
       } else if (event.type === "suggestions") {
         if (suggestionsSuppressed || !Array.isArray(event.questions)) return;
         var seen = new Set();
+        // The class deliberately names control characters and line separators:
+        // a suggestion carrying one is dropped, not normalised.
+        // eslint-disable-next-line no-control-regex
+        var unsafeSuggestionChars = /[\x00-\x1f\x7f-\x9f\u2028\u2029]/;
         pendingSuggestions = event.questions.slice(0, 64).filter(function (question) {
           if (typeof question !== "string" || !question.trim() || Array.from(question.trim()).length > 100 ||
-              /[\x00-\x1f\x7f-\x9f\u2028\u2029]/.test(question)) return false;
+              unsafeSuggestionChars.test(question)) return false;
           var key = question.trim().toLowerCase();
           if (seen.has(key)) return false;
           seen.add(key);

@@ -80,7 +80,6 @@ const TOP_CONSUMERS = 3;
 export function buildOverviewModel(apps, metricsInput, historyInput = {}) {
   const list = Array.isArray(apps) ? apps : [];
   const metricsState = normalizeMetricsState(metricsInput);
-  const metrics = metricsState.metrics;
 
   const counts = Object.fromEntries(pulseOrder.map((key) => [key, 0]));
   const attention = [];

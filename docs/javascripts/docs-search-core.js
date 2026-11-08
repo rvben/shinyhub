@@ -22,6 +22,9 @@ export function markdownText(value) {
 }
 
 export function documentLocation(value, origin, index) {
+  // The class deliberately names control characters: an index entry carrying
+  // one is dropped, not normalised.
+  // eslint-disable-next-line no-control-regex
   if (typeof value !== 'string' || /[\u0000-\u001f]/.test(value)) return null;
   try {
     const url = new URL(value, origin + '/');
