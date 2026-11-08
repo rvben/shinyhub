@@ -94,6 +94,11 @@ func TestIsLongLivedAPIRoute(t *testing.T) {
 		// Schedule run log stream — long-lived by design.
 		{"schedule run logs GET", http.MethodGet, "/api/apps/myapp/schedules/7/runs/42/logs", true},
 
+		// Draft upload carries a full bundle, same as deploy.
+		{"drafts POST", http.MethodPost, "/api/apps/myapp/drafts", true},
+		{"drafts GET", http.MethodGet, "/api/apps/myapp/drafts", false},
+		{"draft delete", http.MethodDelete, "/api/apps/myapp/drafts/abc123", false},
+
 		// Wrong method on a lifecycle verb must NOT bypass the timeout.
 		{"restart GET", http.MethodGet, "/api/apps/myapp/restart", false},
 		{"deploy GET", http.MethodGet, "/api/apps/myapp/deploy", false},
@@ -201,8 +206,14 @@ func TestIsLargeUploadRoute(t *testing.T) {
 		{"deploy POST", http.MethodPost, "/api/apps/myapp/deploy", true},
 		{"data PUT", http.MethodPut, "/api/apps/myapp/data/big.csv", true},
 		{"data PUT nested", http.MethodPut, "/api/apps/myapp/data/a/b/c.bin", true},
+		// A draft is a full bundle upload with the same handler-side cap as deploy.
+		{"drafts POST", http.MethodPost, "/api/apps/myapp/drafts", true},
 
 		// Small-body mutations stay capped.
+		{"drafts GET", http.MethodGet, "/api/apps/myapp/drafts", false},
+		{"draft delete", http.MethodDelete, "/api/apps/myapp/drafts/abc123", false},
+		{"draft promote POST", http.MethodPost, "/api/apps/myapp/drafts/abc123/promote", false},
+		{"draft preview POST", http.MethodPost, "/api/apps/myapp/drafts/abc123/preview", false},
 		{"deploy GET", http.MethodGet, "/api/apps/myapp/deploy", false},
 		{"restart POST", http.MethodPost, "/api/apps/myapp/restart", false},
 		{"patch app", http.MethodPatch, "/api/apps/myapp", false},
