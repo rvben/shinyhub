@@ -624,13 +624,15 @@ type Proxy struct {
 	// byte-for-byte unchanged.
 	onMissSync atomic.Pointer[onMissSyncFuncT]
 
-	// Phase 1 worker-isolation: per-client accounting.
-	//
-	// clients maps slug -> clientID -> *clientSlot. It lives under the SAME pool
-	// lock (p.mu) so reservation, binding, and accounting updates are atomic with
-	// respect to each other and to ServeHTTP's RLock path. A second lock would
-	// invert against ServeHTTP (which holds p.mu.RLock through activeConns bump)
-	// and deadlock.
+	// clients maps slug -> clientID -> *clientSlot, the per-client accounting
+	// for elastic workers. The map itself lives under the pool lock: binding and
+	// reservation add or remove slots under p.mu.Lock, and the routing path looks
+	// slots up under p.mu.RLock, so a slot cannot appear or vanish mid-route. The
+	// accounting inside a slot (liveConns and the grace timer) is guarded by the
+	// slot's own cs.mu, acquired only after p.mu or an accounting read stripe,
+	// so clientConnOpened and clientConnClosed run under a stripe plus cs.mu and
+	// unrelated clients and slugs proceed in parallel. The ordering is stated at
+	// clientSlot in elastic.go.
 	clients map[string]map[string]*clientSlot
 
 	// terminate is called (via goroutine, never inline under p.mu) when an elastic
