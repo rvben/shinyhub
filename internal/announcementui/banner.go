@@ -14,7 +14,13 @@ import (
 // client is served directly by the platform, including in dev-static mode.
 const ClientPath = "/announcements.js"
 
-//go:embed assets/banner.js
+// Script is the minified build of assets/banner.js; the source is where to
+// read how the banner behaves. Every app page load carries it inline, so the
+// minified sibling ships. go generate (or make ui-minify) regenerates it and
+// make ui-minify-check fails while it is stale.
+//
+//go:generate node ../../scripts/minify-injected.mjs assets/banner.js
+//go:embed assets/banner.min.js
 var Script string
 
 var CSPHash = func() string {

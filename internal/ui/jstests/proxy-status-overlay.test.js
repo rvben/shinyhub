@@ -2,16 +2,20 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { JSDOM, VirtualConsole } from 'jsdom';
+import { injectedScript } from './injected-script.js';
 
 // The status overlay is JavaScript the proxy splices into every app's HTML. No
 // Go test executes it, and it runs inside pages ShinyHub did not write, so a
 // defect here is invisible to `go test` and visible to every visitor of every
-// app. These tests run the REAL shipped bytes - the same file inject.go embeds -
-// in a real DOM, driving the actual contract it depends on: Shiny appending
-// #shiny-disconnected-overlay to <body> and removing it again.
+// app. These tests run the script in a real DOM, driving the actual contract
+// it depends on: Shiny appending #shiny-disconnected-overlay to <body> and
+// removing it again. `script` is what gets evaluated: the readable source, or
+// under SHINYHUB_INJECTED_SCRIPTS=min the minified sibling inject.go embeds.
+// `source` is always the readable text, for the assertions that read it as text.
 
 const OVERLAY_JS = new URL('../../proxy/assets/overlay.js', import.meta.url);
 const source = readFileSync(OVERLAY_JS, 'utf8');
+const script = injectedScript(OVERLAY_JS);
 // A silently-empty or renamed source would make every test below pass
 // vacuously, which is the one outcome worse than failing.
 if (!source.includes('shiny-disconnected-overlay')) {
@@ -125,7 +129,7 @@ function mount({
     if (v === null) tag.removeAttribute(k);
     else tag.setAttribute(k, v);
   }
-  tag.textContent = source;
+  tag.textContent = script;
   d.body.appendChild(tag);
   if (connected) {
     if (connectedViaJQuery) jqueryConnectedHandler();

@@ -1,4 +1,4 @@
-.PHONY: bootstrap build check clean test test-go test-race test-race-non-api test-race-api vuln scan-image test-js test-worker test-onboarding-e2e test-browser-onboarding-e2e test-browser-logs-e2e test-browser-app-nav-e2e test-browser-lifecycle-e2e test-cli-compatibility-e2e test-shell-completion-e2e test-cli-release-contract test-remote-e2e test-fargate-it test-provider-logs-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev dev-reset goreleaser-check release-notes release-patch release-minor release-major build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-check clispec-score test-identity test-py-identity test-py-bookmarks test-py-agent test-r-identity test-identity-conformance bootstrap-r-identity check-r-identity docs-r-identity render-rig-up render-rig-down load-test-render test-render-rig
+.PHONY: bootstrap build check clean test test-go test-race test-race-non-api test-race-api vuln scan-image node-deps ui-minify ui-minify-check test-js test-worker test-onboarding-e2e test-browser-onboarding-e2e test-browser-logs-e2e test-browser-app-nav-e2e test-browser-lifecycle-e2e test-cli-compatibility-e2e test-shell-completion-e2e test-cli-release-contract test-remote-e2e test-fargate-it test-provider-logs-it test-handoff test-postgres test-ha test-provisioning lint fmt fmt-check run dev dev-reset goreleaser-check release-notes release-patch release-minor release-major build-runner-image skill-lint skill-smoke load-test load-test-isolation iac-validate clispec-check clispec-score test-identity test-py-identity test-py-bookmarks test-py-agent test-r-identity test-identity-conformance bootstrap-r-identity check-r-identity docs-r-identity render-rig-up render-rig-down load-test-render test-render-rig
 
 AIR_VERSION ?= v1.67.4
 AIR_BIN := $(CURDIR)/tmp/tools/air
@@ -31,7 +31,7 @@ clean:
 test: test-go test-js test-worker
 
 # check is the fast, deterministic pre-PR gate contributors should run.
-check: fmt-check lint skill-lint test
+check: fmt-check lint ui-minify-check skill-lint test
 
 test-go:
 	go test ./... -count=1
@@ -80,15 +80,37 @@ scan-image:
 			image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 shinyhub-scan:latest; \
 	fi
 
-# test-js runs the JSDOM tests for UI assets. Requires Node 20+. Installs
-# devDependencies (jsdom, axe-core) the first time it runs; afterwards it's a no-op.
+# node-deps makes sure the pinned devDependencies (jsdom, axe-core, terser) are
+# installed. Requires Node 20+. Installs them the first time a Node-backed
+# target runs; afterwards it's a no-op.
+node-deps:
+	@command -v node >/dev/null 2>&1 || { echo "node not found (Node 20+ required)"; exit 1; }
+	@if [ ! -d node_modules/jsdom ] || [ ! -d node_modules/axe-core ] || [ ! -d node_modules/terser ]; then npm install --no-audit --no-fund --silent; fi
+
+# ui-minify regenerates the minified siblings of the scripts the proxy inlines
+# into app pages (the app switcher, the status overlay, the announcement banner,
+# the support rail, the environment badge). The Go packages embed the sibling,
+# so run this after editing one of those sources and commit the result: the
+# module must build from a clean clone without Node. scripts/minify-injected.mjs
+# lists the sources.
+ui-minify: node-deps
+	node scripts/minify-injected.mjs
+
+# ui-minify-check fails, naming the files, when a committed minified sibling no
+# longer matches its source. Part of check and CI so an edited source cannot
+# ship with the previous script still embedded.
+ui-minify-check: node-deps
+	node scripts/minify-injected.mjs --check
+
+# test-js runs the JSDOM tests for UI assets, then runs the tests that evaluate
+# an injected script a second time with SHINYHUB_INJECTED_SCRIPTS=min, so the
+# minified bytes the proxy actually embeds are proven to behave like the source.
 # The glob is left unquoted so the shell expands it to the matching files;
 # node --test does not expand glob patterns itself before Node 21, so quoting
 # would break on Node 20.
-test-js:
-	@command -v node >/dev/null 2>&1 || { echo "node not found (Node 20+ required for UI tests)"; exit 1; }
-	@if [ ! -d node_modules/jsdom ] || [ ! -d node_modules/axe-core ]; then npm install --no-audit --no-fund --silent; fi
+test-js: node-deps
 	node --test internal/ui/jstests/*.test.js
+	SHINYHUB_INJECTED_SCRIPTS=min node --test $$(grep -l injected-script.js internal/ui/jstests/*.test.js)
 
 # test-worker runs the unit tests for the Cloudflare demo Worker. The Worker
 # decides what reaches the demo container, and a request that reaches a sleeping

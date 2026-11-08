@@ -15,7 +15,7 @@ const axe = require('axe-core');
 const base = new URL('../packaging/python-agent/src/shinyhub_agent/www/', import.meta.url);
 const assets = new Map(await Promise.all(['chat.js', 'chat.css', 'charts.js', 'vendor/vega.min.js',
   'vendor/vega-lite.min.js', 'vendor/vega-embed.min.js'].map(async p => ['/' + p, await readFile(new URL(p, base))])));
-assets.set('/nav.js', await readFile(new URL('../internal/appnav/assets/nav.js', import.meta.url)));
+assets.set('/nav.js', await readFile(new URL('../internal/appnav/assets/nav.min.js', import.meta.url)));
 const server = createServer((req, res) => {
   if (assets.has(req.url)) { res.setHeader('Content-Type', req.url.endsWith('.css') ? 'text/css' : 'text/javascript'); res.end(assets.get(req.url)); return; }
   if (req.url === '/nav.json') { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({apps:[{slug:'demo',name:'Demo',url:'/app/demo/'}]})); return; }

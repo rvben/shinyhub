@@ -33,6 +33,12 @@ jobs:
       - name: Skill lint
         run: make skill-lint
 
+      # The scripts the proxy inlines into app pages are embedded as committed
+      # minified siblings of their sources; a source edit without a regenerate
+      # would ship the previous script.
+      - name: Minified injected scripts match their sources
+        run: make ui-minify-check
+
       # Compile-check the build-tag-gated tests (integration = real AWS ECS,
       # e2e = proxy distribution). They never run in the default suite, so
       # without this they silently rot when the code they call is renamed.

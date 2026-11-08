@@ -2,13 +2,18 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { JSDOM, VirtualConsole } from 'jsdom';
+import { injectedScript } from './injected-script.js';
 
+// `source` is the readable text, for the checks that read it as text; `script`
+// is what gets evaluated: the same source, or under SHINYHUB_INJECTED_SCRIPTS=min
+// the minified sibling banner.go embeds.
 const BANNER_JS = new URL('../../supportui/assets/banner.js', import.meta.url);
 const source = readFileSync(BANNER_JS, 'utf8');
+const script = injectedScript(BANNER_JS);
 if (!source.includes('shinyhub-support-session')) {
   throw new Error(`${BANNER_JS.pathname} does not look like the support-session banner`);
 }
-if (source.includes('.innerHTML')) {
+if (source.includes('.innerHTML') || script.includes('.innerHTML')) {
   throw new Error('support-session banner must remain compatible with Trusted Types enforcement');
 }
 
@@ -47,7 +52,7 @@ function mount({ remaining = 15 * 60 * 1000 } = {}) {
   tag.dataset.subject = 'alice';
   tag.dataset.sessionId = 'support-id';
   tag.dataset.expiresAt = String(now + remaining);
-  tag.textContent = source;
+  tag.textContent = script;
   document.body.appendChild(tag);
 
   const host = document.getElementById('shinyhub-support-session');

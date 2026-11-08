@@ -21,11 +21,14 @@ import (
 	xhtml "golang.org/x/net/html"
 )
 
-// overlayScript is the status overlay injected into app page loads. See
-// assets/overlay.js for what it does and why it is safe to run inside an app
-// this server did not write.
+// overlayScript is the status overlay injected into app page loads: the
+// minified build of assets/overlay.js, which is where to read what it does and
+// why it is safe to run inside an app this server did not write. The minified
+// sibling ships because every app page load carries it inline; go generate (or
+// make ui-minify) regenerates it and make ui-minify-check fails while stale.
 //
-//go:embed assets/overlay.js
+//go:generate node ../../scripts/minify-injected.mjs assets/overlay.js
+//go:embed assets/overlay.min.js
 var overlayScript string
 
 // overlayCSPHash is the CSP source expression allowing overlayScript as an

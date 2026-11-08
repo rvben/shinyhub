@@ -12,7 +12,13 @@ import (
 	"time"
 )
 
-//go:embed assets/banner.js
+// bannerScript is the minified build of assets/banner.js; the source is where
+// to read how the rail behaves. It is inlined into every page load of an app
+// under a support session, so the minified sibling ships. go generate (or
+// make ui-minify) regenerates it and make ui-minify-check fails while stale.
+//
+//go:generate node ../../scripts/minify-injected.mjs assets/banner.js
+//go:embed assets/banner.min.js
 var bannerScript string
 
 // CSPHash admits exactly the embedded script without enabling arbitrary inline

@@ -2,13 +2,16 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { JSDOM, VirtualConsole } from 'jsdom';
+import { injectedScript } from './injected-script.js';
 
 // Exercise all three shipped scripts together, including the adapter's real
 // pending/saved/disconnected ordering. Only Shiny's server and the clock are fake.
-const source = path => readFileSync(new URL(path, import.meta.url), 'utf8');
-const overlay = source('../../proxy/assets/overlay.js');
-const nav = source('../../appnav/assets/nav.js');
-const bridge = source('../../../packaging/python-bookmarks/src/shinyhub_bookmarks/www/bridge.js');
+// The two injected scripts come through injectedScript, so that under
+// SHINYHUB_INJECTED_SCRIPTS=min the minified siblings the proxy embeds are what
+// runs; the bookmarks bridge ships as its source and is read directly.
+const overlay = injectedScript(new URL('../../proxy/assets/overlay.js', import.meta.url));
+const nav = injectedScript(new URL('../../appnav/assets/nav.js', import.meta.url));
+const bridge = readFileSync(new URL('../../../packaging/python-bookmarks/src/shinyhub_bookmarks/www/bridge.js', import.meta.url), 'utf8');
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
 async function mount(t, { policy = 'when_hidden', status = 200, body = { ready: true },

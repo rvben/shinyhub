@@ -45,9 +45,27 @@ Before opening a pull request:
 make check
 ```
 
-That deterministic gate checks formatting, Go vet, skill metadata, Go tests,
-and dashboard JavaScript tests. Specialized integration targets remain
-separate because they require Docker, uv, R, or cloud infrastructure.
+That deterministic gate checks formatting, Go vet, skill metadata, the
+minified injected scripts, Go tests, and dashboard JavaScript tests.
+Specialized integration targets remain separate because they require Docker,
+uv, R, or cloud infrastructure.
+
+## Edit an injected script
+
+The scripts the proxy inlines into app pages (the app switcher, the status
+overlay, the announcement banner, the support rail, the environment badge) live
+beside their Go package under `assets/`, and the package embeds a committed
+`.min.js` sibling of each. After editing one of the sources, regenerate the
+siblings and commit them with the source:
+
+```bash
+make ui-minify
+```
+
+`make check` and CI run `make ui-minify-check`, which fails naming any sibling
+that no longer matches its source. The jsdom tests evaluate the readable source
+and then, as part of `make test-js`, the minified sibling, so a behaviour
+difference between the two fails the gate.
 
 For changes to packaging, remote connection, login, tokens, or first deploy,
 run the release-shaped onboarding gate too:

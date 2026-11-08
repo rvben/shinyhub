@@ -89,3 +89,13 @@ func TestGuardRecoveryAlwaysOffersTrustedDashboard(t *testing.T) {
 		t.Fatal("safety page must allow only its exact script")
 	}
 }
+
+// The rail is spliced inline into every page load of an app under a support
+// session. The readable source stays in assets; what ships is the minified
+// sibling, and this bound trips when the embed is pointed back at the source.
+func TestBannerScript_StaysWithinInlineBudget(t *testing.T) {
+	const budget = 6_500
+	if n := len(bannerScript); n > budget {
+		t.Fatalf("embedded support rail is %d bytes, over its %d byte inline budget (regenerate with make ui-minify)", n, budget)
+	}
+}
