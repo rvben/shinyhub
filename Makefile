@@ -388,6 +388,13 @@ test-cli-compatibility-e2e:
 test-shell-completion-e2e:
 	./scripts/completion-e2e.sh
 
+# test-install-e2e runs scripts/install.sh, the curl | sh installer, against a
+# local release laid out like a GitHub one, and requires it to refuse a tarball
+# whose checksum does not match or is not listed. Needs python3 and curl.
+.PHONY: test-install-e2e
+test-install-e2e:
+	./scripts/install-e2e.sh
+
 # Complete long-lived CLI contract gate. Requires uv, curl, and all four shells.
 test-cli-release-contract: test-cli-compatibility-e2e test-shell-completion-e2e
 

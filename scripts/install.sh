@@ -1,6 +1,12 @@
 #!/bin/sh
 # ShinyHub installer.
 # Usage: curl -fsSL https://raw.githubusercontent.com/rvben/shinyhub/main/scripts/install.sh | sh
+#
+# Environment:
+#   INSTALL_DIR            where to put the binary (default /usr/local/bin)
+#   SHINYHUB_VERSION       release tag to install, e.g. v0.23.0 (default: latest)
+#   SHINYHUB_DOWNLOAD_URL  base URL holding one directory per release tag
+#                          (default: this repo's GitHub release downloads)
 set -e
 
 REPO="rvben/shinyhub"
@@ -21,10 +27,13 @@ case "$ARCH" in
   *) printf 'Unsupported architecture: %s\n' "$ARCH" >&2; exit 1 ;;
 esac
 
-# Resolve latest version tag from GitHub API
-VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
-  | grep '"tag_name"' \
-  | sed 's/.*"tag_name": *"//;s/".*//')
+# Resolve the latest version tag from the GitHub API unless one is pinned.
+VERSION="${SHINYHUB_VERSION:-}"
+if [ -z "$VERSION" ]; then
+  VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
+    | grep '"tag_name"' \
+    | sed 's/.*"tag_name": *"//;s/".*//')
+fi
 
 if [ -z "$VERSION" ]; then
   printf 'Could not determine latest version\n' >&2
@@ -32,7 +41,7 @@ if [ -z "$VERSION" ]; then
 fi
 
 TARBALL="shinyhub_${OS}_${ARCH}.tar.gz"
-BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
+BASE_URL="${SHINYHUB_DOWNLOAD_URL:-https://github.com/${REPO}/releases/download}/${VERSION}"
 
 printf 'Installing shinyhub %s (%s/%s) to %s...\n' "$VERSION" "$OS" "$ARCH" "$INSTALL_DIR"
 
@@ -57,10 +66,20 @@ cd "$TMP"
 #      trust; it never silently skips the checksum itself.
 
 # Step 1: mandatory checksum verification (fail closed).
+#
+# checksums.txt lists every release asset, including each tarball's SBOM, whose
+# name starts with the tarball's name. Only the line naming the tarball exactly
+# is checked: a checker handed the SBOM line too fails on a file this script
+# never downloads.
+ENTRY=$(awk -v f="${TARBALL}" '$2 == f' checksums.txt)
+if [ -z "$ENTRY" ]; then
+  printf 'Error: checksums.txt has no checksum for %s; refusing to install unverified binary\n' "$TARBALL" >&2
+  exit 1
+fi
 if command -v sha256sum >/dev/null 2>&1; then
-  grep "${TARBALL}" checksums.txt | sha256sum -c -
+  printf '%s\n' "$ENTRY" | sha256sum -c -
 elif command -v shasum >/dev/null 2>&1; then
-  grep "${TARBALL}" checksums.txt | shasum -a 256 -c -
+  printf '%s\n' "$ENTRY" | shasum -a 256 -c -
 else
   printf 'Error: no SHA-256 tool (sha256sum or shasum) found; refusing to install unverified binary\n' >&2
   exit 1
