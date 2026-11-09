@@ -28,6 +28,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **db**: open every SQLite write transaction with BEGIN IMMEDIATE ([d307aff](https://github.com/rvben/shinyhub/commit/d307affc53096ebd6b794fbc019a22ebc8846d65))
 - **db**: roll back a SQLite write transaction whose COMMIT fails ([49266f3](https://github.com/rvben/shinyhub/commit/49266f35001862a0bcf3c59eedef7715818d9460))
 - **api**: exempt draft bundle uploads from the 4 MiB JSON body cap ([3bc766f](https://github.com/rvben/shinyhub/commit/3bc766f6649316964f4651024faa215404f736a7))
+- **ci**: correct Docker action pins for releases ([425eb2c](https://github.com/rvben/shinyhub/commit/425eb2cfa8e2776a401ed443f7b9e39bc3ac70db))
 
 ### Performance
 
