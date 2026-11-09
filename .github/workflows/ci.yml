@@ -83,7 +83,8 @@ jobs:
         run: make test-wait-pypi-e2e
 
   # The bookmark SDK supports Python 3.10, whose copy protocol differs from
-  # newer interpreters. Keep that minimum-version compatibility exercised.
+  # newer interpreters. Exercise its private Shiny restore API at the minimum
+  # supported Shiny version too; the main job checks the newest supported one.
   test-python-bookmarks-minimum:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -93,8 +94,12 @@ jobs:
         with:
           python-version: "3.10"
       - uses: astral-sh/setup-uv@v7
-      - name: Bookmark SDK on minimum supported Python
-        run: make test-py-bookmarks PYTHON_VERSION=3.10
+      - name: Bookmark SDK on minimum supported Python and Shiny
+        run: make test-py-bookmarks PYTHON_VERSION=3.10 BOOKMARKS_SHINY='shiny==1.8.0'
+      - name: Install Chromium for bookmark restore tests
+        run: uv run --python 3.10 --no-project --with pytest-playwright playwright install --with-deps chromium
+      - name: Bookmark restoration in Chromium on minimum supported Shiny
+        run: make test-py-bookmarks-browser PYTHON_VERSION=3.10 BOOKMARKS_SHINY='shiny==1.8.0'
 
   # Keep the stable baseline, older compatibility and newest preview under the
   # same SDK and native-launch checks; no free-threaded interpreter is selected.

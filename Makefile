@@ -6,6 +6,8 @@ CLISPEC ?= clispec
 CLISPEC_MIN_VERSION := 0.3.1
 RACE_TIMEOUT ?= 20m
 PYTHON_VERSION ?= 3.14+gil
+BOOKMARKS_SHINY ?= shiny>=1.8,<2
+BOOKMARKS_BROWSERS ?= --browser chromium
 
 # Go commands build this module on its own. A go.work in a parent directory
 # (the main checkout's, when working in a nested worktree) would otherwise put
@@ -183,7 +185,12 @@ test-py-identity:
 # test-py-bookmarks validates the independently versioned Python Shiny adapter.
 test-py-bookmarks:
 	@command -v uv >/dev/null 2>&1 || { echo "uv not found (needed for the Python bookmark helper tests)"; exit 1; }
-	cd packaging/python-bookmarks && PYTHONPATH=src uv run --python '$(PYTHON_VERSION)' --with pytest --with pytest-asyncio --with 'shiny>=1.8,<2' --no-project python -m pytest tests/ -q
+	cd packaging/python-bookmarks && PYTHONPATH=src uv run --python '$(PYTHON_VERSION)' --with pytest --with pytest-asyncio --with '$(BOOKMARKS_SHINY)' --no-project python -m pytest tests/ -q
+
+.PHONY: test-py-bookmarks-browser
+test-py-bookmarks-browser:
+	@command -v uv >/dev/null 2>&1 || { echo "uv not found (needed for the Python bookmark browser tests)"; exit 1; }
+	cd packaging/python-bookmarks && uv run --python '$(PYTHON_VERSION)' --with . --with pytest --with pytest-asyncio --with pytest-playwright --with pytest-timeout --with '$(BOOKMARKS_SHINY)' --no-project python -m pytest browser-tests/ -q --timeout=120 --timeout-method=thread $(BOOKMARKS_BROWSERS)
 
 # test-py-agent validates the session-bound adapter and browser protocol.
 test-py-agent:

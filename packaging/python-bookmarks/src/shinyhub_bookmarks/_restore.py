@@ -29,6 +29,10 @@ class ChoiceRestore:
     ``aliases`` maps retired values to their current equivalent. When a saved
     value is no longer available, ``default`` wins; without one, the value
     already selected by Shiny is retained.
+
+    With ``control="selectize"``, build the input using
+    ``shinyhub_bookmarks.input_selectize`` so affected Shiny releases can render
+    the bookmarked page before this session-level policy runs.
     """
 
     choices: ChoiceSource

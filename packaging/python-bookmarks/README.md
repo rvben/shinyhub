@@ -99,6 +99,47 @@ The live URL is minimal; the explicit **Copy link** action is exact and includes
 every checked field, even one at baseline. An opened exact link stays full until
 a registered value changes, after which live synchronization minimizes it.
 
+## Selectize inputs
+
+Build bookmarkable selectize inputs with this package's helper:
+
+```python
+from shinyhub_bookmarks import input_selectize
+
+input_selectize(
+    "resolution", "Resolution", ["Day", "Week", "Month"], selected="Month"
+)
+```
+
+Replace `ui.input_selectize(...)` with `input_selectize(...)` for both single
+and multiple selections. The arguments and defaults are the same. Modules,
+grouped choices, and dynamically rendered inputs are supported.
+
+Shiny 1.8 and 1.9 restore the bookmarked selection into the available choices.
+This causes single selections and `null` selections to fail before the page
+loads, and narrows multi-select choices to the bookmarked values. The helper
+restores only the selection and preserves the app's choices. It also works
+with the upstream fix in [py-shiny #2610](https://github.com/posit-dev/py-shiny/pull/2610).
+It does not patch Shiny or change other inputs.
+
+Upgrading this package alone does not fix existing `ui.input_selectize` calls;
+apps must switch to the helper. This applies to any selectize included in a
+native Shiny bookmark, whether or not it is registered with ShinyHub.
+`register()` and `ChoiceRestore(control="selectize")` run after UI creation
+and cannot prevent an initial rendering failure. Continue to use `ChoiceRestore`
+for retired choices, aliases, and adjustment messages.
+
+The helper can remain in place when Shiny includes the upstream fix. No private
+context API is needed for inputs without a saved value; bookmarked inputs use
+a short-lived context scoped to the constructor call.
+
+For maintainers, `make test-py-bookmarks` runs the package tests.
+`make test-py-bookmarks-browser` additionally checks initial and dynamically
+rendered module inputs in a real browser, including selecting options omitted
+from the bookmark. It requires Playwright's Chromium browser installation.
+Set `BOOKMARKS_BROWSERS='--browser chromium --browser firefox --browser webkit'`
+to exercise all three browser engines.
+
 ## View links that outlive the app
 
 Native Shiny restoration ignores a removed input, but a retired choice can

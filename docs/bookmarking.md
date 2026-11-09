@@ -263,6 +263,16 @@ reported. `renamed_from` requires a `ChoiceRestore` policy so the saved value is
 validated and moved to the current field. For a dynamically rendered choice
 input, validation and any required update run once the input materializes.
 
+For selectize controls, build the UI with
+`from shinyhub_bookmarks import input_selectize` and replace
+`ui.input_selectize(...)` with `input_selectize(...)`, for both single and
+multiple selections. In affected Shiny releases, the native constructor restores
+the saved selection into the choice list, causing an initial page error or
+silently removing other choices. The helper preserves choices while restoring
+the selection, including in modules and dynamic UI. A package upgrade alone
+does not migrate existing calls. `ChoiceRestore(control="selectize")` still
+handles stale choices after the page loads.
+
 The helper adds no package-specific schema or version metadata to the URL.
 Shiny may still include application-owned bookmark values when an app adds
 them through its own callbacks. App evolution is declared directly through

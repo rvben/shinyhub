@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- `input_selectize`, a drop-in constructor that preserves choices when restoring
+  single- and multi-select bookmarks on affected Shiny releases. Apps must
+  replace their `ui.input_selectize` calls to use the helper.
+
 ## [0.5.6](https://github.com/rvben/shinyhub/compare/shinyhub-bookmarks-v0.5.5...shinyhub-bookmarks-v0.5.6) - 2026-11-04
 
 ### Fixed

@@ -5,6 +5,7 @@ __version__ = "0.5.6"
 from ._adapter import Field, Registration, register
 from ._dependency import bookmarking_dependency
 from ._restore import Adjustment, ChoiceRestore
+from ._selectize import input_selectize
 
 __all__ = [
     "Adjustment",
@@ -12,5 +13,6 @@ __all__ = [
     "Field",
     "Registration",
     "bookmarking_dependency",
+    "input_selectize",
     "register",
 ]
