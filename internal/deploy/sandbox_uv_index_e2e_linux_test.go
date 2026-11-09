@@ -122,6 +122,10 @@ func TestSandboxedPythonSync_PrivateIndexE2E_Live(t *testing.T) {
 	// UV_PYTHON_PREFERENCE is not the mechanism under test.
 	t.Setenv("UV_PYTHON_PREFERENCE", "only-managed")
 	t.Setenv("SHINYHUB_APP_ENV_ALLOW", "UV_PYTHON_PREFERENCE")
+	// An inherited UV_PYTHON_INSTALL_DIR is the operator override that
+	// replaces the per-app store this test asserts on, and CI runners set
+	// one (astral-sh/setup-uv exports it), so the default is pinned here.
+	t.Setenv("UV_PYTHON_INSTALL_DIR", "")
 
 	base := t.TempDir()
 	buildDir := filepath.Join(base, "corpapp", "versions", "v1")
