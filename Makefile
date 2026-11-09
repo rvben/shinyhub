@@ -188,7 +188,22 @@ test-py-bookmarks:
 	@command -v uv >/dev/null 2>&1 || { echo "uv not found (needed for the Python bookmark helper tests)"; exit 1; }
 	cd packaging/python-bookmarks && PYTHONPATH=src uv run --python '$(PYTHON_VERSION)' --with pytest --with pytest-asyncio --with '$(BOOKMARKS_SHINY)' --no-project python -m pytest tests/ -q
 
-.PHONY: install-py-bookmarks-browser test-py-bookmarks-browser
+.PHONY: fuzz-py-bookmarks audit-py-bookmarks audit-py-bookmarks-browser install-py-bookmarks-browser test-py-bookmarks-browser
+BOOKMARKS_FUZZ_EXAMPLES ?= 500
+# Resolve the Hypothesis pin from the Python bookmark SDK's fuzz extra.
+BOOKMARKS_FUZZ_ENV = PYTHONPATH=src uv run --python '$(PYTHON_VERSION)' --with pytest --with pytest-asyncio --with '.[fuzz]' --with '$(BOOKMARKS_SHINY)' --no-project
+fuzz-py-bookmarks:
+	@command -v uv >/dev/null 2>&1 || { echo "uv not found (needed for bookmark fuzzing)"; exit 1; }
+	cd packaging/python-bookmarks && BOOKMARKS_FUZZ_EXAMPLES='$(BOOKMARKS_FUZZ_EXAMPLES)' $(BOOKMARKS_FUZZ_ENV) python -m pytest fuzz-tests/ -q --hypothesis-show-statistics $(FUZZ_ARGS)
+
+audit-py-bookmarks:
+	@command -v uv >/dev/null 2>&1 || { echo "uv not found (needed for the bookmark audit)"; exit 1; }
+	cd packaging/python-bookmarks && $(BOOKMARKS_FUZZ_ENV) python fuzz-tests/audit_restore.py $(AUDIT_ARGS)
+
+audit-py-bookmarks-browser:
+	@command -v uv >/dev/null 2>&1 || { echo "uv not found (needed for the bookmark browser audit)"; exit 1; }
+	cd packaging/python-bookmarks && $(BOOKMARKS_BROWSER_ENV) python fuzz-tests/audit_browser.py $(AUDIT_ARGS)
+
 install-py-bookmarks-browser:
 	@command -v uv >/dev/null 2>&1 || { echo "uv not found (needed for the Python bookmark browser tests)"; exit 1; }
 	cd packaging/python-bookmarks && $(BOOKMARKS_BROWSER_ENV) playwright install --with-deps chromium

@@ -47,6 +47,7 @@ node_modules/
 
 # Python bytecode (repo-wide; the render-rig test suites generate it)
 __pycache__/
+.hypothesis/
 
 # Local investigation scratch. Not shipped, and it carries customer names
 # that must never reach a committed file.

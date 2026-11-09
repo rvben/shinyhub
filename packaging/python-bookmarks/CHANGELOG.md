@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- `input_slider`, a drop-in constructor that preserves bookmarked date and
+  datetime values, including ranges and module inputs. Apps must replace their
+  affected `ui.input_slider` calls to use the helper. Invalid saved date values
+  and mismatched range shapes fall back to the app default.
+
 ## [0.5.7](https://github.com/rvben/shinyhub/compare/shinyhub-bookmarks-v0.5.6...shinyhub-bookmarks-v0.5.7) - 2026-11-09
 
 ### Added

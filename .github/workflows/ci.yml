@@ -64,6 +64,9 @@ jobs:
       - name: Test (Python bookmarks)
         run: make test-py-bookmarks
 
+      - name: Fuzz bookmark restore invariants
+        run: make fuzz-py-bookmarks
+
       - name: Test (Python agent tools)
         run: make test-py-agent
 
@@ -96,6 +99,8 @@ jobs:
       - uses: astral-sh/setup-uv@v7
       - name: Bookmark SDK on minimum supported Python and Shiny
         run: make test-py-bookmarks PYTHON_VERSION=3.10 BOOKMARKS_SHINY='shiny==1.8.0'
+      - name: Fuzz bookmark restore on minimum supported Shiny
+        run: make fuzz-py-bookmarks PYTHON_VERSION=3.10 BOOKMARKS_SHINY='shiny==1.8.0'
       - name: Install Chromium for bookmark restore tests
         run: make install-py-bookmarks-browser PYTHON_VERSION=3.10 BOOKMARKS_SHINY='shiny==1.8.0'
       - name: Bookmark restoration in Chromium on minimum supported Shiny

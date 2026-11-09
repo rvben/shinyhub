@@ -142,6 +142,44 @@ the browser tests use an editable installation so source changes are exercised.
 Set `BOOKMARKS_BROWSERS='--browser chromium --browser firefox --browser webkit'`
 to exercise all three browser engines.
 
+## Date and datetime sliders
+
+Build bookmarkable date and datetime sliders with this package's helper:
+
+```python
+from datetime import date
+from shinyhub_bookmarks import input_slider
+
+input_slider(
+    "period", "Period", date(2026, 1, 1), date(2026, 12, 31),
+    (date(2026, 2, 1), date(2026, 3, 1)),
+)
+```
+
+Replace `ui.input_slider(...)` with `input_slider(...)` for sliders whose bounds
+are Python `date` or `datetime` values. Both single values and ranges are
+supported, including modules and dynamically rendered inputs. Numeric sliders
+can keep using `ui.input_slider`. The helper has the same arguments and defaults.
+
+Shiny 1.8 and 1.9 can silently reset bookmarked date sliders to their minimum
+because saved dates reach the browser as strings instead of numeric timestamps.
+The helper decodes the saved value before delegating rendering and timestamp
+conversion to Shiny. It also works with the upstream fix in
+[py-shiny #2612](https://github.com/posit-dev/py-shiny/pull/2612).
+
+Upgrading this package alone does not change existing `ui.input_slider` calls.
+Switch each affected constructor, then reopen a bookmark with a non-default
+value and verify both the control and its server value. This applies to native
+Shiny bookmarks as well as fields registered with ShinyHub. `register()` runs
+after UI construction and cannot repair this initial rendering problem.
+
+Invalid saved dates, null values, and mismatched single/range shapes use the
+app's default value. Registered fields can report that adjustment through the
+existing banner. Valid dates outside the current bounds retain Shiny's normal
+clamping behavior. Numeric inputs retain native Shiny restoration behavior.
+No global monkeypatch is installed; the helper can remain after an upstream
+upgrade. Only saved date inputs need the guarded private restore-context API.
+
 ## View links that outlive the app
 
 Native Shiny restoration ignores a removed input, but a retired choice can
@@ -223,3 +261,6 @@ warning clears on the next visit.
   complete delivery path is known to accept longer URLs.
 - The control stays absent when the bridge is not installed, so unsupported apps
   never show a dead action.
+
+Restore property tests and exploratory browser audits are documented in
+[fuzz-tests/README.md](fuzz-tests/README.md).

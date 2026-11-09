@@ -31,9 +31,11 @@ Issues     = "https://github.com/rvben/shinyhub/issues"
 
 [project.optional-dependencies]
 test = ["pytest>=9.1.1", "pytest-asyncio>=1.4"]
+fuzz = ["hypothesis==6.168.5", "pytest>=9.1.1", "pytest-asyncio>=1.4"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/shinyhub_bookmarks"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
