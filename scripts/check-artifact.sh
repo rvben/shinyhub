@@ -8,7 +8,8 @@
 #
 # Budgets come from the environment, so a deliberate change raises one in the
 # commit that justifies it:
-#   ARTIFACT_SIZE_BUDGET_BYTES  stripped size of cmd/shinyhub (default 52000000)
+#   ARTIFACT_SIZE_BUDGET_BYTES  stripped size of cmd/shinyhub for linux/amd64
+#                               (default 56000000)
 #   ARTIFACT_INIT_BUDGET_MS     package init time before main (default 50)
 #   ARTIFACT_INIT_RUNS          runs whose minimum is held to the budget (default 5)
 #   ARTIFACT_OUT_DIR            where the builds are written (default tmp/check-artifact)
@@ -17,21 +18,32 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 out_dir=${ARTIFACT_OUT_DIR:-tmp/check-artifact}
-size_budget=${ARTIFACT_SIZE_BUDGET_BYTES:-52000000}
+size_budget=${ARTIFACT_SIZE_BUDGET_BYTES:-56000000}
 init_budget_ms=${ARTIFACT_INIT_BUDGET_MS:-50}
 init_runs=${ARTIFACT_INIT_RUNS:-5}
 
 mkdir -p "$out_dir"
 stripped=$out_dir/shinyhub
 symbols=$out_dir/shinyhub-symbols
+native=$out_dir/shinyhub-native
 trace=$out_dir/inittrace.txt
 min_trace=$out_dir/inittrace-min.txt
 report=$out_dir/report.md
 
-# The flags .goreleaser.yaml builds with. The version only has to be set so
-# that --version runs the same code as a release binary.
-go build -trimpath -ldflags "-s -w -X main.version=check-artifact" -o "$stripped" ./cmd/shinyhub
-go build -trimpath -ldflags "-w -X main.version=check-artifact" -o "$symbols" ./cmd/shinyhub
+# The flags and environment .goreleaser.yaml builds with. The version only
+# has to be set so that --version runs the same code as a release binary.
+#
+# Size and linking are measured on one fixed release target, linux/amd64,
+# the server binary the container image ships. A native build would make the
+# answer depend on the host: darwin/arm64 is several megabytes smaller than
+# linux/amd64, so a budget that passes on a workstation fails on a runner.
+# Package init has to be timed by running the binary, so it uses a native
+# build with the same flags.
+release_flags=(-trimpath)
+version_flag="-X main.version=check-artifact"
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build "${release_flags[@]}" -ldflags "-s -w $version_flag" -o "$stripped" ./cmd/shinyhub
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build "${release_flags[@]}" -ldflags "-w $version_flag" -o "$symbols" ./cmd/shinyhub
+CGO_ENABLED=0 go build "${release_flags[@]}" -ldflags "-s -w $version_flag" -o "$native" ./cmd/shinyhub
 
 size=$(wc -c < "$stripped" | tr -d ' ')
 
@@ -41,7 +53,7 @@ size=$(wc -c < "$stripped" | tr -d ' ')
 # run, while a busy host inflates only some of them.
 init_min_ms=
 for _ in $(seq "$init_runs"); do
-  GODEBUG=inittrace=1 "$stripped" --version 2> "$trace" > /dev/null
+  GODEBUG=inittrace=1 "$native" --version 2> "$trace" > /dev/null
   run_ms=$(awk '/^init /{s += $5} END{printf "%.1f", s}' "$trace")
   if [ -z "$init_min_ms" ] || awk -v a="$run_ms" -v b="$init_min_ms" 'BEGIN{exit !(a < b)}'; then
     init_min_ms=$run_ms
@@ -52,9 +64,9 @@ done
 status=0
 {
   if [ "$size" -le "$size_budget" ]; then
-    echo "- ok: stripped size ${size} bytes (budget ${size_budget})"
+    echo "- ok: stripped linux/amd64 size ${size} bytes (budget ${size_budget})"
   else
-    echo "- FAIL: stripped size ${size} bytes exceeds the budget of ${size_budget}"
+    echo "- FAIL: stripped linux/amd64 size ${size} bytes exceeds the budget of ${size_budget}"
     status=1
   fi
 
