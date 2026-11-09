@@ -35,11 +35,11 @@ func (s *Server) pauseSharedDataRuns(appID int64) (func(), error) {
 	return release, nil
 }
 
-func (s *Server) sharedDataRunError(w http.ResponseWriter, err error) {
+func (s *Server) sharedDataRunError(w http.ResponseWriter, r *http.Request, err error) {
 	if errors.Is(err, jobs.ErrAppRunsActive) || errors.Is(err, jobs.ErrManagerStopped) {
 		writeError(w, http.StatusConflict, err.Error())
 	} else {
-		writeError(w, http.StatusInternalServerError, "could not verify scheduled jobs are idle")
+		writeInternal(w, r, "could not verify scheduled jobs are idle", err)
 	}
 }
 
@@ -69,7 +69,7 @@ func (s *Server) handleRevokeSharedData(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	defer release()
-	app, ok = s.rereadAuthorizedApp(w, app.Slug, app.ID)
+	app, ok = s.rereadAuthorizedApp(w, r, app.Slug, app.ID)
 	if !ok {
 		return
 	}
@@ -79,7 +79,7 @@ func (s *Server) handleRevokeSharedData(w http.ResponseWriter, r *http.Request) 
 	}
 	releaseRuns, err := s.pauseSharedDataRuns(app.ID)
 	if err != nil {
-		s.sharedDataRunError(w, err)
+		s.sharedDataRunError(w, r, err)
 		return
 	}
 	defer releaseRuns()
@@ -132,31 +132,31 @@ func (s *Server) handleRevokeSharedData(w http.ResponseWriter, r *http.Request) 
 		status = "stopped"
 	}
 	if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: app.Slug, Status: status}); err != nil {
-		writeError(w, http.StatusInternalServerError, "app stopped, but its status could not be saved; unmount not applied")
+		writeInternal(w, r, "app stopped, but its status could not be saved; unmount not applied", err)
 		return
 	}
 	rows, err := s.store.ListReplicas(app.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "app stopped, but replica state could not be loaded; unmount not applied")
+		writeInternal(w, r, "app stopped, but replica state could not be loaded; unmount not applied", err)
 		return
 	}
 	for _, row := range rows {
 		if err := s.store.SetReplicaDesiredState(app.ID, row.Index, "stopped"); err != nil {
-			writeError(w, http.StatusInternalServerError, "app stopped, but replica state could not be saved; unmount not applied")
+			writeInternal(w, r, "app stopped, but replica state could not be saved; unmount not applied", err)
 			return
 		}
 	}
 	if s.cfg.Storage.AppDataDir != "" {
 		if err := process.RemoveSharedMountLink(filepath.Join(s.cfg.Storage.AppDataDir, app.Slug), sourceSlug); err != nil {
-			writeError(w, http.StatusInternalServerError, "app stopped, but the shared mount link could not be removed; unmount not applied")
+			writeInternal(w, r, "app stopped, but the shared mount link could not be removed; unmount not applied", err)
 			return
 		}
 	}
 	if err := s.store.RevokeSharedData(app.ID, src.ID); err != nil && !errors.Is(err, db.ErrNotFound) {
-		writeError(w, http.StatusInternalServerError, "app stopped, but the mount configuration could not be removed; retry unmount")
+		writeInternal(w, r, "app stopped, but the mount configuration could not be removed; retry unmount", err)
 		return
 	}
-	s.audit(r, "shared_data_revoke", "app", app.Slug, fmt.Sprintf(`{"source":%q}`, src.Slug))
+	s.audit(r, "shared_data_revoke", "app", app.Slug, db.AuditDetail(map[string]any{"source": src.Slug}))
 	// New executions now resolve only the remaining grants. Release these fences
 	// before the normal boot path reacquires consumer/producer lifetime locks.
 	releaseConsumers()

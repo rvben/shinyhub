@@ -91,7 +91,7 @@ func (s *Server) handleDataList(w http.ResponseWriter, r *http.Request) {
 				"too many files: directory exceeds the cap of 10000 entries")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "list files")
+		writeInternal(w, r, "list files", err)
 		return
 	}
 	if files == nil {
@@ -100,7 +100,7 @@ func (s *Server) handleDataList(w http.ResponseWriter, r *http.Request) {
 
 	appsUsed, dataUsed, err := s.appUsageBreakdown(slug)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "measure disk usage")
+		writeInternal(w, r, "measure disk usage", err)
 		return
 	}
 
@@ -164,7 +164,7 @@ func (s *Server) handleDataGet(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, data.ErrInvalidPath):
 			writeError(w, http.StatusBadRequest, "invalid path")
 		default:
-			writeError(w, http.StatusInternalServerError, "read file")
+			writeInternal(w, r, "read file", err)
 		}
 		return
 	}
@@ -241,7 +241,7 @@ func (s *Server) handleDataDelete(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(delErr, data.ErrInvalidPath):
 			writeError(w, http.StatusBadRequest, "invalid path")
 		default:
-			writeError(w, http.StatusInternalServerError, "delete failed")
+			writeInternal(w, r, "delete failed", delErr)
 		}
 		return
 	}
@@ -337,7 +337,7 @@ func (s *Server) handleDataPut(w http.ResponseWriter, r *http.Request) {
 		// account for any existing file at the destination (overwrite-aware).
 		used, err := s.appUsedBytes(slug)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "measure app size")
+			writeInternal(w, r, "measure app size", err)
 			return
 		}
 
@@ -353,7 +353,7 @@ func (s *Server) handleDataPut(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, http.StatusRequestEntityTooLarge, qe)
 				return
 			}
-			writeError(w, http.StatusInternalServerError, "quota check")
+			writeInternal(w, r, "quota check", err)
 			return
 		}
 	}

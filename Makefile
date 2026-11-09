@@ -76,22 +76,37 @@ test-race-api:
 vuln:
 	go tool govulncheck ./...
 
-# scan-image builds the container image and scans it for known HIGH/CRITICAL
-# CVEs with Trivy (base image layers + the embedded Go binary's dependencies).
-# govulncheck (make vuln) covers Go source; this covers what actually ships in
-# the image. Uses a local trivy if present, else the aquasec/trivy container, so
-# it runs the same locally and in CI. Skips (exit 0) when docker is unavailable
-# so a workstation without docker stays green; --ignore-unfixed avoids failing on
-# base-image CVEs with no upstream fix yet.
+# scan-image builds the image a release ships and scans it for known
+# HIGH/CRITICAL CVEs with Trivy (base image layers + the Go binary's stdlib and
+# dependencies). govulncheck (make vuln) covers Go source; this covers what
+# actually ships. The image is built the way GoReleaser builds it: a binary
+# from go.mod's exact toolchain with the release flags, packaged by
+# Dockerfile.goreleaser. go.mod's go line is only a minimum, so a newer local or
+# builder-image toolchain would scan a stdlib the release does not carry. Uses a
+# local trivy if present, else the pinned Trivy container, so it runs the same
+# locally and in CI. Skips (exit 0) when docker is unavailable so a workstation
+# without docker stays green; --ignore-unfixed avoids failing on base-image
+# CVEs with no upstream fix yet.
+SCAN_DIR := $(CURDIR)/tmp/scan-image
+GO_MOD_VERSION = $(shell awk '$$1 == "go" { print $$2; exit }' go.mod)
+TRIVY_IMAGE ?= aquasec/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb
+
 scan-image:
 	@if ! command -v docker >/dev/null 2>&1; then \
 		echo "docker not found; skipping image scan"; exit 0; \
-	fi
-	docker build -t shinyhub-scan:latest .
-	@if command -v trivy >/dev/null 2>&1; then \
+	fi; \
+	set -e; \
+	arch="$$(docker version -f '{{.Server.Arch}}')"; \
+	rm -rf "$(SCAN_DIR)"; mkdir -p "$(SCAN_DIR)"; \
+	GOTOOLCHAIN="go$(GO_MOD_VERSION)" CGO_ENABLED=0 GOOS=linux GOARCH="$$arch" \
+		go build -trimpath -ldflags "-s -w -X main.version=scan" \
+		-o "$(SCAN_DIR)/shinyhub" ./cmd/shinyhub; \
+	cp Dockerfile.goreleaser shinyhub.yaml.example "$(SCAN_DIR)/"; \
+	docker build -f "$(SCAN_DIR)/Dockerfile.goreleaser" -t shinyhub-scan:latest "$(SCAN_DIR)"; \
+	if command -v trivy >/dev/null 2>&1; then \
 		trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 shinyhub-scan:latest; \
 	else \
-		docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest \
+		docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$(TRIVY_IMAGE)" \
 			image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 shinyhub-scan:latest; \
 	fi
 
@@ -387,6 +402,46 @@ test-cli-compatibility-e2e:
 # provisions all four; local callers may narrow with SHINYHUB_COMPLETION_SHELLS.
 test-shell-completion-e2e:
 	./scripts/completion-e2e.sh
+
+# test-install-e2e runs scripts/install.sh, the curl | sh installer, against a
+# local release laid out like a GitHub one, and requires it to refuse a tarball
+# whose checksum does not match or is not listed. Needs python3 and curl.
+.PHONY: test-install-e2e
+test-install-e2e:
+	./scripts/install-e2e.sh
+
+# verify-release-asset refuses a downloaded release asset unless checksums.txt
+# carries this repo's release-workflow signature for TAG and lists ASSET with a
+# matching hash. DIR holds ASSET, checksums.txt and checksums.txt.bundle. The
+# wheels job runs it before repackaging a binary for PyPI. Needs cosign.
+.PHONY: verify-release-asset
+verify-release-asset:
+	@test -n "$(DIR)" -a -n "$(ASSET)" -a -n "$(TAG)" \
+		|| { echo "usage: make verify-release-asset DIR=<dir> ASSET=<file> TAG=<vX.Y.Z>" >&2; exit 2; }
+	./scripts/verify-release-asset.sh "$(DIR)" "$(ASSET)" "$(TAG)"
+
+# test-release-asset-e2e runs verify-release-asset against a published release
+# (SHINYHUB_VERIFY_TAG, default the latest) and requires it to refuse a tampered
+# tarball, a re-signed-looking checksums.txt, the wrong tag and a missing
+# bundle or cosign. Needs gh, cosign and network access.
+.PHONY: test-release-asset-e2e
+test-release-asset-e2e:
+	./scripts/verify-release-asset-e2e.sh
+
+# wait-pypi blocks until PyPI's simple index, the API pip and uv resolve
+# against, lists every wheel and the sdist for VERSION. PyPI's JSON API can show
+# a version before the simple index serves it, so a release is installable from
+# PyPI only once this returns. WAIT_PYPI_TIMEOUT bounds the wait (default 900s).
+.PHONY: wait-pypi
+wait-pypi:
+	@test -n "$(VERSION)" || { echo "usage: make wait-pypi VERSION=<X.Y.Z>" >&2; exit 2; }
+	./scripts/wait-pypi.sh "$(VERSION)"
+
+# test-wait-pypi-e2e runs wait-pypi against local fixture indexes: complete,
+# missing a wheel, not JSON, and absent. Needs python3 and curl, no network.
+.PHONY: test-wait-pypi-e2e
+test-wait-pypi-e2e:
+	./scripts/wait-pypi-e2e.sh
 
 # Complete long-lived CLI contract gate. Requires uv, curl, and all four shells.
 test-cli-release-contract: test-cli-compatibility-e2e test-shell-completion-e2e

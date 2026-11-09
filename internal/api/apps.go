@@ -95,7 +95,7 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	if len(apps) == 0 {
@@ -106,7 +106,7 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 	if !u.IsServiceAccount() && !isPrivilegedAppOperator(u) {
 		managedSlugs, err = s.store.ManagedAppSlugsForUser(u.ID)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			writeInternal(w, r, "internal server error", err)
 			return
 		}
 	}
@@ -118,17 +118,17 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 	}
 	replicasByApp, err := s.store.ListReplicasForApps(appIDs)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	repairByApp, err := s.store.DeploymentRepairRequiredForApps(appIDs)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load deployment repair state")
+		writeInternal(w, r, "failed to load deployment repair state", err)
 		return
 	}
 	producerByApp, err := s.store.ProducerCompatibilityForApps(appIDs)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load producer compatibility state")
+		writeInternal(w, r, "failed to load producer compatibility state", err)
 		return
 	}
 	disp := s.loadProjectDisplay()
@@ -411,7 +411,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, err.Error())
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 
@@ -442,7 +442,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "development session is no longer available; start a new session")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	if projectCreated {
@@ -468,7 +468,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 
 	app, err := s.store.GetAppBySlug(req.Slug)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	s.logAuditEvent(r, db.AuditEventParams{
@@ -476,7 +476,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		Action:       "create_app",
 		ResourceType: "app",
 		ResourceID:   req.Slug,
-		Detail: auditDetailJSON(map[string]any{
+		Detail: db.AuditDetail(map[string]any{
 			"name":     app.Name,
 			"access":   app.Access,
 			"owner_id": app.OwnerID,
@@ -505,7 +505,7 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 
 	replicas, err := s.store.ListReplicas(app.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	if replicas == nil {
@@ -544,7 +544,7 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	app.CanManage = canManage
 	latestActivations, err := s.store.LatestScheduleActivationsByApp(app.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	if latestActivations == nil {
@@ -562,7 +562,7 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 		if activation == nil {
 			activation, err = s.store.GetScheduleActivation(*replica.ActivationID)
 			if err != nil && !errors.Is(err, db.ErrNotFound) {
-				writeError(w, http.StatusInternalServerError, "failed to load replica data provenance")
+				writeInternal(w, r, "failed to load replica data provenance", err)
 				return
 			}
 		}
@@ -576,7 +576,7 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	}
 	scheduleFreshness, err := s.store.ScheduleFreshnessByApp(app.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	scheduleConvergenceSatisfied := true
@@ -615,7 +615,7 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	}
 	compatibility, compatibilityErr := s.store.AppCompatibilityState(app.ID)
 	if compatibilityErr != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load app compatibility state")
+		writeInternal(w, r, "failed to load app compatibility state", compatibilityErr)
 		return
 	}
 	compatibilityQuarantined := compatibility.Quarantined()
@@ -1312,7 +1312,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			newTiers = []string{s.cfg.Runtime.DefaultTierName()}
 		}
 		if tier, blocked, gerr := s.ephemeralDataBlockForTiers(app, nil, newTiers); gerr != nil {
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			writeInternal(w, r, "internal server error", gerr)
 			return
 		} else if blocked {
 			writeError(w, http.StatusUnprocessableEntity, ephemeralDataDeployMsg(tier))
@@ -1383,7 +1383,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	if setWorkerIsolation || setPlacement || clearPlacement {
 		if err := s.dischargeElasticOrphanRisk(app.ID); err != nil {
 			reqLog(r).Error("discharge elastic orphan-risk marker", "slug", slug, "err", err)
-			writeError(w, http.StatusInternalServerError, "verify elastic worker lifetime")
+			writeInternal(w, r, "verify elastic worker lifetime", err)
 			return
 		}
 		projected := *app
@@ -1398,7 +1398,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		}
 		schedules, err := s.store.ListSchedulesByApp(app.ID)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			writeInternal(w, r, "internal server error", err)
 			return
 		}
 		for _, schedule := range schedules {
@@ -1490,7 +1490,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		reqLog(r).Error("patch app settings failed", "slug", slug, "err", err)
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	priorStatus, priorReplicas := patched.PriorStatus, patched.PriorReplicas
@@ -1519,7 +1519,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		}
 		if _, err := s.usagePolicy.ApplyCommittedAppPolicy(s.store, app.ID, slug, newOverride); err != nil {
 			reqLog(r).Error("reconcile committed usage privacy policy", "slug", slug, "err", err)
-			writeError(w, http.StatusInternalServerError, "usage privacy policy committed but retained-data reconciliation failed")
+			writeInternal(w, r, "usage privacy policy committed but retained-data reconciliation failed", err)
 			return
 		}
 	}
@@ -1529,7 +1529,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusNotFound, "not found")
 				return
 			}
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			writeInternal(w, r, "internal server error", err)
 			return
 		}
 	}
@@ -1540,7 +1540,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusNotFound, "not found")
 				return
 			}
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			writeInternal(w, r, "internal server error", err)
 			return
 		}
 	}
@@ -1555,7 +1555,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			ierr = s.store.SetAppIconEmojiExclusive(slug, newIconEmoji)
 		}
 		if ierr != nil {
-			writeError(w, http.StatusInternalServerError, "internal error")
+			writeInternal(w, r, "internal error", ierr)
 			return
 		}
 		s.auditIcon(r, db.AuditAppIconEmoji, slug, map[string]any{"emoji": newIconEmoji})
@@ -1567,7 +1567,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusNotFound, "not found")
 				return
 			}
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			writeInternal(w, r, "internal server error", err)
 			return
 		}
 	}
@@ -1586,7 +1586,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusNotFound, "not found")
 				return
 			}
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			writeInternal(w, r, "internal server error", err)
 			return
 		}
 	}
@@ -1705,12 +1705,12 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		if retryResources && resourceUpdateErr == nil && deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation) == "multiplex" {
 			target, err := s.store.GetAppBySlug(slug)
 			if err != nil {
-				writeError(w, http.StatusInternalServerError, "read saved settings for resource retry")
+				writeInternal(w, r, "read saved settings for resource retry", err)
 				return
 			}
 			rows, err := s.store.ListReplicas(app.ID)
 			if err != nil {
-				writeError(w, http.StatusInternalServerError, "read replicas for resource retry")
+				writeInternal(w, r, "read replicas for resource retry", err)
 				return
 			}
 			needsResize = needsResize || !s.replicaRowsMatchTarget(target, rows)
@@ -1728,7 +1728,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			return s.store.ResolveLiveSettingsRedeploy(context.Background(), lease, slug, patched, outcome, reason)
 		})
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "settings saved but recording live application failed")
+			writeInternal(w, r, "settings saved but recording live application failed", err)
 			return
 		}
 		if resolved && outcome != "" {
@@ -1743,7 +1743,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", fetchErr)
 		return
 	}
 	// Audit any non-resource field touch exactly as before (these log even with
@@ -2491,12 +2491,12 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// error" to a deployer who would otherwise keep re-uploading a good bundle.
 	// The full error, host paths included, stays in the server log.
 	storeFailed := func(stage string, err error) {
-		slog.Error("deploy_store_bundle_failed", "slug", slug, "stage", stage, "err", err)
 		if status, msg, ok := bundleStorageFailure(err); ok {
+			slog.Error("deploy_store_bundle_failed", "slug", slug, "stage", stage, "err", err)
 			writeError(w, status, msg)
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeInternal(w, r, "could not "+stage, err)
 	}
 	if err := os.MkdirAll(filepath.Dir(bundleZip), 0o750); err != nil {
 		endReceive(err)
@@ -2538,7 +2538,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			writeError(w, status, msg)
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeInternal(w, r, "internal error", err)
 		return
 	}
 
@@ -2551,11 +2551,11 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			mode, policyErr := s.servingIsolation(app)
 			grouped := mode == "grouped"
 			if policyErr != nil {
-				writeError(w, http.StatusInternalServerError, "inspect serving policy: "+policyErr.Error())
+				writeInternal(w, r, "inspect serving policy", policyErr)
 				return
 			}
 			if err != nil {
-				writeError(w, http.StatusInternalServerError, "inspect generation cleanup: "+err.Error())
+				writeInternal(w, r, "inspect generation cleanup", err)
 				return
 			}
 			if s.hasUnownedGenerationRows(slug, rows, active.DeploymentID, grouped) {
@@ -2600,7 +2600,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "precondition failed: app no longer exists (re-run plan)")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	if checkAppPreconditions(w, r, app) {
@@ -2626,8 +2626,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 				writeQuotaExceeded(w, used, s.cfg.Storage.AppQuotaMB)
 				return
 			}
-			slog.Warn("quota check failed", "slug", slug, "err", qErr)
-			writeError(w, http.StatusInternalServerError, "internal error")
+			writeInternal(w, r, "quota check failed", qErr)
 			return
 		}
 	}
@@ -2655,7 +2654,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		if err := s.dischargeElasticOrphanRisk(app.ID); err != nil {
 			endValidate(err)
 			reqLog(r).Error("discharge elastic orphan-risk marker", "slug", slug, "err", err)
-			writeError(w, http.StatusInternalServerError, "verify elastic worker lifetime")
+			writeInternal(w, r, "verify elastic worker lifetime", err)
 			return
 		}
 		if ve := s.validateManifestActivationTopology(app, manifest); ve != nil {
@@ -2697,8 +2696,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// shared across replicas.
 	if tier, blocked, gerr := s.ephemeralDataDeployBlock(app, manifestCommand(manifest)); gerr != nil {
 		endValidate(gerr)
-		slog.Error("durable-data guard check failed", "slug", slug, "err", gerr)
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeInternal(w, r, "durable-data guard check failed", gerr)
 		return
 	} else if blocked {
 		endValidate(errors.New(ephemeralDataDeployMsg(tier)))
@@ -2727,7 +2725,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	}
 	preexistingDeploymentQuarantine, err := s.store.AppDeploymentCompatibilityQuarantined(app.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "check compatibility quarantine: "+err.Error())
+		writeInternal(w, r, "check compatibility quarantine", err)
 		return
 	}
 	// Capture sleeping intent before candidate producers can reconcile the
@@ -2741,8 +2739,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 
 	pendingDep, err := s.store.BeginDeploymentWithOrigin(app.ID, version, bundleDir, runID, nil, origin)
 	if err != nil {
-		slog.Error("deploy: record pending deployment failed; running pool untouched", "slug", slug, "err", err)
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeInternal(w, r, "could not record the deployment; the running app is untouched", err)
 		return
 	}
 	// Only an existing deployment fence is inherited. Running writers and
@@ -2757,7 +2754,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	if producerBarrierEntered {
 		if err := s.store.MarkDeploymentProducerBarrierEntered(pendingDep.ID); err != nil {
 			_ = s.store.FailDeploymentWithReason(pendingDep.ID, "compatibility quarantine could not be inherited")
-			writeError(w, http.StatusInternalServerError, "inherit compatibility quarantine: "+err.Error())
+			writeInternal(w, r, "inherit compatibility quarantine", err)
 			return
 		}
 	}
@@ -2792,7 +2789,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		_ = s.store.FailDeploymentWithReason(pendingDep.ID, "bundle content digest could not be persisted")
 		slog.Error("deploy: content digest persistence is required before runtime mutation",
 			"slug", slug, "version", version, "err", err)
-		writeError(w, http.StatusInternalServerError, "bundle content digest could not be persisted")
+		writeInternal(w, r, "bundle content digest could not be persisted", err)
 		return
 	}
 	pendingDep.ContentDigest = digest
@@ -2801,7 +2798,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	prestartPlan, err := s.planPrestartSchedules(app, manifest, digest, bundleDir)
 	if err != nil {
 		_ = s.store.FailDeployment(pendingDep.ID)
-		writeError(w, http.StatusInternalServerError, "plan schedule convergence: "+err.Error())
+		writeInternal(w, r, "plan schedule convergence", err)
 		return
 	}
 	placeholdersCommitted := false
@@ -2817,7 +2814,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.revalidatePrestartPlan(prestartPlan, digest); err != nil {
 		_ = s.store.FailDeployment(pendingDep.ID)
-		writeError(w, http.StatusInternalServerError, "revalidate schedule convergence: "+err.Error())
+		writeInternal(w, r, "revalidate schedule convergence", err)
 		return
 	}
 	if len(prestartPlan.producers) > 0 && s.jobs == nil {
@@ -2829,7 +2826,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	currentIsolation, policyErr := s.servingIsolation(app)
 	if policyErr != nil {
 		_ = s.store.FailDeployment(pendingDep.ID)
-		writeError(w, http.StatusInternalServerError, "inspect serving policy: "+policyErr.Error())
+		writeInternal(w, r, "inspect serving policy", policyErr)
 		return
 	}
 	targetIsolation := deploy.ResolveWorkerIsolation(app.WorkerIsolation, s.cfg.Runtime.DefaultWorkerIsolation)
@@ -2839,13 +2836,13 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	activeRows, err := s.store.ListReplicas(app.ID)
 	if err != nil {
 		_ = s.store.FailDeploymentWithReason(pendingDep.ID, "current replica state could not be inspected")
-		writeError(w, http.StatusInternalServerError, "inspect current replica state: "+err.Error())
+		writeInternal(w, r, "inspect current replica state", err)
 		return
 	}
 	durableGenerationRows, err := s.store.ListDeploymentReplicas(app.ID)
 	if err != nil {
 		_ = s.store.FailDeploymentWithReason(pendingDep.ID, "generation cleanup state could not be inspected")
-		writeError(w, http.StatusInternalServerError, "inspect generation cleanup state: "+err.Error())
+		writeInternal(w, r, "inspect generation cleanup state", err)
 		return
 	}
 	activeProcessPresent := s.manager != nil && s.manager.HasRunning(slug)
@@ -2934,7 +2931,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		}
 		if capacityBlock != nil {
 			if err := s.recordCapacityBlock(pendingDep.ID, capacityBlock); err != nil {
-				writeError(w, http.StatusInternalServerError, "could not persist capacity refusal; inspect server logs before retrying")
+				writeInternal(w, r, "could not persist capacity refusal; inspect server logs before retrying", err)
 				return
 			}
 			w.Header().Set("X-ShinyHub-Conflict", "generation-handoff-deferred")
@@ -2966,7 +2963,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		if _, native := s.manager.RuntimeForTier(s.elasticSpawnTier()).(*process.NativeRuntime); groupedHandoff && !native {
 			if err := s.store.MarkElasticOrphanRisk(app.ID); err != nil {
 				_ = s.store.FailDeploymentWithReason(pendingDep.ID, "persist grouped worker lifetime fence")
-				writeError(w, http.StatusInternalServerError, "persist grouped worker lifetime fence")
+				writeInternal(w, r, "persist grouped worker lifetime fence", err)
 				return
 			}
 		}
@@ -3050,7 +3047,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			} else if !generationHandoff {
 				s.restoreAfterFailedDeploy(r, slug, app, prevActive, keepDown, keepHibernated, fmt.Sprintf("manifest apply failed: %v", err))
 			}
-			writeError(w, http.StatusInternalServerError, "manifest apply failed")
+			writeInternal(w, r, "manifest apply failed", err)
 			return
 		}
 		manifestApplied = !generationHandoff
@@ -3087,7 +3084,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		sort.Slice(desired, func(i, j int) bool { return desired[i].Name < desired[j].Name })
 		if err := s.store.StageHandoffSettings(pendingDep.ID, &preManifestApp, app, prestartPlan.previousDeclarations, desired); err != nil {
 			_ = s.store.FailDeploymentWithReason(pendingDep.ID, err.Error())
-			writeError(w, http.StatusInternalServerError, "stage handoff configuration: "+err.Error())
+			writeInternal(w, r, "stage handoff configuration", err)
 			return
 		}
 	}
@@ -3128,7 +3125,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		floor, floorErr := s.generationSlotFloor(app)
 		if floorErr != nil {
 			_ = s.store.FailDeployment(pendingDep.ID)
-			writeError(w, http.StatusInternalServerError, "inspect grouped slot identities: "+floorErr.Error())
+			writeInternal(w, r, "inspect grouped slot identities", floorErr)
 			return
 		}
 		deployParams.GroupedSlotFloor = floor
@@ -3609,7 +3606,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for _, schedule := range prestartPlan.retirements {
-			s.audit(r, "schedule_retire", "schedule", fmt.Sprintf("%d", schedule.ID), fmt.Sprintf(`{"app":%q,"name":%q}`, app.Slug, schedule.Name))
+			s.audit(r, "schedule_retire", "schedule", fmt.Sprintf("%d", schedule.ID), db.AuditDetail(map[string]any{"app": app.Slug, "name": schedule.Name}))
 			manifestSummary.Schedules = append(manifestSummary.Schedules, ManifestScheduleResult{Name: schedule.Name, Action: "retired", ScheduleID: schedule.ID})
 		}
 		s.applyHandoffProxySettings(app)
@@ -3828,7 +3825,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			// The deployment id and content digest are what let a reader tie
 			// this event to a specific bundle on disk, and to the rollback that
 			// may later target it.
-			Detail: auditDetailJSON(map[string]any{
+			Detail: db.AuditDetail(map[string]any{
 				"deployment_id":  pendingDep.ID,
 				"version":        version,
 				"content_digest": pendingDep.ContentDigest,
@@ -3917,7 +3914,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusNotFound, "deployment not found")
 				return
 			}
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			writeInternal(w, r, "internal server error", err)
 			return
 		}
 		prev = dep
@@ -3925,7 +3922,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		// Default rollback: use the previous deployment (index 1, newest-first).
 		deployments, err := s.store.ListRecentDeployments(app.ID, 2)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			writeInternal(w, r, "internal server error", err)
 			return
 		}
 		if len(deployments) < 2 {
@@ -3965,7 +3962,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 	// read, and booting that earlier snapshot would bring the old settings
 	// back up. The settings redeploy seq read here names exactly the settings
 	// this rollback boots, so its outcome can serve that seq below.
-	app, ok = s.rereadAuthorizedApp(w, slug, app.ID)
+	app, ok = s.rereadAuthorizedApp(w, r, slug, app.ID)
 	if !ok {
 		return
 	}
@@ -3995,7 +3992,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 	// Defense in depth: if the app's tier lost its durable backend since the last
 	// deploy, refuse to re-run a data-using app onto now-ephemeral storage.
 	if tier, blocked, gerr := s.ephemeralDataDeployBlock(app, nil); gerr != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", gerr)
 		return
 	} else if blocked {
 		writeError(w, http.StatusUnprocessableEntity, ephemeralDataDeployMsg(tier))
@@ -4011,20 +4008,19 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 	}
 	preexistingDeploymentQuarantine, err := s.store.AppDeploymentCompatibilityQuarantined(app.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "check compatibility quarantine: "+err.Error())
+		writeInternal(w, r, "check compatibility quarantine", err)
 		return
 	}
 	pendingDep, err := s.store.BeginDeploymentWithOrigin(app.ID, prev.Version, prev.BundleDir, runID, &prev.ID, origin)
 	if err != nil {
-		slog.Error("rollback: record pending deployment failed; running pool untouched", "slug", slug, "err", err)
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "could not record the rollback; the running app is untouched", err)
 		return
 	}
 	producerBarrierEntered := preexistingDeploymentQuarantine
 	if producerBarrierEntered {
 		if err := s.store.MarkDeploymentProducerBarrierEntered(pendingDep.ID); err != nil {
 			_ = s.store.FailDeploymentWithReason(pendingDep.ID, "compatibility quarantine could not be inherited")
-			writeError(w, http.StatusInternalServerError, "inherit compatibility quarantine: "+err.Error())
+			writeInternal(w, r, "inherit compatibility quarantine", err)
 			return
 		}
 	}
@@ -4033,7 +4029,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 	if prev.ContentDigest != "" {
 		if err := s.store.SetDeploymentDigest(pendingDep.ID, prev.ContentDigest); err != nil {
 			_ = s.store.FailDeployment(pendingDep.ID)
-			writeError(w, http.StatusInternalServerError, "record rollback bundle identity")
+			writeInternal(w, r, "record rollback bundle identity", err)
 			return
 		}
 	}
@@ -4043,7 +4039,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, db.ErrNotFound) {
 			writeError(w, http.StatusConflict, "rollback target predates immutable schedule snapshots; redeploy that version before rolling back to it")
 		} else {
-			writeError(w, http.StatusInternalServerError, "plan rollback schedule convergence: "+err.Error())
+			writeInternal(w, r, "plan rollback schedule convergence", err)
 		}
 		return
 	}
@@ -4060,7 +4056,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.revalidatePrestartPlan(prestartPlan, prev.ContentDigest); err != nil {
 		_ = s.store.FailDeployment(pendingDep.ID)
-		writeError(w, http.StatusInternalServerError, "revalidate rollback schedule convergence: "+err.Error())
+		writeInternal(w, r, "revalidate rollback schedule convergence", err)
 		return
 	}
 	if len(prestartPlan.producers) > 0 && prev.ContentDigest == "" {
@@ -4251,7 +4247,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 			_ = s.store.FailDeploymentWithReason(pendingDep.ID, reason)
 			_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "stopped"})
 		}
-		writeError(w, http.StatusInternalServerError, reason)
+		writeInternal(w, r, "rollback consumer provenance could not be persisted", replicaPersistenceErr)
 		return
 	}
 	// UpdateAppStatus is soft state — the watchdog reconciles. PromoteDeployment
@@ -4268,9 +4264,8 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.store.PromoteDeployment(pendingDep.ID); err != nil {
-		slog.Error("rollback: promote deployment failed; pool is live but durable state is unresolved", "slug", slug, "version", prev.Version, "err", err)
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf(
-			"rollback runtime changed but recording it failed; inspect deployment history and, if needed, retry explicitly with --to %d", prev.ID))
+		writeInternal(w, r, fmt.Sprintf(
+			"rollback runtime changed but recording it failed; inspect deployment history and, if needed, retry explicitly with --to %d", prev.ID), err)
 		return
 	}
 	var convergenceWarning string
@@ -4305,7 +4300,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 			// Which bundle the app landed on is the whole point of a rollback
 			// event; "targeted" distinguishes an operator naming a deployment
 			// from the default step back to the previous one.
-			Detail: auditDetailJSON(map[string]any{
+			Detail: db.AuditDetail(map[string]any{
 				"to_deployment_id": prev.ID,
 				"to_version":       prev.Version,
 				"targeted":         reqBody.DeploymentID != nil,
@@ -4327,10 +4322,10 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 // slug alone does not pin identity: the app may have been deleted and
 // another created under the same slug while the request queued, and the
 // caller was never authorized to act on that one.
-func (s *Server) rereadAuthorizedApp(w http.ResponseWriter, slug string, authorizedID int64) (*db.App, bool) {
+func (s *Server) rereadAuthorizedApp(w http.ResponseWriter, r *http.Request, slug string, authorizedID int64) (*db.App, bool) {
 	app, err := s.store.GetAppBySlug(slug)
 	if err != nil && !errors.Is(err, db.ErrNotFound) {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return nil, false
 	}
 	if err != nil || app.ID != authorizedID {
@@ -4383,7 +4378,7 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 	// The settings redeploy seq read here names exactly the settings this
 	// restart boots, so its outcome can serve that seq below.
 	previousStatus := app.Status
-	app, ok = s.rereadAuthorizedApp(w, slug, app.ID)
+	app, ok = s.rereadAuthorizedApp(w, r, slug, app.ID)
 	if !ok {
 		return
 	}
@@ -4403,7 +4398,7 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 
@@ -4423,7 +4418,7 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 	// Defense in depth: refuse to restart a data-using app onto a tier that lost
 	// its durable backend since the last deploy.
 	if tier, blocked, gerr := s.ephemeralDataDeployBlock(app, nil); gerr != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", gerr)
 		return
 	} else if blocked {
 		writeError(w, http.StatusUnprocessableEntity, ephemeralDataDeployMsg(tier))
@@ -4433,7 +4428,7 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 	restartDefaultMem, restartDefaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)
 	releaseConsumerBoot, gateErr := s.acquireConsumerBootGate(app.ID)
 	if gateErr != nil {
-		writeError(w, http.StatusInternalServerError, "acquire startup-data compatibility fence")
+		writeInternal(w, r, "acquire startup-data compatibility fence", gateErr)
 		return
 	}
 	defer releaseConsumerBoot()
@@ -4506,7 +4501,7 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "stopped"})
 		s.recordBootOutcome(app.ID, slug, bootedSeq, db.RedeployFailed, "restart failed: replica state could not be persisted")
-		writeError(w, http.StatusInternalServerError, "restart consumer provenance could not be persisted")
+		writeInternal(w, r, "restart consumer provenance could not be persisted", replicaPersistenceErr)
 		return
 	}
 	if len(result.Failed) > 0 {
@@ -4529,7 +4524,7 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 
 	updatedApp, err := s.store.GetAppBySlug(slug)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 
@@ -4544,7 +4539,7 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 			// after the pool came back. Recording where the app was separates a
 			// routine cycle of a healthy app from an operator reviving one that
 			// had crashed, which is the question an audit reader is asking.
-			Detail: auditDetailJSON(map[string]any{
+			Detail: db.AuditDetail(map[string]any{
 				"previous_status": previousStatus,
 				"replicas":        updatedApp.Replicas,
 			}),
@@ -4589,7 +4584,7 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 
@@ -4751,13 +4746,13 @@ func (s *Server) handleStopApp(w http.ResponseWriter, r *http.Request) {
 		Status: "stopped",
 		// Port and PID left nil to clear them in the DB.
 	}); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 
 	app, err := s.store.GetAppBySlug(slug)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 
@@ -4768,7 +4763,7 @@ func (s *Server) handleStopApp(w http.ResponseWriter, r *http.Request) {
 			Action:       "stop",
 			ResourceType: "app",
 			ResourceID:   slug,
-			Detail: auditDetailJSON(map[string]any{
+			Detail: db.AuditDetail(map[string]any{
 				"previous_status": previousStatus,
 			}),
 			IPAddress: s.ClientIP(r),
@@ -4815,15 +4810,14 @@ func (s *Server) handleSleepApp(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, lifecycle.ErrSleepTeardownFailed):
 			writeError(w, http.StatusConflict, "app did not stop; try again or use stop")
 		default:
-			slog.Error("sleep app", "slug", slug, "err", err)
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			writeInternal(w, r, "could not sleep app", err)
 		}
 		return
 	}
 
 	app, err := s.store.GetAppBySlug(slug)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 
@@ -4834,7 +4828,7 @@ func (s *Server) handleSleepApp(w http.ResponseWriter, r *http.Request) {
 			Action:       "sleep",
 			ResourceType: "app",
 			ResourceID:   slug,
-			Detail: auditDetailJSON(map[string]any{
+			Detail: db.AuditDetail(map[string]any{
 				"previous_status":  previousStatus,
 				"worker_isolation": isolation,
 			}),
@@ -4871,12 +4865,12 @@ func (s *Server) handleSetAppAccess(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	app, err := s.store.GetAppBySlug(slug)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	u := auth.UserFromContext(r.Context())
@@ -4934,7 +4928,7 @@ func (s *Server) handleTransferAppOwnership(w http.ResponseWriter, r *http.Reque
 			writeError(w, http.StatusNotFound, "user not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	if target.PrincipalType == "service_account" {
@@ -4943,7 +4937,7 @@ func (s *Server) handleTransferAppOwnership(w http.ResponseWriter, r *http.Reque
 	}
 	if target.ID != app.OwnerID {
 		if err := s.store.SetAppOwner(slug, target.ID); err != nil {
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			writeInternal(w, r, "internal server error", err)
 			return
 		}
 		s.logAuditEvent(r, db.AuditEventParams{
@@ -4955,7 +4949,7 @@ func (s *Server) handleTransferAppOwnership(w http.ResponseWriter, r *http.Reque
 	}
 	app, err = s.store.GetAppBySlug(slug)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	// Decorated against the row as it now stands, so a former owner who handed
@@ -4992,7 +4986,7 @@ func (s *Server) handleGrantAppAccess(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusNotFound, "user not found")
 				return
 			}
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			writeInternal(w, r, "internal server error", err)
 			return
 		}
 	case req.Username != "":
@@ -5003,7 +4997,7 @@ func (s *Server) handleGrantAppAccess(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusNotFound, "user not found")
 				return
 			}
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			writeInternal(w, r, "internal server error", err)
 			return
 		}
 		userID = u.ID
@@ -5018,7 +5012,7 @@ func (s *Server) handleGrantAppAccess(w http.ResponseWriter, r *http.Request) {
 	auditDetail := fmt.Sprintf("user_id=%d", userID)
 	if req.Role == nil {
 		if err := s.store.GrantAppAccess(slug, userID); err != nil {
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			writeInternal(w, r, "internal server error", err)
 			return
 		}
 	} else {
@@ -5032,7 +5026,7 @@ func (s *Server) handleGrantAppAccess(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.store.GrantAppAccessWithRole(slug, userID, role); err != nil {
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			writeInternal(w, r, "internal server error", err)
 			return
 		}
 		auditDetail = fmt.Sprintf("user_id=%d role=%s", userID, role)
@@ -5104,7 +5098,7 @@ func (s *Server) handleRevokeAppAccess(w http.ResponseWriter, r *http.Request) {
 					writeError(w, http.StatusNotFound, "user not found")
 					return
 				}
-				writeError(w, http.StatusInternalServerError, "internal server error")
+				writeInternal(w, r, "internal server error", err)
 				return
 			}
 			req.UserID = u.ID
@@ -5130,7 +5124,7 @@ func (s *Server) handleRevokeAppAccess(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 
@@ -5179,7 +5173,7 @@ func (s *Server) handleSetMemberRole(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "member not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	if u := auth.UserFromContext(r.Context()); u != nil {
@@ -5208,7 +5202,7 @@ func (s *Server) handleGetAppGroupAccess(w http.ResponseWriter, r *http.Request)
 	}
 	rules, err := s.store.ListAppGroupAccess(slug)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	resp := make([]appGroupRuleResponse, len(rules))
@@ -5247,7 +5241,7 @@ func (s *Server) handleGrantAppGroupAccess(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if err := s.store.GrantAppGroupAccess(slug, req.Group, role, "manual"); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	if u := auth.UserFromContext(r.Context()); u != nil {
@@ -5288,7 +5282,7 @@ func (s *Server) handleRevokeAppGroupAccess(w http.ResponseWriter, r *http.Reque
 	// clear 409 instead of a surprising transient removal.
 	rules, err := s.store.ListAppGroupAccess(slug)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	for _, ru := range rules {
@@ -5302,7 +5296,7 @@ func (s *Server) handleRevokeAppGroupAccess(w http.ResponseWriter, r *http.Reque
 			writeError(w, http.StatusNotFound, "group rule not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	if u := auth.UserFromContext(r.Context()); u != nil {
@@ -5330,7 +5324,7 @@ func (s *Server) handleGetMembers(w http.ResponseWriter, r *http.Request) {
 	// envelope carries an accurate total.
 	members, err := s.store.ListAppMembers(slug, 0, 0)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	resp := make([]appMemberResponse, len(members))
@@ -5364,7 +5358,7 @@ func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, userLookupResponse{ID: user.ID, Username: user.Username})
@@ -6033,7 +6027,7 @@ func (s *Server) handleBatchMetrics(w http.ResponseWriter, r *http.Request) {
 
 	apps, err := s.metricAppsForUser(u, r.URL.Query().Get("slugs"))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 
@@ -6047,12 +6041,12 @@ func (s *Server) handleBatchMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	replicasByApp, err := s.store.ListReplicasForApps(appIDs)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	autoscaleBySlug, err := s.store.LatestAutoscaleEventForSlugs(slugs)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 
@@ -6165,7 +6159,7 @@ func (s *Server) handleListDeployments(w http.ResponseWriter, r *http.Request) {
 	}
 	deployments, err := s.store.ListDeploymentsBySlug(slug)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	limit, offset := parsePagination(r)

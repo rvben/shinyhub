@@ -34,7 +34,7 @@ func (s *Server) HandleAppNavJSON(w http.ResponseWriter, r *http.Request) {
 	// happens to end exactly there.
 	apps, err := s.listAppsVisibleTo(u, appnav.MaxApps+1, 0)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 
@@ -82,7 +82,7 @@ func (s *Server) authorizeAppVersion(w http.ResponseWriter, r *http.Request, slu
 		return nil, false
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return nil, false
 	}
 	u := auth.UserFromContext(r.Context())
@@ -95,7 +95,7 @@ func (s *Server) authorizeAppVersion(w http.ResponseWriter, r *http.Request, slu
 	}
 	ok, err := s.canViewApp(u, app)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return nil, false
 	}
 	if !ok {

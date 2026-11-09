@@ -44,13 +44,13 @@ func requireAdmin(w http.ResponseWriter, r *http.Request) (*auth.ContextUser, bo
 // destroy or re-credential that row can name it in the audit trail without a
 // second query. The returned user is nil when the row does not exist, which is
 // the only case that continues with stop=false and no user.
-func (s *Server) refuseSystemUser(w http.ResponseWriter, id int64) (*db.User, bool) {
+func (s *Server) refuseSystemUser(w http.ResponseWriter, r *http.Request, id int64) (*db.User, bool) {
 	u, err := s.store.GetUserByID(id)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			return nil, false
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return nil, true
 	}
 	if u.PrincipalType == "service_account" {
@@ -128,12 +128,12 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 	limit, offset := parsePagination(r)
 	users, err := s.store.ListUsersExcludingServiceAccounts(limit, offset)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	total, err := s.store.CountUsersExcludingServiceAccounts()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 
@@ -214,7 +214,7 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 
 	hash, err := auth.HashPassword(req.Password)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 
@@ -231,13 +231,13 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "username is reserved")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 
 	user, err := s.store.GetUserByUsername(req.Username)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 
@@ -272,7 +272,7 @@ func (s *Server) handleAutomaticUserRole(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "invalid user id")
 		return
 	}
-	user, stop := s.refuseSystemUser(w, id)
+	user, stop := s.refuseSystemUser(w, r, id)
 	if stop {
 		return
 	}
@@ -282,7 +282,7 @@ func (s *Server) handleAutomaticUserRole(w http.ResponseWriter, r *http.Request)
 	}
 	groups, err := s.store.GetUserGroups(id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	role, source := s.jitOAuthRole(), "default"
@@ -305,7 +305,7 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid user id")
 		return
 	}
-	if _, stop := s.refuseSystemUser(w, id); stop {
+	if _, stop := s.refuseSystemUser(w, r, id); stop {
 		return
 	}
 	// An admin cannot change their own role via the API (the UI also blocks it):
@@ -329,7 +329,7 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	oldRole := existing.Role
@@ -349,7 +349,7 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusConflict, "cannot remove the last admin")
 				return
 			}
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			writeInternal(w, r, "internal server error", err)
 			return
 		}
 	} else {
@@ -362,14 +362,14 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusConflict, "cannot remove the last admin")
 				return
 			}
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			writeInternal(w, r, "internal server error", err)
 			return
 		}
 	}
 
 	user, err := s.store.GetUserByID(id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 
@@ -400,7 +400,7 @@ func (s *Server) handlePatchUserPassword(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "invalid user id")
 		return
 	}
-	target, stop := s.refuseSystemUser(w, id)
+	target, stop := s.refuseSystemUser(w, r, id)
 	if stop {
 		return
 	}
@@ -417,7 +417,7 @@ func (s *Server) handlePatchUserPassword(w http.ResponseWriter, r *http.Request)
 
 	hash, err := auth.HashPassword(req.Password)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 
@@ -426,13 +426,13 @@ func (s *Server) handlePatchUserPassword(w http.ResponseWriter, r *http.Request)
 			writeError(w, http.StatusNotFound, "not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	// An admin reset is the compromised-account playbook: kill the (possibly
 	// hijacked) live sessions along with the credential.
 	if err := s.store.BumpTokenEpoch(id); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 
@@ -463,7 +463,7 @@ func (s *Server) handleRevokeUserSessions(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "invalid user id")
 		return
 	}
-	target, stop := s.refuseSystemUser(w, id)
+	target, stop := s.refuseSystemUser(w, r, id)
 	if stop {
 		return
 	}
@@ -472,7 +472,7 @@ func (s *Server) handleRevokeUserSessions(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusNotFound, "not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	s.logAuditEvent(r, db.AuditEventParams{
@@ -500,7 +500,7 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid user id")
 		return
 	}
-	target, stop := s.refuseSystemUser(w, id)
+	target, stop := s.refuseSystemUser(w, r, id)
 	if stop {
 		return
 	}
@@ -524,7 +524,7 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "user still owns apps; transfer them first (shinyhub apps transfer <slug> <new-owner>) or delete them")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 

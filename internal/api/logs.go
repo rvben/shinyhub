@@ -88,7 +88,7 @@ func (s *Server) handleLogSources(w http.ResponseWriter, r *http.Request) {
 
 	replicas, err := s.store.ListReplicas(app.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	replicaByIndex := make(map[int]*db.Replica, len(replicas))
@@ -105,8 +105,7 @@ func (s *Server) handleLogSources(w http.ResponseWriter, r *http.Request) {
 
 	files, err := s.manager.LogRuns(slug)
 	if err != nil {
-		slog.Warn("list log runs", "slug", slug, "err", err)
-		writeError(w, http.StatusInternalServerError, "could not list log sources")
+		writeInternal(w, r, "could not list log sources", err)
 		return
 	}
 	fileByRun := make(map[string]process.LogSource, len(files))
@@ -116,7 +115,7 @@ func (s *Server) handleLogSources(w http.ResponseWriter, r *http.Request) {
 
 	runs, err := s.store.ListAppLogRuns(app.ID, 100)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	runIDs := make([]string, len(runs))
@@ -125,7 +124,7 @@ func (s *Server) handleLogSources(w http.ResponseWriter, r *http.Request) {
 	}
 	sharedStats, err := s.store.AppLogStatsForRuns(runIDs)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	out := make([]*logSourceResponse, 0, len(runs)+len(replicas))
@@ -169,8 +168,7 @@ func (s *Server) handleLogSources(w http.ResponseWriter, r *http.Request) {
 
 	legacy, err := s.manager.LogSources(slug)
 	if err != nil {
-		slog.Warn("list legacy log sources", "slug", slug, "err", err)
-		writeError(w, http.StatusInternalServerError, "could not list log sources")
+		writeInternal(w, r, "could not list log sources", err)
 		return
 	}
 	for _, log := range legacy {
@@ -464,7 +462,7 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 			}
 			_, hasSharedLog, statsErr := s.store.AppLogEndOffset(runID)
 			if statsErr != nil {
-				writeError(w, http.StatusInternalServerError, "internal server error")
+				writeInternal(w, r, "internal server error", statsErr)
 				return
 			}
 			if hasSharedLog || (s.store.IsPostgres() && run.Provider != "fargate") {
@@ -476,7 +474,7 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	} else if s.store.IsPostgres() {
 		runs, err := s.store.ListAppLogRuns(app.ID, 100)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			writeInternal(w, r, "internal server error", err)
 			return
 		}
 		for _, run := range runs {
@@ -497,7 +495,7 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		if runName == "" {
 			runName = "current"
 		}
-		writeLogsDownload(w, lr, fmt.Sprintf("%s-replica-%d-%s.log", slug, idx, runName))
+		writeLogsDownload(w, r, lr, fmt.Sprintf("%s-replica-%d-%s.log", slug, idx, runName))
 		return
 	}
 
@@ -511,11 +509,10 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 // writeLogsDownload emits a byte-exact retained snapshot. Unlike the plain
 // one-shot endpoint, it neither normalizes line endings nor adds a trailing
 // newline, and it is not constrained by the interactive tail limit.
-func writeLogsDownload(w http.ResponseWriter, lr appLogReader, filename string) {
+func writeLogsDownload(w http.ResponseWriter, r *http.Request, lr appLogReader, filename string) {
 	data, err := lr.ReadAll()
 	if err != nil {
-		slog.Warn("logs download", "err", err)
-		writeError(w, http.StatusInternalServerError, "could not download log")
+		writeInternal(w, r, "could not download log", err)
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")

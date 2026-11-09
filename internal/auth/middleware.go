@@ -280,7 +280,7 @@ func writeUnauthorized(w http.ResponseWriter, err error) {
 			"%s realm=\"shinyhub\", error=\"invalid_request\", error_description=%q",
 			wrong.Want, wrong.Error()))
 	}
-	http.Error(w, "unauthorized", http.StatusUnauthorized)
+	writeAPIError(w, http.StatusUnauthorized, "unauthorized")
 }
 
 // LooksLikeJWT reports whether token has the structural shape of a compact

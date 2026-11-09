@@ -82,14 +82,14 @@ func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 
 	stateBytes := make([]byte, 16)
 	if _, err := rand.Read(stateBytes); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	state := hex.EncodeToString(stateBytes)
 	nonce := deriveOIDCNonce(s.cfg.Auth.Secret, state)
 
 	if err := s.store.CreateOAuthStateWithReturnPath(state, providerOIDC, safeNextPath(r.URL.Query().Get("next"))); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 
@@ -163,7 +163,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		reqLog(r).Error("oidc_provision_user_failed", "err", err)
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	if created {
@@ -195,7 +195,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 			AuthMappings(s.cfg.Auth.GroupRoleMappings), s.jitOAuthRole(),
 		); err != nil {
 			reqLog(r).Error("oidc_reconcile_groups_failed", "username", user.Username, "err", err)
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			writeInternal(w, r, "internal server error", err)
 			return
 		}
 		// Re-read so the issued JWT carries the reconciled role. A read failure
@@ -203,7 +203,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		fresh, err := s.store.GetUserByID(user.ID)
 		if err != nil {
 			reqLog(r).Error("oidc_reread_user_failed", "username", user.Username, "err", err)
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			writeInternal(w, r, "internal server error", err)
 			return
 		}
 		user = fresh
@@ -211,7 +211,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 
 	_, err = s.setBrowserSession(w, r, user.ContextUser(), time.Time{})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 

@@ -33,7 +33,7 @@ func (s *Server) HandleAppSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "could not renew session")
+			writeInternal(w, r, "could not renew session", err)
 			return
 		}
 	}

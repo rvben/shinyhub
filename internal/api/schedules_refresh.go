@@ -3,13 +3,13 @@ package api
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/db"
 )
 
 // acquireRefreshOperation preserves both the fleet and cross-process app fences
@@ -72,7 +72,7 @@ func (s *Server) handleRefreshStaleSchedule(w http.ResponseWriter, r *http.Reque
 		writeError(w, status, "schedule refresh admission failed: "+err.Error())
 		return
 	}
-	s.audit(r, "schedule_refresh_stale", "schedule", strconv.FormatInt(id, 10), fmt.Sprintf(`{"status":%q,"run_id":%d}`, result.Status, result.RunID))
+	s.audit(r, "schedule_refresh_stale", "schedule", strconv.FormatInt(id, 10), db.AuditDetail(map[string]any{"status": result.Status, "run_id": result.RunID}))
 	status := http.StatusOK
 	if result.Status == "started" || result.Status == "joined" {
 		status = http.StatusAccepted

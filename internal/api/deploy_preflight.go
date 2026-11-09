@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -112,8 +111,7 @@ func (s *Server) handleDeployPreflight(w http.ResponseWriter, r *http.Request) {
 			app.Replicas = s.cfg.Runtime.DefaultReplicas
 		}
 	default:
-		slog.Error("deploy preflight: load app", "slug", slug, "err", err)
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeInternal(w, r, "load app", err)
 		return
 	}
 
@@ -127,8 +125,7 @@ func (s *Server) handleDeployPreflight(w http.ResponseWriter, r *http.Request) {
 
 	reply, err := s.deployPreflight(app, req)
 	if err != nil {
-		slog.Error("deploy preflight failed", "slug", slug, "err", err)
-		writeError(w, http.StatusInternalServerError, "internal error")
+		writeInternal(w, r, "deploy preflight failed", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, reply)

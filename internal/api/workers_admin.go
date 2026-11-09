@@ -51,7 +51,7 @@ func (s *Server) handleListWorkers(w http.ResponseWriter, r *http.Request) {
 	if s.workerReg != nil {
 		workers, err := s.store.ListWorkers()
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			writeInternal(w, r, "internal server error", err)
 			return
 		}
 		for _, wk := range workers {
@@ -79,7 +79,7 @@ func (s *Server) handleRevokeWorker(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "worker not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	// Revocation marks the worker down, but the down-timeout sweep skips workers
@@ -117,7 +117,7 @@ func (s *Server) handleRevokeWorker(w http.ResponseWriter, r *http.Request) {
 		// A revocation that could not evict is the case an incident review needs
 		// to find: the certificate is rejected while replicas may still be
 		// serving, and the failure otherwise exists only in the server log.
-		Detail: auditDetailJSON(map[string]any{
+		Detail: db.AuditDetail(map[string]any{
 			"replicas_hosted": hosted,
 			"eviction_failed": evictionFailed,
 		}),

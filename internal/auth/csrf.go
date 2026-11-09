@@ -67,22 +67,22 @@ func CSRFMiddleware(trustedNets []*net.IPNet) func(http.Handler) http.Handler {
 			// hard isolation of untrusted apps, deploy them on a separate origin
 			// (server.app_origin).
 			if r.Header.Get("Referer") == "" {
-				http.Error(w, "csrf: missing referer", http.StatusForbidden)
+				writeAPIError(w, http.StatusForbidden, "csrf: missing referer")
 				return
 			}
 			if refererUnderAppPath(r.Header.Get("Referer")) {
-				http.Error(w, "csrf: mutation originated from a proxied app", http.StatusForbidden)
+				writeAPIError(w, http.StatusForbidden, "csrf: mutation originated from a proxied app")
 				return
 			}
 
 			cookie, err := r.Cookie(CSRFCookieName)
 			if err != nil || cookie.Value == "" {
-				http.Error(w, "csrf: missing token", http.StatusForbidden)
+				writeAPIError(w, http.StatusForbidden, "csrf: missing token")
 				return
 			}
 			header := r.Header.Get(CSRFHeaderName)
 			if header == "" || subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(header)) != 1 {
-				http.Error(w, "csrf: token mismatch", http.StatusForbidden)
+				writeAPIError(w, http.StatusForbidden, "csrf: token mismatch")
 				return
 			}
 			next.ServeHTTP(w, r)

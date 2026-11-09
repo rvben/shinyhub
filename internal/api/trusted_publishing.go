@@ -80,12 +80,12 @@ func (s *Server) handleTrustedPublishing(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not prepare deployment identity")
+		writeInternal(w, r, "could not prepare deployment identity", err)
 		return
 	}
 	raw, hash, err := generateAPIKey()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not issue deployment credential")
+		writeInternal(w, r, "could not issue deployment credential", err)
 		return
 	}
 	expires := time.Now().UTC().Add(trustedpublish.CredentialLifetime)
@@ -101,6 +101,6 @@ func (s *Server) handleTrustedPublishing(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusConflict, "credential exchange failed; request a fresh CI identity token before retrying")
 		return
 	}
-	s.logAuditEvent(r, db.AuditEventParams{UserID: &account.ID, Action: "trusted_publish", ResourceType: "token", ResourceID: policy.Name, Detail: auditDetailJSON(map[string]any{"credential_id": id, "apps": policy.Apps, "expires_at": expires}), IPAddress: s.ClientIP(r)})
+	s.logAuditEvent(r, db.AuditEventParams{UserID: &account.ID, Action: "trusted_publish", ResourceType: "token", ResourceID: policy.Name, Detail: db.AuditDetail(map[string]any{"credential_id": id, "apps": policy.Apps, "expires_at": expires}), IPAddress: s.ClientIP(r)})
 	writeJSON(w, http.StatusCreated, map[string]any{"token": raw, "token_type": "Token", "expires_at": expires, "expires_in": int(trustedpublish.CredentialLifetime.Seconds()), "apps": policy.Apps, "id": id})
 }

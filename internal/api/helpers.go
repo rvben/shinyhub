@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -30,11 +29,33 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	}
 }
 
-// writeError writes a JSON error response: {"error": "msg"}.
+// writeError writes a JSON error response: {"error": "msg"}. The message is
+// JSON-encoded rather than formatted, because it can carry request text (a
+// field name, a filename) holding bytes that Go quoting would turn into
+// escapes JSON does not allow.
 func writeError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	fmt.Fprintf(w, `{"error":%q}`+"\n", msg)
+	_ = json.NewEncoder(w).Encode(struct {
+		Error string `json:"error"`
+	}{msg})
+}
+
+// writeInternal answers a server-side failure. The cause is logged with the
+// request id, method and path, and stays out of the body, where store or
+// filesystem errors could expose SQL text or server paths. The body carries msg,
+// a short description of what failed, plus the request id that finds the log
+// record.
+func writeInternal(w http.ResponseWriter, r *http.Request, msg string, err error) {
+	id := RequestIDFromContext(r.Context())
+	slog.Error("api: internal error", "request_id", id, "method", r.Method, "path", r.URL.Path,
+		"error", msg, "err", err)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusInternalServerError)
+	_ = json.NewEncoder(w).Encode(struct {
+		Error     string `json:"error"`
+		RequestID string `json:"request_id,omitempty"`
+	}{msg, id})
 }
 
 // writeErrorWithKind writes a JSON error response that also carries a stable

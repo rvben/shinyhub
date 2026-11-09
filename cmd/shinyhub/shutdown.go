@@ -6,20 +6,44 @@ import (
 	"os"
 	"runtime"
 	"time"
+
+	"github.com/rvben/shinyhub/internal/rungroup"
 )
 
-// shutdownDrainBudget bounds the work ownerWork's shutdown branch does before
+// shutdownDrainBudget bounds the work ownerRuntime.run's shutdown branch does before
 // releasing ownership: draining scheduled jobs and acquiring the fleet
 // mutation fence share this single deadline, so together they can never hang
 // the ownership handoff indefinitely.
 const shutdownDrainBudget = 20 * time.Second
 
 // shutdownWatchdogBudget bounds stopOwnership itself (elector shutdown, the
-// ownerWork goroutine returning, and scope.Stop()). It is larger than
+// ownerRuntime.run goroutine returning, and scope.Stop()). It is larger than
 // shutdownDrainBudget so the drain budget above normally fires first and logs
 // a more specific cause; this is the last-resort backstop for anything that
 // hangs outside that inner budget (for example loops.Wait() itself).
 const shutdownWatchdogBudget = 30 * time.Second
+
+// Stop budgets for the background services in runServe's run group. A service
+// that uses the database gets the watchdog's budget, since the store closes
+// once shutdown stops waiting for it; a service holding only in-memory state
+// gets a short one.
+const (
+	serviceStoreStopBudget  = shutdownWatchdogBudget
+	serviceMemoryStopBudget = 5 * time.Second
+)
+
+// stopBeforeStoreCloses stops a service whose work reads the store and keeps
+// waiting if it overruns its budget. A sweep that outlives the store turns
+// every lookup into an error, and an access recheck reads an error as a
+// revocation, so closing the store first would end sessions that are still
+// entitled. The overrun is logged by name before the wait continues.
+func stopBeforeStoreCloses(svc *rungroup.Service, log *slog.Logger) {
+	if svc.Stop() {
+		return
+	}
+	log.Error("waiting for a service that reads the store to exit before the store closes")
+	<-svc.Done()
+}
 
 // osExit is os.Exit behind a variable so a test can intercept the "give up
 // and exit non-zero" path without terminating the test process.

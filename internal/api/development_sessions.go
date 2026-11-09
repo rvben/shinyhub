@@ -81,7 +81,7 @@ func (s *Server) handleEndDevelopmentSession(w http.ResponseWriter, r *http.Requ
 			writeError(w, http.StatusNotFound, "development session not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	if u := auth.UserFromContext(r.Context()); u != nil {
@@ -115,7 +115,7 @@ func (s *Server) handleHeartbeatDevelopmentSession(w http.ResponseWriter, r *htt
 			writeError(w, http.StatusConflict, "development session has ended; start a new session")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

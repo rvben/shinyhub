@@ -363,13 +363,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 
 	token, err := auth.IssueSessionToken(user.ContextUser(), s.cfg.Auth.Secret)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 
@@ -414,13 +414,13 @@ func (s *Server) handleSessionLogin(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 
 	session, err := s.setBrowserSession(w, r, user.ContextUser(), time.Time{})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 
@@ -472,7 +472,7 @@ func (s *Server) handleRevokeOwnSessions(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	if _, stop := s.refuseSystemUser(w, u.ID); stop {
+	if _, stop := s.refuseSystemUser(w, r, u.ID); stop {
 		return
 	}
 	if err := s.store.BumpTokenEpoch(u.ID); err != nil {
@@ -480,8 +480,7 @@ func (s *Server) handleRevokeOwnSessions(w http.ResponseWriter, r *http.Request)
 			writeError(w, http.StatusNotFound, "not found")
 			return
 		}
-		slog.Error("revoke own sessions", "user", u.Username, "err", err)
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "could not revoke sessions", err)
 		return
 	}
 	s.logAuditEvent(r, db.AuditEventParams{
@@ -526,7 +525,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				if err != nil {
-					writeError(w, http.StatusInternalServerError, "internal server error")
+					writeInternal(w, r, "internal server error", err)
 					return
 				}
 			}
@@ -600,7 +599,7 @@ func (s *Server) handlePatchMe(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	if !canManageSelf(current) {
@@ -661,11 +660,11 @@ func (s *Server) handlePatchMe(w http.ResponseWriter, r *http.Request) {
 		}
 		hash, err := auth.HashPassword(req.NewPassword)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			writeInternal(w, r, "internal server error", err)
 			return
 		}
 		if err := s.store.UpdateUserPassword(u.ID, hash); err != nil {
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			writeInternal(w, r, "internal server error", err)
 			return
 		}
 		// Changing the password signs out every session that was authenticated
@@ -673,7 +672,7 @@ func (s *Server) handlePatchMe(w http.ResponseWriter, r *http.Request) {
 		// rotation). The caller's own browser session is re-issued below at the
 		// new epoch so they stay signed in; a Bearer-JWT caller re-logs in.
 		if err := s.store.BumpTokenEpoch(u.ID); err != nil {
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			writeInternal(w, r, "internal server error", err)
 			return
 		}
 		if r.Header.Get("Authorization") == "" {
@@ -706,7 +705,7 @@ func (s *Server) handlePatchMe(w http.ResponseWriter, r *http.Request) {
 
 	if req.DisplayName != nil || req.AvatarColor != nil || avatarVersion != nil {
 		if err := s.store.UpdateUserProfile(u.ID, req.DisplayName, req.AvatarColor, avatarVersion, avatarData); err != nil {
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			writeInternal(w, r, "internal server error", err)
 			return
 		}
 	}
@@ -735,7 +734,7 @@ func (s *Server) handlePatchMe(w http.ResponseWriter, r *http.Request) {
 
 	fresh, err := s.store.GetUserByID(u.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, sessionResponse{
@@ -932,7 +931,7 @@ func (s *Server) handleCLIConnectRegister(w http.ResponseWriter, r *http.Request
 
 	userCode, err := registerCLIConnectRequest(s.store, strings.ToLower(req.TokenHash), req.Name, generateCLIUserCode)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, cliConnectRegisterResponse{
@@ -955,7 +954,7 @@ func (s *Server) handleCLIConnectStatus(w http.ResponseWriter, r *http.Request) 
 	}
 	status, err := s.store.CLIConnectRequestStatus(hash)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
@@ -1002,7 +1001,7 @@ func (s *Server) handleApproveCLIConnect(w http.ResponseWriter, r *http.Request)
 			writeError(w, http.StatusBadRequest, "that code is invalid or has expired; run `shinyhub connect` again to get a new one")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 
@@ -1015,7 +1014,7 @@ func (s *Server) handleApproveCLIConnect(w http.ResponseWriter, r *http.Request)
 			writeError(w, http.StatusConflict, "a token named \""+name+"\" already exists; run `shinyhub connect` again to get a new one")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	s.logAuditEvent(r, db.AuditEventParams{
@@ -1055,7 +1054,7 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 
 	exists, err := s.store.APIKeyNameExists(u.ID, req.Name)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	if exists {
@@ -1076,7 +1075,7 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 
 	rawKey, keyHash, err := generateAPIKey()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 
@@ -1091,7 +1090,7 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "token name already in use")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 
@@ -1131,7 +1130,7 @@ func (s *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {
 		}
 		keys, err := s.store.ListAllAPIKeys()
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			writeInternal(w, r, "internal server error", err)
 			return
 		}
 		writeList(w, keys, limit, offset, nil)
@@ -1140,7 +1139,7 @@ func (s *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {
 
 	keys, err := s.store.ListAPIKeys(u.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	writeList(w, keys, limit, offset, nil)
@@ -1176,7 +1175,7 @@ func (s *Server) handleDeleteToken(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "token not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 

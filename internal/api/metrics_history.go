@@ -61,7 +61,7 @@ func (s *Server) handleBatchMetricsHistory(w http.ResponseWriter, r *http.Reques
 	}
 	apps, err := s.metricAppsForUser(u, r.URL.Query().Get("slugs"))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 

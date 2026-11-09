@@ -193,14 +193,14 @@ func (s *Server) handleListSchedules(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := s.store.ListSchedulesByApp(app.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	// One extra query for the whole list, not one per schedule: freshness is
 	// what a caller would otherwise reconstruct from per-schedule run history.
 	fresh, err := s.store.ScheduleFreshnessByApp(app.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	byID := make(map[int64]db.ScheduleFreshness, len(fresh))
@@ -209,7 +209,7 @@ func (s *Server) handleListSchedules(w http.ResponseWriter, r *http.Request) {
 	}
 	activations, err := s.store.LatestScheduleActivationsByApp(app.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	latestActivation := make(map[int64]*db.ScheduleActivation)
@@ -300,7 +300,7 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.dischargeElasticOrphanRisk(app.ID); err != nil {
 		reqLog(r).Error("discharge elastic orphan-risk marker", "slug", app.Slug, "err", err)
-		writeError(w, http.StatusInternalServerError, "verify elastic worker lifetime")
+		writeInternal(w, r, "verify elastic worker lifetime", err)
 		return
 	}
 	if err := s.validateScheduleProducerTopology(app, deployTrigger, onSuccess); err != nil {
@@ -365,18 +365,22 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, db.ErrScheduleNameExists.Error())
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	postcommitWarning := ""
 	if err := s.reloadScheduler(id, app.Slug, req.Name); err != nil {
 		postcommitWarning = "schedule was created, but scheduler reload requires asynchronous repair: " + err.Error()
 	}
-	s.audit(r, "schedule_create", "schedule", fmt.Sprintf("%d", id), fmt.Sprintf(
-		`{"app":%q,"name":%q,"effective_timezone":%q,"on_success":%q,"min_roll_interval_seconds":%d,"roll_fallback":%q,"max_defer_age_seconds":%d}`,
-		app.Slug, req.Name, effectiveTZLabel(storedTZ, s.cfg.Scheduler.Location), onSuccess,
-		req.MinRollIntervalSeconds, rollFallback, req.MaxDeferAgeSeconds,
-	))
+	s.audit(r, "schedule_create", "schedule", fmt.Sprintf("%d", id), db.AuditDetail(map[string]any{
+		"app":                       app.Slug,
+		"name":                      req.Name,
+		"effective_timezone":        effectiveTZLabel(storedTZ, s.cfg.Scheduler.Location),
+		"on_success":                onSuccess,
+		"min_roll_interval_seconds": req.MinRollIntervalSeconds,
+		"roll_fallback":             rollFallback,
+		"max_defer_age_seconds":     req.MaxDeferAgeSeconds,
+	}))
 
 	sc, _ := s.store.GetSchedule(id)
 	dto := toScheduleDTO(sc, nil, s.cfg.Scheduler.Location)
@@ -586,7 +590,7 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.dischargeElasticOrphanRisk(app.ID); err != nil {
 		reqLog(r).Error("discharge elastic orphan-risk marker", "slug", app.Slug, "err", err)
-		writeError(w, http.StatusInternalServerError, "verify elastic worker lifetime")
+		writeInternal(w, r, "verify elastic worker lifetime", err)
 		return
 	}
 	if err := s.validateScheduleProducerTopology(app, deployTrigger, normalizedAction); err != nil {
@@ -623,7 +627,7 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.store.UpdateSchedule(id, updateParams); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	// Series are keyed by schedule name, so a rename would otherwise leave the
@@ -638,14 +642,17 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	fresh, err := s.store.GetSchedule(id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "reload updated schedule: "+err.Error())
+		writeInternal(w, r, "reload updated schedule", err)
 		return
 	}
-	s.audit(r, "schedule_update", "schedule", fmt.Sprintf("%d", id), fmt.Sprintf(
-		`{"app":%q,"name":%q,"activation_policy":{"before":{"on_success":%q,"min_roll_interval_seconds":%d,"roll_fallback":%q,"max_defer_age_seconds":%d},"after":{"on_success":%q,"min_roll_interval_seconds":%d,"roll_fallback":%q,"max_defer_age_seconds":%d}}}`,
-		app.Slug, sc.Name, sc.OnSuccess, sc.MinRollIntervalSeconds, sc.RollFallback, sc.MaxDeferAgeSeconds,
-		fresh.OnSuccess, fresh.MinRollIntervalSeconds, fresh.RollFallback, fresh.MaxDeferAgeSeconds,
-	))
+	s.audit(r, "schedule_update", "schedule", fmt.Sprintf("%d", id), db.AuditDetail(map[string]any{
+		"app":  app.Slug,
+		"name": sc.Name,
+		"activation_policy": map[string]any{
+			"before": activationPolicyDetail(sc.OnSuccess, sc.MinRollIntervalSeconds, sc.RollFallback, sc.MaxDeferAgeSeconds),
+			"after":  activationPolicyDetail(fresh.OnSuccess, fresh.MinRollIntervalSeconds, fresh.RollFallback, fresh.MaxDeferAgeSeconds),
+		},
+	}))
 	dto := toScheduleDTO(fresh, nil, s.cfg.Scheduler.Location)
 	dto.Warning = postcommitWarning
 	dto.RollFeasibilityAdvisory = s.rollFeasibilityAdvisory(app, fresh.OnSuccess, fresh.RollFallback)
@@ -663,6 +670,17 @@ func (s *Server) handlePatchSchedule(w http.ResponseWriter, r *http.Request) {
 // rollout engine cannot recover safely. This validation belongs at every write
 // boundary (REST and manifest), so unsupported intent is never persisted and
 // then silently ignored.
+// activationPolicyDetail is one side of a schedule_update activation_policy
+// before/after pair, keyed as the API spells the fields.
+func activationPolicyDetail(onSuccess string, minRollIntervalSeconds int, rollFallback string, maxDeferAgeSeconds int) map[string]any {
+	return map[string]any{
+		"on_success":                onSuccess,
+		"min_roll_interval_seconds": minRollIntervalSeconds,
+		"roll_fallback":             rollFallback,
+		"max_defer_age_seconds":     maxDeferAgeSeconds,
+	}
+}
+
 func (s *Server) validateScheduleActivationForApp(app *db.App, action string) error {
 	if action != "roll" {
 		return nil
@@ -859,7 +877,7 @@ func (s *Server) handleDeleteSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if repairRequired, err := s.store.ScheduleProducerRepairRequired(id); err != nil {
-		writeError(w, http.StatusInternalServerError, "check producer repair state: "+err.Error())
+		writeInternal(w, r, "check producer repair state", err)
 		return
 	} else if repairRequired {
 		writeError(w, http.StatusConflict, "cannot delete a producer with an unrepaired failed data write; run it successfully before deleting it")
@@ -867,7 +885,7 @@ func (s *Server) handleDeleteSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	deleted, err := s.store.DeleteScheduleIfIdle(id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	if !deleted {
@@ -887,9 +905,9 @@ func (s *Server) handleDeleteSchedule(w http.ResponseWriter, r *http.Request) {
 	// resource_id resolves to nothing. Record what identified it - which app,
 	// what it was called, and when it ran - or the audit trail says only that
 	// some numbered schedule was deleted.
-	s.audit(r, "schedule_delete", "schedule", fmt.Sprintf("%d", id), fmt.Sprintf(
-		`{"app":%q,"name":%q,"cron":%q}`, app.Slug, sc.Name, sc.CronExpr,
-	))
+	s.audit(r, "schedule_delete", "schedule", fmt.Sprintf("%d", id), db.AuditDetail(map[string]any{
+		"app": app.Slug, "name": sc.Name, "cron": sc.CronExpr,
+	}))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -918,13 +936,12 @@ func (s *Server) handleCancelScheduleActivation(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusConflict, "no queued activation to cancel")
 		return
 	case err != nil:
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
-	s.audit(r, "schedule_activation_cancel", "schedule", fmt.Sprintf("%d", id), fmt.Sprintf(
-		`{"app":%q,"name":%q,"activation_id":%d,"target_generation":%d}`,
-		app.Slug, sc.Name, a.ID, a.TargetGeneration,
-	))
+	s.audit(r, "schedule_activation_cancel", "schedule", fmt.Sprintf("%d", id), db.AuditDetail(map[string]any{
+		"app": app.Slug, "name": sc.Name, "activation_id": a.ID, "target_generation": a.TargetGeneration,
+	}))
 	writeJSON(w, http.StatusOK, a)
 }
 
@@ -970,12 +987,12 @@ func (s *Server) handleRunSchedule(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "schedule admissions are temporarily unavailable; retry after reload or ownership handoff completes")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "failed to start run: "+err.Error())
+		writeInternal(w, r, "failed to start run", err)
 		return
 	}
-	s.audit(r, "schedule_run_manual", "schedule", fmt.Sprintf("%d", id), fmt.Sprintf(
-		`{"app":%q,"name":%q,"run_id":%d}`, app.Slug, sc.Name, runID,
-	))
+	s.audit(r, "schedule_run_manual", "schedule", fmt.Sprintf("%d", id), db.AuditDetail(map[string]any{
+		"app": app.Slug, "name": sc.Name, "run_id": runID,
+	}))
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "started", "run_id": runID})
 }
 
@@ -1004,14 +1021,14 @@ func (s *Server) handleListScheduleRuns(w http.ResponseWriter, r *http.Request) 
 	limit, offset := paginationParams(r, 50, 200)
 	runs, err := s.store.ListScheduleRuns(id, limit, offset)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	// Run history can be large, so the page is fetched at the DB layer; report
 	// the full count separately for an accurate envelope total.
 	total, err := s.store.CountScheduleRuns(id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	writeListPage(w, runs, total, limit, offset, nil)
@@ -1051,7 +1068,7 @@ func (s *Server) handleCancelScheduleRun(w http.ResponseWriter, r *http.Request)
 	}
 	if s.jobs != nil {
 		if err := s.jobs.Cancel(runID); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeInternal(w, r, "internal server error", err)
 			return
 		}
 	}
@@ -1276,7 +1293,7 @@ func (s *Server) handleListSharedData(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := s.store.ListSharedDataSources(app.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	out := make([]sharedDataDTO, 0, len(rows))
@@ -1303,7 +1320,7 @@ func (s *Server) handleGrantSharedData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
-	app, ok = s.rereadAuthorizedApp(w, app.Slug, app.ID)
+	app, ok = s.rereadAuthorizedApp(w, r, app.Slug, app.ID)
 	if !ok {
 		return
 	}
@@ -1331,7 +1348,7 @@ func (s *Server) handleGrantSharedData(w http.ResponseWriter, r *http.Request) {
 	// schedule run they fully control. See A.2 in v0.2.2 audit.
 	ok, err = s.hasExplicitAccess(user, src)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	if !ok {
@@ -1340,7 +1357,7 @@ func (s *Server) handleGrantSharedData(w http.ResponseWriter, r *http.Request) {
 	}
 	releaseRuns, runErr := s.pauseSharedDataRuns(app.ID)
 	if runErr != nil {
-		s.sharedDataRunError(w, runErr)
+		s.sharedDataRunError(w, r, runErr)
 		return
 	}
 	defer releaseRuns()
@@ -1353,11 +1370,11 @@ func (s *Server) handleGrantSharedData(w http.ResponseWriter, r *http.Request) {
 			// the existing mount descriptor so the caller can act idempotently.
 			writeJSON(w, http.StatusOK, sharedDataDTO{SourceSlug: src.Slug, SourceID: src.ID})
 		default:
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeInternal(w, r, "internal server error", err)
 		}
 		return
 	}
-	s.audit(r, "shared_data_grant", "app", app.Slug, fmt.Sprintf(`{"source":%q}`, src.Slug))
+	s.audit(r, "shared_data_grant", "app", app.Slug, db.AuditDetail(map[string]any{"source": src.Slug}))
 	dto := sharedDataDTO{SourceSlug: src.Slug, SourceID: src.ID}
 	if s.cfg.Runtime.Mode != "docker" {
 		dto.Warning = sharedDataNativeWarning

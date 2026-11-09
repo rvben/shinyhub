@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/pprof"
-	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -34,13 +31,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3files"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
-	"github.com/go-chi/chi/v5"
 	"github.com/rvben/shinyhub/internal/access"
 	"github.com/rvben/shinyhub/internal/activation"
-	"github.com/rvben/shinyhub/internal/admission"
-	"github.com/rvben/shinyhub/internal/announcementui"
 	"github.com/rvben/shinyhub/internal/api"
-	"github.com/rvben/shinyhub/internal/appenv"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/autoscale"
 	"github.com/rvben/shinyhub/internal/backup"
@@ -53,7 +46,6 @@ import (
 	"github.com/rvben/shinyhub/internal/fargate"
 	"github.com/rvben/shinyhub/internal/favicon"
 	"github.com/rvben/shinyhub/internal/history"
-	"github.com/rvben/shinyhub/internal/httpcompress"
 	"github.com/rvben/shinyhub/internal/identity"
 	"github.com/rvben/shinyhub/internal/jobs"
 	"github.com/rvben/shinyhub/internal/leader"
@@ -65,7 +57,7 @@ import (
 	"github.com/rvben/shinyhub/internal/oauth"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
-	"github.com/rvben/shinyhub/internal/proxytrust"
+	"github.com/rvben/shinyhub/internal/rungroup"
 	"github.com/rvben/shinyhub/internal/safego"
 	"github.com/rvben/shinyhub/internal/sandbox"
 	scalewayruntime "github.com/rvben/shinyhub/internal/scaleway"
@@ -77,10 +69,7 @@ import (
 	"github.com/rvben/shinyhub/internal/upgrade"
 	"github.com/rvben/shinyhub/internal/usage"
 	"github.com/rvben/shinyhub/internal/worker"
-	"github.com/rvben/shinyhub/internal/workloadmetrics"
 	"github.com/scaleway/scaleway-sdk-go/scw"
-	gopscpu "github.com/shirou/gopsutil/v4/cpu"
-	gopsmem "github.com/shirou/gopsutil/v4/mem"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/hkdf"
 )
@@ -1071,23 +1060,6 @@ func (cleaners appResourceCleaners) CleanupApp(ctx context.Context, appID int64)
 	return errors.Join(errs...)
 }
 
-// hostSampler samples PID-backed replicas (native) via gopsutil and reports
-// PID-less replicas (docker/remote/fargate handles, whose RunHandle carries a
-// ContainerID rather than a PID) as unmeasured without error: the zero Stats it
-// returns carries a nil CPU rate, so they render as "not available" rather than
-// as an idle app. Returning no error for the PID-less case is deliberate: the
-// status endpoint treats a sampler error as a dead replica, so a running replica
-// on a container/fargate tier must not be probed by PID (PID 0) and misreported
-// as stopped.
-type hostSampler struct{ gops process.GopsutilSampler }
-
-func (h *hostSampler) Sample(handle process.RunHandle) (process.Stats, error) {
-	if handle.PID == 0 {
-		return process.Stats{}, nil
-	}
-	return h.gops.Sample(handle)
-}
-
 func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) error {
 	environment, envErr := config.ServerEnvironment(serverConfigPath(), os.Environ())
 	if envErr != nil {
@@ -1228,6 +1200,11 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 			slog.Warn("store close", "err", err)
 		}
 	}()
+	// Long-lived background services. The shutdown sequence stops each one at
+	// the point it must be gone; this deferred Stop, which runs before the
+	// store closes, joins whatever an early return left running.
+	services := rungroup.New(slog.Default())
+	defer services.Stop()
 	// On the shared-user native runtime a deployed app runs as the same OS user as this
 	// process, and a process environment is readable by any process of that
 	// user. auth.secret signs every session token and derives the key
@@ -1247,46 +1224,8 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		return fmt.Errorf("publish runtime marker: %w", err)
 	}
 	defer clearMarker()
-	// Copy the database aside before changing its schema, so a bad upgrade can
-	// be rolled back by putting the old binary and this file back. A snapshot
-	// that cannot be written aborts startup: migrating a database the operator
-	// cannot recover is worse than not starting.
-	snap, err := backup.PreMigrationSnapshot(cfg, store, time.Now())
-	if err != nil {
-		return fmt.Errorf("pre-migration snapshot: %w (set database.pre_migration_snapshot: false to skip it)", err)
-	}
-	if snap.PruneErr != "" {
-		slog.Warn("prune old pre-migration snapshots failed", "err", snap.PruneErr,
-			"remedy", "delete stale *.pre-migration-v*.sqlite files beside the database by hand")
-	}
-	switch {
-	case snap.Path != "":
-		slog.Info("pre-migration snapshot written", "path", snap.Path,
-			"pending_migrations", len(snap.Pending),
-			"retention", cfg.Database.PreMigrationSnapshotRetention)
-	case len(snap.Pending) > 0 && store.IsPostgres():
-		slog.Warn("applying migrations with no snapshot; take a pg_dump before upgrading a Postgres deployment",
-			"pending_migrations", len(snap.Pending))
-	case len(snap.Pending) > 0:
-		slog.Info("applying migrations without a pre-migration snapshot",
-			"pending_migrations", len(snap.Pending), "reason", snap.Skipped)
-	}
-	if err := store.Migrate(); err != nil {
-		return fmt.Errorf("db migrate: %w", err)
-	}
-	// Refuse to serve a database that a newer build already migrated past this
-	// binary: the schema would carry columns/tables this code cannot read,
-	// risking silent corruption. Fail fast with an actionable message instead.
-	if err := store.VerifySchemaCompatibility(); err != nil {
-		return fmt.Errorf("schema compatibility: %w", err)
-	}
-	if legacyRuns, err := store.CountLegacyUnfencedScheduleRuns(); err != nil {
-		return fmt.Errorf("legacy schedule writer fence: %w", err)
-	} else if legacyRuns > 0 {
-		return fmt.Errorf("legacy schedule writer fence: %d schedule run(s) were running during the 0.12.x upgrade and may have surviving unfenced descendants; stop every old server, verify those process trees are gone, then run `shinyhub resolve-legacy-schedule-writers --acknowledge-processes-stopped` before restarting", legacyRuns)
-	}
-	if err := validateStoredProducerTopology(store, cfg.Runtime); err != nil {
-		return fmt.Errorf("producer topology: %w", err)
+	if err := prepareDatabase(cfg, store, logger, time.Now()); err != nil {
+		return err
 	}
 
 	var (
@@ -1374,183 +1313,22 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		return err
 	}
 
-	// Build one runtime per configured tier. The first tier is the default
-	// (config.Load synthesizes a single "local" tier from Mode when none are
-	// declared, so single-node behavior is unchanged). The default tier's
-	// runtime backs the Manager and every runtime-typed consumer (sampler,
-	// jobs, recovery lister, sweeper); additional tiers are registered so
-	// placement can route replicas to them.
-	defaultTier := cfg.Runtime.DefaultTierName()
-	// Find the full TierConfig for the default tier so LaunchType is carried through.
-	defaultTierCfg := config.TierConfig{Name: defaultTier, Runtime: cfg.Runtime.Mode}
-	for _, t := range cfg.Runtime.Tiers {
-		if t.Name == defaultTier {
-			defaultTierCfg = t
-			break
-		}
-	}
-	var rt process.Runtime
-	if defaultTierCfg.Runtime == "remote_docker" {
-		if workerReg == nil || dialer == nil {
-			return fmt.Errorf("tier %q requires worker hosting to be enabled", defaultTier)
-		}
-		rt = worker.NewRemoteRuntime(workerReg, defaultTier, dialer)
-	} else {
-		rt, err = buildRuntime(ctx, defaultTierCfg, cfg, bundleTokenKey)
-		if err != nil {
-			return err
-		}
-	}
-	slog.Info("runtime configured", "tier", defaultTier, "mode", defaultTierCfg.Runtime, "max_concurrent_builds", cfg.Runtime.MaxConcurrentBuilds)
-	deploy.SetMaxConcurrentBuilds(cfg.Runtime.MaxConcurrentBuilds)
-	mgr := process.NewManager(cfg.Storage.AppsDir, rt)
-	// Processes that survived the last shutdown are still running and still
-	// serving, but this Manager has not adopted them yet: RecoverProcesses does
-	// that from ownerWork, after ownership is acquired, while the listener is
-	// already answering. Declare the pass outstanding here - before anything can
-	// read the Manager - so a reader knows an absent entry means "not looked at"
-	// rather than "not running". RecoverProcesses clears it on every exit path.
-	mgr.MarkRecoveryPending()
-	mgr.SetDefaultTier(defaultTier)
-	mgr.SetStopGrace(cfg.Server.StopGrace)
-	mgr.SetLogMaxSize(int64(cfg.Storage.AppLogMaxSizeMB) << 20)
-	mgr.SetLogRunRecorder(process.LogRunRecorder{
-		Begin: func(run process.LogRun) error {
-			// AppID is absent only in local/test-style starts that are not backed by
-			// an app row. They still get immutable files, but cannot have DB history.
-			if run.AppID == 0 {
-				return nil
-			}
-			var deploymentID *int64
-			if run.DeploymentID != 0 {
-				id := run.DeploymentID
-				deploymentID = &id
-			}
-			return store.CreateAppLogRun(db.CreateAppLogRunParams{
-				RunID: run.RunID, AppID: run.AppID, ReplicaIndex: run.ReplicaIndex,
-				DeploymentID: deploymentID, AppVersion: run.AppVersion,
-				Tier: run.Tier, Status: string(run.Status), StartedAt: run.StartedAt,
-			})
-		},
-		Running: func(run process.LogRun) error {
-			if run.AppID == 0 {
-				return nil
-			}
-			externalLogs := ""
-			if run.ExternalLogs != nil {
-				encoded, err := json.Marshal(run.ExternalLogs)
-				if err != nil {
-					return fmt.Errorf("encode external log handoff: %w", err)
-				}
-				externalLogs = string(encoded)
-			}
-			return store.MarkAppLogRunRunning(run.RunID, run.Provider, externalLogs)
-		},
-		Finish: func(run process.LogRun) error {
-			if run.AppID == 0 {
-				return nil
-			}
-			return store.FinishAppLogRunWithExit(run.RunID, string(run.Status), run.FinishedAt,
-				run.OOMKilled, run.ExitCode, run.Signal, run.ExitReason)
-		},
+	mgr, err := newProcessManager(ctx, processManagerDeps{
+		cfg:            cfg,
+		store:          store,
+		workerReg:      workerReg,
+		dialer:         dialer,
+		bundleTokenKey: bundleTokenKey,
+		secretsKey:     secretsKey,
+		absAppDataDir:  absAppDataDir,
 	})
-	if store.IsPostgres() {
-		mgr.SetLogRunSinkFactory(func(run process.LogRun) (io.WriteCloser, error) {
-			if run.AppID == 0 {
-				return nil, nil
-			}
-			return store.NewAppLogWriter(run.RunID, db.AppLogRetentionBytes)
-		})
-	}
-	for _, tierCfg := range cfg.Runtime.Tiers {
-		if tierCfg.Name == defaultTier {
-			continue
-		}
-		if tierCfg.Runtime == "remote_docker" {
-			if workerReg == nil || dialer == nil {
-				return fmt.Errorf("tier %q requires worker hosting to be enabled", tierCfg.Name)
-			}
-			mgr.RegisterRuntime(tierCfg.Name, worker.NewRemoteRuntime(workerReg, tierCfg.Name, dialer))
-			slog.Info("remote runtime tier registered", "tier", tierCfg.Name, "mode", tierCfg.Runtime)
-			continue
-		}
-		tierRT, err := buildRuntime(ctx, tierCfg, cfg, bundleTokenKey)
-		if err != nil {
-			return err
-		}
-		mgr.RegisterRuntime(tierCfg.Name, tierRT)
-		slog.Info("runtime tier registered", "tier", tierCfg.Name, "mode", tierCfg.Runtime)
-	}
-	mgr.SetEnvResolver(func(slug string) ([]string, []string, error) {
-		app, err := store.GetApp(slug)
-		if err != nil {
-			return nil, nil, err
-		}
-		vars, err := store.ListAppEnvVars(app.ID)
-		if err != nil {
-			return nil, nil, err
-		}
-		env, secretEnv, err := appenv.Resolve(vars, secretsKey)
-		if err != nil {
-			return nil, nil, fmt.Errorf("resolve env for app %s: %w", slug, err)
-		}
-		return env, secretEnv, nil
-	})
-	mgr.SetSharedMountResolver(func(slug string) ([]process.SharedMount, error) {
-		app, err := store.GetApp(slug)
-		if err != nil {
-			return nil, err
-		}
-		rows, err := store.ListSharedDataSources(app.ID)
-		if err != nil {
-			return nil, err
-		}
-		out := make([]process.SharedMount, 0, len(rows))
-		for _, m := range rows {
-			out = append(out, process.SharedMount{
-				SourceSlug: m.SourceSlug,
-				HostPath:   filepath.Join(absAppDataDir, m.SourceSlug),
-			})
-		}
-		return out, nil
-	})
-	if err := mgr.SetAppDataRoot(absAppDataDir); err != nil {
-		return fmt.Errorf("set app data root: %w", err)
-	}
-	if err := mgr.SetAppCache(cfg.Storage.AppCacheDir, cfg.Storage.CacheMaxMB()); err != nil {
-		return fmt.Errorf("set app cache: %w", err)
+	if err != nil {
+		return err
 	}
 
-	// Tracing: shared ring buffer surfaced by the /traces handler, plus
-	// platform-default OTEL_* env vars injected into every app process so
-	// Shiny's built-in OpenTelemetry exporter reaches the configured backend
-	// without per-app configuration. Both are no-ops when cfg.Tracing.Enabled
-	// is false.
+	// Tracing: shared ring buffer surfaced by the /traces handler. It is a
+	// no-op when cfg.Tracing.Enabled is false.
 	traceBuffer := tracing.NewBuffer(cfg.Tracing.RingBufferSize, time.Duration(cfg.Tracing.SlowRequestMS)*time.Millisecond)
-	mgr.SetPlatformDefaultEnvResolver(func(slug string, replica int) []string {
-		env := tracing.EnvFor(cfg.Tracing, slug, replica)
-		// Identity: every app receives its verification key and its own
-		// slug, unconditionally (the key alone discloses nothing - it only
-		// verifies tokens that are never minted while forwarding is
-		// disabled - and unconditional injection means enabling the flag
-		// later doesn't strand running apps without a key). The numeric ID
-		// scopes the key so a delete-and-recreate under the same slug
-		// cannot inherit its predecessor's key.
-		app, err := store.GetApp(slug)
-		if err != nil {
-			slog.Warn("identity: resolve app for key derivation; skipping identity env", "slug", slug, "err", err)
-			return env
-		}
-		key := identity.DeriveKey(cfg.Auth.Secret, app.ID)
-		return append(env,
-			"SHINYHUB_IDENTITY_KEY="+hex.EncodeToString(key),
-			"SHINYHUB_APP_SLUG="+slug,
-		)
-	})
-	// The Enabled conjunct is belt-and-braces on top of config validation:
-	// wrapping apps that would export nowhere must be impossible.
-	mgr.SetAutoInstrumentAppsDefault(cfg.Tracing.Enabled && cfg.Tracing.AutoInstrumentApps)
-	mgr.SetAutoInstrumentExtraPackages(cfg.Tracing.AutoInstrumentExtraPackages)
 
 	prx := proxy.New()
 	prx.SetTracing(cfg.Tracing, traceBuffer)
@@ -1606,20 +1384,13 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	var usageRecorder *usage.Recorder
 	if cfg.Usage.Enabled {
 		usageRecorder = usage.NewRecorderWithPolicy(store, cfg.Server.InstanceID, usagePolicy)
-		usageCtx, cancelUsage := context.WithCancel(context.Background())
-		var usageWG sync.WaitGroup
-		usageWG.Add(1)
-		go func() {
-			defer usageWG.Done()
-			usageRecorder.Run(usageCtx)
-		}()
+		usageService := services.Go("usage recorder", serviceStoreStopBudget, usageRecorder.Run)
 		prx.SetUsageRecorder(usageRecorder)
 		var stopOnce sync.Once
 		stopUsage = func() {
 			stopOnce.Do(func() {
 				prx.SetUsageRecorder(nil)
-				cancelUsage()
-				usageWG.Wait()
+				usageService.Stop()
 			})
 		}
 		defer stopUsage()
@@ -1657,23 +1428,12 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// periodically upserts its local per-(app, replica) active-connection
 	// counts into replica_sessions so other instances can aggregate fleet
 	// load. Single-node deployments skip this entirely: no rows, no goroutine.
-	var reporterWG sync.WaitGroup
-	var reporterCancel context.CancelFunc
-	// Declared here, started once the /app/* chain below is wired (the recheck
-	// reuses that chain's store and user lookup so both decide alike).
-	var recheckWG sync.WaitGroup
-	var recheckCancel context.CancelFunc
+	var reporterService *rungroup.Service
 	if isClustered(cfg) {
 		flushCh := make(chan string, 16)
 		prx.EnableImmediateFlush(flushCh)
 		reporter := proxy.NewSessionReporter(prx, store, cfg.Server.InstanceID, flushCh)
-		reporterCtx, cancelReporter := context.WithCancel(context.Background())
-		reporterCancel = cancelReporter
-		reporterWG.Add(1)
-		go func() {
-			defer reporterWG.Done()
-			reporter.Run(reporterCtx)
-		}()
+		reporterService = services.Go("session reporter", serviceStoreStopBudget, reporter.Run)
 		slog.Info("session reporter started",
 			"interval", proxy.ReporterInterval,
 			"stale_cutoff", proxy.ReplicaSessionStaleCutoff,
@@ -1693,18 +1453,18 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		prx.SetRetiringParent(fence)
 		var releaseOnce sync.Once
 		releaseRetiringParentFence = func() { releaseOnce.Do(func() { close(fence) }) }
-		go func() {
-			if err := upg.WaitForParent(ctx); err != nil {
+		services.Go("retiring parent wait", serviceMemoryStopBudget, func(wctx context.Context) {
+			if err := upg.WaitForParent(wctx); err != nil {
 				// Fail closed: an unconfirmed parent's sessions must not be
-				// mistaken for zero. No store access in this goroutine.
-				if ctx.Err() == nil {
+				// mistaken for zero. No store access in this service.
+				if wctx.Err() == nil {
 					logger.Error("cannot confirm retiring proxy exit; lifecycle changes remain fenced", "err", err)
 				}
 				return
 			}
 			relayLeases.Refresh()
 			close(done)
-		}()
+		})
 	}
 
 	// In clustered deployments every instance runs a pool syncer that
@@ -1713,22 +1473,17 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// placement registry. Single-node deployments skip this entirely: the
 	// deploy fast-path and RecoverProcesses remain the sole pool-population
 	// paths, byte-for-byte unchanged.
-	var syncerWG sync.WaitGroup
-	var syncerCancel context.CancelFunc
+	var syncerService *rungroup.Service
 	if isClustered(cfg) {
 		transportBuilder := worker.NewReplicaTransportBuilder(dialer, store)
 		syncer := proxy.NewPoolSyncer(prx, store, transportBuilder, slog.Default(), cfg.Auth.IdentityHeadersEnabled())
 		syncer.SetReplicaValidator(lifecycle.ReplicaRouteValidator(store, mgr))
 		syncer.SetReconcileGuard(srv.TryAcquireFleetReconciliation)
-		syncerCtx, cancelSyncer := context.WithCancel(context.Background())
-		syncerCancel = cancelSyncer
-		syncerWG.Add(1)
-		go func() {
-			defer syncerWG.Done()
-			syncer.Run(syncerCtx)
-		}()
+		syncerService = services.Go("pool syncer", serviceStoreStopBudget, syncer.Run)
 		// Wire the on-miss sync hook so a first-request for a freshly-started
 		// app is served immediately without waiting for the next background tick.
+		// It binds to the syncer's context so stopping the syncer ends it too.
+		syncerCtx := syncerService.Context()
 		prx.SetOnMissSync(func(slug string) {
 			syncer.SyncSlug(syncerCtx, slug)
 		})
@@ -1795,103 +1550,16 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	var metricsLn net.Listener
 	var metricsReg *metrics.Registry
 	if cfg.Metrics.Enabled {
-		reg := metrics.New(version)
-		reg.RegisterDBStats(store.Stats)
-		metricsReg = reg
-		if usageRecorder != nil {
-			usageRecorder.SetMetrics(reg)
-		}
-		srv.SetMetrics(reg)
-		prx.SetRejectRecorder(reg)
-		// Fleet gauges read live counts from the store at scrape time, so
-		// "apps/replicas running right now" is answerable from Prometheus alone.
-		reg.RegisterFleetGauges(
-			func() float64 {
-				n, err := store.CountRunningApps()
-				if err != nil {
-					return 0
-				}
-				return float64(n)
-			},
-			func() float64 {
-				n, err := store.CountRunningReplicas()
-				if err != nil {
-					return 0
-				}
-				return float64(n)
-			},
-			func() float64 {
-				n, err := store.CountCrashedApps()
-				if err != nil {
-					return 0
-				}
-				return float64(n)
-			},
-		)
-		reg.RegisterRetiredGauges(func() (int, int64, bool) { st := relayLeases.Status(); return st.Count, st.Sessions, st.Unknown })
-		// Schedule last-success gauge: DB-backed (restart-safe), one sample per
-		// schedule that has ever succeeded.
-		if err := reg.Register(metrics.NewScheduleFreshnessCollector(func() ([]metrics.ScheduleSample, error) {
-			rows, qerr := store.ScheduleFreshness()
-			if qerr != nil {
-				return nil, qerr
-			}
-			out := make([]metrics.ScheduleSample, len(rows))
-			for i, fr := range rows {
-				s := metrics.ScheduleSample{
-					Slug: fr.Slug, Name: fr.Name, Enabled: fr.Enabled,
-					ConsecutiveFailures: fr.ConsecutiveFailures,
-					ActivationStatus:    fr.ActivationStatus,
-					CapacityDeferrals:   fr.ActivationCapacityDeferrals,
-				}
-				if fr.LastFailureAt != nil {
-					s.LastFailureUnix = fr.LastFailureAt.Unix()
-				}
-				if fr.LastInterruptedAt != nil {
-					s.LastInterruptedUnix = fr.LastInterruptedAt.Unix()
-				}
-				if fr.LastSuccessAt != nil {
-					s.LastSuccessUnix = fr.LastSuccessAt.Unix()
-					s.OK = true
-				}
-				if fr.ActivationCreatedAt != nil {
-					s.ActivationCreatedUnix = fr.ActivationCreatedAt.Unix()
-				}
-				if fr.ActivationCapacityDeferredAt != nil {
-					s.CapacityDeferredUnix = fr.ActivationCapacityDeferredAt.Unix()
-				}
-				if fr.ActivationGeneration != nil {
-					s.ActivationGeneration = *fr.ActivationGeneration
-				}
-				out[i] = s
-			}
-			return out, nil
-		})); err != nil {
-			slog.Warn("register schedule freshness collector", "err", err)
-		}
-		// Per-app session gauges: sampled live from the proxy at scrape time so a
-		// Grafana panel can show sessions-vs-ceiling without polling the REST API.
-		// The admission ceiling is per-replica cap times the live replica count;
-		// uncapped pools emit only the sessions gauge (no meaningful ceiling).
-		if err := reg.Register(metrics.NewSessionGaugesCollector(func() []metrics.SessionSample {
-			stats := prx.PoolSessionSnapshot()
-			out := make([]metrics.SessionSample, 0, len(stats))
-			for slug, st := range stats {
-				out = append(out, metrics.SessionSample{
-					Slug: slug, Sessions: st.Sessions, Cap: st.Cap, Replicas: st.Replicas,
-				})
-			}
-			return out
-		})); err != nil {
-			slog.Warn("register session gauges collector", "err", err)
-		}
-		// Surface dropped audit events (e.g. disk full) as a counter so the
-		// silent loss of the compliance trail is alertable.
-		store.SetAuditErrorHook(reg.RecordAuditWriteError)
-		// Shared-log writers capture this recorder when they are created. Keep
-		// persistence health observable without importing Prometheus from db.
-		store.SetAppLogMetrics(reg)
-		metricsSrv, metricsLn, err = startMetricsListener(upg.Listen, cfg.Metrics.Addr, reg)
+		metricsReg = newServerMetrics(serverMetricsDeps{
+			version:       version,
+			logger:        logger,
+			store:         store,
+			srv:           srv,
+			prx:           prx,
+			usageRecorder: usageRecorder,
+			relayLeases:   relayLeases,
+		})
+		metricsSrv, metricsLn, err = startMetricsListener(upg.Listen, cfg.Metrics.Addr, metricsReg)
 		if err != nil {
 			return err
 		}
@@ -1924,43 +1592,17 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		defer func() { _ = tracer.Shutdown(context.Background()) }()
 	}
 
-	var stopWorkloadMetrics func()
-	if cfg.Metrics.ProcessInterval > 0 {
-		// The ownership-lease ID defaults to hostname-PID and changes on restart.
-		// Counts need the stable server slot, while launch CPU streams stay unique.
-		listener := net.JoinHostPort(cfg.Server.Host, strconv.Itoa(cfg.Server.Port))
-		collector, setupErr := workloadmetrics.New(cfg.Tracing, cfg.Metrics.ProcessInterval, listener)
-		if setupErr != nil {
-			return fmt.Errorf("workload metrics setup: %w", setupErr)
-		}
-		for _, tier := range cfg.Runtime.Tiers {
-			if native, ok := mgr.RuntimeForTier(tier.Name).(interface {
-				SetWorkloadObserver(process.WorkloadObserver)
-			}); ok {
-				native.SetWorkloadObserver(collector.Observe)
-			}
-		}
-		metricsCtx, cancelMetrics := context.WithCancel(context.Background())
-		var metricsWG sync.WaitGroup
-		metricsWG.Add(1)
-		go func() {
-			defer metricsWG.Done()
-			collector.Run(metricsCtx)
-		}()
-		var stopOnce sync.Once
-		stopWorkloadMetrics = func() {
-			stopOnce.Do(func() {
-				cancelMetrics()
-				metricsWG.Wait()
-				flushCtx, cancelFlush := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancelFlush()
-				if err := collector.Shutdown(flushCtx); err != nil {
-					slog.Warn("workload metrics shutdown failed")
-				}
-			})
-		}
+	stopWorkloadMetrics, err := startWorkloadMetrics(workloadMetricsDeps{
+		cfg:      cfg,
+		mgr:      mgr,
+		services: services,
+		logger:   logger,
+	})
+	if err != nil {
+		return err
+	}
+	if stopWorkloadMetrics != nil {
 		defer stopWorkloadMetrics()
-		slog.Info("native workload metrics enabled", "interval", cfg.Metrics.ProcessInterval)
 	}
 
 	// Running with neither metrics nor tracing means no external visibility into
@@ -1970,112 +1612,9 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		slog.Warn("observability disabled: no Prometheus metrics or OTel tracing are enabled; enable metrics.enabled to get request/error/crashed-app signals")
 	}
 
-	// Emit a structured access log for every proxied app request. Using the
-	// Server's trusted-proxy-aware ClientIP keeps the "client" field honest
-	// when shinyhub itself sits behind an edge proxy; this is independent of
-	// anything the backend app (uvicorn/httpuv) chooses to print in its own
-	// log and gives operators a reliable per-slug audit trail.
-	prx.SetClientIPResolver(srv.ClientIP)
-	// Distinguish unknown-slug requests from hibernated-app requests so the
-	// proxy returns 404 for typos / deleted apps instead of looping the
-	// loading page indefinitely. The lookup hits SQLite (cached page) and
-	// only runs on miss, so the cost is negligible.
-	//
-	// We distinguish "row missing" (db.ErrNotFound → return false, nil → 404)
-	// from "lookup itself failed" (DB unavailable, ctx cancelled → return
-	// false, err → fall through to loading page). Conflating them would 404
-	// a real app whenever SQLite hiccupped, masking transient infra issues
-	// as a permanent "deleted app" UX.
-	prx.SetSlugExists(func(slug string) (bool, error) {
-		_, err := store.GetAppBySlug(slug)
-		if err == nil {
-			return true, nil
-		}
-		if errors.Is(err, db.ErrNotFound) {
-			return false, nil
-		}
-		slog.Warn("proxy_slug_lookup_failed", "slug", slug, "error", err.Error())
-		return false, err
-	})
-	prx.SetAccessLogger(func(e proxy.AccessLogEntry) {
-		attrs := []any{
-			"slug", e.Slug,
-			"method", e.Method,
-			"path", e.Path,
-			"status", e.Status,
-			"bytes", e.Bytes,
-			"duration_ms", e.Duration.Milliseconds(),
-			"client_ip", e.ClientIP,
-			"peer", e.Peer,
-		}
-		if e.ReplicaIndex >= 0 {
-			attrs = append(attrs, "replica", e.ReplicaIndex, "sticky", e.Sticky)
-		}
-		if e.Reject != "" {
-			attrs = append(attrs, "reject", string(e.Reject))
-		}
-		if e.Fallback {
-			attrs = append(attrs, "fallback", true, "fallback_reason", e.FallbackReason)
-		}
-		slog.Info("proxy_access", attrs...)
-	})
-	wsBursts := proxy.NewWSAbnormalBurstDetector()
-	prx.SetWSSessionEndRecorder(func(e proxy.WSSessionEnd) {
-		attrs := []any{
-			"slug", e.Slug, "connection_id", e.ConnectionID, "replica", e.ReplicaIndex,
-			"deployment_id", e.DeploymentID, "duration_ms", e.Duration.Milliseconds(),
-			"closed_by", e.ClosedBy, "end_signal", e.EndSignal,
-			"transport_end_side", e.TransportEndSide, "bytes_to_client", e.BytesToClient,
-			"bytes_to_upstream", e.BytesToUpstream, "abnormal", e.Abnormal,
-		}
-		if e.CloseCode != nil {
-			attrs = append(attrs, "close_code", *e.CloseCode)
-		}
-		if e.CloseReason != "" {
-			attrs = append(attrs, "close_reason", e.CloseReason)
-		}
-		if metricsReg != nil {
-			metricsReg.RecordWSSessionEnd(e.Slug, e.ClosedBy, e.TransportEndSide, e.Abnormal)
-		}
-		if e.Abnormal {
-			slog.Warn("ws_session_end", attrs...)
-		} else {
-			slog.Info("ws_session_end", attrs...)
-		}
-		if burst, ok := wsBursts.Record(e); ok {
-			if metricsReg != nil {
-				metricsReg.RecordWSAbnormalBurst(burst.Slug)
-			}
-			burstAttrs := []any{
-				"slug", burst.Slug, "replica", burst.Replica,
-				"deployment_id", burst.DeploymentID, "count", burst.Count,
-				"window_ms", burst.Window.Milliseconds(), "span_ms", burst.Span.Milliseconds(),
-			}
-			if burst.CloseCode != nil {
-				burstAttrs = append(burstAttrs, "close_code", *burst.CloseCode)
-			}
-			if burst.CloseReason != "" {
-				burstAttrs = append(burstAttrs, "close_reason", burst.CloseReason)
-			}
-			slog.Warn("ws_abnormal_burst", burstAttrs...)
-		}
-	})
+	configureProxyObservability(logger, prx, srv, store, metricsReg)
 
-	// Choose the metrics sampler. A docker default tier samples container stats
-	// through the Runtime API. Otherwise use the host sampler, which reads host
-	// PIDs for native replicas and reports PID-less replicas (fargate/remote
-	// container handles) as zero usage without error, so a running replica on
-	// such a tier is never misreported as stopped by a failed PID probe.
-	// Compare the default tier's resolved runtime rather than cfg.Runtime.Mode
-	// (the legacy field): a config that declares tiers:[{runtime:docker}]
-	// without setting runtime.mode must still pick the RuntimeSampler, not the
-	// host sampler.
-	var replicaSampler process.Sampler
-	if defaultTierCfg.Runtime == "docker" {
-		replicaSampler = &process.RuntimeSampler{Runtime: rt}
-	} else {
-		replicaSampler = &hostSampler{}
-	}
+	replicaSampler, histSampler := replicaSamplers(cfg, mgr)
 	srv.SetSampler(replicaSampler)
 
 	// Start the in-memory metrics-history collector unless disabled
@@ -2083,23 +1622,12 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// runs locally) with its own sampler instance so its CPU deltas are
 	// independent of the API's on-demand sampler. Cancelled + joined at shutdown
 	// so it stops cleanly on SIGTERM and on a tableflip re-exec.
-	var historyWG sync.WaitGroup
-	var historyCancel context.CancelFunc
+	var historyService *rungroup.Service
 	if cfg.Metrics.HistoryWindow > 0 {
 		histStore := history.NewStore(cfg.Metrics.HistoryWindow, cfg.Metrics.HistoryInterval)
 		srv.SetHistory(histStore)
-		var histSampler process.Sampler = &process.GopsutilSampler{}
-		if defaultTierCfg.Runtime == "docker" {
-			histSampler = &process.RuntimeSampler{Runtime: rt}
-		}
 		collector := history.NewCollector(mgr, prx, histSampler, histStore, cfg.Metrics.HistoryInterval)
-		historyCtx, cancel := context.WithCancel(context.Background())
-		historyCancel = cancel
-		historyWG.Add(1)
-		go func() {
-			defer historyWG.Done()
-			collector.Run(historyCtx)
-		}()
+		historyService = services.Go("metrics history collector", serviceMemoryStopBudget, collector.Run)
 		slog.Info("metrics history collector started",
 			"window", cfg.Metrics.HistoryWindow, "interval", cfg.Metrics.HistoryInterval)
 	}
@@ -2317,145 +1845,9 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// the watcher is constructed above.
 	watcher.SetElasticTerminator(elasticSpawner)
 
-	// Host-memory admission floor for elastic pools: while MemAvailable is
-	// below the configured floor, new worker allocation is shed (503) instead
-	// of letting the kernel OOM killer pick a live worker. Probe errors fail
-	// open inside the proxy.
-	if minMB := cfg.MinAvailableMemoryMB(); minMB > 0 {
-		prx.SetMemoryGuard(minMB, func() (int, bool) {
-			vm, err := gopsmem.VirtualMemory()
-			if err != nil {
-				return 0, false
-			}
-			return int(vm.Available / (1024 * 1024)), true
-		})
-		slog.Info("elastic admission memory floor active", "min_available_memory_mb", minMB)
+	if err := configureProxyAdmission(cfg, store, srv, prx, services); err != nil {
+		return err
 	}
-
-	// Render-aware admission. Detect the cores the pacer sizes against and log
-	// which source won so an operator can see the effective number.
-	renderCores, coreSource := admission.Detect(cfg.RenderCapacityCores())
-	slog.Info("render admission: effective cores", "cores", renderCores, "source", coreSource)
-
-	// Host capacity: the scale Overview measures fleet usage against when no app
-	// carries an enforced per-replica limit. Separate override from the pacer's
-	// render_capacity_cores, because one is a reporting scale and the other is a
-	// pacing budget; the detection behind both is the same.
-	hostCores, hostCoreSource := admission.Detect(cfg.HostCapacityCores())
-	slog.Info("live-update CPU accounting", "worker_cpu_request_cores", cfg.Server.UpdateCapacity.CPURequest(),
-		"counts_idle_and_suspended_workers", true)
-	hostMemoryMB, hostMemorySource, hostMemoryOK := admission.DetectMemory(cfg.HostCapacityMemoryMB())
-	if !hostMemoryOK {
-		hostMemoryMB, hostMemorySource = 0, ""
-		slog.Warn("host capacity: memory could not be detected; Overview will report usage without a memory scale",
-			"hint", "set server.host_capacity_memory_mb to supply it")
-	}
-	srv.SetHostCapacity(hostCores, hostCoreSource, hostMemoryMB, hostMemorySource)
-	slog.Info("host capacity", "cores", hostCores, "cores_source", hostCoreSource,
-		"memory_mb", hostMemoryMB, "memory_source", hostMemorySource)
-
-	// Host CPU watermark, only when enabled. It samples on its own goroutine;
-	// cpu.Percent blocks, so it is never called from the admission path. Under
-	// runtime.mode docker this is sized against the ShinyHub process, not each
-	// worker's container quota (a known limitation).
-	if maxCPU := cfg.MaxCPUPercent(); maxCPU > 0 {
-		wm := admission.NewWatermark(maxCPU, func() (float64, error) {
-			pcts, err := gopscpu.Percent(0, false)
-			if err != nil {
-				return 0, err
-			}
-			if len(pcts) == 0 {
-				return 0, fmt.Errorf("cpu.Percent returned no samples")
-			}
-			return pcts[0], nil
-		})
-		go wm.Run(ctx)
-		prx.SetCPUWatermark(wm)
-	}
-
-	// Size a per-app limiter for every app that has opted into pacing
-	// (render_seconds > 0). Apps at the default 0 get no limiter, so this is a
-	// no-op today. The access-mode lookup lets per-principal fairness key
-	// correctly.
-	prx.SetAppAccessLookup(func(slug string) string {
-		if a, err := store.GetAppBySlug(slug); err == nil {
-			return a.Access
-		}
-		return "" // unknown: the charge-point plan treats this as the conservative case
-	})
-	renderApps, err := store.ListApps(0, 0) // limit <= 0 means all apps (queries.go ListApps)
-	if err != nil {
-		return fmt.Errorf("list apps for render-admission sizing: %w", err)
-	}
-
-	// Build the limiter factory once, capturing the effective host sizing, so a
-	// render_seconds change (CLI/API/manifest, or poolsync convergence) can install
-	// or clear a limiter live without calling Detect again.
-	headroom := cfg.RenderHeadroom()
-	divisor := cfg.PrincipalShareDivisor()
-	principalBurst := cfg.RenderPrincipalBurst()
-	lru := cfg.PrincipalLRUCapacity()
-	prx.SetRenderLimiterFactory(func(renderSeconds float64) *admission.AppLimiter {
-		return proxy.BuildAppLimiter(renderSeconds, renderCores, headroom, float64(principalBurst), divisor, lru)
-	})
-	for _, a := range renderApps {
-		prx.ApplyRenderPacing(a.Slug, a.RenderSeconds)
-	}
-	srv.SetRenderPacingCores(renderCores, coreSource)
-	prx.SetRenderParkBudget(cfg.RenderParkMaxPerApp(), cfg.RenderParkMaxTotal())
-	prx.SetRenderParkTTL(cfg.RenderParkTTL())
-	prx.SetRenderPageWait(cfg.RenderParkTTL())
-
-	// Let the proxy render a clear status page (instead of the endless loading
-	// spinner) when a request hits an app that is crashed or stopped, and the
-	// deploying wait page while a deployment is in flight. MissStatus reports
-	// "deploying" from the pending deployment row, which GetAppBySlug already
-	// joins in, so this costs no extra query; DeployInFlight (a map read)
-	// keeps a stale pending row from masking a stopped/crashed app.
-	prx.SetAppStatusLookup(func(slug string) (string, string) {
-		app, err := store.GetAppBySlug(slug)
-		if err != nil {
-			return "", ""
-		}
-		return app.MissStatus(srv.DeployInFlight(slug))
-	})
-	prx.SetAppNameLookup(func(slug string) string {
-		app, err := store.GetAppBySlug(slug)
-		if err != nil {
-			return ""
-		}
-		return app.Name
-	})
-
-	var versionSwitchPolicies sync.Map
-	type servedVersionSwitchPolicy struct{ slug, policy string }
-	prx.SetVersionSwitchLookup(func(slug string, deploymentID int64) string {
-		if cached, ok := versionSwitchPolicies.Load(deploymentID); ok {
-			entry := cached.(servedVersionSwitchPolicy)
-			if entry.slug == slug {
-				return entry.policy
-			}
-			return "manual"
-		}
-		app, err := store.GetAppBySlug(slug)
-		if err != nil {
-			return "manual"
-		}
-		served, err := store.GetDeploymentByID(deploymentID)
-		if err != nil || served.AppID != app.ID {
-			return "manual"
-		}
-		manifest, err := deploy.LoadManifest(served.BundleDir)
-		if err != nil || manifest == nil {
-			return "manual"
-		}
-		versionSwitchPolicies.Store(deploymentID, servedVersionSwitchPolicy{slug: slug, policy: manifest.App.VersionSwitch})
-		return manifest.App.VersionSwitch
-	})
-
-	// Hold a request for a not-yet-routable app while its wake completes, so a
-	// warm resume serves inline (no loading-page round-trip). 0 disables it.
-	prx.SetWakeHoldTimeout(cfg.Lifecycle.WakeHold)
 
 	// Record hibernate/wake transitions and crash-restart counts when metrics
 	// are enabled. Nil-safe inside the watcher when metrics are disabled.
@@ -2509,23 +1901,15 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		})
 	}
 
-	// reconcileCleaner is captured by ownerWork for owner-scoped cleanup so only
+	// reconcileCleaner is handed to the owner runtime for owner-scoped cleanup so only
 	// the lease holder mutates retained cloud resources.
 	var reconcileCleaner lifecycle.AppSecretsCleaner
 	if len(managedResourceCleaners) > 0 {
 		reconcileCleaner = managedResourceCleaners
 	}
 
-	// Worker-down monitor: object created here, loop started inside ownerWork.
+	// Worker-down monitor: object created here, loop started as owner work.
 	// Only relevant when worker hosting is enabled.
-	const (
-		workerTimeout   = 90 * time.Second
-		monitorInterval = 30 * time.Second
-		// workerRetention is how long a down, non-revoked worker row with no
-		// live replicas is kept before being reaped. It is far longer than the
-		// down timeout so a briefly-flapping worker is never tombstoned.
-		workerRetention = 24 * time.Hour
-	)
 	var monitor *lifecycle.WorkerDownMonitor
 	if workerReg != nil {
 		monitor = lifecycle.NewWorkerDownMonitor(store, workerTimeout, workerRetention, workerReg.Reap, func(slug string, index int, expectURL string) {
@@ -2575,7 +1959,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// Replica autoscaling is opt-in per app and gated by a global switch. When
 	// enabled, the controller evaluates opted-in apps on its own interval and
 	// drives the same incremental scale primitives the API exposes; it never
-	// scales worker hosts. The loop is started inside ownerWork.
+	// scales worker hosts. The loop is started inside ownerRuntime.run.
 	var controller *autoscale.Controller
 	if cfg.Runtime.Autoscale.Enabled {
 		runtimeMax := cfg.Runtime.MaxReplicas
@@ -2612,381 +1996,29 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		}
 	}
 
-	// ownerWork runs the owner-only startup and background loops for one span of
-	// ownership. It performs the destructive boot-time reconciles/sweeps
-	// exactly once (deferred until ownership so a coexisting new instance never
-	// fails the old owner's in-flight deploy), starts the owner-scoped background loops
-	// bound to octx, then blocks until ownership is lost and stops them.
-	// jobsMgr/sched/watcher/monitor/controller are created once above and reused
-	// across spans (the scheduler supports stop/start cycles).
-	// ownerReady is true only while this instance is the owner AND its worker
-	// routing index has been refreshed for the current ownership span. The
-	// mutation gates require it (not just IsOwner): the elector flips IsOwner true
-	// before ownerWork runs, so without this a freshly-acquired owner could admit
-	// deploy-placement / worker mutations against a stale index.
-	var ownerReady atomic.Bool
-	// handoffIncomplete records that an ownership handoff drain gave up with
-	// work still running; see drainOwnershipHandoff.
-	var handoffIncomplete atomic.Bool
-	ownerWork := func(octx context.Context, epoch int64) {
-		ownerReady.Store(false)       // closed at the start of every ownership span
-		defer ownerReady.Store(false) // and on span exit (ownership lost / shutdown)
-		slog.Info("became control-plane owner", "epoch", epoch, "instance", cfg.Server.InstanceID)
-		retryOwnerStep := func(label string, fn func() error) bool {
-			for {
-				if err := fn(); err == nil {
-					return true
-				} else {
-					slog.Error(label, "err", err)
-				}
-				select {
-				case <-octx.Done():
-					return false
-				case <-time.After(registryRefreshBackoff):
-				}
-			}
-		}
-
-		// Reconcile the environment-managed deploy credential before opening the
-		// owner readiness gate. Standbys authenticate against the same database but
-		// never write this singleton configuration state themselves.
-		for {
-			if err := syncDeployCredential(); err == nil {
-				break
-			} else {
-				slog.Error("reconcile deploy token configuration", "err", err)
-			}
-			select {
-			case <-octx.Done():
-				return
-			case <-time.After(registryRefreshBackoff):
-			}
-		}
-
-		// Rebuild the worker routing index from the authoritative DB so this new
-		// active reflects every worker row the previous owner wrote before it died.
-		// Fail-closed: retry until it succeeds or ownership is lost, so owner work
-		// (placement-affecting reconciles, loops, and admitted mutations) never runs
-		// on a stale index. A persistent failure means the DB is unusable, where no
-		// owner work could function anyway.
-		if workerReg != nil && !refreshUntilReady(octx, workerReg, registryRefreshBackoff, slog.Default()) {
-			return // lost ownership before a fresh index; start no owner work
-		}
-		// Rewrite any legacy relative bundle_dir rows to their canonical absolute
-		// path under the configured apps_dir. Idempotent; must run before recovery
-		// so process adoption sees absolute paths.
-		if err := lifecycle.NormalizeBundleDirs(store, cfg.Storage.AppsDir); err != nil {
-			slog.Error("bundle_dir backfill", "err", err)
-		}
-		// Fence startup's destructive reconciliation/adoption across every app.
-		// This waits for lifecycle handlers that may still be unwinding on a
-		// retiring process, including handlers that outlived HTTP shutdown.
-		var releaseStartupFence func()
-		if !retryOwnerStep("acquire startup app-operation fence", func() error {
-			var err error
-			releaseStartupFence, err = srv.AcquireFleetAppOperations()
-			return err
-		}) {
-			return
-		}
-		startupFenceHeld := true
-		defer func() {
-			if startupFenceHeld {
-				releaseStartupFence()
-			}
-		}()
-		// A Docker one-shot producer survives a control-plane crash. Force-remove
-		// every such orphan and retry on any daemon uncertainty before recovery can
-		// adopt or boot a consumer over data that is still being mutated.
-		for {
-			fenceCtx, cancelFence := context.WithTimeout(octx, 60*time.Second)
-			containerErr := lifecycle.FenceOrphanScheduleContainersForTiers(mgr, cfg.Runtime.TierOrder())
-			taskErr := lifecycle.FenceOrphanScheduleTasksForTiers(fenceCtx, mgr, cfg.Runtime.TierOrder())
-			cancelFence()
-			if containerErr == nil && taskErr == nil {
-				break
-			}
-			slog.Error("fence orphan schedule producers", "container_err", containerErr, "task_err", taskErr)
-			select {
-			case <-octx.Done():
-				return
-			case <-time.After(registryRefreshBackoff):
-			}
-		}
-		var appsForPublicationFence []*db.App
-		if !retryOwnerStep("list apps for publication recovery fence", func() error {
-			var err error
-			appsForPublicationFence, err = store.ListApps(0, 0)
-			return err
-		}) {
-			return
-		}
-		appIDsForPublicationFence := make([]int64, 0, len(appsForPublicationFence))
-		for _, app := range appsForPublicationFence {
-			appIDsForPublicationFence = append(appIDsForPublicationFence, app.ID)
-		}
-		var releasePublicationFences func()
-		if !retryOwnerStep("acquire publication recovery fences", func() error {
-			var err error
-			releasePublicationFences, err = jobsMgr.AcquirePublicationRecoveryFences(octx, appIDsForPublicationFence)
-			return err
-		}) {
-			return
-		}
-		publicationFencesHeld := true
-		defer func() {
-			if publicationFencesHeld {
-				releasePublicationFences()
-			}
-		}()
-		// A previous owner may have completed while we waited for its physical
-		// writer lock. Only rows still running now are truly interrupted/uncertain.
-		var interruptedRuns []db.ScheduleRunTransition
-		if !retryOwnerStep("terminalize inherited schedule runs", func() error {
-			var err error
-			interruptedRuns, err = store.MarkRunningSchedulesInterrupted()
-			return err
-		}) {
-			return
-		} else if len(interruptedRuns) > 0 {
-			slog.Warn("terminalized inherited schedule runs", "count", len(interruptedRuns))
-			jobsMgr.ReportScheduleRunTransitions(interruptedRuns...)
-		}
-		// Resolve interrupted deployments before recovery. Fail closed and retry:
-		// a candidate producer may already have published incompatible shared data,
-		// in which case prior consumers must never be adopted.
-		for {
-			if err := lifecycle.ReconcileInflightDeployments(store); err == nil {
-				break
-			} else {
-				slog.Error("reconcile interrupted deployments", "err", err)
-			}
-			select {
-			case <-octx.Done():
-				return
-			case <-time.After(registryRefreshBackoff):
-			}
-		}
-		// Migrations may have completed while a predecessor owner still had an
-		// admitted legacy deploy handler. The exclusive startup fence above now
-		// proves those writers are gone, so repair tokens and active pointers from
-		// the final succeeded ledger before process recovery consults them.
-		if !retryOwnerStep("repair deployment generation ledger", store.RepairDeploymentGenerationLedger) {
-			return
-		}
-		// Finish any app deletion interrupted between the 'deleting' tombstone and
-		// the row removal. Reconcile first so freshly-cleaned slugs are not flagged
-		// as orphans by the next step.
-		lifecycle.ReconcileDeletingApps(octx, store, cfg, reconcileCleaner)
-		// Report (do not delete) slug dirs with no owning row. Run AFTER
-		// ReconcileDeletingApps so freshly-cleaned slugs are not reported.
-		lifecycle.LogOrphanAppDirs(store, cfg)
-		// Resolve every running app and its active bundle directory before
-		// recovery mutates anything. Fail closed and retry: a mid-scan database
-		// error must never fall through as an unresolved bundle directory, which
-		// would let validateNativeProcessIdentity skip its cwd check and adopt a
-		// reused PID on port evidence alone, or make reAdoptFrozenWarmReplica fail
-		// closed and rewrite a still-SIGSTOPped frozen-warm row to stopped.
-		var recoveryInputs *lifecycle.RecoveryInputs
-		if !retryOwnerStep("prepare process recovery", func() error {
-			var err error
-			recoveryInputs, err = lifecycle.PrepareRecovery(store)
-			return err
-		}) {
-			return
-		}
-		// Re-adopt any processes that survived a server restart. Must run after
-		// ReconcileInflightDeployments so recovery adopts the last-good deployment,
-		// not a half-applied one.
-		var previouslyRunning []*db.App
-		if !retryOwnerStep("list apps for startup warm floors", func() error {
-			var err error
-			previouslyRunning, err = store.ListRunningApps()
-			return err
-		}) {
-			return
-		}
-		lifecycle.RecoverProcesses(store, mgr, prx, cfg.Runtime.DefaultMaxSessionsPerReplica, cfg.Auth.IdentityHeadersEnabled(), cfg.Runtime.DefaultWorkerIsolation, watcher, recoveryInputs)
-		// Stop any native processes in the Manager that belong to elastic-mode
-		// apps. Elastic workers are ephemeral and must not be re-adopted; the
-		// pool starts empty and clients trigger fresh spawns on next request.
-		lifecycle.ReapElasticOrphans(store, mgr, cfg.Runtime.DefaultWorkerIsolation)
-		// Apps that ran elastic workers under a version without durable worker
-		// identities carry an orphan-risk marker. With every known worker
-		// stopped, a free consumer-lifetime lock proves no unknown one survived,
-		// and the marker no longer needs to block producer schedules.
-		lifecycle.DischargeElasticOrphanRisk(store, jobsMgr)
-		// Remove ShinyHub-managed containers no live replica re-adopted across
-		// every configured local container tier. Shared Docker daemons are
-		// deduplicated by endpoint.
-		if err := lifecycle.SweepOrphanContainersForTiersWithGenerations(store, mgr, cfg.Runtime.TierOrder()); err != nil {
-			// An orphan may still hold an old result cache namespace open, so
-			// pruning waits for the next deploy or retirement instead.
-			slog.Warn("container sweep incomplete; skipping startup result cache prune", "err", err)
-		} else {
-			lifecycle.PruneAppCaches(store, cfg.Storage.AppCacheDir)
-		}
-		// Sweep orphan Fargate tasks across ALL registered tiers.
-		sweepCtx, cancelSweep := context.WithTimeout(octx, 60*time.Second)
-		for _, tierName := range cfg.Runtime.TierOrder() {
-			tierRT := mgr.RuntimeForTier(tierName)
-			if fts, ok := tierRT.(lifecycle.FargateTaskSweeper); ok {
-				lifecycle.SweepOrphanFargateTasks(sweepCtx, mgr, fts)
-			}
-		}
-		cancelSweep()
-
-		// A crash may leave an activation marked running. Process/container
-		// recovery above has adopted or swept any surviving surge first; generation
-		// stamps then let the retried rollout skip canonical slots already replaced.
-		if !isClustered(cfg) {
-			if n, err := store.RequeueRunningScheduleActivations(time.Now().UTC()); err != nil {
-				slog.Error("requeue interrupted schedule activations", "err", err)
-			} else if n > 0 {
-				slog.Info("requeued interrupted schedule activations", "count", n)
-			}
-		}
-		// Start the scheduler before opening owner readiness. Admissions are
-		// temporarily reopened while every recovery fence is still held so missed
-		// and obligation dispatch can register durably but cannot cross a physical
-		// writer/consumer boundary. A transient scheduler load failure is retried
-		// within this ownership span rather than leaving a permanently green owner
-		// with dead cron processing.
-		jobsMgr.ResumeAdmissions()
-		if !retryOwnerStep("start scheduler", func() error { return sched.Start(octx) }) {
-			sched.Stop()
-			if err := jobsMgr.InterruptAndDrain(context.Background()); err != nil {
-				slog.Error("drain scheduled jobs after failed owner startup", "err", err)
-			}
-			return
-		}
-		// Ownership may have been cancelled between the successful Start call and
-		// this continuation. Never briefly advertise readiness or release the
-		// recovery fences for an already-retired owner.
-		if octx.Err() != nil {
-			sched.Stop()
-			if err := jobsMgr.InterruptAndDrain(context.Background()); err != nil {
-				slog.Error("drain scheduled jobs after ownership loss during startup", "err", err)
-			}
-			return
-		}
-		slog.Info("scheduler started")
-		releasePublicationFences()
-		publicationFencesHeld = false
-		releaseStartupFence()
-		startupFenceHeld = false
-		if warning := srv.UpdateCPUCapacityWarning(); warning != "" {
-			slog.Warn("live-update capacity after worker recovery", "warning", warning)
-		}
-		ownerReady.Store(true) // recovery complete and worker index is fresh
-		// A settings redeploy whose process exited before reporting is still
-		// owed; serve it now that this owner can boot pools. The scan retries
-		// through transient store failures, so it runs beside the owner's
-		// loops instead of delaying them.
-		relaunchOwed := func() { safego.Go("relaunch owed redeploys", srv.RelaunchOwedRedeploys) }
-		if !prx.RetiringParentAlive() {
-			relaunchOwed()
-		}
-
-		var loops sync.WaitGroup
-		if retiringParentDone != nil && prx.RetiringParentAlive() {
-			// Recovery retains obsolete multiplex generations while the parent
-			// proxies them. Keep the lifecycle fence until cleanup finishes,
-			// so no new candidate or draining generation can enter this pass.
-			loops.Add(1)
-			go func() {
-				defer loops.Done()
-				runRetiringParentCleanup(octx, retiringParentDone, recoveryInputs.Apps,
-					srv.TryAcquireAppOperation, func(recovered *db.App) error {
-						app, err := store.GetAppByID(recovered.ID)
-						if errors.Is(err, db.ErrNotFound) {
-							return nil
-						}
-						if err != nil {
-							return err
-						}
-						// Parent exit is confirmed; the separate lifecycle fence
-						// stays held until every app in this pass is processed.
-						lifecycle.CleanupObsoleteDeploymentGenerationsAfterParent(store, mgr, prx, app)
-						return nil
-					}, func() {
-						releaseRetiringParentFence()
-						relaunchOwed()
-					})
-			}()
-		}
-		if monitor != nil {
-			loops.Add(1)
-			go func() { defer loops.Done(); monitor.Run(octx, monitorInterval) }()
-			slog.Info("worker-down monitor started", "timeout", workerTimeout, "interval", monitorInterval, "retention", workerRetention)
-		}
-		loops.Add(1)
-		go func() { defer loops.Done(); watcher.Start(octx) }()
-		if !isClustered(cfg) {
-			loops.Add(1)
-			go func() { defer loops.Done(); activationCoordinator.Start(octx) }()
-			slog.Info("schedule activation coordinator started", "concurrency", 1)
-		}
-		// Database housekeeping (audit + schedule-run retention) runs on the owner
-		// only, so HA standbys never prune concurrently. A no-op unless retention
-		// is configured.
-		loops.Add(1)
-		go func() {
-			defer loops.Done()
-			runMaintenance(octx, store, mgr, appLogTelemetry, cfg.Maintenance, cfg.Usage)
-		}()
-		// A file-backed SQLite database is only ever served by one process, so
-		// its WAL checkpoint and planner statistics belong with the owner loops.
-		loops.Add(1)
-		go func() {
-			defer loops.Done()
-			runSQLiteMaintenance(octx, store, cfg.Maintenance.Interval)
-		}()
-		loops.Add(1)
-		go func() { defer loops.Done(); srv.RunDevelopmentAppReaper(octx, time.Minute) }()
-		// Restore serving floors independently of optional frozen warm-wake.
-		// Sequence the two passes so frozen restoration cannot claim a serving app.
-		loops.Add(1)
-		go func() {
-			defer loops.Done()
-			watcher.RestoreWarmFloors(octx, previouslyRunning)
-			if cfg.Runtime.Snapshot.Enabled && cfg.Runtime.Snapshot.RestoreOnStartup {
-				watcher.RestoreWarm(octx)
-			}
-		}()
-		if controller != nil {
-			loops.Add(1)
-			go func() { defer loops.Done(); controller.Run(octx) }()
-			slog.Info("autoscale controller started",
-				"scan_interval", cfg.Runtime.Autoscale.ScanInterval,
-				"cooldown", cfg.Runtime.Autoscale.Cooldown,
-				"default_target", cfg.Runtime.Autoscale.DefaultTarget)
-		}
-
-		<-octx.Done()
-		ownerReady.Store(false) // close admission before waiting for local handlers
-		slog.Info("releasing control-plane ownership loops", "epoch", epoch)
-		sched.Stop() // restartable on the next acquisition
-		loops.Wait() // watcher/monitor/autoscale fully stopped
-		// Job cancellation must never wait behind the fleet fence: a successor
-		// request can hold fleet-SH while waiting for this owner's publication
-		// lock. Drain first, then use fleet-EX to close the remaining HTTP/lifecycle
-		// handoff. Successor startup independently waits physical writer locks.
-		// Both steps share one bounded drainCtx so neither can hang the handoff
-		// indefinitely. The exclusive fleet fence drains requests admitted before
-		// handoff (including uploads not yet at an app lock) while the successor
-		// is still excluded, so their durable terminal state lands before a new
-		// scheduler can reconcile running rows. When either step gives up at the
-		// deadline, the lease is left to expire on its TTL instead of being
-		// released, so a successor never overlaps goroutines still writing.
-		drainCtx, cancelDrain := context.WithTimeout(context.Background(), shutdownDrainBudget)
-		defer cancelDrain()
-		if !drainOwnershipHandoff(drainCtx, jobsMgr.InterruptAndDrain, srv.AcquireFleetHandoffBarrier, registryRefreshBackoff, slog.Default()) {
-			handoffIncomplete.Store(true)
-		}
+	owner := &ownerRuntime{
+		cfg:                        cfg,
+		store:                      store,
+		srv:                        srv,
+		mgr:                        mgr,
+		prx:                        prx,
+		jobsMgr:                    jobsMgr,
+		sched:                      sched,
+		watcher:                    watcher,
+		workerReg:                  workerReg,
+		monitor:                    monitor,
+		controller:                 controller,
+		activationCoordinator:      activationCoordinator,
+		reconcileCleaner:           reconcileCleaner,
+		appLogTelemetry:            appLogTelemetry,
+		syncDeployCredential:       syncDeployCredential,
+		retiringParentDone:         retiringParentDone,
+		releaseRetiringParentFence: releaseRetiringParentFence,
 	}
+	ownerReady := &owner.ready
+	handoffIncomplete := &owner.handoffIncomplete
 
-	scope := leader.NewOwnerScope(ownerWork)
+	scope := leader.NewOwnerScope(owner.run)
 	elector := leader.New(store, leader.Config{
 		InstanceID: cfg.Server.InstanceID,
 		TTL:        cfg.Server.LeaseTTL,
@@ -3006,9 +2038,9 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	watcher.SetIsOwner(elector.IsOwner)
 
 	// Gate mutations on owner AND ready: the elector reports IsOwner true before
-	// ownerWork refreshes the registry, so admitting owner-only mutations (main-API
+	// ownerRuntime.run refreshes the registry, so admitting owner-only mutations (main-API
 	// deploy/placement, worker register/heartbeat) must wait for the fresh index.
-	ownerAndReady := ownerAndReadyPredicate(elector.IsOwner, &ownerReady)
+	ownerAndReady := ownerAndReadyPredicate(elector.IsOwner, ownerReady)
 	srv.SetOwnership(func() bool { return ownerAndReady() && !srv.AppOperationsPaused() })
 	srv.SetOwnerLease(func() *db.OwnerLease {
 		return &db.OwnerLease{Instance: cfg.Server.InstanceID, Epoch: elector.Epoch()}
@@ -3020,6 +2052,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	electorCtx, cancelElector := context.WithCancel(context.Background())
 	electorDone := make(chan struct{})
 	var localLogMaintenanceWG sync.WaitGroup
+	// rungroup:exempt: joined through electorDone by stopOwnership, under the ownership watchdog that exits rather than close the store under it
 	go func() {
 		defer close(electorDone)
 		elector.Run(electorCtx)
@@ -3033,7 +2066,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		localLogMaintenanceWG.Wait()
 		scope.Stop()
 	}
-	// stopOwnership can hang (ownerWork's shutdown branch above blocking on
+	// stopOwnership can hang (ownerRuntime.run's shutdown branch blocking on
 	// loops.Wait(), a slow drain, or the fence retry), and letting that hang
 	// propagate here would race runServe's deferred store.Close() against a
 	// goroutine still using the store. awaitOwnershipStop is idempotent to call
@@ -3042,14 +2075,13 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	defer awaitOwnershipStop(shutdownWatchdogBudget, stopOwnership, slog.Default())
 	if cfg.Maintenance.AppLogRunRetentionCount > 0 {
 		localLogMaintenanceWG.Add(1)
+		// rungroup:exempt: joined by stopOwnership with the elector, under the same exit watchdog
 		go func() {
 			defer localLogMaintenanceWG.Done()
 			runLocalLogMaintenance(electorCtx, store, mgr, appLogTelemetry, cfg.Maintenance.Interval)
 		}()
 	}
 
-	mux := http.NewServeMux()
-	mux.Handle("/api/", apiHandler(srv))
 	// Re-resolve JWT-claimed users against the live DB on every /app/* hit
 	// so role demotions and account deletions take effect immediately.
 	// Without this an admin's still-valid JWT keeps the admin-bypass path
@@ -3093,191 +2125,28 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		}
 		return access.Recheck(store, appUserLookup, store.IsTokenRevoked, principal)
 	}
-	{
-		recheckCtx, cancelRecheck := context.WithCancel(context.Background())
-		recheckCancel = cancelRecheck
-		recheckWG.Add(1)
-		go func() {
-			defer recheckWG.Done()
-			prx.StartSessionRecheck(recheckCtx, every, reauthorize)
-		}()
-		slog.Info("session recheck started", "interval", every, "entitlements_only", !recheckAppSessions)
-	}
+	// A session-preserving reload replaces this service with relay
+	// authorization once the store is closed; whichever runs last is stopped
+	// before shutdown completes.
+	recheckService := services.Go("session recheck", serviceStoreStopBudget, func(rctx context.Context) {
+		prx.StartSessionRecheck(rctx, every, reauthorize)
+	})
+	slog.Info("session recheck started", "interval", every, "entitlements_only", !recheckAppSessions)
 	if !recheckAppSessions {
 		slog.Warn("general session recheck disabled; app entitlements still checked every 30s")
 	}
-	// The pages these two middlewares answer with instead of the app - denied,
-	// and awaiting a first deploy - are dead ends for the same reason app pages
-	// are, so they carry the same switcher. Nothing but the switcher varies:
-	// Support recovery stays available independently of the optional app switcher.
-	navOpts := []access.Option{access.WithSupportDashboard(strings.TrimRight(cfg.Server.BaseURL, "/") + "/users")}
-	navOpts = append(navOpts, access.WithAnnouncements(), access.WithEnvironment(cfg.Branding.Environment))
-	if cfg.Server.AppNavEnabled() {
-		navOpts = append(navOpts, access.WithAppNav(appNavHomeURL(cfg)))
-	}
-	proxyEmptyState := access.NeverDeployedMiddleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup, cfg.TrustedProxyNets, navOpts...)(prx)
-	appHandler := access.Middleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup, navOpts...)(proxyEmptyState)
-	var parsedAppOrigin *url.URL
-	// With no dedicated app_origin, every deployed app runs same-origin with the
-	// dashboard, so ShinyHub trusts every deployed app with dashboard users'
-	// sessions. Warn loudly so that is a deliberate choice, not an oversight -
-	// the same posture the empty-app_origin admin banner and docs/security.md's
-	// deployment posture section both flag.
-	if msg := appOriginTrustWarning(cfg.Server.AppOrigin); msg != "" {
-		slog.Warn(msg)
-	}
-	if cfg.Server.AppOrigin != "" {
-		parsedAppOrigin, _ = url.Parse(cfg.Server.AppOrigin) // validated by config.Load
-		redirect := appOriginRedirectHandler(store, parsedAppOrigin, cfg.TrustedProxyNets)
-		redirectEmptyState := access.NeverDeployedMiddleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup, cfg.TrustedProxyNets, navOpts...)(redirect)
-		controlAppHandler := access.Middleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup, navOpts...)(redirectEmptyState)
-		appHandler = appOriginDispatch(parsedAppOrigin, cfg.TrustedProxyNets, store, cfg.Auth.Secret, controlAppHandler, appHandler, cfg.Auth)
-	} else if cfg.Auth.SupportSessions && cfg.Auth.SupportSessionsTrustedApps {
-		slog.Warn("trusted-app support sessions enabled: malicious or compromised app JavaScript may act with the administrator's browser authority; only deploy trusted app code")
-		appHandler = trustedAppSupportDispatch(appHandler, store, cfg.Auth.Secret, cfg.TrustedProxyNets)
-	}
-	mux.Handle("/app/", appHandler)
-	// App-local renewal is always available, including on the isolated app
-	// origin and when the optional app switcher is disabled. Access middleware
-	// revalidates the browser identity and app permissions on every request.
-	if parsedAppOrigin != nil {
-		mux.HandleFunc("GET "+auth.AppLogoutPath, func(w http.ResponseWriter, r *http.Request) {
-			if !sameHost(proxytrust.Host(r, cfg.TrustedProxyNets), parsedAppOrigin.Host) {
-				http.NotFound(w, r)
-				return
-			}
-			srv.HandleAppLogout(w, r)
-		})
-	}
-	appSessionHandler := access.Middleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup)(http.HandlerFunc(srv.HandleAppSession))
-	mux.Handle("GET /app/{slug}/.shinyhub/session.json", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "no-store")
-		appSessionHandler.ServeHTTP(w, r)
-	}))
-	mux.HandleFunc("GET /app/{slug}/.shinyhub/announcements.json", srv.HandleActiveAnnouncements)
-	if cfg.Auth.SupportSessions {
-		mux.HandleFunc("POST /app/{slug}/.shinyhub/support-session/stop",
-			supportSessionStopHandler(store, cfg.Auth.Secret, strings.TrimRight(cfg.Server.BaseURL, "/")+"/users?support=ended", cfg.TrustedProxyNets))
-	}
-	// The per-app favicon is access-controlled exactly like the app. Register it
-	// as a more-specific pattern than /app/ so it never reaches the app backend.
-	platformFavicon := ui.FaviconHandler(cfg.Branding)
-	appIconHandler := access.Middleware(store, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup)(
-		appFaviconHandler(store, platformFavicon, cfg.Branding.Environment != nil),
-	)
-	mux.Handle("GET /app/{slug}"+favicon.AppSuffix, appIconHandler)
-	// The switcher's own data, served from under /app/ because that is the only
-	// prefix the isolated app origin admits (appOriginBoundary) - a fleet-wide
-	// path would be unreachable from the very pages that need it. Registered as
-	// its own pattern rather than behind the access middleware: the answer is
-	// the caller's own app list, so being refused THIS app must not refuse it.
-	// A more specific pattern than "/app/", so ServeMux prefers it here and
-	// leaves every other app path to the proxy.
-	//
-	// Registered only when the switcher is on, so app_nav: false means the
-	// feature is absent rather than merely unused: nothing under /app/ answers
-	// differently than it did before the switcher existed.
-	if cfg.Server.AppNavEnabled() {
-		mux.HandleFunc("GET /app/{slug}/.shinyhub/nav.json", func(w http.ResponseWriter, r *http.Request) {
-			if u := access.ResolveOptionalUser(r, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup); u != nil {
-				r = r.WithContext(auth.WithUser(r.Context(), u))
-			}
-			srv.HandleAppNavJSON(w, r)
-		})
-		mux.HandleFunc("GET /app/{slug}/.shinyhub/version.json", func(w http.ResponseWriter, r *http.Request) {
-			if u := access.ResolveOptionalUser(r, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup); u != nil {
-				r = r.WithContext(auth.WithUser(r.Context(), u))
-			}
-			srv.HandleAppVersionJSON(w, r, r.PathValue("slug"))
-		})
-		mux.HandleFunc("POST /app/{slug}/.shinyhub/version/switch", func(w http.ResponseWriter, r *http.Request) {
-			if u := access.ResolveOptionalUser(r, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup); u != nil {
-				r = r.WithContext(auth.WithUser(r.Context(), u))
-			}
-			srv.HandleAppVersionSwitch(w, r, r.PathValue("slug"))
-		})
-		mux.HandleFunc("DELETE /app/{slug}/.shinyhub/version/switch", func(w http.ResponseWriter, r *http.Request) {
-			if u := access.ResolveOptionalUser(r, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup); u != nil {
-				r = r.WithContext(auth.WithUser(r.Context(), u))
-			}
-			srv.HandleAppVersionSwitch(w, r, r.PathValue("slug"))
-		})
-	}
-	mux.Handle("/healthz", probeMethods(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok"))
-	})))
-	mux.Handle("/readyz", probeMethods(readyzHandler(prx, readyCh, store)))
-	mux.Handle("/activez", probeMethods(activezHandler(ownerAndReady)))
-	mux.HandleFunc("GET "+announcementui.ClientPath, announcementui.ScriptHandler)
-	mux.Handle("/static/", ui.Handler())
-	mux.Handle("/invite", ui.InvitationHandler())
-
-	// GET /internal/runtime-bundle/{digest} streams a bundle to a managed runtime
-	// runner presenting a short-lived HMAC capability token. Keep the original
-	// Fargate route as a compatibility alias for already-deployed runner images.
-	// Mounted directly on the main mux (not under /api/) so large bundle streams
-	// are not subject to apiTimeoutHandler's 30-second cap.
-	fargateBundleHandler := api.NewFargateBundleHandler(store, cfg.Storage.AppsDir, bundleTokenKey)
-	internalMux := chi.NewRouter()
-	internalMux.Get("/runtime-bundle/{digest}", fargateBundleHandler.Handle)
-	internalMux.Get("/fargate-bundle/{digest}", fargateBundleHandler.Handle)
-	mux.Handle("/internal/", http.StripPrefix("/internal", internalMux))
-
-	registerBrandingRoutes(mux, cfg, srv, store, appUserLookup)
-
-	var rootHandler http.Handler = mux
-	if parsedAppOrigin != nil {
-		rootHandler = appOriginLaunchDispatch(rootHandler, parsedAppOrigin, store, cfg.Auth.Secret, cfg.TrustedProxyNets, cfg.Auth)
-	}
-	if cfg.Auth.ForwardAuth.Enabled {
-		faCfg := auth.ForwardAuthConfig{
-			DashboardURL: cfg.Server.BaseURL, SessionSecret: cfg.Auth.Secret, SessionMaxAge: cfg.Auth.BrowserSessionMaxAge(), Revoked: store.IsTokenRevoked,
-			Enabled:             true,
-			UserHeader:          cfg.Auth.ForwardAuth.UserHeader,
-			SharedSecret:        cfg.Auth.ForwardAuth.SharedSecret,
-			SecretHeader:        cfg.Auth.ForwardAuth.SecretHeader,
-			EmailHeader:         cfg.Auth.ForwardAuth.EmailHeader,
-			NameHeader:          cfg.Auth.ForwardAuth.NameHeader,
-			GroupsHeader:        cfg.Auth.ForwardAuth.GroupsHeader,
-			DefaultRole:         cfg.Auth.ForwardAuth.DefaultRole,
-			GroupRoleMappings:   api.AuthMappings(cfg.Auth.GroupRoleMappings),
-			RequireGroupsHeader: cfg.Auth.ForwardAuth.RequireGroupsHeader,
-		}
-		if parsedAppOrigin != nil {
-			faCfg.AppOriginHost = parsedAppOrigin.Host
-		}
-		rootHandler = auth.ForwardAuthMiddleware(store, faCfg, cfg.TrustedProxyNets)(rootHandler)
-	}
-	rootHandler = appOriginBoundary(rootHandler, parsedAppOrigin, cfg.TrustedProxyNets)
-	if cfg.Server.CompressionEnabled() {
-		rootHandler = httpcompress.Handler(rootHandler)
-	}
-
-	// Branding injects inline <script>/<style> into the SPA shell only when
-	// active; the strict CSP allows exactly those blocks by SHA-256 hash (both
-	// slices stay empty when branding is off, so no inline is served). Computed
-	// from the same resolved branding the renderer uses so they cannot drift.
-	var cspScriptSrc, cspStyleSrc, cspImgSrc []string
-	if cfg.Branding.IsActive() {
-		brandPub := ui.PublicBranding(cfg.Branding, cfg.Branding.ResolvedAssets())
-		s, st, cspErr := ui.CSPInlineSources(brandPub)
-		if cspErr != nil {
-			return fmt.Errorf("compute branding CSP sources: %w", cspErr)
-		}
-		cspScriptSrc, cspStyleSrc = s, st
-		// A logo/favicon hosted off-origin needs its origin in img-src, or the
-		// browser blocks the operator's own image.
-		cspImgSrc = ui.ImageSources(brandPub)
-	} else {
-		// Branding off: the raw shell is served, but its static inline
-		// scripts (the pre-paint theme bootstrap) still need CSP hashes.
-		s, cspErr := ui.StaticShellInlineScriptSources()
-		if cspErr != nil {
-			return fmt.Errorf("compute shell CSP sources: %w", cspErr)
-		}
-		cspScriptSrc = s
+	httpHandler, err := buildHTTPHandler(httpHandlerDeps{
+		cfg:            cfg,
+		store:          store,
+		srv:            srv,
+		prx:            prx,
+		readyCh:        readyCh,
+		ownerAndReady:  ownerAndReady,
+		bundleTokenKey: bundleTokenKey,
+		appUserLookup:  appUserLookup,
+	})
+	if err != nil {
+		return err
 	}
 
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
@@ -3286,13 +2155,9 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// Streaming and long-running routes (the reverse proxy, SSE log tails, large
 	// uploads, lifecycle swaps) clear these per-connection deadlines via
 	// deadlineExemptions so they are not severed mid-flight.
-	// RecoverPanic wraps the outer mux so a panic in a non-/api/ handler (notably
-	// the /app/* reverse proxy, which had no recovery) is logged via slog and
-	// returned as a 500 instead of escaping to the stdlib server's per-connection
-	// default (which bypasses structured logging). /api/* already has chi.Recoverer.
 	httpSrv := &http.Server{
 		Addr:              addr,
-		Handler:           api.SecurityHeaders(cfg.TrustedProxyNets, cspScriptSrc, cspStyleSrc, cspImgSrc, api.RecoverPanic(slog.Default(), deadlineExemptions(rootHandler))),
+		Handler:           httpHandler,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       60 * time.Second,
 		WriteTimeout:      120 * time.Second,
@@ -3311,7 +2176,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// routable DB replica rows before the listener starts serving, so a ZDT
 	// successor process can route requests to already-running app processes
 	// immediately. Without this the pool is empty until RecoverProcesses runs
-	// inside ownerWork (~10s after boot), causing 10-18s of loading-page
+	// inside ownerRuntime.run (~10s after boot), causing 10-18s of loading-page
 	// degradation on every handoff.
 	//
 	// Clustered deployments already have a periodic PoolSyncer that runs from
@@ -3338,6 +2203,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 
 	httpListener := newHandoffListener(ln, httpSrv)
 	serveErr := make(chan error, 1)
+	// rungroup:exempt: joined by httpSrv.Shutdown and the handoff listener's ServeDone
 	go func() {
 		slog.Info("listening", "version", version, "addr", addr)
 		close(readyCh)
@@ -3523,7 +2389,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		relayRPC.Commit()
 	}
 	reloadStartupReady.Store(true)
-	startFirstRunExperience(ctx, logger, srv.Router(), store, cfg, ownerAndReady, serveOpts)
+	firstRun := startFirstRunExperience(logger, services, srv.Router(), store, cfg, ownerAndReady, serveOpts)
 
 	select {
 	case err := <-serveErr:
@@ -3533,6 +2399,11 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		}
 	case <-upg.Exit():
 		slog.Info("shutdown/handoff initiated, draining")
+	}
+	// The example install deploys through the API and the store; end it
+	// before ownership and the HTTP server it goes through are torn down.
+	if firstRun != nil {
+		firstRun.Stop()
 	}
 	// Mark unready for both the signal and clean self-stop paths.
 	prx.SetDraining(true)
@@ -3572,23 +2443,20 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	awaitOwnershipStop(shutdownWatchdogBudget, stopOwnership, slog.Default())
 	// Stop the session reporter (clustered only). Cancel triggers a final
 	// flush so the last known counts are persisted before the store closes.
-	if reporterCancel != nil {
-		reporterCancel()
-		reporterWG.Wait()
+	if reporterService != nil {
+		reporterService.Stop()
 	}
 	// Stop the pool syncer (clustered only). Nil out the on-miss hook after
 	// the syncer goroutine exits so a late-arriving request cannot invoke
 	// SyncSlug with an already-cancelled context.
-	if syncerCancel != nil {
-		syncerCancel()
-		syncerWG.Wait()
+	if syncerService != nil {
+		syncerService.Stop()
 		prx.SetOnMissSync(nil)
 	}
 	// Stop the metrics-history collector. It only reads in-memory manager/proxy
 	// state, so ordering relative to the store close is not load-bearing.
-	if historyCancel != nil {
-		historyCancel()
-		historyWG.Wait()
+	if historyService != nil {
+		historyService.Stop()
 	}
 	// Drain in-flight scheduled job runs before the store closes.
 	jobsDrained := jobsMgr.Stop(shutdownCtx)
@@ -3618,11 +2486,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 			// Legacy successors retain the process-exit fence and bounded drain.
 			if upg.(*upgrade.RepeatableUpgrader).SuccessorRelayAware() {
 				srv.Close()
-				if recheckCancel != nil {
-					recheckCancel()
-					recheckWG.Wait()
-					recheckCancel = nil
-				}
+				stopBeforeStoreCloses(recheckService, slog.Default())
 				client := newRelayClient(relayDir, cfg.Auth.Secret)
 				if usageRecorder != nil {
 					usageRecorder.RelayPersistence(client)
@@ -3637,13 +2501,9 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 				if err := store.Close(); err != nil {
 					return fmt.Errorf("close retiring database: %w", err)
 				}
-				authCtx, cancelAuth := context.WithCancel(context.Background())
-				recheckCancel = cancelAuth
-				recheckWG.Add(1)
-				go func() {
-					defer recheckWG.Done()
-					runRelayAuthorization(authCtx, prx, client, every, max(90*time.Second, 3*every))
-				}()
+				recheckService = services.Go("relay authorization", serviceMemoryStopBudget, func(actx context.Context) {
+					runRelayAuthorization(actx, prx, client, every, max(90*time.Second, 3*every))
+				})
 				upg.(*upgrade.RepeatableUpgrader).ReleaseUpgradeFence()
 				preservingReload = upg.(*upgrade.RepeatableUpgrader).RetireControlPlane()
 			}
@@ -3694,10 +2554,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	}
 	// Retiring proxies still enforce access revocations until their final
 	// connection closes. Join the sweep before its store is closed below.
-	if recheckCancel != nil {
-		recheckCancel()
-		recheckWG.Wait()
-	}
+	stopBeforeStoreCloses(recheckService, slog.Default())
 	// The tracer closes after every span producer (lifecycle watcher, job
 	// runs, proxied requests and upgraded sessions) has stopped, so spans
 	// ended during shutdown are exported. The flush gets its own bounded

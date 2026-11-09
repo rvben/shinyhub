@@ -145,7 +145,7 @@ func (s *Server) requireViewApp(w http.ResponseWriter, r *http.Request, slug str
 			writeError(w, http.StatusNotFound, "not found")
 			return nil, nil, false
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return nil, nil, false
 	}
 
@@ -156,7 +156,7 @@ func (s *Server) requireViewApp(w http.ResponseWriter, r *http.Request, slug str
 	}
 	ok, err := s.canViewApp(u, app)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return nil, nil, false
 	}
 	if !ok {
@@ -239,7 +239,7 @@ func (s *Server) requireExplicitAppAccess(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusNotFound, "not found")
 			return nil, nil, false
 		}
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return nil, nil, false
 	}
 	u := auth.UserFromContext(r.Context())
@@ -249,7 +249,7 @@ func (s *Server) requireExplicitAppAccess(w http.ResponseWriter, r *http.Request
 	}
 	ok, err := s.hasExplicitAccess(u, app)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return nil, nil, false
 	}
 	if ok {
@@ -303,7 +303,7 @@ func (s *Server) requireManageApp(w http.ResponseWriter, r *http.Request, slug s
 	// A member OR group rule with role "manager" may also manage the app.
 	role, ok, err := s.effectiveAppMemberRole(u, app)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return nil, false
 	}
 	if ok && role == "manager" {

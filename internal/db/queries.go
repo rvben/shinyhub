@@ -1277,13 +1277,17 @@ func (s *Store) AppElasticOrphanRisk(appID int64) (bool, error) {
 // statuses also keeps the deploying page on clustered standbys, which never
 // hold the lock; their stopped/crashed windows degrade to the previous pages.
 func (a *App) MissStatus(deployInFlight bool) (status, reason string) {
+	return missStatus(a.Status, a.LastError, a.LastDeploymentStatus, deployInFlight)
+}
+
+func missStatus(appStatus, lastError, lastDeploymentStatus string, deployInFlight bool) (status, reason string) {
 	// Starting a corrective deployment does not repair incompatible data.
 	// Preserve this fence until successful producer/deployment completion.
-	if a.Status == "failed" {
-		return a.Status, a.LastError
+	if appStatus == "failed" {
+		return appStatus, lastError
 	}
-	if a.LastDeploymentStatus == DeploymentPending {
-		switch a.Status {
+	if lastDeploymentStatus == DeploymentPending {
+		switch appStatus {
 		case "stopped", "crashed":
 			if deployInFlight {
 				return "deploying", ""
@@ -1299,7 +1303,7 @@ func (a *App) MissStatus(deployInFlight bool) (status, reason string) {
 		// stale pending row can never dress an unforeseen state up as an
 		// in-flight deploy.
 	}
-	return a.Status, a.LastError
+	return appStatus, lastError
 }
 
 // deploymentSummarySQL is the SELECT fragment that adds the deployment-derived
@@ -1317,8 +1321,13 @@ const deploymentSummarySQL = `
 		(SELECT content_digest FROM deployments
 		   WHERE app_id = apps.id AND serving_activation_id IS NULL AND status = 'succeeded'
 		   ORDER BY created_at DESC, id DESC LIMIT 1) AS content_digest,
-		(SELECT status FROM deployments WHERE app_id = apps.id AND serving_activation_id IS NULL
-		   ORDER BY created_at DESC, id DESC LIMIT 1) AS last_deployment_status`
+		` + lastDeploymentStatusSQL + ` AS last_deployment_status`
+
+// lastDeploymentStatusSQL selects the status of an app's newest deployment.
+// Its ORDER BY matches idx_deployments_app_created, so it reads the newest
+// rows from the index whatever the length of the history.
+const lastDeploymentStatusSQL = `(SELECT status FROM deployments WHERE app_id = apps.id AND serving_activation_id IS NULL
+		   ORDER BY created_at DESC, id DESC LIMIT 1)`
 
 // appColumns is the plain apps.* column list shared by every App SELECT, in the
 // exact order scanApp expects. It is kept as a single constant so the column
@@ -1375,28 +1384,54 @@ func (s *Store) CreateApp(p CreateAppParams) (bool, error) {
 
 func (s *Store) GetAppBySlug(slug string) (*App, error) {
 	defer s.timed("GetAppBySlug")()
-	stmt, err := s.appLookupStatement()
+	stmt, err := s.appLookup.get(s, `SELECT `+appColumns+deploymentSummarySQL+` FROM apps WHERE slug = ?`)
 	if err != nil {
 		return nil, err
 	}
 	return scanApp(stmt.QueryRow(slug))
 }
 
-// appLookupStatement prepares once per store (and sql.DB prepares per pooled
-// connection as needed). Failed preparation is retried on the next call so an
-// early lookup before migration or a transient database error cannot poison the
-// store. The statement caches SQL execution machinery, not authorization data.
-func (s *Store) appLookupStatement() (*sql.Stmt, error) {
-	s.appLookupMu.Lock()
-	defer s.appLookupMu.Unlock()
-	if s.appLookupStmt == nil {
-		stmt, err := s.db.real.Prepare(s.d.rebind(`SELECT ` + appColumns + deploymentSummarySQL + ` FROM apps WHERE slug = ?`))
-		if err != nil {
-			return nil, err
-		}
-		s.appLookupStmt = stmt
+// AppRouting is the part of an app the proxy consults on every request: what
+// to call it, who may reach it, and which page to show while it cannot serve.
+type AppRouting struct {
+	Name                 string
+	Access               string
+	Status               string
+	LastError            string
+	LastDeploymentStatus string
+}
+
+// MissStatus reports the status page for a request that found no routable
+// replica, exactly as App.MissStatus does for the full app row.
+func (a *AppRouting) MissStatus(deployInFlight bool) (status, reason string) {
+	return missStatus(a.Status, a.LastError, a.LastDeploymentStatus, deployInFlight)
+}
+
+// appRoutingSQL reads only the routing fields. Unlike the full app lookup it
+// carries no release counters, so its cost does not grow with the app's
+// deployment history.
+const appRoutingSQL = `SELECT name, access, status, COALESCE(last_error, ''),
+		COALESCE(` + lastDeploymentStatusSQL + `, '')
+	FROM apps WHERE slug = ?`
+
+// GetAppRoutingBySlug returns the routing fields of the app with slug, or
+// ErrNotFound. It is the per-request proxy lookup; use GetAppBySlug for
+// anything that needs the rest of the app.
+func (s *Store) GetAppRoutingBySlug(slug string) (*AppRouting, error) {
+	defer s.timed("GetAppRoutingBySlug")()
+	stmt, err := s.appRoutingLookup.get(s, appRoutingSQL)
+	if err != nil {
+		return nil, err
 	}
-	return s.appLookupStmt, nil
+	var a AppRouting
+	err = stmt.QueryRow(slug).Scan(&a.Name, &a.Access, &a.Status, &a.LastError, &a.LastDeploymentStatus)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &a, nil
 }
 
 // GetApp is an alias for GetAppBySlug.

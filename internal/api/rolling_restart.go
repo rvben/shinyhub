@@ -2,7 +2,6 @@ package api
 
 import (
 	"errors"
-	"fmt"
 	"net/http"
 
 	"github.com/rvben/shinyhub/internal/db"
@@ -31,7 +30,7 @@ func (s *Server) handleEnqueueRollingRestart(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeInternal(w, r, "internal server error", err)
 		return
 	}
 	if !current.Prepared {
@@ -52,9 +51,9 @@ func (s *Server) handleEnqueueRollingRestart(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "enqueue rolling restart failed")
+		writeInternal(w, r, "enqueue rolling restart failed", err)
 		return
 	}
-	s.audit(r, "rolling_restart", "app", app.Slug, fmt.Sprintf(`{"activation_id":%d}`, a.ID))
+	s.audit(r, "rolling_restart", "app", app.Slug, db.AuditDetail(map[string]any{"activation_id": a.ID}))
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "accepted", "slug": app.Slug, "activation_id": a.ID, "drain_timeout_seconds": s.generationDrainTimeoutSeconds()})
 }

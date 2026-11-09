@@ -1841,7 +1841,7 @@ func (w *Watcher) runOnce() {
 	// old process may have died mid-driveWakingApp; BeginWake's CAS prevents
 	// re-triggering (status != hibernated); and the inline trigger drive in
 	// WakeTrigger does not run across a process boundary. The watcher already
-	// runs inside ownerWork, so this block is owner-gated on both paths.
+	// runs inside ownerRuntime.run, so this block is owner-gated on both paths.
 	wakingApps, err := w.store.ListWakingApps()
 	if err != nil {
 		slog.Warn("watcher: list waking apps failed", "err", err)

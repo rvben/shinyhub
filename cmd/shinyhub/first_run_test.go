@@ -6,10 +6,12 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/api"
@@ -20,6 +22,7 @@ import (
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
+	"github.com/rvben/shinyhub/internal/rungroup"
 )
 
 func TestEligibleForFirstRunExampleIsDeliberatelyNarrow(t *testing.T) {
@@ -230,4 +233,63 @@ func TestInstallFirstRunExampleNeverAddsContentToNonEmptyServer(t *testing.T) {
 func newFirstRunTestStore(t *testing.T) *db.Store {
 	t.Helper()
 	return dbtest.New(t)
+}
+
+// TestFirstRunExperienceIsJoinedByServiceStop pins that the first-run example
+// runs as a stoppable service: once the services stop, its goroutine has
+// returned, so runServe can close the store it installs through.
+func TestFirstRunExperienceIsJoinedByServiceStop(t *testing.T) {
+	out := &lockedBuffer{}
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	services := rungroup.New(discard)
+	svc := startFirstRunExperience(discard, services, nil, nil,
+		&config.Config{Server: config.ServerConfig{Host: "127.0.0.1"}},
+		func() bool { return false },
+		serveOptions{
+			NoBrowser: true,
+			ErrOut:    out,
+			FirstRun: &setupResult{
+				CreatedConfig: true, CreatedAdmin: true, Username: "admin",
+				DatabaseDSN: "data/shinyhub.db", URL: "http://127.0.0.1:1",
+			},
+		})
+	if svc == nil {
+		t.Fatal("an eligible first run started no service")
+	}
+	if overran := services.Stop(); len(overran) != 0 {
+		t.Fatalf("first-run service overran its stop budget: %v", overran)
+	}
+	if got := out.String(); !strings.Contains(got, "Example app was not installed") {
+		t.Fatalf("services stopped before the first-run goroutine finished; output so far: %q", got)
+	}
+}
+
+func TestFirstRunExperienceStartsNothingWhenIneligible(t *testing.T) {
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	services := rungroup.New(discard)
+	defer services.Stop()
+	if svc := startFirstRunExperience(discard, services, nil, nil,
+		&config.Config{Server: config.ServerConfig{Host: "127.0.0.1"}}, nil, serveOptions{}); svc != nil {
+		t.Fatal("an ineligible first run started a service")
+	}
+	if plan := services.Plan(); plan != 0 {
+		t.Fatalf("an ineligible first run registered a service (plan %s)", plan)
+	}
+}
+
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
