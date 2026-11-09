@@ -6,9 +6,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.24.0](https://github.com/rvben/shinyhub/compare/v0.23.0...v0.24.0) - 2026-11-09
+
 ### Added
 
 - Add opt-in anonymous availability monitoring per app without waking sleeping apps or extending their inactivity window. Responses distinguish serving routes from activation eligibility, use fixed status and reason codes, and bound concurrent monitoring queries. Enable selected slugs with `server.public_app_availability`; existing app authentication and readiness behavior are preserved.
+- **bookmarks**: add bookmark-safe selectize input ([275ebab](https://github.com/rvben/shinyhub/commit/275ebab1b380b03dea2f45af084bf0422386f295))
+- **deploy**: cap concurrent dependency builds per host ([ecd5566](https://github.com/rvben/shinyhub/commit/ecd55665f68d4e25a6e57f48d93ce9d7d8bb1db7))
+
+### Fixed
+
+- **bookmarks**: preserve bookmarked date slider values ([dfc202d](https://github.com/rvben/shinyhub/commit/dfc202ddf8a6cb6c777d7e354800a5143272541f))
+- **install**: verify only the tarball's own checksum line ([cc14c48](https://github.com/rvben/shinyhub/commit/cc14c487178ce32ba3c6cf5cd4958cda5c291443))
+- **auth**: answer API auth rejections with a JSON error body ([1752a0a](https://github.com/rvben/shinyhub/commit/1752a0ad698afec956a114d19ae9779313cc9686))
+- **api**: log server errors with their request and keep causes out of responses ([a818b97](https://github.com/rvben/shinyhub/commit/a818b977bde2b1db9e784f833bd1b4cbc8f108e9))
+- **api**: always answer errors with valid JSON ([cef80de](https://github.com/rvben/shinyhub/commit/cef80def7dfb72674c2aa67693bc2d5f2209627e))
+- **metrics**: leave fleet gauges absent when the store count fails ([50633df](https://github.com/rvben/shinyhub/commit/50633df85830473305d166283a95a6915865a721))
+- **serve**: join background services before the store closes ([f16ae31](https://github.com/rvben/shinyhub/commit/f16ae31cd9617f6aa6f2ed15dc126f15eaa50b54))
+- **cli**: read the git HEAD commit from stdout only ([a4118a2](https://github.com/rvben/shinyhub/commit/a4118a2ebb044a22159afcbbc1122a3bcf88c797))
+- **config**: reject unknown YAML keys at every depth, not only the top level ([689f978](https://github.com/rvben/shinyhub/commit/689f978940befed7d3a1ec9586fcc222e746f3c4))
+- **db**: open every SQLite write transaction with BEGIN IMMEDIATE ([d307aff](https://github.com/rvben/shinyhub/commit/d307affc53096ebd6b794fbc019a22ebc8846d65))
+- **db**: roll back a SQLite write transaction whose COMMIT fails ([49266f3](https://github.com/rvben/shinyhub/commit/49266f35001862a0bcf3c59eedef7715818d9460))
+- **api**: exempt draft bundle uploads from the 4 MiB JSON body cap ([3bc766f](https://github.com/rvben/shinyhub/commit/3bc766f6649316964f4651024faa215404f736a7))
+
+### Performance
+
+- **proxy**: read per-request app routing without counting deployment history ([e1d813a](https://github.com/rvben/shinyhub/commit/e1d813a63fca47d14c7040a079b52b57b93ec5d5))
+- **proxy**: embed minified builds of the scripts inlined into app pages ([7c090eb](https://github.com/rvben/shinyhub/commit/7c090eb9b71d65176e0ba52a5d6262a8dd4ef7de))
+- **db**: keep the retained app log size on the run row ([aff53ff](https://github.com/rvben/shinyhub/commit/aff53ff0676beda3731b2294b720955559c84d72))
+- **db**: bound the SQLite WAL and refresh planner statistics ([3c1467e](https://github.com/rvben/shinyhub/commit/3c1467e7b8ca64fffe1979c38594dc8a6fe2b8a9))
+- **proxy**: recycle reverse proxy copy buffers through a shared pool ([74d1484](https://github.com/rvben/shinyhub/commit/74d1484bb53b1f32b91d7f757ec290960ee61aa7))
+- **api**: replace init-time bcrypt hash with a precomputed literal ([a2805ee](https://github.com/rvben/shinyhub/commit/a2805ee40ff2d57a4897e8a8576eba700cd13395))
+
+### Upgrade notice
+
+This release adds retained log-size accounting to the database schema. Back up the database before upgrading. Older binaries reject the newer schema, so downgrading requires restoring the pre-upgrade database.
 
 ## [0.23.0](https://github.com/rvben/shinyhub/compare/v0.22.0...v0.23.0) - 2026-11-04
 
