@@ -9,6 +9,7 @@ import (
 
 	"github.com/rvben/shinyhub/internal/api"
 	"github.com/rvben/shinyhub/internal/config"
+	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/dbtest"
 	"github.com/rvben/shinyhub/internal/proxy"
 )
@@ -21,6 +22,7 @@ type testHTTPHandler struct {
 	readyCh chan struct{}
 	owner   *atomic.Bool
 	prx     *proxy.Proxy
+	store   *db.Store
 }
 
 func newTestHTTPHandler(t *testing.T, configure func(*config.Config)) *testHTTPHandler {
@@ -36,7 +38,7 @@ func newTestHTTPHandler(t *testing.T, configure func(*config.Config)) *testHTTPH
 		configure(cfg)
 	}
 	srv := api.New(cfg, store, nil, prx)
-	h := &testHTTPHandler{readyCh: make(chan struct{}), owner: &atomic.Bool{}, prx: prx}
+	h := &testHTTPHandler{readyCh: make(chan struct{}), owner: &atomic.Bool{}, prx: prx, store: store}
 	handler, err := buildHTTPHandler(httpHandlerDeps{
 		cfg:            cfg,
 		store:          store,

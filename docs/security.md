@@ -160,6 +160,15 @@ real name in its display name, which is only shown to people who may open it.
 Installations where even the set of slugs is sensitive should authenticate at the
 reverse proxy, so that nothing reaches ShinyHub unauthenticated.
 
+Operators may also explicitly expose `GET /app/<slug>/.shinyhub/availability`
+through `server.public_app_availability`. This anonymous monitoring endpoint
+reveals coarse availability and fixed reason codes for allowlisted apps,
+including private apps. It returns 404 for unlisted and unknown apps, never
+returns stored diagnostics or identity data, and never wakes an app. It does
+not change the authentication rules of app content or `.shinyhub/ready`.
+See [availability monitoring](configuration.md#anonymous-app-availability-monitoring)
+for the contract and upstream authentication configuration.
+
 ## Ending sessions
 
 Three actions end a signed-in session, and they differ in scope on purpose.

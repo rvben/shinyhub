@@ -17,6 +17,9 @@ database:
 server:
   host: 0.0.0.0                       # bind address
   port: 8080                          # HTTP port
+  # Anonymous, non-waking availability checks for these exact app slugs.
+  # Exposes existence and operational state even for private apps. No wildcards.
+  public_app_availability: []          # SHINYHUB_SERVER_PUBLIC_APP_AVAILABILITY=sales,reports
   base_url: https://shiny.example.com # external URL (used in OAuth callbacks)  # SHINYHUB_BASE_URL
   # Strongly recommended when app authors are less trusted than operators.
   # Route this separate HTTPS hostname to the same ShinyHub backend.

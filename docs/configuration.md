@@ -258,6 +258,100 @@ On by default. What it does, and what it deliberately does not do:
 Set it to `false` for byte-for-byte untouched application responses. No response
 body is rewritten while it is off.
 
+## Anonymous app availability monitoring
+
+Enable a non-waking availability check for explicitly selected apps:
+
+```yaml
+server:
+  public_app_availability: [sales, reports]
+```
+
+The default is an empty list. `SHINYHUB_SERVER_PUBLIC_APP_AVAILABILITY=sales,reports`
+overrides the list; set it to `[]` to disable all exposure. Only exact, valid
+app slugs are accepted; wildcards are rejected. Keep configuration consistent
+across instances. This setting exposes existence and coarse operational state
+for listed apps, including private apps; it grants no access to app content.
+The allowlist follows the slug: if an app is deleted and its slug reused, the
+replacement inherits this exposure. Remove retired entries when appropriate.
+Restart the server or perform a [zero-downtime reload](zero-downtime-upgrades.md)
+to apply this setting; the handler captures the allowlist at startup.
+
+Probe `GET /app/sales/.shinyhub/availability` on the hostname used for apps:
+
+```sh
+curl --fail-with-body https://apps.example.com/app/sales/.shinyhub/availability
+```
+
+A hibernated app eligible to activate returns:
+
+```json
+{"available":true,"status":"hibernated","basis":"activation_eligible"}
+```
+
+| Condition | HTTP | Response fields |
+| --- | --- | --- |
+| Published release has a fresh-session route | 200 | `available:true`, lifecycle `status`, `basis:"serving_route"` |
+| Degraded app with surviving routes | 200 | `available:true`, `status:"degraded"`, `basis:"serving_route"` |
+| Hibernated app with a successful serving release and no activation blocker | 200 | `available:true`, `status:"hibernated"`, `basis:"activation_eligible"` |
+| Published demand-driven pool eligible to allocate workers, including during a replacement deploy/start | 200 | `available:true`, lifecycle `status`, `basis:"activation_eligible"`; no worker is allocated |
+| Deploying/starting/waking app with a previous release still serving | 200 | `available:true`, lifecycle `status`, `basis:"serving_route"` |
+| Compatibility failure, including an unrepaired producer barrier | 503 | `available:false`, `status:"quarantined"`, `reason:"compatibility_blocked"` |
+| Active data publisher prevents activation, with no existing serving route | 503 | `available:false`, lifecycle `status`, `reason:"activation_blocked"` |
+| Operator-stopped, deleting, failed or crashed app | 503 | `available:false`, lifecycle `status` |
+| No successful serving release | 503 | `available:false`, lifecycle `status`, `reason:"no_serving_release"` |
+| Starting or missing fresh-session capacity | 503 | `available:false`, lifecycle `status`, `reason:"no_serving_capacity"` |
+| Hibernating/waking with a successful release and no activation blocker | 200 | `available:true`, lifecycle `status`, `basis:"activation_eligible"` |
+| Server starting, draining or not yet synchronized | 503 | `available:false`, `status:"unknown"`, `reason:"platform_unavailable"` |
+| Database lookup failed, or unrecognized lifecycle state | 503 | `available:false`, `status:"unknown"`, `reason:"state_unavailable"` |
+| Unlisted or confirmed unknown slug | 404 | No app state disclosed |
+| Monitoring lookup budget exhausted | 429 | `available:false`, `status:"unknown"`, `reason:"monitor_busy"`; retry after one second |
+
+`available:true` means ShinyHub knows a serving route or an eligible activation
+path. Every 200 response names that evidence in `basis`: `serving_route` or
+`activation_eligible`. Neither value claims that a synthetic request succeeded.
+Responses with `available:false` omit `basis`; an optional fixed `reason`
+explains the failure. `status` always describes lifecycle state, rather than
+inferring that a demand-driven app is idle from its worker policy.
+
+Compatibility failures take precedence over stale routes and lifecycle status.
+An active, healthy data publisher blocks new activations but does not invalidate
+an existing consumer route. A failed deployment attempt does not itself make a
+still-serving previous release unavailable. Retiring generations and draining
+replicas do not count as capacity for new sessions.
+
+`HEAD` returns the same status and headers without a body. Other methods return
+405 for listed slugs. Responses include `Cache-Control: no-store`, including
+404s and 429s. At most two monitoring database lookups run concurrently per
+server process, shared across all slugs. Excess probes receive 429 immediately
+with `Retry-After: 1`; they do not queue or query the database. A 429 means the
+monitoring service is busy and provides no evidence about app health. Monitors
+should retry with backoff and jitter rather than page on a single busy response.
+The budget is released before writing a response, so a slow client cannot hold
+a database slot. Each lookup has a one-second context deadline; an uncertain lookup never
+becomes an unknown-app 404. Probes do not contact apps, start workers, request
+a wake, set affinity cookies, or record app activity, so polling does not extend
+the hibernation window. The existing authenticated `.shinyhub/ready` endpoint
+and browser recovery behavior are unchanged.
+
+This checks the external path to a ShinyHub monitoring handler and reports
+ShinyHub's current knowledge of the app. It does not exercise app HTTP or
+WebSocket behavior, authentication, or dependencies. `activation_eligible`
+means there is no known activation blocker; it does not prove startup will
+succeed, validate bundle files on disk, reserve resources, or promise available
+capacity under load. This is not an overload or memory-pressure probe. Lifecycle
+state, route observations and later user requests may race, including briefly
+disagreeing during a generation switch. Use a separate authenticated synthetic
+check when those stronger guarantees are required, accepting that it may wake
+the app.
+
+If an upstream proxy enforces authentication, explicitly exempt only the exact
+monitoring paths for the configured slugs from that proxy's authentication
+check and forward them to ShinyHub. Avoid exempting the entire `/app/` prefix
+or `.shinyhub/` namespace. ShinyHub's allowlist cannot override a rejection
+issued upstream. Probe the public app hostname when `server.app_origin` is set.
+Use `/healthz` for platform liveness and `/readyz` for platform readiness.
+
 ## Application switcher
 
 An open application fills the browser tab, and nothing in it leads anywhere

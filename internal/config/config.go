@@ -668,6 +668,10 @@ type ServerConfig struct {
 	// believed.
 	AppNav *bool `yaml:"app_nav"`
 
+	// PublicAppAvailability explicitly exposes anonymous availability for these
+	// exact slugs, including private apps. Empty means no apps are exposed.
+	PublicAppAvailability []string `yaml:"public_app_availability"`
+
 	// Compression controls whether responses are gzip-encoded for clients that
 	// accept it: the dashboard, the API, and everything relayed from apps. Shiny
 	// backends serve their pages and dependencies uncompressed, and a typical
@@ -2131,6 +2135,11 @@ func loadRaw(path string) (*Config, error) {
 	if err := validateBranding(&cfg.Branding); err != nil {
 		return nil, err
 	}
+	for _, slug := range cfg.Server.PublicAppAvailability {
+		if !slugpkg.Valid(slug) {
+			return nil, fmt.Errorf("server.public_app_availability: invalid slug %q: %s", slug, slugpkg.HumanRule)
+		}
+	}
 	// Normalize storage roots to absolute so a relative/cwd-dependent root cannot
 	// resolve differently across HA instances sharing one filesystem.
 	if abs, err := filepath.Abs(cfg.Storage.AppsDir); err == nil {
@@ -3029,6 +3038,14 @@ func applyEnvWith(cfg *Config, getConfigEnv func(string) string) error {
 			return fmt.Errorf("SHINYHUB_SERVER_APP_NAV: %w", err)
 		}
 		cfg.Server.AppNav = &b
+	}
+	if v := getConfigEnv("SHINYHUB_SERVER_PUBLIC_APP_AVAILABILITY"); v != "" {
+		cfg.Server.PublicAppAvailability = nil
+		if strings.TrimSpace(v) != "[]" {
+			for _, slug := range strings.Split(v, ",") {
+				cfg.Server.PublicAppAvailability = append(cfg.Server.PublicAppAvailability, strings.TrimSpace(slug))
+			}
+		}
 	}
 	if v := getConfigEnv("SHINYHUB_SERVER_COMPRESSION"); v != "" {
 		b, err := parseBoolEnv(v)

@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- Add opt-in anonymous availability monitoring per app without waking sleeping apps or extending their inactivity window. Responses distinguish serving routes from activation eligibility, use fixed status and reason codes, and bound concurrent monitoring queries. Enable selected slugs with `server.public_app_availability`; existing app authentication and readiness behavior are preserved.
+
 ## [0.23.0](https://github.com/rvben/shinyhub/compare/v0.22.0...v0.23.0) - 2026-11-04
 
 ### Added
