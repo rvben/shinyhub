@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.5.7](https://github.com/rvben/shinyhub/compare/shinyhub-bookmarks-v0.5.6...shinyhub-bookmarks-v0.5.7) - 2026-11-09
+
 ### Added
 
 - `input_selectize`, a drop-in constructor that preserves choices when restoring
