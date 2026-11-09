@@ -134,9 +134,11 @@ context API is needed for inputs without a saved value; bookmarked inputs use
 a short-lived context scoped to the constructor call.
 
 For maintainers, `make test-py-bookmarks` runs the package tests.
-`make test-py-bookmarks-browser` additionally checks initial and dynamically
+Run `make install-py-bookmarks-browser` to install Chromium.
+`make test-py-bookmarks-browser` checks initial and dynamically
 rendered module inputs in a real browser, including selecting options omitted
-from the bookmark. It requires Playwright's Chromium browser installation.
+from the bookmark. Both targets resolve the same dependency environment, and
+the browser tests use an editable installation so source changes are exercised.
 Set `BOOKMARKS_BROWSERS='--browser chromium --browser firefox --browser webkit'`
 to exercise all three browser engines.
 

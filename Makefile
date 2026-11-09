@@ -8,6 +8,7 @@ RACE_TIMEOUT ?= 20m
 PYTHON_VERSION ?= 3.14+gil
 BOOKMARKS_SHINY ?= shiny>=1.8,<2
 BOOKMARKS_BROWSERS ?= --browser chromium
+BOOKMARKS_BROWSER_ENV = uv run --python '$(PYTHON_VERSION)' --with-editable . --with pytest --with pytest-asyncio --with pytest-playwright --with pytest-timeout --with '$(BOOKMARKS_SHINY)' --no-project
 
 # Go commands build this module on its own. A go.work in a parent directory
 # (the main checkout's, when working in a nested worktree) would otherwise put
@@ -187,10 +188,14 @@ test-py-bookmarks:
 	@command -v uv >/dev/null 2>&1 || { echo "uv not found (needed for the Python bookmark helper tests)"; exit 1; }
 	cd packaging/python-bookmarks && PYTHONPATH=src uv run --python '$(PYTHON_VERSION)' --with pytest --with pytest-asyncio --with '$(BOOKMARKS_SHINY)' --no-project python -m pytest tests/ -q
 
-.PHONY: test-py-bookmarks-browser
+.PHONY: install-py-bookmarks-browser test-py-bookmarks-browser
+install-py-bookmarks-browser:
+	@command -v uv >/dev/null 2>&1 || { echo "uv not found (needed for the Python bookmark browser tests)"; exit 1; }
+	cd packaging/python-bookmarks && $(BOOKMARKS_BROWSER_ENV) playwright install --with-deps chromium
+
 test-py-bookmarks-browser:
 	@command -v uv >/dev/null 2>&1 || { echo "uv not found (needed for the Python bookmark browser tests)"; exit 1; }
-	cd packaging/python-bookmarks && uv run --python '$(PYTHON_VERSION)' --with . --with pytest --with pytest-asyncio --with pytest-playwright --with pytest-timeout --with '$(BOOKMARKS_SHINY)' --no-project python -m pytest browser-tests/ -q --timeout=120 --timeout-method=thread $(BOOKMARKS_BROWSERS)
+	cd packaging/python-bookmarks && $(BOOKMARKS_BROWSER_ENV) python -m pytest browser-tests/ -q --timeout=120 --timeout-method=thread $(BOOKMARKS_BROWSERS)
 
 # test-py-agent validates the session-bound adapter and browser protocol.
 test-py-agent:
