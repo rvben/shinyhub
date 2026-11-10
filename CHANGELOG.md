@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- Allow app-owned anonymous availability opt-in through bundle and fleet config when permitted by `server.app_availability_opt_in`. Add separately enabled fleet discovery at `/.shinyhub/availability`, with bounded complete snapshots, shared monitoring admission, and no app activation or activity recording.
+- Report `stopped_by_operator` only for confirmed explicit stops. Track stop intent durably and clear it for accepted activation attempts, so failed first deployments and failed restarts are not mistaken for intentional downtime.
+
 ## [0.24.1](https://github.com/rvben/shinyhub/compare/v0.24.0...v0.24.1) - 2026-11-10
 
 ### Added

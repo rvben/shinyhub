@@ -671,6 +671,10 @@ type ServerConfig struct {
 	// PublicAppAvailability explicitly exposes anonymous availability for these
 	// exact slugs, including private apps. Empty means no apps are exposed.
 	PublicAppAvailability []string `yaml:"public_app_availability"`
+	// AppAvailabilityOptIn permits app owners to publish coarse app state.
+	AppAvailabilityOptIn string `yaml:"app_availability_opt_in"`
+	// PublicFleetAvailability separately permits anonymous inventory discovery.
+	PublicFleetAvailability bool `yaml:"public_fleet_availability"`
 
 	// Compression controls whether responses are gzip-encoded for clients that
 	// accept it: the dashboard, the API, and everything relayed from apps. Shiny
@@ -2135,6 +2139,12 @@ func loadRaw(path string) (*Config, error) {
 	if err := validateBranding(&cfg.Branding); err != nil {
 		return nil, err
 	}
+	if cfg.Server.AppAvailabilityOptIn == "" {
+		cfg.Server.AppAvailabilityOptIn = "deny"
+	}
+	if cfg.Server.AppAvailabilityOptIn != "allow" && cfg.Server.AppAvailabilityOptIn != "deny" {
+		return nil, fmt.Errorf("server.app_availability_opt_in must be allow or deny")
+	}
 	for _, slug := range cfg.Server.PublicAppAvailability {
 		if !slugpkg.Valid(slug) {
 			return nil, fmt.Errorf("server.public_app_availability: invalid slug %q: %s", slug, slugpkg.HumanRule)
@@ -3038,6 +3048,16 @@ func applyEnvWith(cfg *Config, getConfigEnv func(string) string) error {
 			return fmt.Errorf("SHINYHUB_SERVER_APP_NAV: %w", err)
 		}
 		cfg.Server.AppNav = &b
+	}
+	if v := getConfigEnv("SHINYHUB_SERVER_APP_AVAILABILITY_OPT_IN"); v != "" {
+		cfg.Server.AppAvailabilityOptIn = v
+	}
+	if v := getConfigEnv("SHINYHUB_SERVER_PUBLIC_FLEET_AVAILABILITY"); v != "" {
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_SERVER_PUBLIC_FLEET_AVAILABILITY: %w", err)
+		}
+		cfg.Server.PublicFleetAvailability = b
 	}
 	if v := getConfigEnv("SHINYHUB_SERVER_PUBLIC_APP_AVAILABILITY"); v != "" {
 		cfg.Server.PublicAppAvailability = nil

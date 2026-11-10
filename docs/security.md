@@ -161,11 +161,20 @@ Installations where even the set of slugs is sensitive should authenticate at th
 reverse proxy, so that nothing reaches ShinyHub unauthenticated.
 
 Operators may also explicitly expose `GET /app/<slug>/.shinyhub/availability`
-through `server.public_app_availability`. This anonymous monitoring endpoint
-reveals coarse availability and fixed reason codes for allowlisted apps,
+through `server.public_app_availability`, or permit app-owned declarations with
+`server.app_availability_opt_in: allow`. App opt-in defaults to denied. This
+anonymous monitoring endpoint reveals coarse availability and fixed reason
+codes for exposed apps,
 including private apps. It returns 404 for unlisted and unknown apps, never
 returns stored diagnostics or identity data, and never wakes an app. It does
 not change the authentication rules of app content or `.shinyhub/ready`.
+The separately disabled-by-default `server.public_fleet_availability` switch
+enables `GET /.shinyhub/availability`, which enumerates every exposed app's
+slug and coarse state. This is an additional discovery disclosure, including
+private apps; existing central allowlists do not automatically enable it.
+App opt-ins belong to the app record, but central allowlist entries continue
+to follow reused slugs. Exempt only the exact monitoring path at an upstream
+authenticating proxy, never the whole `.shinyhub/` namespace.
 See [availability monitoring](configuration.md#anonymous-app-availability-monitoring)
 for the contract and upstream authentication configuration.
 

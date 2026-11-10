@@ -89,6 +89,9 @@ func summarizeManifest(m *deploy.Manifest) []string {
 	if m.App.MaxSessionsPerReplica != nil {
 		appParts = append(appParts, fmt.Sprintf("max_sessions_per_replica=%d", *m.App.MaxSessionsPerReplica))
 	}
+	if m.App.Availability != nil {
+		appParts = append(appParts, fmt.Sprintf("availability=%s", *m.App.Availability))
+	}
 	if m.App.RenderSeconds != nil {
 		appParts = append(appParts, fmt.Sprintf("render_seconds=%g", *m.App.RenderSeconds))
 	}

@@ -31,3 +31,32 @@ func TestPublicAppAvailabilityConfiguration(t *testing.T) {
 		}
 	}
 }
+
+func TestAvailabilityPolicyDefaultsAndOverrides(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", testSecret)
+	path := writeYAML(t, "server:\n  public_app_availability: [sales]\n")
+	cfg, err := config.Load(path)
+	if err != nil || cfg.Server.AppAvailabilityOptIn != "deny" || cfg.Server.PublicFleetAvailability {
+		t.Fatalf("unsafe defaults: %+v %v", cfg, err)
+	}
+	t.Setenv("SHINYHUB_SERVER_APP_AVAILABILITY_OPT_IN", "allow")
+	t.Setenv("SHINYHUB_SERVER_PUBLIC_FLEET_AVAILABILITY", "true")
+	cfg, err = config.Load(path)
+	if err != nil || cfg.Server.AppAvailabilityOptIn != "allow" || !cfg.Server.PublicFleetAvailability {
+		t.Fatalf("env policy: %+v %v", cfg, err)
+	}
+	t.Setenv("SHINYHUB_SERVER_APP_AVAILABILITY_OPT_IN", "yes")
+	if _, err := config.Load(path); err == nil {
+		t.Fatal("accepted invalid opt-in policy")
+	}
+	t.Setenv("SHINYHUB_SERVER_APP_AVAILABILITY_OPT_IN", "deny")
+	t.Setenv("SHINYHUB_SERVER_PUBLIC_FLEET_AVAILABILITY", "perhaps")
+	if _, err := config.Load(path); err == nil {
+		t.Fatal("accepted invalid discovery boolean")
+	}
+	t.Setenv("SHINYHUB_SERVER_PUBLIC_FLEET_AVAILABILITY", "false")
+	cfg, err = config.Load(path)
+	if err != nil || cfg.Server.AppAvailabilityOptIn != "deny" || cfg.Server.PublicFleetAvailability || len(cfg.Server.PublicAppAvailability) != 1 {
+		t.Fatalf("policy override affected central allowlist: %+v %v", cfg, err)
+	}
+}

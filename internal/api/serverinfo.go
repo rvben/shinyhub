@@ -43,6 +43,7 @@ type serverInfoResponse struct {
 // rely on precondition headers and content-digest tracking, or must degrade
 // gracefully against an older server.
 type serverCapabilities struct {
+	AppAvailability           bool `json:"app_availability"`
 	BundleEnv                 bool `json:"bundle_env"`
 	RollingRestart            bool `json:"rolling_restart"`
 	ScheduleInputs            bool `json:"schedule_inputs"`
@@ -87,6 +88,7 @@ func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 		Commit:           s.commitForCaller(r),
 		ProtocolVersion:  protocol.CurrentVersion,
 		Capabilities: serverCapabilities{
+			AppAvailability:           true,
 			RollingRestart:            true,
 			ScheduleInputs:            true,
 			RuntimeCapabilities:       true,

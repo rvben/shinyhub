@@ -46,7 +46,8 @@ func (p Problem) Error() string {
 // Config mirrors the reconcilable subset of shinyhub.toml [app]. Pointers
 // distinguish "declared" (drift-protected) from "absent" (server/bundle wins).
 type Config struct {
-	Env map[string]string `toml:"env"`
+	Availability *string           `toml:"availability"`
+	Env          map[string]string `toml:"env"`
 	// Name and Description are the app's display metadata. Declaring either
 	// makes the fleet manifest its owner: a rename in the dashboard then shows
 	// up as drift on the next plan and is reverted by apply. Leaving the key out
@@ -114,6 +115,9 @@ type AppEntry struct {
 // layers can declare; bundle-only durable fields remain managed by the bundle.
 func EffectiveConfig(app AppEntry) Config {
 	c := app.Bundle
+	if app.Config.Availability != nil {
+		c.Availability = app.Config.Availability
+	}
 	if len(app.Config.Env) > 0 {
 		env := make(map[string]string, len(c.Env)+len(app.Config.Env))
 		for k, v := range c.Env {
@@ -198,7 +202,7 @@ var validVisibility = map[string]bool{"private": true, "shared": true, "public":
 // knownKeys is the set of accepted manifest keys, used for "did you mean"
 // suggestions on unknown-key rejection.
 var knownKeys = []string{
-	"environments", "host", "min_warm_replicas", "render_seconds", "dev", "env", "env_allow", "seed", "fleet_id", "app", "project", "bundle_file", "from", "to", "consumers",
+	"availability", "environments", "host", "min_warm_replicas", "render_seconds", "dev", "env", "env_allow", "seed", "fleet_id", "app", "project", "bundle_file", "from", "to", "consumers",
 	"slug", "source", "visibility", "config",
 	"name", "description", "icon",
 	"hibernate_timeout_minutes", "replicas", "max_sessions_per_replica",
@@ -407,6 +411,9 @@ func validateConfig(file, who string, c *Config) []Problem {
 	var probs []Problem
 	if c.MinWarmReplicas != nil && (*c.MinWarmReplicas < 0 || *c.MinWarmReplicas > 1000) {
 		probs = append(probs, Problem{File: file, Msg: who + ": min_warm_replicas must be between 0 and 1000"})
+	}
+	if c.Availability != nil && *c.Availability != "off" && *c.Availability != "public" {
+		probs = append(probs, Problem{File: file, Msg: who + ": availability must be off or public"})
 	}
 	if c.RenderSeconds != nil && (math.IsNaN(*c.RenderSeconds) || math.IsInf(*c.RenderSeconds, 0) || *c.RenderSeconds < 0 || *c.RenderSeconds > 600) {
 		probs = append(probs, Problem{File: file, Msg: who + ": render_seconds must be finite and between 0 and 600"})

@@ -101,9 +101,11 @@ export const robotsBody = "User-agent: *\nDisallow: /\n";
 // internal/apporigin, which the server's app-origin boundary uses to 404
 // everything else; forwarding those rejects would wake the container to produce
 // a 404 the edge can produce for free. TestDemoWorkerAppOriginMatchesServer
-// pins the two lists together.
+// pins the two lists together. Fleet availability can pass this origin boundary
+// but classifyColdRequest always refuses it while the demo is asleep; probes
+// cannot spend a cold start, even when discovery is enabled on the server.
 const APP_ORIGIN_PREFIXES = ["/app/"];
-const APP_ORIGIN_EXACT = new Set(["/healthz", "/readyz", "/api/app/logout", "/favicon.ico"]);
+const APP_ORIGIN_EXACT = new Set(["/.shinyhub/availability", "/healthz", "/readyz", "/api/app/logout", "/favicon.ico"]);
 
 // Reports whether the app origin serves pathname.
 export function appOriginAdmits(pathname: string): boolean {

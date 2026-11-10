@@ -63,6 +63,7 @@ func publishHandoffSettingsTx(tx writeTx, id int64, revert bool) error {
 		{"max_sessions_per_replica", snapshot.Before.MaxSessionsPerReplica, snapshot.After.MaxSessionsPerReplica},
 		{"min_warm_replicas", snapshot.Before.MinWarmReplicas, snapshot.After.MinWarmReplicas},
 		{"memory_limit_mb", snapshot.Before.MemoryLimitMB, snapshot.After.MemoryLimitMB}, {"cpu_quota_percent", snapshot.Before.CPUQuotaPercent, snapshot.After.CPUQuotaPercent},
+		{"availability", snapshot.Before.Availability, snapshot.After.Availability},
 		{"render_seconds", snapshot.Before.RenderSeconds, snapshot.After.RenderSeconds},
 		{"autoscale_enabled", boolToInt(snapshot.Before.AutoscaleEnabled), boolToInt(snapshot.After.AutoscaleEnabled)},
 		{"autoscale_min_replicas", snapshot.Before.AutoscaleMinReplicas, snapshot.After.AutoscaleMinReplicas},
@@ -147,7 +148,7 @@ func publishHandoffSettingsTx(tx writeTx, id int64, revert bool) error {
 // Persist only the fields required for cutover/compensation, excluding unrelated
 // app metadata and runtime diagnostics from the durable settings snapshot.
 func handoffAppSnapshot(a *App) App {
-	return App{WorkerIsolation: a.WorkerIsolation, WorkerGroupedSize: a.WorkerGroupedSize, WorkerMaxWorkers: a.WorkerMaxWorkers,
+	return App{Availability: a.Availability, WorkerIsolation: a.WorkerIsolation, WorkerGroupedSize: a.WorkerGroupedSize, WorkerMaxWorkers: a.WorkerMaxWorkers,
 		WorkerWarmSpares: a.WorkerWarmSpares, WorkerMaxSessionLifetimeSecs: a.WorkerMaxSessionLifetimeSecs, ID: a.ID, Name: a.Name, Description: a.Description, IconEmoji: a.IconEmoji, ProjectSlug: a.ProjectSlug,
 		HibernateTimeoutMinutes: a.HibernateTimeoutMinutes, MaxSessionsPerReplica: a.MaxSessionsPerReplica, MinWarmReplicas: a.MinWarmReplicas,
 		MemoryLimitMB: a.MemoryLimitMB, CPUQuotaPercent: a.CPUQuotaPercent, RenderSeconds: a.RenderSeconds,

@@ -123,6 +123,9 @@ func emitFleetManifestWithProjects(fleetID, sourceRoot string, apps []db.App, pr
 		if a.Replicas > 0 {
 			cfg = append(cfg, fmt.Sprintf("replicas                  = %d", a.Replicas))
 		}
+		if a.Availability == "public" {
+			cfg = append(cfg, `availability = "public"`)
+		}
 		if a.MaxSessionsPerReplica > 0 {
 			cfg = append(cfg, fmt.Sprintf("max_sessions_per_replica  = %d", a.MaxSessionsPerReplica))
 		}

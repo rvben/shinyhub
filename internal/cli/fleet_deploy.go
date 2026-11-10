@@ -87,7 +87,7 @@ func deployAppBundleFromSpec(cfg *cliConfig, slug string, spec bundleBuildSpec, 
 }
 
 func deployAppBundleFromSpecWithDowntime(cfg *cliConfig, slug string, spec bundleBuildSpec, visibility, project string, out io.Writer, runID string, timeout time.Duration, allowDowntime bool, preconditions ...*string) (promoted string, committed bool, deployRuns []deployRunRef, kind deployfail.Kind, err error) {
-	if err := ensureFleetAppWithRun(cfg, slug, visibility, project, out, runID); err != nil {
+	if err := ensureAppCoreWithAvailability(cfg, slug, visibility, project, spec.Availability, out, false, runID); err != nil {
 		return "", false, nil, ensureFailureKind(err), err
 	}
 	updateFleetProgress(out, "Building bundle", "", time.Time{}, false)
@@ -300,10 +300,6 @@ func readPromotedDigest(cfg *cliConfig, slug string) (string, error) {
 // project_slug.
 func ensureFleetApp(cfg *cliConfig, slug, visibility, project string, out io.Writer) error {
 	return ensureAppCore(cfg, slug, visibility, project, out, false)
-}
-
-func ensureFleetAppWithRun(cfg *cliConfig, slug, visibility, project string, out io.Writer, runID string) error {
-	return ensureAppCore(cfg, slug, visibility, project, out, false, runID)
 }
 
 // ensureFailureKind maps a failure from the pre-deploy existence check or the

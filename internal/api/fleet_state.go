@@ -23,7 +23,7 @@ const (
 var fleetStateKeys = map[string]bool{
 	"source": true, "visibility": true, "name": true, "description": true,
 	"icon": true, "project": true, "hibernate_timeout_minutes": true,
-	"replicas": true, "max_sessions_per_replica": true, "render_seconds": true,
+	"availability": true, "replicas": true, "max_sessions_per_replica": true, "render_seconds": true,
 	"identity_headers": true, "usage_identity_mode": true, "min_warm_replicas": true, "memory_limit_mb": true,
 	"cpu_quota_percent": true, "worker_isolation": true, "worker_grouped_size": true,
 	"worker_max_workers": true, "worker_warm_spares": true,
@@ -98,6 +98,7 @@ func currentFleetValues(app *db.App) map[string]string {
 		"hibernate_timeout_minutes":        hibernate,
 		"replicas":                         fmt.Sprintf("%d", app.Replicas),
 		"max_sessions_per_replica":         fmt.Sprintf("%d", app.MaxSessionsPerReplica),
+		"availability":                     quoted(app.Availability),
 		"render_seconds":                   fmt.Sprintf("%g", app.RenderSeconds),
 		"identity_headers":                 identity,
 		"usage_identity_mode":              usageIdentity,

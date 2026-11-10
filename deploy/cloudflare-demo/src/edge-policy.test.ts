@@ -618,3 +618,17 @@ test("the awake memo is far shorter than the container sleep timer", () => {
     `the memo must stay a small fraction of the ${SLEEP_AFTER_MS}ms sleep timer, not ${AWAKE_MEMO_MS}ms`,
   );
 });
+
+// Origin admission and permission to wake are separate: fleet monitoring must
+// never start the sleeping demo, even with forged browser-navigation headers.
+test("fleet availability probes cannot wake the sleeping demo", () => {
+  for (const hostname of [APP_HOST, DEMO_HOST]) {
+    for (const method of ["GET", "HEAD", "POST"]) {
+      for (const headers of [programmatic, navigation]) {
+        const verdict = classifyColdRequest({ hostname, pathname: "/.shinyhub/availability", method, ...headers });
+        assert.equal(verdict, "refuse");
+        assert.equal(gateUnconfirmed(verdict, true), "refuse");
+      }
+    }
+  }
+});

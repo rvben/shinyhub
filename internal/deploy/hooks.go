@@ -59,7 +59,8 @@ type Hook struct {
 // has no null literal: the convention mirrors the CLI's
 // `--hibernate-timeout -1`.
 type AppSettings struct {
-	InheritLivePolicy bool `toml:"-"`
+	Availability      *string `toml:"availability"`
+	InheritLivePolicy bool    `toml:"-"`
 	// Env is plaintext configuration owned by this bundle, including builds and jobs.
 	Env map[string]string `toml:"env"`
 	// Framework selects a managed API launcher; empty retains existing inference.
@@ -211,7 +212,7 @@ type AutoscaleSettings struct {
 // belongs to the bundle and is resolved at launch. MemoryLimitMB /
 // CPUQuotaPercent ARE reconciled into the DB (like Replicas), so they count.
 func (a AppSettings) IsZero() bool {
-	return a.HibernateTimeoutMinutes == nil &&
+	return a.Availability == nil && a.HibernateTimeoutMinutes == nil &&
 		a.Replicas == nil &&
 		a.MaxSessionsPerReplica == nil &&
 		a.RenderSeconds == nil &&
@@ -354,13 +355,13 @@ func ParseManifest(data []byte) (*Manifest, error) {
 		return nil, fmt.Errorf("parse %s: unknown field(s): %s", ManifestFilename, strings.Join(keys, ", "))
 	}
 	if m.Sparse {
-		allowed := map[string]bool{"replicas": true, "min_warm_replicas": true, "max_sessions_per_replica": true, "autoscale": true, "hibernate_timeout_minutes": true, "render_seconds": true, "env": true}
+		allowed := map[string]bool{"availability": true, "replicas": true, "min_warm_replicas": true, "max_sessions_per_replica": true, "autoscale": true, "hibernate_timeout_minutes": true, "render_seconds": true, "env": true}
 		for _, key := range meta.Keys() {
 			if key[0] == "sparse" {
 				continue
 			}
 			if key[0] != "app" || (len(key) > 1 && !allowed[key[1]]) {
-				return nil, fmt.Errorf("sparse manifest only accepts app sizing, lifecycle and env declarations: %s", key.String())
+				return nil, fmt.Errorf("sparse manifest only accepts app sizing, lifecycle, availability and env declarations: %s", key.String())
 			}
 		}
 	}
@@ -448,6 +449,9 @@ func normalizeAndValidateApp(a *AppSettings) error {
 	}
 	if a.MaxSessionsPerReplica != nil && (*a.MaxSessionsPerReplica < 0 || *a.MaxSessionsPerReplica > 1000) {
 		return fmt.Errorf("max_sessions_per_replica must be between 0 and 1000, got %d", *a.MaxSessionsPerReplica)
+	}
+	if a.Availability != nil && *a.Availability != "off" && *a.Availability != "public" {
+		return fmt.Errorf("availability must be off or public")
 	}
 	if a.RenderSeconds != nil {
 		v := *a.RenderSeconds

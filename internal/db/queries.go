@@ -1183,6 +1183,7 @@ type App struct {
 	// admission pacer. 0 disables pacing. Mirrors autoscale_target's float64
 	// round-tripping (REAL on SQLite, DOUBLE PRECISION on Postgres).
 	RenderSeconds float64 `json:"render_seconds"`
+	Availability  string  `json:"availability"`
 	// RedeploySeqLaunched counts the settings redeploys owed to this app: a
 	// PATCH that changes the pool shape of a running app advances it in the
 	// same transaction as the settings. A redeploy is owed while
@@ -1343,7 +1344,7 @@ const appColumns = `id, slug, name, project_slug, owner_id, access, status,
 		       last_autoscale_at, identity_headers, usage_identity_mode, min_warm_replicas,
 		       last_error, crashed_at, description, icon_mime, icon_emoji, producer_recovery_status,
 		       worker_isolation, worker_grouped_size, worker_max_workers, worker_warm_spares,
-		       worker_max_session_lifetime_secs, ephemeral_data_ack, render_seconds,
+		       worker_max_session_lifetime_secs, ephemeral_data_ack, render_seconds, availability,
 		       redeploy_seq_launched, last_redeploy_seq, last_redeploy_outcome,
 		       last_redeploy_reason, last_redeploy_at,`
 
@@ -1353,10 +1354,11 @@ const appColumns = `id, slug, name, project_slug, owner_id, access, status,
 var appColumnsLean = strings.TrimSuffix(appColumns, ",")
 
 type CreateAppParams struct {
-	Slug        string
-	Name        string
-	ProjectSlug string
-	OwnerID     int64
+	Availability string // empty defaults to off
+	Slug         string
+	Name         string
+	ProjectSlug  string
+	OwnerID      int64
 	// Access must be one of ValidAppVisibilities; validated by callers before
 	// calling CreateApp. The SQL column DEFAULT 'private' acts as a last-resort
 	// safety net only when the column is omitted from the INSERT entirely.
@@ -1370,8 +1372,8 @@ type CreateAppParams struct {
 // 050) must never apply again.
 func (s *Store) CreateApp(p CreateAppParams) (bool, error) {
 	_, err := s.db.Exec(
-		`INSERT INTO apps (slug, name, project_slug, owner_id, access) VALUES (?, ?, ?, ?, ?)`,
-		p.Slug, p.Name, p.ProjectSlug, p.OwnerID, p.Access,
+		`INSERT INTO apps (slug, name, project_slug, owner_id, access, availability) VALUES (?, ?, ?, ?, ?, COALESCE(NULLIF(?, ''), 'off'))`,
+		p.Slug, p.Name, p.ProjectSlug, p.OwnerID, p.Access, p.Availability,
 	)
 	if err != nil {
 		if s.d.isUniqueViolation(err) {
@@ -1797,7 +1799,7 @@ func (s *Store) ListCrashedAppsWithLostReplicas() ([]*App, error) {
 // every other transition out of "crashed".
 func (s *Store) ReviveCrashedApp(slug string) (bool, error) {
 	res, err := s.db.Exec(
-		`UPDATE apps SET status = 'degraded', last_error = '', crashed_at = 0, updated_at = CURRENT_TIMESTAMP
+		`UPDATE apps SET status = 'degraded', operator_stopped = 0, last_error = '', crashed_at = 0, updated_at = CURRENT_TIMESTAMP
 		   WHERE slug = ? AND status = 'crashed'`,
 		slug,
 	)
@@ -2051,6 +2053,9 @@ func (s *Store) ListPublicApps(limit, offset int) ([]*App, error) {
 }
 
 type UpdateAppStatusParams struct {
+	// OperatorStopped is set only by a confirmed explicit stop operation.
+	OperatorStopped bool
+
 	// PreserveRecoveryIntent is for failed automatic operations, not explicit lifecycle choices.
 	PreserveRecoveryIntent bool
 
@@ -2074,8 +2079,19 @@ type UpdateAppStatusParams struct {
 
 func updateAppStatusRow(exec func(string, ...any) (sql.Result, error), p UpdateAppStatusParams) error {
 	recovery := "producer_recovery_status = ''"
+	if p.OperatorStopped && p.Status != "stopped" {
+		return fmt.Errorf("operator stop intent requires stopped status")
+	}
+	intent := "operator_stopped = 0"
+	if p.Status == "stopped" {
+		intent = "operator_stopped = CASE WHEN status = 'stopped' THEN operator_stopped ELSE 0 END"
+		if p.OperatorStopped {
+			intent = "operator_stopped = 1"
+		}
+	}
+	recovery += ", " + intent
 	if p.PreserveRecoveryIntent {
-		recovery = "producer_recovery_status = producer_recovery_status"
+		recovery = "producer_recovery_status = producer_recovery_status, " + intent
 	}
 	query := `UPDATE apps SET status = ?, ` + recovery + `, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`
 	args := []any{p.Status, p.Slug}
@@ -2230,7 +2246,7 @@ func (s *Store) MarkRecoveryHibernated(slug string) error {
 
 	res, err := tx.Exec(`
 		UPDATE apps
-		SET status = 'hibernated', last_error = '', crashed_at = 0,
+		SET status = 'hibernated', operator_stopped = 0, last_error = '', crashed_at = 0,
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE slug = ? AND status IN ('running', 'degraded', 'hibernated')`, slug)
 	if err != nil {
@@ -2386,7 +2402,7 @@ func (s *Store) MarkAppCrashed(slug, reason string) error {
 		return fmt.Errorf("mark app crashed: %w", err)
 	}
 	res, err := s.db.Exec(
-		`UPDATE apps SET status = 'crashed', producer_recovery_status = '', last_error = ?, crashed_at = ?, updated_at = CURRENT_TIMESTAMP
+		`UPDATE apps SET status = 'crashed', operator_stopped = 0, producer_recovery_status = '', last_error = ?, crashed_at = ?, updated_at = CURRENT_TIMESTAMP
 		   WHERE slug = ? AND status != 'deleting'`,
 		reason, epoch, slug,
 	)
@@ -2407,7 +2423,7 @@ func (s *Store) MarkAppCrashed(slug, reason string) error {
 // spawn; everyone else gets false and returns.
 func (s *Store) BeginWake(slug string) (bool, error) {
 	res, err := s.db.Exec(
-		`UPDATE apps SET status = 'waking', updated_at = CURRENT_TIMESTAMP
+		`UPDATE apps SET status = 'waking', operator_stopped = 0, updated_at = CURRENT_TIMESTAMP
 		   WHERE slug = ? AND status = 'hibernated'`,
 		slug,
 	)
@@ -2424,7 +2440,7 @@ func (s *Store) BeginWake(slug string) (bool, error) {
 // intent.
 func (s *Store) AbortWake(slug string) error {
 	if _, err := s.db.Exec(
-		`UPDATE apps SET status = 'hibernated', updated_at = CURRENT_TIMESTAMP
+		`UPDATE apps SET status = 'hibernated', operator_stopped = 0, updated_at = CURRENT_TIMESTAMP
 		   WHERE slug = ? AND status = 'waking'`,
 		slug,
 	); err != nil {
@@ -2439,7 +2455,7 @@ func (s *Store) AbortWake(slug string) error {
 // clobbered back to running (won=false, the caller leaves the newer status).
 func (s *Store) FinishWake(slug string) (bool, error) {
 	res, err := s.db.Exec(
-		`UPDATE apps SET status = 'running', updated_at = CURRENT_TIMESTAMP
+		`UPDATE apps SET status = 'running', operator_stopped = 0, updated_at = CURRENT_TIMESTAMP
 		   WHERE slug = ? AND status = 'waking'`,
 		slug,
 	)
@@ -2460,7 +2476,7 @@ func (s *Store) FinishWake(slug string) (bool, error) {
 // an app that is still "running" but has already had its pool removed.
 func (s *Store) HibernateApp(slug string) (bool, error) {
 	res, err := s.db.Exec(
-		`UPDATE apps SET status = 'hibernated', updated_at = CURRENT_TIMESTAMP
+		`UPDATE apps SET status = 'hibernated', operator_stopped = 0, updated_at = CURRENT_TIMESTAMP
 		   WHERE slug = ? AND status = 'running'`,
 		slug,
 	)
@@ -3219,11 +3235,12 @@ func (s *Store) QuarantineAndFailDeploymentWithAppStatus(id int64, reason, lastE
 	}
 	res, err := tx.Exec(`
 		UPDATE apps SET status = CASE WHEN status = 'deleting' THEN status ELSE ? END,
+        operator_stopped = CASE WHEN status = 'stopped' AND ? = 'stopped' THEN operator_stopped ELSE 0 END,
         producer_recovery_status = CASE WHEN ? = 'failed' THEN producer_recovery_status ELSE '' END,
         last_error = CASE WHEN status = 'deleting' THEN last_error ELSE ? END, crashed_at = 0, updated_at = CURRENT_TIMESTAMP
 		WHERE id = (SELECT app_id FROM deployments
 		            WHERE id = ? AND status = ? AND
-		                  (producer_barrier_entered = 1 OR prior_schedule_snapshot_recorded = 0))`, appStatus, appStatus, lastError, id, DeploymentPending)
+		                  (producer_barrier_entered = 1 OR prior_schedule_snapshot_recorded = 0))`, appStatus, appStatus, appStatus, lastError, id, DeploymentPending)
 	if err != nil {
 		return fmt.Errorf("quarantine deployment %d app: %w", id, err)
 	}
@@ -5631,6 +5648,9 @@ type ApplyAppManifestSettingsParams struct {
 	SetMaxSessionsPerReplica bool
 	MaxSessionsPerReplica    int
 
+	SetAvailability bool
+	Availability    string
+
 	SetRenderSeconds bool
 	RenderSeconds    float64
 
@@ -5790,6 +5810,14 @@ func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) (bool
 		}
 	}
 
+	if p.SetAvailability {
+		if p.Availability != "off" && p.Availability != "public" {
+			return false, fmt.Errorf("availability must be off or public")
+		}
+		if _, err := tx.Exec(`UPDATE apps SET availability = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, p.Availability, p.AppID); err != nil {
+			return false, fmt.Errorf("update availability: %w", err)
+		}
+	}
 	if p.SetRenderSeconds {
 		if _, err := tx.Exec(
 			`UPDATE apps SET render_seconds = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
@@ -5937,6 +5965,9 @@ type PatchAppSettingsParams struct {
 
 	SetMaxSessions bool
 	MaxSessions    int
+
+	SetAvailability bool
+	Availability    string
 
 	SetRenderSeconds bool
 	RenderSeconds    float64
@@ -6110,6 +6141,14 @@ func (s *Store) patchAppSettings(p PatchAppSettingsParams) (res PatchAppSettings
 		}
 	}
 
+	if p.SetAvailability {
+		if p.Availability != "off" && p.Availability != "public" {
+			return res, fmt.Errorf("availability must be off or public")
+		}
+		if _, err := tx.Exec(`UPDATE apps SET availability = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, p.Availability, appID); err != nil {
+			return res, fmt.Errorf("update availability: %w", err)
+		}
+	}
 	if p.SetRenderSeconds {
 		if _, err := tx.Exec(
 			`UPDATE apps SET render_seconds = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
@@ -6301,7 +6340,7 @@ func scanApp(s scanner) (*App, error) {
 		&a.LastAutoscaleAt, &a.IdentityHeaders, &a.UsageIdentityMode, &a.MinWarmReplicas,
 		&a.LastError, &a.CrashedAt, &a.Description, &a.IconMime, &a.IconEmoji, &a.ProducerRecoveryStatus,
 		&a.WorkerIsolation, &a.WorkerGroupedSize, &a.WorkerMaxWorkers,
-		&a.WorkerWarmSpares, &a.WorkerMaxSessionLifetimeSecs, &ephemeralDataAckInt, &a.RenderSeconds,
+		&a.WorkerWarmSpares, &a.WorkerMaxSessionLifetimeSecs, &ephemeralDataAckInt, &a.RenderSeconds, &a.Availability,
 		&a.RedeploySeqLaunched, &lastRedeploy.Seq, &lastRedeploy.Outcome,
 		&lastRedeploy.Reason, &lastRedeployAt,
 		&lastDeployedAtRaw, &a.ReleaseNumber, &releasedAtRaw,
@@ -6367,7 +6406,7 @@ func scanAppLean(s scanner) (*App, error) {
 		&a.LastAutoscaleAt, &a.IdentityHeaders, &a.UsageIdentityMode, &a.MinWarmReplicas,
 		&a.LastError, &a.CrashedAt, &a.Description, &a.IconMime, &a.IconEmoji, &a.ProducerRecoveryStatus,
 		&a.WorkerIsolation, &a.WorkerGroupedSize, &a.WorkerMaxWorkers,
-		&a.WorkerWarmSpares, &a.WorkerMaxSessionLifetimeSecs, &ephemeralDataAckInt, &a.RenderSeconds,
+		&a.WorkerWarmSpares, &a.WorkerMaxSessionLifetimeSecs, &ephemeralDataAckInt, &a.RenderSeconds, &a.Availability,
 		&a.RedeploySeqLaunched, &lastRedeploy.Seq, &lastRedeploy.Outcome,
 		&lastRedeploy.Reason, &lastRedeployAt,
 	)

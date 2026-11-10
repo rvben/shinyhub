@@ -33,6 +33,9 @@ func newValidationError(format string, args ...any) *validationError {
 // MaxSessions 0..1000) are already enforced at parse time in
 // deploy.LoadManifest.
 func (s *Server) validateManifestForServer(app *db.App, m deploy.AppSettings) *validationError {
+	if m.Availability != nil && *m.Availability == "public" && s.cfg.Server.AppAvailabilityOptIn != "allow" && app.Availability != "public" {
+		return newValidationError("app availability opt-in is denied by server policy")
+	}
 	if m.IsZero() {
 		return nil
 	}
@@ -265,6 +268,8 @@ func (s *Server) applyManifestAppSettings(r *http.Request, app *db.App, m deploy
 		PreviousReplicas:             app.Replicas,
 		SetMaxSessionsPerReplica:     m.MaxSessionsPerReplica != nil,
 		MaxSessionsPerReplica:        derefOrZero(m.MaxSessionsPerReplica),
+		SetAvailability:              m.Availability != nil,
+		Availability:                 derefStringOrEmpty(m.Availability),
 		SetRenderSeconds:             m.RenderSeconds != nil,
 		RenderSeconds:                derefFloatOrZero(m.RenderSeconds),
 		SetIdentityHeaders:           true,
@@ -607,6 +612,9 @@ func manifestAppliedSummary(m deploy.AppSettings) map[string]any {
 	if m.MaxSessionsPerReplica != nil {
 		d["max_sessions_per_replica"] = *m.MaxSessionsPerReplica
 	}
+	if m.Availability != nil {
+		d["availability"] = *m.Availability
+	}
 	if m.RenderSeconds != nil {
 		d["render_seconds"] = *m.RenderSeconds
 	}
@@ -682,6 +690,9 @@ func manifestAppDetail(m deploy.AppSettings) string {
 	}
 	if m.MaxSessionsPerReplica != nil {
 		d["max_sessions_per_replica"] = *m.MaxSessionsPerReplica
+	}
+	if m.Availability != nil {
+		d["availability"] = *m.Availability
 	}
 	if m.RenderSeconds != nil {
 		d["render_seconds"] = *m.RenderSeconds

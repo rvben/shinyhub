@@ -20,6 +20,9 @@ server:
   # Anonymous, non-waking availability checks for these exact app slugs.
   # Exposes existence and operational state even for private apps. No wildcards.
   public_app_availability: []          # SHINYHUB_SERVER_PUBLIC_APP_AVAILABILITY=sales,reports
+  app_availability_opt_in: deny        # allow | deny; SHINYHUB_SERVER_APP_AVAILABILITY_OPT_IN
+  # Separately enable anonymous discovery of ALL exposed slugs and their state.
+  public_fleet_availability: false     # SHINYHUB_SERVER_PUBLIC_FLEET_AVAILABILITY
   base_url: https://shiny.example.com # external URL (used in OAuth callbacks)  # SHINYHUB_BASE_URL
   # Strongly recommended when app authors are less trusted than operators.
   # Route this separate HTTPS hostname to the same ShinyHub backend.

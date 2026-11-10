@@ -371,7 +371,7 @@ func applyConfigDrift(cfg *cliConfig, slug string, drift []fleet.ConfigDriftItem
 				return fmt.Errorf("app %s: invalid desired %s=%q: %w", slug, c.Key, c.Desired, perr)
 			}
 			body[c.Key] = n
-		case "name", "description", "worker_isolation":
+		case "name", "description", "worker_isolation", "availability":
 			// Rebuilt from the declared config, like autoscale below: the drift
 			// item carries a quoted display string, not a value to send.
 			if v := declaredString(declared, c.Key); v != nil {
@@ -441,6 +441,8 @@ func retryableFleetPatch(err error) bool {
 // items use so the two cannot drift apart.
 func declaredString(c fleet.Config, key string) *string {
 	switch key {
+	case "availability":
+		return c.Availability
 	case "name":
 		return c.Name
 	case "description":

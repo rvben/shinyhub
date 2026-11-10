@@ -268,14 +268,78 @@ server:
 ```
 
 The default is an empty list. `SHINYHUB_SERVER_PUBLIC_APP_AVAILABILITY=sales,reports`
-overrides the list; set it to `[]` to disable all exposure. Only exact, valid
+overrides the list; set it to `[]` to clear the central allowlist. Only exact, valid
 app slugs are accepted; wildcards are rejected. Keep configuration consistent
 across instances. This setting exposes existence and coarse operational state
 for listed apps, including private apps; it grants no access to app content.
 The allowlist follows the slug: if an app is deleted and its slug reused, the
 replacement inherits this exposure. Remove retired entries when appropriate.
 Restart the server or perform a [zero-downtime reload](zero-downtime-upgrades.md)
-to apply this setting; the handler captures the allowlist at startup.
+to apply server monitoring settings; the handler captures them at startup.
+
+App owners can instead declare exposure in their own deployment configuration,
+when the operator permits it:
+
+```yaml
+server:
+  app_availability_opt_in: allow  # default: deny
+```
+
+In an app's `shinyhub.toml`:
+
+```toml
+[app]
+availability = "public"  # off | public; new apps default to off
+```
+
+Or in a fleet manifest:
+
+```toml
+fleet_id = "analytics"
+
+[[app]]
+slug = "sales"
+source = "./sales"
+
+[app.config]
+availability = "public"
+```
+
+The effective exposure is the union of the central allowlist and app opt-ins
+permitted by the server. `availability = "off"` revokes the app opt-in, but
+cannot override the operator's central allowlist. Omitting the key preserves
+the stored value. Fleet config takes precedence over a source bundle and is
+reconciled even when its digest is unchanged. App settings take effect when
+committed, with no ShinyHub restart or app activation required; authorized
+owners and users with app management rights can also use
+`PATCH /api/apps/<slug>` with `{"availability":"off"}` or
+`{"availability":"public"}`. Changing only fleet monitoring config uses PATCH
+without restarting workers or changing the bundle digest. New fleet apps receive
+the effective fleet or source declaration at creation,
+so a failed first boot is monitored too. A conflicting declaration in the
+source manifest is overridden in the uploaded manifest and follows the usual
+deployment path. Out-of-band exposure drift is corrected through PATCH. Rollback
+uses the stored exposure setting and does not restore an opt-in from an older
+bundle.
+
+The server rejects new `public` declarations when opt-in is denied; `off` is
+always allowed. Unchanged stored `public` declarations remain valid during
+redeployment while their exposure is suppressed. Setting the server policy back
+to `deny` suppresses stored app opt-ins without erasing them, so changing it to `allow` later restores
+them. The central allowlist continues to work under either policy. To disable
+all exposure, clear the central list and set opt-in to `deny`.
+`SHINYHUB_SERVER_APP_AVAILABILITY_OPT_IN` overrides this policy.
+
+An opt-in is attached to the app record: deletion and slug reuse do not transfer
+it. Central allowlist entries still follow the slug. App visibility (`private`,
+`shared`, `public`) is independent of monitoring exposure. An app opt-in reveals
+its existence and coarse state even when its content is private.
+
+Like other declared app metadata, a stop-first deploy commits exposure during
+manifest reconciliation; it can remain exposed if the subsequent boot fails,
+which lets monitors detect that failure. A parallel generation handoff stages
+it with the candidate's settings and publishes it at successful cutover.
+A policy or manifest validation rejection does not change exposure.
 
 Probe `GET /app/sales/.shinyhub/availability` on the hostname used for apps:
 
@@ -298,13 +362,14 @@ A hibernated app eligible to activate returns:
 | Deploying/starting/waking app with a previous release still serving | 200 | `available:true`, lifecycle `status`, `basis:"serving_route"` |
 | Compatibility failure, including an unrepaired producer barrier | 503 | `available:false`, `status:"quarantined"`, `reason:"compatibility_blocked"` |
 | Active data publisher prevents activation, with no existing serving route | 503 | `available:false`, lifecycle `status`, `reason:"activation_blocked"` |
-| Operator-stopped, deleting, failed or crashed app | 503 | `available:false`, lifecycle `status` |
+| Confirmed explicit operator stop | 503 | `available:false`, `status:"stopped"`, `reason:"stopped_by_operator"` |
+| Stopped without recorded operator intent, deleting, failed or crashed app | 503 | `available:false`, lifecycle `status` |
 | No successful serving release | 503 | `available:false`, lifecycle `status`, `reason:"no_serving_release"` |
 | Starting or missing fresh-session capacity | 503 | `available:false`, lifecycle `status`, `reason:"no_serving_capacity"` |
 | Hibernating/waking with a successful release and no activation blocker | 200 | `available:true`, lifecycle `status`, `basis:"activation_eligible"` |
 | Server starting, draining or not yet synchronized | 503 | `available:false`, `status:"unknown"`, `reason:"platform_unavailable"` |
 | Database lookup failed, or unrecognized lifecycle state | 503 | `available:false`, `status:"unknown"`, `reason:"state_unavailable"` |
-| Unlisted or confirmed unknown slug | 404 | No app state disclosed |
+| Unlisted, not opted in, policy-suppressed, or confirmed unknown slug | 404 | No app state disclosed |
 | Monitoring lookup budget exhausted | 429 | `available:false`, `status:"unknown"`, `reason:"monitor_busy"`; retry after one second |
 
 `available:true` means ShinyHub knows a serving route or an eligible activation
@@ -314,6 +379,23 @@ Responses with `available:false` omit `basis`; an optional fixed `reason`
 explains the failure. `status` always describes lifecycle state, rather than
 inferring that a demand-driven app is idle from its worker policy.
 
+`stopped_by_operator` requires a recorded, confirmed stop operation; `stopped`
+alone does not prove intent. A failed first deployment or restart may also
+leave an app stopped. An accepted activation attempt clears the intent before
+boot, including when boot fails. Preparation-only deploys that keep an app
+stopped preserve it. Existing stopped apps are not backfilled with guessed
+intent on upgrade; explicitly stopping them establishes it. Compatibility
+quarantine still takes precedence, even for deliberately stopped apps.
+Whether to suppress alerts for an intentional stop is the monitor's policy. In HA,
+finish upgrading all control-plane instances before writing app opt-ins or
+relying on the new stop reason: older instances cannot apply these settings or
+maintain stop intent. App resource revisions also change with this upgrade;
+re-plan saved fleet plans after the upgrade, and expect revision precondition
+failures while requests can reach mixed versions. Configure the same
+monitoring policy on every instance behind a load balancer before enabling
+fleet discovery. Binary downgrades still require restoring a compatible
+pre-migration snapshot or backup; see [downgrades](#downgrades-exit-7).
+
 Compatibility failures take precedence over stale routes and lifecycle status.
 An active, healthy data publisher blocks new activations but does not invalidate
 an existing consumer route. A failed deployment attempt does not itself make a
@@ -321,12 +403,16 @@ still-serving previous release unavailable. Retiring generations and draining
 replicas do not count as capacity for new sessions.
 
 `HEAD` returns the same status and headers without a body. Other methods return
-405 for listed slugs. Responses include `Cache-Control: no-store`, including
+405 for enabled, syntactically valid monitoring paths. Responses include
+`Cache-Control: no-store`, including
 404s and 429s. At most two monitoring database lookups run concurrently per
-server process, shared across all slugs. Excess probes receive 429 immediately
+server process, shared across all slugs and the fleet endpoint below. Excess probes receive 429 immediately
 with `Retry-After: 1`; they do not queue or query the database. A 429 means the
 monitoring service is busy and provides no evidence about app health. Monitors
 should retry with backoff and jitter rather than page on a single busy response.
+Enabling app opt-in (`allow`) also lets syntactically valid unknown-slug probes
+consume this shared lookup budget; the central allowlist alone rejects unlisted
+slugs before a lookup.
 The budget is released before writing a response, so a slow client cannot hold
 a database slot. Each lookup has a one-second context deadline; an uncertain lookup never
 becomes an unknown-app 404. Probes do not contact apps, start workers, request
@@ -351,6 +437,74 @@ check and forward them to ShinyHub. Avoid exempting the entire `/app/` prefix
 or `.shinyhub/` namespace. ShinyHub's allowlist cannot override a rejection
 issued upstream. Probe the public app hostname when `server.app_origin` is set.
 Use `/healthz` for platform liveness and `/readyz` for platform readiness.
+
+### Fleet availability and discovery
+
+Separately enable anonymous discovery of the complete exposed inventory:
+
+```yaml
+server:
+  app_availability_opt_in: allow
+  public_fleet_availability: true  # default: false
+```
+
+`SHINYHUB_SERVER_PUBLIC_FLEET_AVAILABILITY` overrides the discovery switch.
+The switch enables `GET /.shinyhub/availability` on both the control and app
+origins, including an isolated `server.app_origin`. Use the app hostname to
+check the externally routed monitoring path. Disabled discovery returns 404
+with `Cache-Control: no-store` and performs no monitoring database lookup.
+Existing central allowlists do not implicitly enable discovery.
+
+```json
+{
+  "generated_at": "2026-11-10T13:05:44Z",
+  "apps": [
+    {"slug":"reports","available":true,"status":"hibernated","basis":"activation_eligible"},
+    {"slug":"sales","available":false,"status":"stopped","reason":"stopped_by_operator"}
+  ]
+}
+```
+
+Only apps exposed through the effective policy above are listed, once each,
+in ascending slug order. Unknown central-list entries are omitted. No names,
+owners, diagnostics or app content are returned. Enabling this endpoint makes
+those slugs **enumerable**, including private apps; per-app probes previously
+required callers to supply a slug. Review that disclosure before enabling it.
+
+Each entry uses the per-app response contract with an added `slug`. HTTP 200
+means a complete inventory was obtained, even if every app is unavailable.
+A healthy empty inventory returns `"apps":[]`. HTTP 503 with the existing
+`platform_unavailable` reason means the platform is starting, unsynchronized
+or draining; `state_unavailable` means the snapshot could not be obtained or
+completed. Failure responses omit `apps`, and must never be interpreted as an
+empty healthy fleet. `HEAD` has the same status and headers without a body;
+other methods return 405. All responses include `Cache-Control: no-store`.
+
+The fleet lookup uses one database statement with a one-second deadline and
+shares the two-slot monitoring budget with per-app lookups. It evaluates at
+most 10,000 app entries; a larger exposed fleet returns 503 with
+`state_unavailable`, rather than a truncated successful inventory. This is a hard safety cap, not
+a throughput guarantee; database load and compatibility metadata can cause a
+smaller fleet to exceed the deadline. The budget
+is released before writing to the client. A busy monitor still returns 429
+with `monitor_busy` and `Retry-After: 1`; use bounded retries with backoff and
+jitter. One request reduces polling overhead but does not remove resource
+limits. The endpoint never contacts apps, wakes workers or records activity.
+
+Database membership and lifecycle state come from one snapshot; routing state
+is observed separately and can change during evaluation. `generated_at` is
+the UTC response generation time, not a guarantee of an atomic routing snapshot
+or successful synthetic app request.
+
+A monitor should alert separately on missing/invalid responses and on app
+unavailability. Remember previous membership or define expected apps: deleted
+apps and revoked opt-ins disappear from future inventories. A successful
+empty or smaller list alone does not prove all expected apps remain covered.
+Suppress `stopped_by_operator` only when that matches your alerting policy.
+
+For fleet monitoring behind an authenticating proxy, exempt only the exact
+`/.shinyhub/availability` path; this is one exemption regardless of app count.
+Do not exempt the `.shinyhub/` namespace or `/app/` prefix.
 
 ## Application switcher
 

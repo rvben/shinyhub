@@ -103,7 +103,7 @@ func reconcileProducerStatusTx(ctx context.Context, tx writeTx, appID, runID int
 		}
 		return nil, nil
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE apps SET status = ?, producer_recovery_status = ?, last_error = ?, crashed_at = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, target, previous, diagnostic, appID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE apps SET status = ?, operator_stopped = 0, producer_recovery_status = ?, last_error = ?, crashed_at = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, target, previous, diagnostic, appID); err != nil {
 		return nil, err
 	}
 	detail, err := json.Marshal(map[string]any{"from": status, "to": target, "reason": reason, "schedule_run_id": runID})

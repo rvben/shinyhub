@@ -27,8 +27,9 @@ type deployPreflightRequest struct {
 // server has no policy for are rejected by the strict decoder rather than
 // silently accepted, so a client never mistakes "ignored" for "checked".
 type deployPreflightSettings struct {
-	Replicas  *int `json:"replicas"`
-	Autoscale *struct {
+	Availability *string `json:"availability"`
+	Replicas     *int    `json:"replicas"`
+	Autoscale    *struct {
 		Enabled     *bool    `json:"enabled"`
 		MinReplicas *int     `json:"min_replicas"`
 		MaxReplicas *int     `json:"max_replicas"`
@@ -41,6 +42,7 @@ func (p *deployPreflightSettings) appSettings() deploy.AppSettings {
 	if p == nil {
 		return m
 	}
+	m.Availability = p.Availability
 	m.Replicas = p.Replicas
 	if p.Autoscale != nil {
 		as := &deploy.AutoscaleSettings{Enabled: p.Autoscale.Enabled}
@@ -68,6 +70,7 @@ type deployPreflightProblem struct {
 }
 
 type deployPreflightResponse struct {
+	Warnings        []string                 `json:"warnings,omitempty"`
 	ScheduleChanges []ManifestScheduleResult `json:"schedule_changes,omitempty"`
 	Valid           bool                     `json:"valid"`
 	Isolation       string                   `json:"isolation"`
@@ -206,6 +209,18 @@ func (s *Server) deployPreflight(app *db.App, req deployPreflightRequest) (deplo
 			reply.Problems = append(reply.Problems, deployPreflightProblem{Stage: "settings", Message: ve.Error()})
 		}
 	}
+	if req.Settings != nil {
+		projectManifestSettings(&projected, req.Settings.appSettings())
+	}
+	if projected.Availability == "public" && s.cfg.Server.AppAvailabilityOptIn != "allow" {
+		central := false
+		for _, slug := range s.cfg.Server.PublicAppAvailability {
+			central = central || slug == app.Slug
+		}
+		if !central && len(reply.Problems) == 0 {
+			reply.Warnings = append(reply.Warnings, "app availability opt-in is suppressed by server policy")
+		}
+	}
 	if app.ID != 0 {
 		existing, err := s.store.ListSchedulesByApp(app.ID)
 		if err != nil {
@@ -264,6 +279,9 @@ func (s *Server) targetHasRepairProducer(appID int64, manifest *deploy.Manifest)
 // onto app, mirroring applyManifestAppSettings without writing anything. Only
 // the columns the server-policy validators read are projected.
 func projectManifestSettings(app *db.App, m deploy.AppSettings) {
+	if m.Availability != nil {
+		app.Availability = *m.Availability
+	}
 	if m.Replicas != nil {
 		app.Replicas = *m.Replicas
 	}

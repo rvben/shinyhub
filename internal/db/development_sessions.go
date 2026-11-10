@@ -88,9 +88,9 @@ func (s *Store) CreateDevelopmentApp(p CreateDevelopmentAppParams) (bool, error)
 
 	var appID int64
 	err = tx.QueryRowContext(ctx,
-		`INSERT INTO apps (slug, name, project_slug, owner_id, access)
-		 VALUES (?, ?, ?, ?, ?) RETURNING id`,
-		p.App.Slug, p.App.Name, p.App.ProjectSlug, p.App.OwnerID, p.App.Access,
+		`INSERT INTO apps (slug, name, project_slug, owner_id, access, availability)
+		 VALUES (?, ?, ?, ?, ?, COALESCE(NULLIF(?, ''), 'off')) RETURNING id`,
+		p.App.Slug, p.App.Name, p.App.ProjectSlug, p.App.OwnerID, p.App.Access, p.App.Availability,
 	).Scan(&appID)
 	if err != nil {
 		if s.d.isUniqueViolation(err) {

@@ -196,6 +196,7 @@ func reportAppsFetchError(cfg *cliConfig, errOut io.Writer, err error) error {
 }
 
 type serverCaps struct {
+	AppAvailability           bool   `json:"app_availability"`
 	BundleEnv                 bool   `json:"bundle_env"`
 	EnvironmentLabel          string `json:"-"`
 	RuntimeCapabilities       bool   `json:"runtime_capabilities"`

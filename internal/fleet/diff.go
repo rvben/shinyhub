@@ -22,8 +22,9 @@ const (
 // ObservedApp is the subset of GET /api/apps the diff needs. The CLI maps the
 // API payload into this; the diff stays I/O-free and API-shape-agnostic.
 type ObservedApp struct {
-	Env  map[string]string
-	Slug string
+	Availability *string
+	Env          map[string]string
+	Slug         string
 	// Name and Description are the server's stored display metadata. They are
 	// pointers for the same reason the scalars below are: nil means "not
 	// observed" (as in DeclaredConfig's zero ObservedApp) and always asserts a
@@ -271,6 +272,9 @@ func unmanagedConfig(app AppEntry, o ObservedApp) []UnmanagedConfigItem {
 		addInt("hibernate_timeout_minutes", c.HibernateTimeoutMinutes, o.HibernateTimeoutMinutes, -1, "(default)")
 	}
 	addInt("max_sessions_per_replica", c.MaxSessionsPerReplica, o.MaxSessionsPerReplica, 0, "(default)")
+	if c.Availability == nil && o.Availability != nil && *o.Availability != "off" {
+		out = append(out, UnmanagedConfigItem{Key: "availability", Server: fmt.Sprintf("%q", *o.Availability), Default: "\"off\""})
+	}
 	addFloat("render_seconds", c.RenderSeconds, o.RenderSeconds, 0, "0")
 	if c.IdentityHeaders == nil && o.IdentityHeaders != nil {
 		out = append(out, UnmanagedConfigItem{
@@ -346,6 +350,7 @@ func configDrift(app AppEntry, o ObservedApp) []ConfigDriftItem {
 	}
 	d = appendIntDrift(d, "replicas", c.Replicas, o.Replicas)
 	d = appendIntDrift(d, "max_sessions_per_replica", c.MaxSessionsPerReplica, o.MaxSessionsPerReplica)
+	d = appendStringDrift(d, "availability", c.Availability, o.Availability)
 	d = appendFloatDrift(d, "render_seconds", c.RenderSeconds, o.RenderSeconds)
 	d = appendBoolDrift(d, "identity_headers", c.IdentityHeaders, o.IdentityHeaders)
 	d = appendStringDrift(d, "usage_identity_mode", c.UsageIdentityMode, o.UsageIdentityMode)

@@ -181,7 +181,7 @@ func (s *Server) manifestHandoffReasons(app *db.App, previous *db.Deployment, ma
 	}
 	// These settings can be staged for candidate boot and committed at cutover.
 	safe := map[string]bool{
-		"name": true, "description": true, "icon": true, "project": true,
+		"availability": true, "name": true, "description": true, "icon": true, "project": true,
 		"hibernate_timeout_minutes": true, "min_warm_replicas": true,
 		"max_sessions_per_replica": true, "autoscale": true,
 		"memory_limit_mb": true, "cpu_quota_percent": true, "render_seconds": true,
@@ -296,6 +296,9 @@ func projectHandoffApp(app *db.App, m deploy.AppSettings) *db.App {
 	}
 	if m.MinWarmReplicas != nil {
 		projected.MinWarmReplicas = *m.MinWarmReplicas
+	}
+	if m.Availability != nil {
+		projected.Availability = *m.Availability
 	}
 	if m.RenderSeconds != nil {
 		projected.RenderSeconds = *m.RenderSeconds

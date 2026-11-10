@@ -305,9 +305,10 @@ func (s *Server) elasticObservation(slug string) elasticPool {
 }
 
 type createAppRequest struct {
-	Slug        string `json:"slug"`
-	Name        string `json:"name"`
-	ProjectSlug string `json:"project_slug"`
+	Availability string `json:"availability"`
+	Slug         string `json:"slug"`
+	Name         string `json:"name"`
+	ProjectSlug  string `json:"project_slug"`
 	// Access sets the initial visibility. When empty the server applies
 	// defaults.app_visibility from config (which defaults to "private").
 	// Allowed values: "private", "shared", "public".
@@ -349,6 +350,17 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.Availability == "" {
+		req.Availability = "off"
+	}
+	if req.Availability != "off" && req.Availability != "public" {
+		writeError(w, http.StatusBadRequest, "availability must be off or public")
+		return
+	}
+	if req.Availability == "public" && s.cfg.Server.AppAvailabilityOptIn != "allow" {
+		writeError(w, http.StatusBadRequest, "app availability opt-in is denied by server policy")
+		return
+	}
 	// Resolve effective access: explicit request body > config default > "private".
 	access := req.Access
 	if access == "" {
@@ -416,11 +428,12 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	appParams := db.CreateAppParams{
-		Slug:        req.Slug,
-		Name:        req.Name,
-		ProjectSlug: req.ProjectSlug,
-		OwnerID:     u.ID,
-		Access:      access,
+		Availability: req.Availability,
+		Slug:         req.Slug,
+		Name:         req.Name,
+		ProjectSlug:  req.ProjectSlug,
+		OwnerID:      u.ID,
+		Access:       access,
 	}
 	var projectCreated bool
 	var err error
@@ -477,10 +490,11 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		ResourceType: "app",
 		ResourceID:   req.Slug,
 		Detail: db.AuditDetail(map[string]any{
-			"name":     app.Name,
-			"access":   app.Access,
-			"owner_id": app.OwnerID,
-			"replicas": app.Replicas,
+			"availability": app.Availability,
+			"name":         app.Name,
+			"access":       app.Access,
+			"owner_id":     app.OwnerID,
+			"replicas":     app.Replicas,
 		}),
 		IPAddress: s.ClientIP(r),
 		RunID:     s.knownFleetRunID(r),
@@ -827,6 +841,8 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		setMaxSessions       bool
 		newRenderSeconds     float64
 		setRenderSeconds     bool
+		newAvailability      string
+		setAvailability      bool
 		newIdentityHeaders   *bool
 		setIdentityHeaders   bool
 		newUsageIdentityMode *string
@@ -999,6 +1015,13 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		newMaxSessions, setMaxSessions = n, true
 	}
 
+	if rawVal, present := raw["availability"]; present {
+		if err := json.Unmarshal(rawVal, &newAvailability); err != nil || (newAvailability != "off" && newAvailability != "public") {
+			writeError(w, http.StatusBadRequest, "availability must be off or public")
+			return
+		}
+		setAvailability = true
+	}
 	if rawVal, present := raw["render_seconds"]; present {
 		var v float64
 		if err := json.Unmarshal(rawVal, &v); err != nil {
@@ -1358,12 +1381,17 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	// remains editable while repair is pending.
 	releaseSettings := s.acquireDeployLock(slug)
 	defer releaseSettings()
-	app, err = s.store.GetAppBySlug(slug)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "not found")
+	app, ok = s.rereadAuthorizedApp(w, r, slug, app.ID)
+	if !ok {
 		return
 	}
 	if checkAppPreconditions(w, r, app) {
+		return
+	}
+	// An unchanged public declaration may survive deny policy, but judge that
+	// against the locked row so a queued request cannot undo a revocation.
+	if setAvailability && newAvailability == "public" && s.cfg.Server.AppAvailabilityOptIn != "allow" && app.Availability != "public" {
+		writeError(w, http.StatusBadRequest, "app availability opt-in is denied by server policy")
 		return
 	}
 	lifecycleMutation := setReplicas || setPlacement || clearPlacement || setMemoryLimitMB || setCPUQuotaPercent ||
@@ -1419,6 +1447,10 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	// old/new pairs, consistent with how memory_limit_mb and cpu_quota_percent are
 	// recorded. The app object still holds the pre-update state at this point.
 	metadataChanges := map[string]any{}
+	availabilityChanged := setAvailability && newAvailability != app.Availability
+	if availabilityChanged {
+		metadataChanges["availability"] = map[string]any{"old": app.Availability, "new": newAvailability}
+	}
 	if setName && newName != app.Name {
 		metadataChanges["name"] = map[string]any{"old": app.Name, "new": newName}
 	}
@@ -1460,6 +1492,8 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		PreserveReplicaRows:          app.Status == "running" || app.Status == "degraded",
 		SetMaxSessions:               setMaxSessions,
 		MaxSessions:                  newMaxSessions,
+		SetAvailability:              setAvailability,
+		Availability:                 newAvailability,
 		SetRenderSeconds:             setRenderSeconds,
 		RenderSeconds:                newRenderSeconds,
 		SetIdentityHeaders:           setIdentityHeaders,
@@ -1751,7 +1785,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	// worker dials and the session cap, audit only a real change, so a no-op
 	// PATCH (e.g. --replicas set to the value it already is) neither redeploys
 	// nor logs a phantom update_app event.
-	nonResourceTouched := setHibernateTimeout || setName || setDescription || setProjectSlug || setIdentityHeaders || setUsageIdentityMode ||
+	nonResourceTouched := availabilityChanged || setHibernateTimeout || setName || setDescription || setProjectSlug || setIdentityHeaders || setUsageIdentityMode ||
 		replicasChanged || maxSessionsChanged || setRenderSeconds || setMinWarmReplicas || setManagedBy ||
 		placementChanged || setAutoscale ||
 		workerIsolationChanged || workerGroupedSizeChanged || workerMaxWorkersChanged || workerWarmSparesChanged || workerMaxSessionLifetimeChanged ||
@@ -2574,14 +2608,6 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// the same slug can't tear down the pool we are about to bring up.
 	release := s.acquireDeployLock(slug)
 	defer release()
-	// Runs on every exit, success or failure, while the lock is still held:
-	// a superseded activation, or a candidate that failed and was confirmed
-	// stopped, no longer needs its result cache.
-	defer s.pruneAppCache(slug, app.ID)
-	if err := s.guardActivationLifecycleWithDrain(app.ID, "deploy "+slug, true); err != nil {
-		writeError(w, http.StatusConflict, err.Error())
-		return
-	}
 
 	// Registered AFTER the lock defer so LIFO order removes uncommitted
 	// files before the lock is released. The broad defer above only covers
@@ -2594,13 +2620,16 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// deployment mutation. Uploading and extracting above only touched temporary
 	// candidate files; a stale saved plan is rejected here before quota checks,
 	// manifest settings, deployment rows, or the running pool can change.
-	app, err = s.store.GetAppBySlug(slug)
-	if err != nil {
-		if errors.Is(err, db.ErrNotFound) {
-			writeError(w, http.StatusConflict, "precondition failed: app no longer exists (re-run plan)")
-			return
-		}
-		writeInternal(w, r, "internal server error", err)
+	app, ok = s.rereadAuthorizedApp(w, r, slug, app.ID)
+	if !ok {
+		return
+	}
+	// Runs on every exit, success or failure, while the lock is still held:
+	// a superseded activation, or a candidate that failed and was confirmed
+	// stopped, no longer needs its result cache.
+	defer s.pruneAppCache(slug, app.ID)
+	if err := s.guardActivationLifecycleWithDrain(app.ID, "deploy "+slug, true); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
 	if checkAppPreconditions(w, r, app) {
@@ -2987,6 +3016,15 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		}()
 		if activeGeneration, activeErr := s.store.GetActiveDeploymentGeneration(app.ID); activeErr == nil {
 			s.proxy.SetGenerationActivationToken(slug, activeGeneration.DeploymentID, activeGeneration.ActivationToken)
+		}
+	}
+	// Admission is complete. Clear intentional downtime before the first
+	// runtime mutation; refused, untouched attempts above preserve it.
+	if !keepDown && app.Status == "stopped" {
+		if err := s.store.ClearAppOperatorStopIntent(app.ID); err != nil {
+			_ = s.store.FailDeployment(pendingDep.ID)
+			writeInternal(w, r, "record activation intent", err)
+			return
 		}
 	}
 	if !generationHandoff && s.proxy != nil {
@@ -3953,10 +3991,6 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 	// Serialize against concurrent deploy/restart/stop on the same slug.
 	release := s.acquireDeployLock(slug)
 	defer release()
-	// Runs on every exit, success or failure, while the lock is still held:
-	// a superseded activation, or a candidate that failed and was confirmed
-	// stopped, no longer needs its result cache.
-	defer s.pruneAppCache(slug, app.ID)
 	// Re-read the row under the lock. A settings PATCH queued ahead of this
 	// rollback may have committed a new pool shape since the authorization
 	// read, and booting that earlier snapshot would bring the old settings
@@ -3966,6 +4000,10 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Runs on every exit, success or failure, while the lock is still held:
+	// a superseded activation, or a candidate that failed and was confirmed
+	// stopped, no longer needs its result cache.
+	defer s.pruneAppCache(slug, app.ID)
 	bootedSeq := app.RedeploySeqLaunched
 	if err := s.guardActivationLifecycle(app.ID, "rollback "+slug); err != nil {
 		writeError(w, http.StatusConflict, err.Error())
@@ -4104,6 +4142,13 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 	rollbackParams.GuardUntilAcknowledged = true
 	rollbackParams.ReplicaStarted = func(result deploy.Result) error {
 		return s.persistStartingDeploymentReplica(app, pendingDep, result)
+	}
+	if app.Status == "stopped" {
+		if err := s.store.ClearAppOperatorStopIntent(app.ID); err != nil {
+			_ = s.store.FailDeployment(pendingDep.ID)
+			writeInternal(w, r, "record activation intent", err)
+			return
+		}
 	}
 	rollbackParams = s.traceDeploy(r.Context(), rollbackParams)
 	var result *deploy.PoolResult
@@ -4449,6 +4494,12 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		// hooks have run and its environment is built.
 		Preparation: deploy.ActivationPreparation(current.Prepared),
 	}, app)
+	if app.Status == "stopped" {
+		if err := s.store.ClearAppOperatorStopIntent(app.ID); err != nil {
+			writeInternal(w, r, "record activation intent", err)
+			return
+		}
+	}
 	restartParams = s.guardDeploymentConsumerStart(app, current, restartParams)
 	restartParams = s.traceDeploy(r.Context(), restartParams)
 	result, err := s.deployRun(restartParams)
@@ -4697,14 +4748,16 @@ func (s *Server) handleStopApp(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// Captured before the post-stop reload overwrites app: the audit event
-	// records what this stop actually interrupted, and a stop of an already
-	// stopped app is a different fact from a stop that took a running one down.
-	previousStatus := app.Status
-
-	// Serialize with any in-flight deploy/restart on this slug.
+	// Serialize with any in-flight deploy/restart on this slug and pin the
+	// authorized app identity before recording intent. A reused slug must not
+	// receive a stop authorized for the app that previously occupied it.
 	release := s.acquireDeployLock(slug)
 	defer release()
+	app, ok = s.rereadAuthorizedApp(w, r, slug, app.ID)
+	if !ok {
+		return
+	}
+	previousStatus := app.Status
 	if err := s.guardActivationLifecycle(app.ID, "stop "+slug); err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
@@ -4742,8 +4795,9 @@ func (s *Server) handleStopApp(w http.ResponseWriter, r *http.Request) {
 
 	// Update DB status and clear port/PID.
 	if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{
-		Slug:   slug,
-		Status: "stopped",
+		OperatorStopped: true,
+		Slug:            slug,
+		Status:          "stopped",
 		// Port and PID left nil to clear them in the DB.
 	}); err != nil {
 		writeInternal(w, r, "internal server error", err)

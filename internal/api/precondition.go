@@ -25,6 +25,7 @@ const (
 // and durable app settings still detect changes to the published app.
 func appResourceRevision(app *db.App) string {
 	snapshot := struct {
+		Availability             string    `json:"availability"`
 		ID                       int64     `json:"id"`
 		Slug                     string    `json:"slug"`
 		Name                     string    `json:"name"`
@@ -63,7 +64,8 @@ func appResourceRevision(app *db.App) string {
 		LastError                string    `json:"last_error"`
 		CrashedAt                int64     `json:"crashed_at"`
 	}{
-		ID: app.ID, Slug: app.Slug, Name: app.Name, Description: app.Description,
+		Availability: app.Availability,
+		ID:           app.ID, Slug: app.Slug, Name: app.Name, Description: app.Description,
 		IconMime: app.IconMime, IconEmoji: app.IconEmoji,
 		OwnerID: app.OwnerID, Access: app.Access,
 		Status: app.Status, UpdatedAt: app.UpdatedAt.UTC(), DeployCount: app.DeployCount,

@@ -167,9 +167,15 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 			bundles[app.Slug] = spec
 		}
 		var resolvedManifest *deploy.Manifest
-		if m.ResolvedEnvironment != "" || len(app.Config.Env) > 0 {
+		if m.ResolvedEnvironment != "" || len(app.Config.Env) > 0 || app.Config.Availability != nil {
 			var err error
-			spec, resolvedManifest, err = resolveEnvironmentBundle(spec, app.Config, app.Environments[m.ResolvedEnvironment].Config)
+			bundleConfig := app.Config
+			if m.ResolvedEnvironment == "" && len(app.Config.Env) == 0 {
+				// A monitoring-only resolution must not materialize unrelated
+				// live settings and accidentally change the content digest.
+				bundleConfig = fleet.Config{Availability: app.Config.Availability}
+			}
+			spec, resolvedManifest, err = resolveEnvironmentBundle(spec, bundleConfig, app.Environments[m.ResolvedEnvironment].Config)
 			if err != nil {
 				resolveProblems = append(resolveProblems, fmt.Sprintf("app %q: %v", app.Slug, err))
 				continue
@@ -183,12 +189,16 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 		}
 		localDigests[app.Slug] = preview.Digest
 		bm, merr := loadFleetSourceManifest(dir)
-		if m.ResolvedEnvironment != "" || len(app.Config.Env) > 0 {
+		if m.ResolvedEnvironment != "" || len(app.Config.Env) > 0 || app.Config.Availability != nil {
 			bm = resolvedManifest
 			merr = nil
 		}
 		if merr != nil {
 			resolveProblems = append(resolveProblems, fmt.Sprintf("app %q: %v", app.Slug, merr))
+			continue
+		}
+		if (app.Config.Availability != nil || (bm != nil && bm.App.Availability != nil)) && !caps.AppAvailability {
+			resolveProblems = append(resolveProblems, fmt.Sprintf("app %q: server does not support app availability settings; upgrade to a server advertising app_availability", app.Slug))
 			continue
 		}
 		if manifestUsesProducerInputs(bm) && !caps.ScheduleInputs {
@@ -202,6 +212,11 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 		if bm != nil {
 			app.Bundle = bundleFleetConfig(bm.App)
 		}
+		// Enroll newly created apps from the effective declaration, including a
+		// source-only opt-in, before upload or preparation can fail. This metadata
+		// never participates in the content digest.
+		spec.Availability = fleet.EffectiveConfig(*app).Availability
+		bundles[app.Slug] = spec
 		bundleFacts[app.Slug] = resolveFleetBundleFacts(spec, bm, preview)
 	}
 	if len(resolveProblems) > 0 {
@@ -309,8 +324,12 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 // Plan and the post-deploy convergence read the same projection, so a value
 // apply converges is exactly the value the next plan compares.
 func observedFromApp(a db.App) fleet.ObservedApp {
+	if a.Availability == "" {
+		a.Availability = "off"
+	}
 	return fleet.ObservedApp{
-		Slug: a.Slug,
+		Slug:         a.Slug,
+		Availability: &a.Availability,
 		// Taken by address so a stored empty description reads as the real
 		// value "" rather than "not observed"; the API omits the key when
 		// empty, which decodes to the same "".
@@ -366,8 +385,9 @@ func stringPtr(v string) *string  { return &v }
 // and intentionally absent; every field here has a stored API counterpart.
 func bundleFleetConfig(a deploy.AppSettings) fleet.Config {
 	c := fleet.Config{
-		Env:  a.Env,
-		Name: a.Name, Description: a.Description, Project: a.Project, Icon: a.Icon,
+		Env:          a.Env,
+		Availability: a.Availability,
+		Name:         a.Name, Description: a.Description, Project: a.Project, Icon: a.Icon,
 		HibernateTimeoutMinutes: a.HibernateTimeoutMinutes,
 		HibernateResetToDefault: a.HibernateResetToDefault,
 		Replicas:                a.Replicas, MaxSessionsPerReplica: a.MaxSessionsPerReplica,

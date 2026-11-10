@@ -94,7 +94,9 @@ func buildHTTPHandler(d httpHandlerDeps) (http.Handler, error) {
 		appSessionHandler.ServeHTTP(w, r)
 	}))
 	mux.HandleFunc("GET /app/{slug}/.shinyhub/announcements.json", srv.HandleActiveAnnouncements)
-	mux.Handle("/app/{slug}/.shinyhub/availability", appAvailabilityHandler(cfg.Server.PublicAppAvailability, store, prx, readyCh))
+	availability := newAvailabilityMonitor(cfg.Server.PublicAppAvailability, cfg.Server.AppAvailabilityOptIn == "allow", cfg.Server.PublicFleetAvailability, store, prx, readyCh)
+	mux.HandleFunc("/app/{slug}/.shinyhub/availability", availability.app)
+	mux.HandleFunc("/.shinyhub/availability", availability.fleet)
 	if cfg.Auth.SupportSessions {
 		mux.HandleFunc("POST /app/{slug}/.shinyhub/support-session/stop",
 			supportSessionStopHandler(store, cfg.Auth.Secret, strings.TrimRight(cfg.Server.BaseURL, "/")+"/users?support=ended", cfg.TrustedProxyNets))

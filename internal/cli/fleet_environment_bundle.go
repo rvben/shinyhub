@@ -15,6 +15,7 @@ import (
 // resolveEnvironmentBundle materializes sizing before server admission. The same
 // bytes feed the digest, rehearsal and upload; the source tree stays untouched.
 func resolveEnvironmentBundle(spec bundleBuildSpec, c fleet.Config, overlays ...fleet.OverlayConfig) (bundleBuildSpec, *deploy.Manifest, error) {
+	spec.Availability = c.Availability
 	data, err := fleetSourceManifestData(spec.Dir)
 	if err != nil && !os.IsNotExist(err) {
 		return spec, nil, err
@@ -58,6 +59,9 @@ func resolveEnvironmentBundle(spec bundleBuildSpec, c fleet.Config, overlays ...
 	}
 	if c.HibernateTimeoutMinutes != nil && (app["hibernate_timeout_minutes"] != nil || force.HibernateTimeoutMinutes != nil) {
 		app["hibernate_timeout_minutes"] = *c.HibernateTimeoutMinutes
+	}
+	if c.Availability != nil && app["availability"] != nil {
+		app["availability"] = *c.Availability
 	}
 	if c.RenderSeconds != nil && (app["render_seconds"] != nil || force.RenderSeconds != nil) {
 		app["render_seconds"] = *c.RenderSeconds

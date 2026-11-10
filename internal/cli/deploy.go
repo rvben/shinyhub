@@ -1186,6 +1186,10 @@ func ensureAppWithOutput(cfg *cliConfig, slug, visibility string, errOut io.Writ
 // because fleet reconciles visibility through its own config-drift mechanism
 // and the deploy-layer warning would otherwise leak once per retry.
 func ensureAppCore(cfg *cliConfig, slug, visibility, project string, errOut io.Writer, warnExisting bool, runIDs ...string) error {
+	return ensureAppCoreWithAvailability(cfg, slug, visibility, project, nil, errOut, warnExisting, runIDs...)
+}
+
+func ensureAppCoreWithAvailability(cfg *cliConfig, slug, visibility, project string, availability *string, errOut io.Writer, warnExisting bool, runIDs ...string) error {
 	checkReq, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug, nil)
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
@@ -1212,6 +1216,9 @@ func ensureAppCore(cfg *cliConfig, slug, visibility, project string, errOut io.W
 	}
 
 	createBody := map[string]string{"slug": slug, "name": slug}
+	if availability != nil {
+		createBody["availability"] = *availability
+	}
 	if visibility != "" {
 		createBody["access"] = visibility
 	}
@@ -1319,9 +1326,10 @@ type bundleSkippedPaths struct {
 }
 
 type bundleBuildSpec struct {
-	Manifest []byte // optional resolved fleet environment manifest
-	Dir      string
-	Inputs   []bundle.FileInputSnapshot
+	Availability *string // initial fleet exposure, outside content/digest; existing apps use config PATCH
+	Manifest     []byte  // optional resolved fleet environment manifest
+	Dir          string
+	Inputs       []bundle.FileInputSnapshot
 }
 
 func zipDir(dir string) (*bytes.Buffer, string, error) {

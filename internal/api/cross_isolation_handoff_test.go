@@ -44,7 +44,9 @@ func TestDeploy_CrossIsolationHandoff(t *testing.T) {
 				runtime.serveTraffic = true
 				zero := 0
 				srv.cfg.Server.MinAvailableMemoryMB = &zero
-				srv.cfg.Server.DrainTimeout = 200 * time.Millisecond
+				// Keep affinity observable through the post-cutover database assertions,
+				// including on a busy PostgreSQL host. Retirement is still checked below.
+				srv.cfg.Server.DrainTimeout = 2 * time.Second
 				srv.SetAvailableMemoryForTest(func() (int, error) { return 1024, nil })
 				app := createGenerationTestApp(t, store, "cross-isolation", 2, 16)
 				if first := deployIsolationManifest(t, srv, token, app.Slug, from, "print('v1')"); first.Code != http.StatusOK {

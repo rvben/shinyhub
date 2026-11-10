@@ -195,7 +195,7 @@ func configurationSavedTOML(app *db.App, isFleet bool) string {
 		if raw == "(unset)" || raw == "(default)" || (key == "worker_isolation" && app.WorkerIsolation == "") {
 			continue
 		}
-		if isFleet && !map[string]bool{"name": true, "description": true, "project": true, "hibernate_timeout_minutes": true, "replicas": true, "max_sessions_per_replica": true, "render_seconds": true, "min_warm_replicas": true}[key] {
+		if isFleet && !map[string]bool{"name": true, "description": true, "project": true, "hibernate_timeout_minutes": true, "replicas": true, "max_sessions_per_replica": true, "availability": true, "render_seconds": true, "min_warm_replicas": true}[key] {
 			continue
 		}
 		var value any

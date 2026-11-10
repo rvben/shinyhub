@@ -42,11 +42,13 @@ type deployPreflightRequest struct {
 }
 
 type deployPreflightSettings struct {
-	Replicas  *int           `json:"replicas,omitempty"`
-	Autoscale map[string]any `json:"autoscale,omitempty"`
+	Availability *string        `json:"availability,omitempty"`
+	Replicas     *int           `json:"replicas,omitempty"`
+	Autoscale    map[string]any `json:"autoscale,omitempty"`
 }
 
 type deployPreflightResponse struct {
+	Warnings        []string `json:"warnings"`
 	ScheduleChanges []struct {
 		Name       string `json:"name"`
 		Action     string `json:"action"`
@@ -176,6 +178,7 @@ func fleetServerPreflight(cfg *cliConfig, caps serverCaps, m *fleet.Manifest, di
 			if err != nil {
 				return nil, err
 			}
+			d.Warnings = append(d.Warnings, reply.Warnings...)
 			for _, change := range reply.ScheduleChanges {
 				if change.Action != "retired" {
 					continue
@@ -220,8 +223,8 @@ func buildDeployPreflightRequest(facts fleetBundleFacts, entry *fleet.AppEntry) 
 	if facts.ResolvedManifest != nil {
 		req.Manifest = string(facts.ResolvedManifest)
 	}
-	if entry.Config.Replicas != nil || entry.Config.Autoscale != nil {
-		req.Settings = &deployPreflightSettings{Replicas: entry.Config.Replicas}
+	if entry.Config.Availability != nil || entry.Config.Replicas != nil || entry.Config.Autoscale != nil {
+		req.Settings = &deployPreflightSettings{Replicas: entry.Config.Replicas, Availability: entry.Config.Availability}
 		if entry.Config.Autoscale != nil {
 			req.Settings.Autoscale = autoscalePatchBody(entry.Config.Autoscale)
 		}
