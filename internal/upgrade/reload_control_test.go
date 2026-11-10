@@ -11,10 +11,34 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// eventDeadlineContext lets protocol events, rather than wall-clock scheduling,
+// expire a request. Children still exercise normal context cancellation propagation.
+type eventDeadlineContext struct {
+	context.Context
+	done chan struct{}
+	once sync.Once
+}
+
+func newEventDeadlineContext() *eventDeadlineContext {
+	return &eventDeadlineContext{Context: context.Background(), done: make(chan struct{})}
+}
+
+func (c *eventDeadlineContext) Done() <-chan struct{} { return c.done }
+func (c *eventDeadlineContext) Err() error {
+	select {
+	case <-c.done:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+func (c *eventDeadlineContext) expire() { c.once.Do(func() { close(c.done) }) }
 
 type reloadTestUpgrader struct {
 	*fakeUpgrader
@@ -117,6 +141,8 @@ func TestAcknowledgedReloadCarriesServingAppsAndRefusesFalseSuccess(t *testing.T
 		t.Fatal(err)
 	}
 	defer successor.Close()
+	ctx := newEventDeadlineContext()
+	defer ctx.expire()
 	var validProbes atomic.Int32
 	go func() {
 		for {
@@ -127,14 +153,15 @@ func TestAcknowledgedReloadCarriesServingAppsAndRefusesFalseSuccess(t *testing.T
 			var request reloadRequest
 			_ = json.NewDecoder(conn).Decode(&request)
 			if len(request.Apps) == 1 && request.Apps[0] == apps[0] {
-				validProbes.Add(1)
+				// Probe two follows the client's processing of the first blocker.
+				if validProbes.Add(1) == 2 {
+					ctx.expire()
+				}
 			}
 			_ = json.NewEncoder(conn).Encode(ReloadResult{PID: os.Getpid() + 1, Ready: false, NotReadyReason: "rolled-app: 0 ready replicas after reload, need 1"})
 			conn.Close()
 		}
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), 350*time.Millisecond)
-	defer cancel()
 	result, err := RequestReload(ctx, pidFile, 0, time.Second)
 	if err == nil || !strings.Contains(err.Error(), "rolled-app") || result.Ready || validProbes.Load() == 0 {
 		t.Fatalf("false success: result=%+v err=%v probes=%d", result, err, validProbes.Load())
@@ -476,8 +503,17 @@ func TestReloadReadinessTimeoutLogsBlockersInSuccessor(t *testing.T) {
 	var logs bytes.Buffer
 	reason := "token-finops: 0 ready replicas after reload, need 1 (status running)"
 	successorUpgrader := newFakeUpgrader()
+	ctx := newEventDeadlineContext()
+	defer ctx.expire()
+	var probes atomic.Int32
 	stop, err := StartReloadControl(context.Background(), pidFile, time.Second, successorUpgrader, &SignalState{}, func() bool { return true }, slog.New(slog.NewTextHandler(&logs, nil)), ReloadServingCheck{
-		Check: func([]ReloadApp) string { return reason },
+		Check: func([]ReloadApp) string {
+			// Only expire after the client has recorded the first blocker.
+			if probes.Add(1) == 2 {
+				ctx.expire()
+			}
+			return reason
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -507,8 +543,6 @@ func TestReloadReadinessTimeoutLogsBlockersInSuccessor(t *testing.T) {
 		}
 		done <- json.NewEncoder(conn).Encode(ReloadResult{PreviousPID: previousPID, PID: successorPID, Apps: []ReloadApp{{ID: 42, Slug: "token-finops", MinimumReady: 1}}})
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), 350*time.Millisecond)
-	defer cancel()
 	result, err := RequestReload(ctx, pidFile, 0, time.Second)
 	if !errors.Is(err, context.DeadlineExceeded) || result.Ready || result.NotReadyReason != reason || !strings.Contains(err.Error(), "handoff accepted") {
 		t.Fatalf("timeout result = %+v, %v", result, err)
