@@ -6,21 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
-### Added
-
-- Allow app-owned anonymous availability opt-in through bundle and fleet config when permitted by `server.app_availability_opt_in`. Add separately enabled fleet discovery at `/.shinyhub/availability`, with bounded complete snapshots, shared monitoring admission, and no app activation or activity recording.
-- Report `stopped_by_operator` only for confirmed explicit stops. Track stop intent durably and clear it for accepted activation attempts, so failed first deployments and failed restarts are not mistaken for intentional downtime.
-
 ## [0.24.1](https://github.com/rvben/shinyhub/compare/v0.24.0...v0.24.1) - 2026-11-10
 
 ### Added
 
+- Allow app-owned anonymous availability opt-in through bundle and fleet config when permitted by `server.app_availability_opt_in`. Add separately enabled fleet discovery at `/.shinyhub/availability`, with bounded complete snapshots, shared monitoring admission, and no app activation or activity recording.
+- Report `stopped_by_operator` only for confirmed explicit stops. Track stop intent durably and clear it for accepted activation attempts, so failed first deployments and failed restarts are not mistaken for intentional downtime.
 - **metrics**: expose cron-aware schedule freshness in Prometheus using the same due-time policy as the schedule API, with explicit reporting for unknown configurations ([72520be](https://github.com/rvben/shinyhub/commit/72520be409e7de5c2a08aebef0cddc3335b2384c))
 
 ### Fixed
 
 - **upgrade**: preserve cancellation and deadline causes in acknowledged reload errors, and explain that an interrupted acknowledgement may still be followed by a completed handoff ([510a67f](https://github.com/rvben/shinyhub/commit/510a67f90a6e2811e681bb7be2d83c762d69e091))
 - **proxy**: preserve attachment downloads, including CSV and HTML files, during support sessions without changing downloaded content or download headers ([11ee4b8](https://github.com/rvben/shinyhub/commit/11ee4b8198f14118579dca3f3d98c21612fcfe75))
+
+### Upgrade notice
+
+This release adds app availability preferences and operator-stop intent to the database schema. Back up the database before upgrading. Older binaries reject the newer schema on startup, so downgrading requires restoring the pre-upgrade database.
 
 ## [0.24.0](https://github.com/rvben/shinyhub/compare/v0.23.0...v0.24.0) - 2026-11-09
 
