@@ -112,6 +112,19 @@ starting another. While one is live, the ShinyHub dashboard shows a compact
 **Active support session** strip on every page. It identifies the represented
 user and app, counts down to expiry, and lets the administrator return to an
 activated app in a new tab or end the session directly from the dashboard.
+
+File downloads such as CSV exports and HTML reports work under the represented
+user's identity. Successful full or ranged responses with an unambiguous, valid
+`Content-Disposition: attachment` stream unchanged, irrespective of media type.
+The saved file contains no injected banner or support-session metadata. Inline
+pages still require the banner; a download URL or filename alone cannot bypass
+that requirement. Missing, malformed, or ambiguous disposition headers follow
+the normal page checks. If ShinyHub cannot safely decorate a page, it returns
+the support-session pause page with HTTP 409.
+Filenames containing spaces must be quoted, for example
+`attachment; filename="Q3 report.csv"`; malformed parameters are rejected even
+when a browser might recover them.
+
 Dashboard termination remains available if the app tab was closed or the
 app-origin cookie was lost; it performs the same token revocation and audit
 transition as the in-app action. A launch whose browser has not reached the app yet can be

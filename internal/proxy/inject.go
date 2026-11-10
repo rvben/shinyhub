@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"html"
 	"io"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
@@ -517,6 +518,9 @@ func injectableResponse(resp *http.Response) bool {
 	if resp == nil || resp.Body == nil || resp.Request == nil {
 		return false
 	}
+	if attachmentDownload(resp) {
+		return false
+	}
 	if resp.StatusCode != http.StatusOK {
 		return false
 	}
@@ -550,6 +554,12 @@ func injectPageScripts(scripts func(*http.Request) []pageScript) func(*http.Resp
 func injectPageHTML(scripts func(*http.Request) []pageScript, faviconHref, titleFallback func() string, environments ...func() *config.EnvironmentConfig) func(*http.Response) error {
 	return func(resp *http.Response) error {
 		if resp == nil || resp.Request == nil {
+			return nil
+		}
+		// Attachments create no app document to carry a banner. Preserve even
+		// HTML reports verbatim: injecting a banner would corrupt the saved file
+		// and embed support-session metadata in a potentially shared export.
+		if attachmentDownload(resp) {
 			return nil
 		}
 		wanted := scripts(resp.Request)
@@ -689,6 +699,24 @@ func injectPageHTML(scripts func(*http.Request) []pageScript, faviconHref, title
 	}
 }
 
+// attachmentDownload accepts only an unambiguous, strictly parsed attachment
+// disposition. RFC 6266 defines this as saving the response rather than rendering
+// it, irrespective of media type. Inline documents, error pages, and ambiguous
+// dispositions retain the normal support-banner checks.
+func attachmentDownload(resp *http.Response) bool {
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		return false
+	}
+	if len(resp.Header.Values("Content-Disposition")) != 1 {
+		return false
+	}
+	disposition, _, err := mime.ParseMediaType(resp.Header.Get("Content-Disposition"))
+	if err != nil || disposition != "attachment" {
+		return false
+	}
+	return true
+}
+
 // readPageBody uses a trustworthy size only as an allocation hint. Reading one
 // extra byte still detects incorrect lengths and enforces the injection cap.
 func readPageBody(body io.Reader, length int64) ([]byte, error) {
@@ -793,6 +821,14 @@ func replaceWithRequiredFallback(resp *http.Response, scripts []pageScript) bool
 	resp.Header.Del("Content-Security-Policy-Report-Only")
 	resp.Header.Del("Content-Encoding")
 	resp.Header.Del("ETag")
+	// These headers describe the discarded backend representation. Keeping them
+	// can download the pause page under the app's filename or advertise a range
+	// or digest that no longer matches its body.
+	for _, header := range []string{"Content-Disposition", "Content-Range", "Accept-Ranges", "Content-MD5", "Digest", "Content-Digest", "Repr-Digest"} {
+		resp.Header.Del(header)
+	}
+	resp.Trailer = nil
+	resp.Header.Del("Trailer")
 	resp.Header.Set("Cache-Control", "no-store")
 	resp.Body = io.NopCloser(strings.NewReader(fallback))
 	resp.ContentLength = int64(len(fallback))
