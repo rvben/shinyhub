@@ -290,6 +290,11 @@ alert; the retry and overflow results are useful early warnings.
 | `shinyhub_schedule_last_interrupted_seconds` | gauge | `slug`, `schedule` | Unix timestamp at which the newest `interrupted` run was closed; absent when there is none. |
 | `shinyhub_schedule_consecutive_failures` | gauge | `slug`, `schedule` | `failed` and `timed_out` runs since the latest `succeeded` run (or ever, for a schedule that has never succeeded), within retained run history. `interrupted` and `cancelled` runs neither count nor reset it. Present for every schedule. |
 | `shinyhub_schedule_enabled` | gauge | `slug`, `schedule` | 1 for an enabled schedule, 0 for a disabled or retired one. Present for every schedule. |
+| `shinyhub_schedule_stale` | gauge | `slug`, `schedule` | 1 when data is overdue under the shared cron-aware freshness policy, otherwise 0; disabled and retired schedules report 0. Absent when freshness is unknown. |
+| `shinyhub_schedule_staleness_seconds` | gauge | `slug`, `schedule` | Seconds past the first unmet success deadline, clamped to zero; absent when freshness is unknown. |
+| `shinyhub_schedule_expected_success_timestamp_seconds` | gauge | `slug`, `schedule` | First cron fire after last success or creation, plus the fixed 10-minute freshness margin. Absent when disabled or unknown. |
+| `shinyhub_schedule_next_run_timestamp_seconds` | gauge | `slug`, `schedule` | Next nominal cron fire after the scrape time, not a dispatch guarantee. Absent when disabled, unknown, or using an `@every` interval. |
+| `shinyhub_schedule_freshness_known` | gauge | `slug`, `schedule` | 1 when freshness is known, 0 for invalid timezone or cron configuration, including expressions that never fire. Disabled schedules report 1. |
 | `shinyhub_schedule_collector_up` | gauge | - | 1 when the scrape-time schedule query succeeded, 0 when it failed. On 0 every other database-backed schedule gauge is absent for that scrape. |
 | `shinyhub_schedule_activation_status` | gauge | `slug`, `schedule`, `status` | Current durable serving-data activation state; the labeled state has value 1. Alert on `repairing`, `deferred_capacity`, `failed`, `cancelled`, or `blocked_unsupported` according to age and policy. |
 | `shinyhub_schedule_activation_age_seconds` | gauge | `slug`, `schedule` | Age of a nonterminal activation. Use with the status metric so ordinary interval damping is not mistaken for a fault. |
@@ -340,8 +345,14 @@ The two kinds of schedule metric answer different questions:
 
 `shinyhub_schedule_last_success_seconds` alone cannot catch a schedule that has
 never succeeded, because the series is absent until the first success. Use
-`shinyhub_schedule_consecutive_failures`, which is present for every schedule,
-and `shinyhub_schedule_enabled` to tell a disabled schedule from a failing one.
+`shinyhub_schedule_stale` to detect overdue data even when no run ever started.
+It shares the [API freshness policy](schedules.md#monitoring-data-freshness),
+including timezone and DST handling: first fire after last success (or creation)
+plus 10 minutes. Active runs do not make stale data fresh or extend that deadline
+by their timeout. `shinyhub_schedule_staleness_seconds` measures time past that
+deadline, so it grows across repeated failures. For run failures specifically,
+use `shinyhub_schedule_consecutive_failures` with `shinyhub_schedule_enabled`.
+Alert on `shinyhub_schedule_freshness_known == 0` to detect invalid configuration.
 Alert on `shinyhub_schedule_collector_up == 0` so a database outage is not read
 as "no schedule is failing".
 
@@ -389,11 +400,16 @@ groups:
           summary: "Schedule {{ $labels.schedule }} on {{ $labels.slug }} did not start ({{ $labels.reason }})"
 
       - alert: ShinyHubScheduleStale
-        # Adjust the threshold to the schedule's cadence.
-        expr: time() - max by (slug, schedule) (shinyhub_schedule_last_success_seconds) > 2 * 86400
-          and on (slug, schedule) max by (slug, schedule) (shinyhub_schedule_enabled) == 1
+        expr: max by (slug, schedule) (shinyhub_schedule_stale) == 1
+        for: 15m
         annotations:
-          summary: "Schedule {{ $labels.schedule }} on {{ $labels.slug }} has not succeeded in 2 days"
+          summary: "Data from {{ $labels.schedule }} on {{ $labels.slug }} is overdue"
+
+      - alert: ShinyHubScheduleFreshnessUnknown
+        expr: min by (slug, schedule) (shinyhub_schedule_freshness_known) == 0
+        for: 5m
+        annotations:
+          summary: "Freshness for {{ $labels.schedule }} on {{ $labels.slug }} cannot be computed"
 
       - alert: ShinyHubScheduleMetricsUnavailable
         expr: min(shinyhub_schedule_collector_up) == 0

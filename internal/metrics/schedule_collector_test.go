@@ -1,12 +1,71 @@
 package metrics
 
 import (
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 )
+
+func TestScheduleFreshnessMetricsDistinguishUnknownAndDisabled(t *testing.T) {
+	reg := prometheus.NewPedanticRegistry()
+	reg.MustRegister(NewScheduleFreshnessCollector(func() ([]ScheduleSample, error) {
+		return []ScheduleSample{
+			{Slug: "app", Name: "overdue", Enabled: true, FreshnessKnown: true, Stale: true, StalenessSeconds: 1800.5, ExpectedSuccessUnix: 1700000000, NextRunUnix: 1700086400},
+			{Slug: "app", Name: "fresh", Enabled: true, FreshnessKnown: true, ExpectedSuccessUnix: 1700086400, NextRunUnix: 1700085800},
+			{Slug: "app", Name: "disabled", FreshnessKnown: true},
+			{Slug: "app", Name: "unknown", Enabled: true},
+		}, nil
+	}))
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := map[string]map[string]float64{}
+	for _, f := range families {
+		values[f.GetName()] = map[string]float64{}
+		for _, m := range f.Metric {
+			name := ""
+			for _, label := range m.Label {
+				if label.GetName() == "schedule" {
+					name = label.GetValue()
+				}
+			}
+			values[f.GetName()][name] = m.GetGauge().GetValue()
+		}
+	}
+	for metric, want := range map[string]map[string]float64{
+		"shinyhub_schedule_freshness_known":                    {"overdue": 1, "fresh": 1, "disabled": 1, "unknown": 0},
+		"shinyhub_schedule_stale":                              {"overdue": 1, "fresh": 0, "disabled": 0},
+		"shinyhub_schedule_staleness_seconds":                  {"overdue": 1800.5, "fresh": 0, "disabled": 0},
+		"shinyhub_schedule_expected_success_timestamp_seconds": {"overdue": 1700000000, "fresh": 1700086400},
+		"shinyhub_schedule_next_run_timestamp_seconds":         {"overdue": 1700086400, "fresh": 1700085800},
+	} {
+		got := values[metric]
+		if len(got) != len(want) {
+			t.Errorf("%s series=%v want=%v", metric, got, want)
+		}
+		for name, v := range want {
+			if actual, ok := got[name]; !ok || actual != v {
+				t.Errorf("%s[%s]=%v present=%t want=%v", metric, name, actual, ok, v)
+			}
+		}
+	}
+}
+
+func TestScheduleFreshnessQueryFailureDoesNotReportFresh(t *testing.T) {
+	reg := prometheus.NewPedanticRegistry()
+	reg.MustRegister(NewScheduleFreshnessCollector(func() ([]ScheduleSample, error) { return nil, errors.New("database unavailable") }))
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(families) != 1 || families[0].GetName() != "shinyhub_schedule_collector_up" || families[0].Metric[0].GetGauge().GetValue() != 0 {
+		t.Fatalf("failed scrape=%v", families)
+	}
+}
 
 func TestScheduleFreshnessCollector(t *testing.T) {
 	const ts = int64(1751284800) // fixed unix timestamp

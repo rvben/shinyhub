@@ -1551,13 +1551,14 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	var metricsReg *metrics.Registry
 	if cfg.Metrics.Enabled {
 		metricsReg = newServerMetrics(serverMetricsDeps{
-			version:       version,
-			logger:        logger,
-			store:         store,
-			srv:           srv,
-			prx:           prx,
-			usageRecorder: usageRecorder,
-			relayLeases:   relayLeases,
+			version:           version,
+			logger:            logger,
+			store:             store,
+			srv:               srv,
+			prx:               prx,
+			usageRecorder:     usageRecorder,
+			relayLeases:       relayLeases,
+			schedulerLocation: cfg.Scheduler.Location,
 		})
 		metricsSrv, metricsLn, err = startMetricsListener(upg.Listen, cfg.Metrics.Addr, metricsReg)
 		if err != nil {

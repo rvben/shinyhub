@@ -25,7 +25,42 @@ type ScheduleSample struct {
 	ActivationGeneration  int64
 	CapacityDeferredUnix  int64
 	CapacityDeferrals     int
+	FreshnessKnown        bool
+	Stale                 bool
+	StalenessSeconds      float64
+	ExpectedSuccessUnix   int64 // absent (0) for disabled or unknown schedules
+	NextRunUnix           int64 // absent (0) for disabled, unknown, or @every schedules
 }
+
+var scheduleFreshnessKnownDesc = prometheus.NewDesc(
+	"shinyhub_schedule_freshness_known",
+	"1 when schedule freshness is known, 0 when cron or timezone evaluation failed or the cron never fires.",
+	[]string{"slug", "schedule"}, nil,
+)
+
+var scheduleStaleDesc = prometheus.NewDesc(
+	"shinyhub_schedule_stale",
+	"1 when enabled schedule data is overdue under the API freshness policy, 0 otherwise. Absent when freshness is unknown.",
+	[]string{"slug", "schedule"}, nil,
+)
+
+var scheduleStalenessDesc = prometheus.NewDesc(
+	"shinyhub_schedule_staleness_seconds",
+	"Seconds past the first unmet expected success deadline, clamped to zero. Absent when freshness is unknown.",
+	[]string{"slug", "schedule"}, nil,
+)
+
+var scheduleExpectedSuccessDesc = prometheus.NewDesc(
+	"shinyhub_schedule_expected_success_timestamp_seconds",
+	"Unix timestamp of the first cron fire after last success or creation, plus the 10-minute freshness margin. Absent when disabled or unknown.",
+	[]string{"slug", "schedule"}, nil,
+)
+
+var scheduleNextRunDesc = prometheus.NewDesc(
+	"shinyhub_schedule_next_run_timestamp_seconds",
+	"Unix timestamp of the next nominal cron fire after the scrape time. Absent when disabled, unknown, or using an @every interval.",
+	[]string{"slug", "schedule"}, nil,
+)
 
 var scheduleLastSuccessDesc = prometheus.NewDesc(
 	"shinyhub_schedule_last_success_seconds",
@@ -99,7 +134,8 @@ type scheduleFreshnessCollector struct {
 	query func() ([]ScheduleSample, error)
 }
 
-// NewScheduleFreshnessCollector builds the DB-backed last-success collector.
+// NewScheduleFreshnessCollector builds the DB-backed run-health and cron
+// freshness collector. The adapter computes all timing at one scrape instant.
 func NewScheduleFreshnessCollector(query func() ([]ScheduleSample, error)) prometheus.Collector {
 	return &scheduleFreshnessCollector{query: query}
 }
@@ -116,6 +152,11 @@ func (c *scheduleFreshnessCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- scheduleActivationGenerationDesc
 	ch <- scheduleCapacityDeferralsDesc
 	ch <- scheduleCapacityDeferredAgeDesc
+	ch <- scheduleFreshnessKnownDesc
+	ch <- scheduleStaleDesc
+	ch <- scheduleStalenessDesc
+	ch <- scheduleExpectedSuccessDesc
+	ch <- scheduleNextRunDesc
 }
 
 func (c *scheduleFreshnessCollector) Collect(ch chan<- prometheus.Metric) {
@@ -130,6 +171,23 @@ func (c *scheduleFreshnessCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(scheduleCollectorUpDesc, prometheus.GaugeValue, 1)
 	now := time.Now().Unix()
 	for _, s := range samples {
+		known := 0.0
+		if s.FreshnessKnown {
+			known = 1
+			stale := 0.0
+			if s.Stale {
+				stale = 1
+			}
+			ch <- prometheus.MustNewConstMetric(scheduleStaleDesc, prometheus.GaugeValue, stale, s.Slug, s.Name)
+			ch <- prometheus.MustNewConstMetric(scheduleStalenessDesc, prometheus.GaugeValue, s.StalenessSeconds, s.Slug, s.Name)
+			if s.ExpectedSuccessUnix > 0 {
+				ch <- prometheus.MustNewConstMetric(scheduleExpectedSuccessDesc, prometheus.GaugeValue, float64(s.ExpectedSuccessUnix), s.Slug, s.Name)
+			}
+			if s.NextRunUnix > 0 {
+				ch <- prometheus.MustNewConstMetric(scheduleNextRunDesc, prometheus.GaugeValue, float64(s.NextRunUnix), s.Slug, s.Name)
+			}
+		}
+		ch <- prometheus.MustNewConstMetric(scheduleFreshnessKnownDesc, prometheus.GaugeValue, known, s.Slug, s.Name)
 		enabled := 0.0
 		if s.Enabled {
 			enabled = 1

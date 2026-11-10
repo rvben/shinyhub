@@ -388,7 +388,7 @@ shinyhub schedule run fetch daily-fetch --follow
 ## Monitoring data freshness
 
 A schedule that stops firing is silent by nature: the app keeps serving, just
-from data that stops advancing. Two surfaces report it, both using the same
+from data that stops advancing. The CLI, API, and Prometheus report it using the same
 server-side staleness rule, so a dashboard never has to reimplement cron
 arithmetic client-side.
 
@@ -439,6 +439,55 @@ Two deliberate properties:
 succeeded (`schedule status` reports them as `null`; `schedule ls` omits the
 keys). Neither is ever reported as `0`, so "never succeeded" cannot be read as
 "succeeded just now".
+
+### Prometheus freshness alerts
+
+When metrics are enabled, each scrape computes these gauges from persisted
+schedule state using the same cron parser and effective timezone as the API:
+
+| Metric | Meaning |
+|---|---|
+| `shinyhub_schedule_stale` | `1` for overdue data, otherwise `0`; disabled and retired schedules report `0`. |
+| `shinyhub_schedule_staleness_seconds` | Seconds past the first unmet success deadline, clamped to zero; disabled schedules report `0`. |
+| `shinyhub_schedule_expected_success_timestamp_seconds` | First cron fire after the last success (or creation), plus the fixed 10-minute freshness margin. |
+| `shinyhub_schedule_next_run_timestamp_seconds` | Next nominal cron fire strictly after the scrape time; not a dispatch guarantee. |
+| `shinyhub_schedule_freshness_known` | `1` when freshness can be evaluated, `0` for invalid timezone or cron configuration, including expressions that never fire. |
+
+All use the existing `slug` and `schedule` labels. The two timestamp gauges are
+absent for disabled or retired schedules. The next-run timestamp is also absent
+for `@every` intervals: their dispatch time depends on scheduler registration,
+not wall-clock cron boundaries. When freshness is unknown, `stale`,
+`staleness_seconds`, and both timestamp gauges are absent rather than reporting
+fresh. A database query failure
+emits only `shinyhub_schedule_collector_up 0` and no per-schedule gauges.
+
+Never-successful schedules become stale after their first cron fire following
+creation plus the margin. Failed runs and ongoing refreshes do not advance that
+deadline, so staleness keeps growing across missed boundaries. A success moves
+the deadline forward. Timezone overrides and daylight-saving transitions follow
+the scheduler's cron rules. The freshness margin is always 10 minutes; the job
+timeout is deliberately separate and does not extend it. This preserves the
+same meaning of `stale` in alerts, API responses, and fleet verification.
+
+For example:
+
+```yaml
+- alert: ShinyHubScheduleStale
+  expr: shinyhub_schedule_stale == 1
+  for: 15m
+  annotations:
+    summary: "Stale data: {{ $labels.slug }}/{{ $labels.schedule }}"
+- alert: ShinyHubScheduleFreshnessUnknown
+  expr: shinyhub_schedule_freshness_known == 0
+  for: 5m
+- alert: ShinyHubScheduleCollectorFailed
+  expr: shinyhub_schedule_collector_up == 0
+  for: 5m
+```
+
+Use `shinyhub_schedule_staleness_seconds` in a separate alert or dashboard when
+displaying the overdue duration; the value of `shinyhub_schedule_stale` is a
+boolean, not a duration. Alert on scrape failures (`up == 0`) separately.
 
 ## Run provenance (`trigger`)
 

@@ -136,6 +136,24 @@ func TestEvaluateStale_InvalidCronIsUnknown(t *testing.T) {
 	}
 }
 
+func TestEvaluateStale_ImpossibleCronIsUnknown(t *testing.T) {
+	_, err := EvaluateStale(Freshness{
+		Enabled: true, CronExpr: "0 6 30 2 *", CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}, time.UTC, time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC))
+	if err == nil {
+		t.Fatal("an impossible cron must not produce a known freshness result")
+	}
+}
+
+func TestIsStale_UnknownNeverLooksFresh(t *testing.T) {
+	for _, expression := range []string{"invalid", "0 6 30 2 *"} {
+		f := Freshness{Enabled: true, CronExpr: expression, CreatedAt: time.Now()}
+		if !IsStale(f, time.UTC, time.Now()) {
+			t.Fatalf("unknown cron %q reported fresh", expression)
+		}
+	}
+}
+
 func TestIsRefreshing_UsesActiveRunWhenLatestRunIsTerminal(t *testing.T) {
 	now := time.Now()
 	active := now.Add(-time.Minute)

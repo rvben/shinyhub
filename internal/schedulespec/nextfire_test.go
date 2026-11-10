@@ -17,6 +17,12 @@ func TestNextFire_Daily(t *testing.T) {
 	}
 }
 
+func TestNextFire_ImpossibleCronReturnsError(t *testing.T) {
+	if _, err := NextFire("0 6 30 2 *", time.UTC, time.Now()); err == nil {
+		t.Fatal("impossible cron must not return a zero timestamp without an error")
+	}
+}
+
 func TestNextFire_TimezoneHonored(t *testing.T) {
 	loc, err := time.LoadLocation("America/New_York")
 	if err != nil {

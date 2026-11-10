@@ -1,6 +1,10 @@
 package schedulespec
 
-import "time"
+import (
+	"time"
+
+	"github.com/robfig/cron/v3"
+)
 
 // staleMargin is the grace added to a schedule's next expected fire before it
 // is treated as stale. It covers clock jitter and the scheduler's start delay.
@@ -28,26 +32,61 @@ type Freshness struct {
 // invalid cron as an error. Strict callers must never turn an unreadable
 // schedule into "fresh" merely because its next fire could not be computed.
 func EvaluateStale(f Freshness, loc *time.Location, now time.Time) (bool, error) {
+	evaluation, err := EvaluateFreshness(f, loc, now)
+	return evaluation.Stale, err
+}
+
+// FreshnessEvaluation is the shared API and metrics view of a schedule's data.
+// Disabled schedules have no deadline. NextRun is a nominal cron fire, not a
+// dispatch guarantee; it is absent for @every intervals, whose real next fire
+// depends on scheduler registration rather than wall-clock cron boundaries.
+type FreshnessEvaluation struct {
+	Stale            bool
+	StalenessSeconds float64
+	ExpectedSuccess  time.Time
+	NextRun          time.Time
+}
+
+// EvaluateFreshness computes the first unmet deadline using one parsed schedule
+// and one clock instant. Failures and active runs never advance that deadline.
+// Invalid or impossible cron expressions return an error, never a fresh result.
+func EvaluateFreshness(f Freshness, loc *time.Location, now time.Time) (FreshnessEvaluation, error) {
 	if !f.Enabled {
-		return false, nil
+		return FreshnessEvaluation{}, nil
 	}
-	// Anchor on the last success (finished) if it ever succeeded, else creation.
+	sched, err := parseInLocation(f.CronExpr, loc)
+	if err != nil {
+		return FreshnessEvaluation{}, err
+	}
 	anchor := f.CreatedAt
 	if f.LastSuccessAt != nil {
 		anchor = *f.LastSuccessAt
 	}
-	next, err := NextFire(f.CronExpr, loc, anchor)
+	next, err := nextAfter(sched, anchor)
 	if err != nil {
-		return false, err
+		return FreshnessEvaluation{}, err
 	}
-	return next.Add(staleMargin).Before(now), nil
+	deadline := next.Add(staleMargin)
+	result := FreshnessEvaluation{
+		ExpectedSuccess:  deadline,
+		Stale:            deadline.Before(now),
+		StalenessSeconds: max(0, now.Sub(deadline).Seconds()),
+	}
+	if _, interval := sched.(cron.ConstantDelaySchedule); !interval {
+		result.NextRun, err = nextAfter(sched, now)
+		if err != nil {
+			return FreshnessEvaluation{}, err
+		}
+	}
+	return result, nil
 }
 
-// IsStale is the compatibility predicate for callers that cannot represent an
-// unknown state. New health and convergence surfaces use EvaluateStale.
+// IsStale is the conservative compatibility predicate for callers that cannot
+// represent an unknown state. New health surfaces use EvaluateStale so errors
+// remain distinguishable from overdue data.
 func IsStale(f Freshness, loc *time.Location, now time.Time) bool {
-	stale, _ := EvaluateStale(f, loc, now)
-	return stale
+	stale, err := EvaluateStale(f, loc, now)
+	return stale || err != nil
 }
 
 // IsRefreshing reports a live, non-zombie run independently of data freshness.

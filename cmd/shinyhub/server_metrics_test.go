@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -62,7 +63,7 @@ func TestScheduleSampleLeavesNeverHappenedEventsAbsent(t *testing.T) {
 	got := scheduleSample(db.ScheduleFreshness{
 		Slug: "report", Name: "nightly", Enabled: true,
 		ConsecutiveFailures: 2, ActivationStatus: "pending", ActivationCapacityDeferrals: 4,
-	})
+	}, time.UTC, time.Now())
 	want := metrics.ScheduleSample{
 		Slug: "report", Name: "nightly", Enabled: true,
 		ConsecutiveFailures: 2, ActivationStatus: "pending", CapacityDeferrals: 4,
@@ -83,7 +84,7 @@ func TestScheduleSampleCarriesEveryRecordedTime(t *testing.T) {
 		ActivationCreatedAt:          at(1004),
 		ActivationCapacityDeferredAt: at(1005),
 		ActivationGeneration:         &gen,
-	})
+	}, time.UTC, time.Now())
 	want := metrics.ScheduleSample{
 		Slug: "report", Name: "nightly",
 		LastSuccessUnix: 1001, OK: true,
@@ -92,6 +93,7 @@ func TestScheduleSampleCarriesEveryRecordedTime(t *testing.T) {
 		ActivationCreatedUnix: 1004,
 		CapacityDeferredUnix:  1005,
 		ActivationGeneration:  7,
+		FreshnessKnown:        true,
 	}
 	if got != want {
 		t.Fatalf("sample = %+v, want %+v", got, want)
@@ -120,6 +122,14 @@ func TestSessionSamplesCopiesEveryPool(t *testing.T) {
 func TestNewServerMetricsWiresTheServerIntoOneRegistry(t *testing.T) {
 	store := dbtest.New(t)
 	createTestApp(t, store, "broken")
+	appID := createTestApp(t, store, "scheduled")
+	if _, err := store.CreateSchedule(db.CreateScheduleParams{AppID: appID, Name: "daily", CronExpr: "0 6 * * *", CommandJSON: `["true"]`, Enabled: true, TimeoutSeconds: 60, OverlapPolicy: "skip", MissedPolicy: "skip"}); err != nil {
+		t.Fatal(err)
+	}
+	location, err := time.LoadLocation("Asia/Tokyo")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: "broken", Status: "crashed"}); err != nil {
 		t.Fatal(err)
 	}
@@ -138,12 +148,13 @@ func TestNewServerMetricsWiresTheServerIntoOneRegistry(t *testing.T) {
 	}
 
 	reg := newServerMetrics(serverMetricsDeps{
-		version:     "v-test",
-		logger:      slog.New(slog.DiscardHandler),
-		store:       store,
-		srv:         srv,
-		prx:         prx,
-		relayLeases: &upgrade.RelayLeases{Dir: notADir},
+		version:           "v-test",
+		logger:            slog.New(slog.DiscardHandler),
+		store:             store,
+		srv:               srv,
+		prx:               prx,
+		relayLeases:       &upgrade.RelayLeases{Dir: notADir},
+		schedulerLocation: location,
 	})
 
 	rec := httptest.NewRecorder()
@@ -158,9 +169,27 @@ func TestNewServerMetricsWiresTheServerIntoOneRegistry(t *testing.T) {
 		"\nshinyhub_retired_state_unknown 1\n",
 		"\nshinyhub_db_max_open_connections ",
 		`shinyhub_http_requests_total{method="GET",route="/api/server-info",status="200"} 1`,
+		`shinyhub_schedule_freshness_known{schedule="daily",slug="scheduled"} 1`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("scrape lacks %q", want)
 		}
+	}
+	foundNext := false
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, `shinyhub_schedule_next_run_timestamp_seconds{schedule="daily",slug="scheduled"} `) {
+			fields := strings.Fields(line)
+			value, err := strconv.ParseFloat(fields[1], 64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if next := time.Unix(int64(value), 0).UTC(); next.Hour() != 21 || next.Minute() != 0 {
+				t.Fatalf("next fire=%s, want 06:00 Tokyo / 21:00 UTC", next)
+			}
+			foundNext = true
+		}
+	}
+	if !foundNext {
+		t.Fatal("next-run metric missing from server scrape")
 	}
 }

@@ -2,11 +2,13 @@ package main
 
 import (
 	"log/slog"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/api"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/metrics"
 	"github.com/rvben/shinyhub/internal/proxy"
+	"github.com/rvben/shinyhub/internal/schedulespec"
 	"github.com/rvben/shinyhub/internal/upgrade"
 	"github.com/rvben/shinyhub/internal/usage"
 )
@@ -14,13 +16,14 @@ import (
 // serverMetricsDeps is what the server self-telemetry registry reads from.
 // usageRecorder is nil when usage recording is disabled.
 type serverMetricsDeps struct {
-	version       string
-	logger        *slog.Logger
-	store         *db.Store
-	srv           *api.Server
-	prx           *proxy.Proxy
-	usageRecorder *usage.Recorder
-	relayLeases   *upgrade.RelayLeases
+	version           string
+	logger            *slog.Logger
+	store             *db.Store
+	srv               *api.Server
+	prx               *proxy.Proxy
+	usageRecorder     *usage.Recorder
+	relayLeases       *upgrade.RelayLeases
+	schedulerLocation *time.Location
 }
 
 // newServerMetrics builds the server's Prometheus registry and wires every
@@ -42,7 +45,7 @@ func newServerMetrics(d serverMetricsDeps) *metrics.Registry {
 		return st.Count, st.Sessions, st.Unknown
 	})
 	// Schedule freshness is DB-backed, so it survives restarts.
-	if err := reg.Register(metrics.NewScheduleFreshnessCollector(scheduleSamples(d.store))); err != nil {
+	if err := reg.Register(metrics.NewScheduleFreshnessCollector(scheduleSamples(d.store, d.schedulerLocation))); err != nil {
 		d.logger.Warn("register schedule freshness collector", "err", err)
 	}
 	// Session gauges are sampled live from the proxy at scrape time, so a
@@ -81,15 +84,16 @@ func fleetCounts(store *db.Store) func() (metrics.FleetCounts, error) {
 }
 
 // scheduleSamples reads one freshness sample per schedule from the store.
-func scheduleSamples(store *db.Store) func() ([]metrics.ScheduleSample, error) {
+func scheduleSamples(store *db.Store, location *time.Location) func() ([]metrics.ScheduleSample, error) {
 	return func() ([]metrics.ScheduleSample, error) {
 		rows, err := store.ScheduleFreshness()
 		if err != nil {
 			return nil, err
 		}
 		out := make([]metrics.ScheduleSample, len(rows))
+		now := time.Now()
 		for i, fr := range rows {
-			out[i] = scheduleSample(fr)
+			out[i] = scheduleSample(fr, location, now)
 		}
 		return out, nil
 	}
@@ -98,7 +102,7 @@ func scheduleSamples(store *db.Store) func() ([]metrics.ScheduleSample, error) {
 // scheduleSample converts one freshness row. An event that never happened
 // stays zero, which the collector reads as absent; OK separately records
 // whether the schedule has ever succeeded.
-func scheduleSample(fr db.ScheduleFreshness) metrics.ScheduleSample {
+func scheduleSample(fr db.ScheduleFreshness, location *time.Location, now time.Time) metrics.ScheduleSample {
 	s := metrics.ScheduleSample{
 		Slug: fr.Slug, Name: fr.Name, Enabled: fr.Enabled,
 		ConsecutiveFailures: fr.ConsecutiveFailures,
@@ -123,6 +127,28 @@ func scheduleSample(fr db.ScheduleFreshness) metrics.ScheduleSample {
 	}
 	if fr.ActivationGeneration != nil {
 		s.ActivationGeneration = *fr.ActivationGeneration
+	}
+	// Disabled (including retired) schedules have no freshness obligation.
+	if !fr.Enabled {
+		s.FreshnessKnown = true
+		return s
+	}
+	loc, err := fr.EffectiveLocationChecked(location)
+	if err != nil {
+		return s
+	}
+	evaluation, err := schedulespec.EvaluateFreshness(schedulespec.Freshness{
+		Enabled: fr.Enabled, CronExpr: fr.CronExpr, CreatedAt: fr.CreatedAt, LastSuccessAt: fr.LastSuccessAt,
+	}, loc, now)
+	if err != nil {
+		return s
+	}
+	s.FreshnessKnown = true
+	s.Stale = evaluation.Stale
+	s.StalenessSeconds = evaluation.StalenessSeconds
+	s.ExpectedSuccessUnix = evaluation.ExpectedSuccess.Unix()
+	if !evaluation.NextRun.IsZero() {
+		s.NextRunUnix = evaluation.NextRun.Unix()
 	}
 	return s
 }
