@@ -206,6 +206,9 @@ func RequestReload(ctx context.Context, pidFile string, wait, upgradeTimeout tim
 	defer cancel()
 	result, err := exchangeReload(ackCtx, reloadSocket(pidFile, pid), reloadRequest{Version: 1, Wait: wait})
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return result, fmt.Errorf("reload acknowledgement interrupted; the handoff may still complete; verify the live PID before retrying: %w", err)
+		}
 		return result, fmt.Errorf("reload acknowledgement unavailable; server must support acknowledged reloads; verify the live PID before retrying: %w", err)
 	}
 	if result.Error != "" {
@@ -283,6 +286,22 @@ func reloadReadinessFailure(ctx context.Context, pidFile string, result ReloadRe
 }
 
 func exchangeReload(ctx context.Context, path string, request reloadRequest) (ReloadResult, error) {
+	result, err := exchangeReloadConn(ctx, path, request)
+	if err != nil {
+		// Cancellation closes the socket. Preserve the cause for callers instead
+		// of exposing that incidental transport error. Never discard a valid ack.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return result, ctxErr
+		}
+		// The socket deadline can fire just before the context timer does.
+		if deadline, ok := ctx.Deadline(); ok && errors.Is(err, os.ErrDeadlineExceeded) && !time.Now().Before(deadline) {
+			return result, context.DeadlineExceeded
+		}
+	}
+	return result, err
+}
+
+func exchangeReloadConn(ctx context.Context, path string, request reloadRequest) (ReloadResult, error) {
 	conn, err := runtimesocket.DialContext(ctx, path)
 	if err != nil {
 		return ReloadResult{}, err

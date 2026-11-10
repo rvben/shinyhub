@@ -163,7 +163,7 @@ func TestAcknowledgedReloadCarriesServingAppsAndRefusesFalseSuccess(t *testing.T
 		}
 	}()
 	result, err := RequestReload(ctx, pidFile, 0, time.Second)
-	if err == nil || !strings.Contains(err.Error(), "rolled-app") || result.Ready || validProbes.Load() == 0 {
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "handoff accepted") || !strings.Contains(err.Error(), "rolled-app") || result.Ready || validProbes.Load() < 2 {
 		t.Fatalf("false success: result=%+v err=%v probes=%d", result, err, validProbes.Load())
 	}
 }
@@ -382,8 +382,8 @@ func TestReloadCallerCancellationReleasesWaitAndAdmission(t *testing.T) {
 	go func() { _, err := RequestReload(ctx, pidFile, time.Hour, time.Second); done <- err }()
 	waitFor(t, func() bool { return attempts.Load() > 0 }, "waiter reached guard")
 	cancel()
-	if err := <-done; err == nil {
-		t.Fatal("canceled caller got success")
+	if err := <-done; !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "handoff may still complete") {
+		t.Fatalf("canceled caller error = %v, want interrupted acknowledgement wrapping context.Canceled", err)
 	}
 	waitFor(t, func() bool { state.mu.Lock(); defer state.mu.Unlock(); return state.inFlight == nil }, "waiting reload releases admission")
 	before := attempts.Load()
@@ -392,6 +392,58 @@ func TestReloadCallerCancellationReleasesWaitAndAdmission(t *testing.T) {
 	}
 	if attempts.Load() != before+1 {
 		t.Fatal("new reload could not enter admission after cancellation")
+	}
+}
+
+func TestExchangeReloadPreservesContextErrors(t *testing.T) {
+	for _, want := range []error{context.Canceled, context.DeadlineExceeded} {
+		t.Run(want.Error(), func(t *testing.T) {
+			dir, err := os.MkdirTemp("", "sh-reload-ctx-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer os.RemoveAll(dir)
+			listener, err := net.Listen("unix", filepath.Join(dir, "control.sock"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			var ctx context.Context
+			var cancel func()
+			if want == context.Canceled {
+				ctx, cancel = context.WithCancel(context.Background())
+			} else {
+				deadlineCtx := newEventDeadlineContext()
+				ctx, cancel = deadlineCtx, deadlineCtx.expire
+			}
+			defer cancel()
+			received := make(chan error, 1)
+			release := make(chan struct{})
+			defer close(release)
+			go func() {
+				conn, err := listener.Accept()
+				if err != nil {
+					received <- err
+					return
+				}
+				defer conn.Close()
+				var request reloadRequest
+				received <- json.NewDecoder(conn).Decode(&request)
+				<-release // Keep Decode blocked until cancellation closes the client.
+			}()
+			done := make(chan error, 1)
+			go func() {
+				_, err := exchangeReload(ctx, listener.Addr().String(), reloadRequest{Version: 1})
+				done <- err
+			}()
+			if err := <-received; err != nil {
+				t.Fatal(err)
+			}
+			cancel()
+			if err := <-done; !errors.Is(err, want) || errors.Is(err, net.ErrClosed) {
+				t.Fatalf("exchange error = %v, want %v", err, want)
+			}
+		})
 	}
 }
 
