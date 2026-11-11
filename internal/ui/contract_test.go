@@ -124,8 +124,12 @@ func TestPageHeadingsUseSharedWeights(t *testing.T) {
 func TestDeployingBadgeWired(t *testing.T) {
 	assertContains(t, "views/app-card-badge.js", "app.deploying",
 		"app-card-badge.js must rank the server-computed deploying flag above every other state")
-	assertContains(t, "app.js", "syncCardFromModel(slug, m)",
+	assertContains(t, "app.js", "syncCardFromModel(slug, m, ",
 		"app.js must hand the whole /metrics sample to the card sync so deploying flips the badge live (see metricsResponse.Deploying in internal/api/apps.go)")
+	assertContains(t, "app.js", "syncCardFromModel(slug, m, { fleetSurfaces: false })",
+		"the metrics poll must defer the fleet-wide attention rail and results line to onBatch so a tick does that work once, not once per slug")
+	assertContains(t, "app.js", "onBatch: () => {",
+		"the metrics poller must refresh the attention rail and results line once per completed poll")
 	assertContains(t, "views/app-card-badge.js", "app.deploying = !!live.deploying",
 		"the live merge must carry deploying from the sample onto the model the badge is derived from")
 	assertContains(t, "views/app-card-badge.js", "live.last_deployment_status !== undefined",
@@ -1779,7 +1783,7 @@ func TestLifecycleMenusFollowPolledStatus(t *testing.T) {
 		handler = handler[:i]
 	}
 	for _, call := range []string{
-		"syncCardFromModel(slug, m)",
+		"syncCardFromModel(slug, m, ",
 		"syncDetailHeaderActions(detailApp)",
 	} {
 		if !strings.Contains(handler, call) {

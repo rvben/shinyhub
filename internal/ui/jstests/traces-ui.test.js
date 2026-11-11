@@ -411,3 +411,41 @@ test('development-session scope reaches the API and has a clear all-traces escap
   assert.equal(invalidCalls[0], '/api/apps/demo/traces');
   assert.equal(invalid.find('#traces-session').hidden, true);
 });
+
+test('the one-second status repaint is disarmed while the tab is hidden and repaints on return', async (t) => {
+  const dom = new JSDOM('<main id="panel"></main>', {
+    url: 'https://shinyhub.example/apps/demo/traces', pretendToBeVisual: true,
+  });
+  const { window } = dom;
+  let hidden = false;
+  Object.defineProperty(window.document, 'hidden', { get: () => hidden });
+  // Count live 1 s intervals on the injected window, the timer the status
+  // repaint must use.
+  const live = new Set();
+  const realSet = window.setInterval.bind(window);
+  const realClear = window.clearInterval.bind(window);
+  window.setInterval = (fn, ms, ...rest) => {
+    const id = realSet(fn, ms, ...rest);
+    if (ms === 1000) live.add(id);
+    return id;
+  };
+  window.clearInterval = (id) => { live.delete(id); realClear(id); };
+  const panel = window.document.querySelector('#panel');
+  const cleanup = createTracesViewer({
+    panel, app: { slug: 'demo' }, api: async () => response([span()]), refreshEveryMs: 60_000,
+  });
+  t.after(() => { cleanup(); window.close(); });
+  await settle();
+  assert.equal(live.size, 1, 'visible tab runs the status repaint');
+
+  hidden = true;
+  window.document.dispatchEvent(new window.Event('visibilitychange'));
+  assert.equal(live.size, 0, 'hidden tab runs no one-second timer');
+
+  hidden = false;
+  window.document.dispatchEvent(new window.Event('visibilitychange'));
+  assert.equal(live.size, 1, 'returning to the tab re-arms the status repaint');
+
+  cleanup();
+  assert.equal(live.size, 0, 'unmount clears the status repaint');
+});

@@ -431,13 +431,15 @@ export function createTracesViewer({ panel, app, api, onUnauthorized = () => {},
   refresh.addEventListener('click', () => { feedback.hidden = true; load({ manual: true }); });
   retry.addEventListener('click', () => load({ manual: true }));
   const stopPoll = startVisiblePoll(doc, refreshEveryMs, load);
-  const statusTick = win.setInterval(paintStatus, 1000);
+  // The relative-time label only matters while the tab is visible; the poll
+  // disarms in the background and repaints once on return.
+  const stopStatusTick = startVisiblePoll(doc, 1000, paintStatus, win);
   load();
   return () => {
     destroyed = true;
     generation++;
     controller?.abort();
     stopPoll();
-    win.clearInterval(statusTick);
+    stopStatusTick();
   };
 }

@@ -224,3 +224,36 @@ test('the same batch set in a different order preserves its in-flight poll', asy
   await flush();
   assert.deepEqual(seen, ['demo', 'other']);
 });
+
+test('onBatch fires once per completed poll, after every onMetrics call', async () => {
+  global.fetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ metrics: { a: { cpu_percent: 1 }, b: { cpu_percent: 2 }, c: { cpu_percent: 3 } } }),
+  });
+  const events = [];
+  const metrics = createMetricsController({
+    intervalMs: 100000,
+    onMetrics: (slug) => events.push(`m:${slug}`),
+    onBatch: (slugs) => events.push(`batch:${slugs.join(',')}`),
+  });
+  metrics.setTargets(['a', 'b', 'c']);
+  await flush();
+  metrics.stop();
+  assert.deepEqual(events, ['m:a', 'm:b', 'm:c', 'batch:a,b,c']);
+});
+
+test('onBatch does not fire when the request fails', async () => {
+  global.fetch = async () => ({ ok: false, status: 500, json: async () => ({}) });
+  let batches = 0;
+  const metrics = createMetricsController({
+    intervalMs: 100000,
+    onMetrics: () => {},
+    onError: () => {},
+    onBatch: () => batches++,
+  });
+  metrics.setTargets(['a']);
+  await flush();
+  metrics.stop();
+  assert.equal(batches, 0);
+});

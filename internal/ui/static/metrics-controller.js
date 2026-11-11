@@ -7,13 +7,14 @@
 //     intervalMs: 10000,
 //     onMetrics: (slug, m) => { /* update UI */ },
 //     onError: (slug, err) => { /* optional */ },
+//     onBatch: (slugs) => { /* optional: once per completed poll */ },
 //   });
 //   metrics.setTargets(['demo', 'replica-smoke']); // grid view
 //   metrics.setTargets(['replica-smoke']);         // detail view
 //   metrics.setTargets([]);                        // login view / logged out
 import { startVisiblePoll } from './views/visible-poll.js';
 
-export function createMetricsController({ intervalMs = 10000, onMetrics, onError }) {
+export function createMetricsController({ intervalMs = 10000, onMetrics, onError, onBatch }) {
   // Guarded rather than a bare reference: this controller is also exercised in
   // plain-Node unit tests with no DOM at all, where startVisiblePoll's fail-open
   // path (doc === null never pauses) keeps those tests' behavior unchanged.
@@ -63,6 +64,9 @@ export function createMetricsController({ intervalMs = 10000, onMetrics, onError
         if (Object.prototype.hasOwnProperty.call(metrics, slug)) onMetrics(slug, metrics[slug]);
         else if (onError) onError(slug, new Error('Metrics missing from response'));
       }
+      // Fleet-wide surfaces (attention rail, result counts) depend on the whole
+      // response, so callers refresh them here once rather than once per slug.
+      if (isCurrent() && onBatch) onBatch(snapshot);
     } catch (e) {
       if (isCurrent() && onError) for (const slug of snapshot) onError(slug, e);
     } finally {

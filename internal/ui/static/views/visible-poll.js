@@ -16,7 +16,11 @@
 // which is what a plain Node test environment with no DOM looks like): with
 // no way to observe visibility the poll simply never pauses, which is the
 // same behavior a bare setInterval already had.
-export function startVisiblePoll(doc, intervalMs, tick) {
+//
+// timers supplies setInterval/clearInterval (default: the global ones). A view
+// that owns an injected window passes it so its timers stay under that
+// window's control.
+export function startVisiblePoll(doc, intervalMs, tick, timers = globalThis) {
   let timer = null;
   let stopped = false;
 
@@ -26,12 +30,12 @@ export function startVisiblePoll(doc, intervalMs, tick) {
 
   function arm() {
     if (stopped || timer !== null || hidden()) return;
-    timer = setInterval(tick, intervalMs);
+    timer = timers.setInterval(tick, intervalMs);
   }
 
   function disarm() {
     if (timer !== null) {
-      clearInterval(timer);
+      timers.clearInterval(timer);
       timer = null;
     }
   }

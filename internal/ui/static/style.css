@@ -74,6 +74,9 @@ summary:focus-visible {
   --surface-2-rgb: 20, 27, 50;
   --surface-rgb:   14, 20, 38;
   --inset-rgb:   6, 9, 20;
+  /* Accent triplet for translucent accent tints: rgba(var(--cyan-rgb), a). One
+     place to retune every tint (hover fills, focus rings) per theme. */
+  --cyan-rgb:    56, 189, 248;
   /* Drop shadow for a lifted card. Themed, because a shadow tuned for a near-black
      page reads as a grey smudge on a light one. */
   --shadow-card: 0 24px 60px -20px rgba(0,0,0,0.6);
@@ -162,6 +165,7 @@ summary:focus-visible {
   --surface-2-rgb: 242, 245, 249;
   --surface-rgb:   255, 255, 255;
   --inset-rgb:   238, 242, 246;
+  --cyan-rgb:    56, 189, 248;
   --shadow-card: 0 18px 40px -24px rgba(22,32,58,0.28);
   --shadow-control: 0 4px 12px rgba(24,38,58,0.12);
   --shadow-modal-focus: 0 24px 64px rgba(24,38,58,0.22);
@@ -352,7 +356,7 @@ body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-colla
 .group-disclosure-toggle:focus-visible,
 .sidebar-collapse:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px rgba(56, 189, 248, 0.55);
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px rgba(var(--cyan-rgb), 0.55);
 }
 .nav-item.tab-active {
   color: var(--cyan);
@@ -360,7 +364,7 @@ body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-colla
   box-shadow: none;
 }
 .nav-item.tab-active:focus-visible {
-  box-shadow: inset 0 0 0 1px var(--line), 0 0 0 2px var(--bg), 0 0 0 4px rgba(56, 189, 248, 0.62);
+  box-shadow: inset 0 0 0 1px var(--line), 0 0 0 2px var(--bg), 0 0 0 4px rgba(var(--cyan-rgb), 0.62);
 }
 .nav-ico { width: 16px; height: 16px; flex-shrink: 0; color: var(--text-muted); }
 .nav-item.tab-active .nav-ico { color: var(--cyan-bright); }
@@ -435,7 +439,6 @@ body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-colla
    only an app the viewer cannot open is muted. Keeps internal state hidden. */
 .sb-dot-ok { background: var(--text-soft); }
 .sb-dot-unavailable { background: var(--text-muted); }
-.sidebar-apps-empty { padding: 0.3rem 0.7rem; color: var(--text-muted); font-size: var(--fs-mono); }
 
 /* Shared project disclosure behavior. Surface-specific rules above/below own
    the typography and spacing; these rules keep the affordance consistent. */
@@ -921,7 +924,7 @@ body[data-auth="out"] {
 
 .login-box input:focus {
   border-color: var(--cyan-bright);
-  box-shadow: 0 0 0 3px rgba(56,189,248,0.12);
+  box-shadow: 0 0 0 3px rgba(var(--cyan-rgb), 0.12);
 }
 .login-box input::placeholder { color: var(--text-muted); }
 
@@ -1065,7 +1068,7 @@ body[data-auth="out"] {
 }
 .toolbar button:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px rgba(56,189,248,0.55);
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px rgba(var(--cyan-rgb), 0.55);
 }
 
 /* ── App Grid ── */
@@ -1832,15 +1835,15 @@ body[data-auth="out"] {
 .app-actions button:hover {
   border-color: var(--cyan-bright);
   color: var(--cyan-bright);
-  background: rgba(56,189,248,0.08);
+  background: rgba(var(--cyan-rgb), 0.08);
 }
 
 /* Opening an app is the preferred card action, but the page-level CTA remains
    primary. A restrained tint keeps the hierarchy local to the card. */
 .app-actions > a {
   gap: 0.35rem;
-  background: rgba(56,189,248,0.08);
-  border-color: rgba(56,189,248,0.28);
+  background: rgba(var(--cyan-rgb), 0.08);
+  border-color: rgba(var(--cyan-rgb), 0.28);
   color: var(--cyan-bright);
   font-weight: 650;
   box-shadow: none;
@@ -1848,8 +1851,8 @@ body[data-auth="out"] {
 .app-actions > a:hover {
   filter: none;
   color: var(--cyan-bright);
-  background: rgba(56,189,248,0.13);
-  border-color: rgba(56,189,248,0.48);
+  background: rgba(var(--cyan-rgb), 0.13);
+  border-color: rgba(var(--cyan-rgb), 0.48);
 }
 
 .dashboard-emptystate {
@@ -2182,7 +2185,7 @@ body[data-auth="out"] {
 }
 
 #users-table tbody tr { transition: background var(--ease); }
-#users-table tbody tr:hover { background: rgba(56,189,248,0.04); }
+#users-table tbody tr:hover { background: rgba(var(--cyan-rgb), 0.04); }
 
 .users-actions-col { width: 1%; white-space: nowrap; }
 #users-table td:last-child { white-space: nowrap; }
@@ -2212,7 +2215,7 @@ body[data-auth="out"] {
 .users-row-actions .btn-row:hover:not(:disabled) {
   border-color: var(--cyan-bright);
   color: var(--cyan-bright);
-  background: rgba(56,189,248,0.06);
+  background: rgba(var(--cyan-rgb), 0.06);
 }
 
 .users-row-actions .btn-row.btn-row-support {
@@ -2373,7 +2376,7 @@ body[data-auth="out"] {
 .service-credential-tools input:focus, .service-credential-tools select:focus {
   outline: none;
   border-color: var(--cyan-bright);
-  box-shadow: 0 0 0 3px rgba(56,189,248,0.2);
+  box-shadow: 0 0 0 3px rgba(var(--cyan-rgb), 0.2);
 }
 .service-credential-tools input { width: min(18rem, 40vw); }
 .service-filter-status { margin-inline-start: auto; color: var(--text-muted); font-size: var(--fs-label); }
@@ -2464,7 +2467,7 @@ body[data-auth="out"] {
 .pagination button:hover:not(:disabled) {
   border-color: var(--cyan-bright);
   color: var(--cyan-bright);
-  background: rgba(56,189,248,0.06);
+  background: rgba(var(--cyan-rgb), 0.06);
 }
 
 .pagination button:disabled {
@@ -2819,7 +2822,7 @@ body[data-auth="out"] {
 
 .modal-header button:hover {
   color: var(--cyan-bright);
-  background: rgba(56,189,248,0.08);
+  background: rgba(var(--cyan-rgb), 0.08);
 }
 
 .modal-body {
@@ -2904,7 +2907,7 @@ fieldset.settings-block { min-width: 0; }
   margin: -0.5rem 0 1.1rem;
   padding: 0.6rem 0.8rem;
   border-radius: var(--radius);
-  background: rgba(56,189,248,0.06);
+  background: rgba(var(--cyan-rgb), 0.06);
   border: 1px solid var(--line-2);
   color: var(--text-soft);
   font-size: var(--fs-mono);
@@ -2916,7 +2919,6 @@ fieldset.settings-block { min-width: 0; }
    .scaling-option-help color rule on the same element. */
 .scaling-option-help.scaling-option-warn { color: var(--yellow, #fbbf24); }
 /* Small muted metadata (e.g. data-dir quota usage). */
-.settings-meta { color: var(--text-muted); font-size: var(--fs-body); font-variant-numeric: tabular-nums; }
 
 .access-radios label {
   display: flex;
@@ -2949,7 +2951,7 @@ fieldset.settings-block { min-width: 0; }
 
 .access-radios input[type="radio"]:checked {
   border-color: var(--cyan-bright);
-  box-shadow: 0 0 0 3px rgba(56,189,248,0.15);
+  box-shadow: 0 0 0 3px rgba(var(--cyan-rgb), 0.15);
 }
 
 .access-radios input[type="radio"]:checked::after {
@@ -3033,17 +3035,17 @@ fieldset.settings-block { min-width: 0; }
 /* On an undeployed card, Deploy is the recommended next action. Keep it tonal:
    it should not compete with the page-level New app button. */
 .app-actions .btn-primary {
-  background: rgba(56,189,248,0.08);
+  background: rgba(var(--cyan-rgb), 0.08);
   color: var(--cyan-bright);
-  border-color: rgba(56,189,248,0.28);
+  border-color: rgba(var(--cyan-rgb), 0.28);
   font-weight: 650;
   box-shadow: none;
 }
 
 .app-actions .btn-primary:hover {
-  background: rgba(56,189,248,0.13);
+  background: rgba(var(--cyan-rgb), 0.13);
   color: var(--cyan-bright);
-  border-color: rgba(56,189,248,0.48);
+  border-color: rgba(var(--cyan-rgb), 0.48);
 }
 
 /* ── Buttons inside any modal-actions row ── */
@@ -3064,12 +3066,12 @@ fieldset.settings-block { min-width: 0; }
 .modal-actions button:hover:not(:disabled) {
   border-color: var(--cyan-bright);
   color: var(--cyan-bright);
-  background: rgba(56,189,248,0.08);
+  background: rgba(var(--cyan-rgb), 0.08);
 }
 
 .modal-actions button:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 3px rgba(56,189,248,0.25);
+  box-shadow: 0 0 0 3px rgba(var(--cyan-rgb), 0.25);
   border-color: var(--cyan-bright);
 }
 
@@ -3118,13 +3120,6 @@ fieldset.settings-block { min-width: 0; }
   background: rgba(248,113,113,0.05);
 }
 .danger-zone .settings-block-title { color: var(--red-text); }
-
-.danger-zone-lead {
-  margin: 0 0 0.8rem;
-  font-size: var(--fs-mono);
-  color: var(--text-soft);
-  line-height: 1.45;
-}
 
 .danger-zone-label {
   display: block;
@@ -3247,23 +3242,7 @@ fieldset.settings-block { min-width: 0; }
   filter: none;
 }
 
-/* ── History modal ── */
-#history-list {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-}
-
-#history-list li {
-  display: flex;
-  align-items: center;
-  gap: 0.85rem;
-  padding: 0.85rem 0;
-  border-top: 1px solid var(--line);
-}
-
-#history-list li:first-child { border-top: none; }
-
+/* ── Deployment history ── */
 .deployment-meta { flex: 1; }
 
 .deployment-version {
@@ -3280,25 +3259,6 @@ fieldset.settings-block { min-width: 0; }
   margin-top: 0.3rem;
   font-family: var(--mono);
   letter-spacing: -0.01em;
-}
-
-#history-list li button {
-  background: transparent;
-  border: 1px solid var(--line-2);
-  color: var(--text-soft);
-  padding: 0.35rem 0.85rem;
-  border-radius: var(--radius);
-  cursor: pointer;
-  font-size: var(--fs-label);
-  font-family: var(--font);
-  font-weight: 600;
-  transition: all var(--ease);
-}
-
-#history-list li button:hover {
-  border-color: var(--cyan-bright);
-  color: var(--cyan-bright);
-  background: rgba(56,189,248,0.06);
 }
 
 /* ── Responsive ── */
@@ -3495,7 +3455,7 @@ fieldset.settings-block { min-width: 0; }
 .settings-tab-panel textarea:focus {
   outline: none;
   border-color: var(--cyan-bright);
-  box-shadow: 0 0 0 3px rgba(56,189,248,0.15);
+  box-shadow: 0 0 0 3px rgba(var(--cyan-rgb), 0.15);
 }
 
 .modal-card form input[type="checkbox"],
@@ -3519,7 +3479,7 @@ fieldset.settings-block { min-width: 0; }
 .settings-tab-panel input[type="checkbox"]:checked {
   border-color: var(--cyan-bright);
   background: var(--cyan-bright);
-  box-shadow: 0 0 0 3px rgba(56,189,248,0.15);
+  box-shadow: 0 0 0 3px rgba(var(--cyan-rgb), 0.15);
 }
 
 .modal-card form input[type="checkbox"]:checked::after,
@@ -3538,7 +3498,7 @@ fieldset.settings-block { min-width: 0; }
 .modal-card form input[type="checkbox"]:focus-visible,
 .settings-tab-panel input[type="checkbox"]:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 3px rgba(56,189,248,0.25);
+  box-shadow: 0 0 0 3px rgba(var(--cyan-rgb), 0.25);
 }
 
 /* Plain checkbox toggle rows lay out as an inline flex (checkbox + label). The
@@ -3787,7 +3747,7 @@ fieldset.settings-block { min-width: 0; }
 .emptystate-btn:hover {
   border-color: var(--cyan-bright);
   color: var(--cyan-bright);
-  background: rgba(56,189,248,0.08);
+  background: rgba(var(--cyan-rgb), 0.08);
 }
 
 .emptystate-btn-primary {
@@ -4022,7 +3982,7 @@ fieldset.settings-block { min-width: 0; }
   padding: 0.4rem 0.8rem;
   background: var(--accent-dim);
   color: var(--cyan-bright);
-  border: 1px solid rgba(56,189,248,0.25);
+  border: 1px solid rgba(var(--cyan-rgb), 0.25);
   border-radius: var(--radius);
   cursor: pointer;
   font-size: var(--fs-label);
@@ -4032,7 +3992,7 @@ fieldset.settings-block { min-width: 0; }
 }
 
 .env-add-btn:hover {
-  background: rgba(56,189,248,0.18);
+  background: rgba(var(--cyan-rgb), 0.18);
   border-color: var(--cyan-bright);
 }
 
@@ -4097,7 +4057,7 @@ fieldset.settings-block { min-width: 0; }
 .env-list .env-actions button:hover {
   border-color: var(--cyan-bright);
   color: var(--cyan-bright);
-  background: rgba(56,189,248,0.08);
+  background: rgba(var(--cyan-rgb), 0.08);
 }
 
 .env-list .env-actions .env-btn-danger {
@@ -4159,7 +4119,7 @@ fieldset.settings-block { min-width: 0; }
 .env-form-row :is(input[type="text"], input[type="password"]):focus {
   outline: none;
   border-color: var(--cyan-bright);
-  box-shadow: 0 0 0 3px rgba(56,189,248,0.14);
+  box-shadow: 0 0 0 3px rgba(var(--cyan-rgb), 0.14);
 }
 
 .env-form-row :is(input[type="text"], input[type="password"]):read-only {
@@ -4227,7 +4187,7 @@ fieldset.settings-block { min-width: 0; }
 .env-btn-secondary:hover {
   border-color: var(--cyan-bright);
   color: var(--cyan-bright);
-  background: rgba(56,189,248,0.08);
+  background: rgba(var(--cyan-rgb), 0.08);
 }
 
 /* ── Data tab ── */
@@ -4278,7 +4238,7 @@ fieldset.settings-block { min-width: 0; }
 .env-form-row input[type="file"]::file-selector-button:hover {
   color: var(--cyan-bright);
   border-color: var(--cyan-bright);
-  background: rgba(56, 189, 248, 0.08);
+  background: rgba(var(--cyan-rgb), 0.08);
 }
 
 .env-form-row input[type="file"]:focus-visible {
@@ -4286,7 +4246,7 @@ fieldset.settings-block { min-width: 0; }
 }
 .env-form-row input[type="file"]:focus-visible::file-selector-button {
   border-color: var(--cyan-bright);
-  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.25);
+  box-shadow: 0 0 0 3px rgba(var(--cyan-rgb), 0.25);
 }
 
 /* ── Scheduled jobs workspace ── */
@@ -4411,7 +4371,7 @@ fieldset.settings-block { min-width: 0; }
 }
 .schedule-run-btn:hover:not(:disabled) {
   border-color: var(--cyan-bright);
-  background: rgba(56, 189, 248, 0.16);
+  background: rgba(var(--cyan-rgb), 0.16);
   color: var(--text);
 }
 
@@ -4831,14 +4791,12 @@ fieldset.settings-block { min-width: 0; }
 
 /* ── Shared Data tab ── */
 
-.shared-data-table .shared-data-list { list-style: none; padding: 0; margin: 0; }
 .shared-data-list li { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; }
 
 .status-pill { padding: 2px 8px; border-radius: 999px; font-size: 0.85em; }
 .status-on  { background: var(--green-bg); color: var(--green); }
 .status-off { background: var(--red-bg);   color: var(--red-text); }
 
-.settings-help { color: var(--text-muted); font-size: 0.9em; margin: -4px 0 12px; }
 
 .run-history-list { list-style: none; padding: 0; margin: 0; }
 .run-history-list li { border-bottom: 1px solid var(--line); }
@@ -4884,39 +4842,6 @@ fieldset.settings-block { min-width: 0; }
   display: flex;
   flex-direction: column;
   gap: 0.2rem;
-}
-.hibernate-option-title {
-  font-weight: 600;
-  font-size: var(--fs-subtitle);
-  color: var(--text);
-}
-.hibernate-option-help {
-  font-size: var(--fs-mono);
-  color: var(--text-muted);
-  line-height: 1.35;
-}
-.hibernate-custom-row {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  margin-top: 0.35rem;
-}
-.hibernate-custom-row input[type="number"] {
-  width: 6rem;
-  padding: 0.35rem 0.5rem;
-  font-family: var(--mono);
-  background: var(--bg-deep);
-  color: var(--text);
-  border: 1px solid var(--line-2);
-  border-radius: var(--radius);
-}
-.hibernate-custom-row input[type="number"]:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-.hibernate-custom-unit {
-  font-size: var(--fs-body);
-  color: var(--text-muted);
 }
 .hibernate-status {
   font-size: var(--fs-body);
@@ -4970,16 +4895,6 @@ fieldset.settings-block { min-width: 0; }
 .setting-action:hover:not(:disabled) { background: var(--surface-2); text-decoration: underline; }
 .setting-action:focus-visible { outline: 2px solid var(--cyan-bright); outline-offset: 2px; }
 .setting-action:disabled { color: var(--text-muted); cursor: default; }
-.setting-override { grid-column: 2; grid-row: 1; justify-content: space-between; gap: 0.5rem; min-height: 44px; font-size: var(--fs-body); color: var(--text); }
-.setting-unlimited { grid-column: 2; grid-row: 2; min-height: 44px; align-self: start; font-size: var(--fs-body); color: var(--text); }
-.settings-tab-panel .setting-override:has(input:disabled), .settings-tab-panel .setting-unlimited:has(input:disabled) { color: var(--text-muted); cursor: default; }
-.settings-tab-panel .setting-override input[type="checkbox"] { width: 36px; height: 22px; margin: 0; border: 1px solid var(--text-muted); border-radius: 11px; background: var(--text-muted); box-shadow: none; }
-.settings-tab-panel .setting-override input[type="checkbox"]::after { content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border: 0; border-radius: 50%; background: #fff; transform: none; transition: transform var(--ease); }
-.settings-tab-panel .setting-override input[type="checkbox"]:checked { border-color: var(--brand-primary, var(--cyan-bright)); background: var(--brand-primary, var(--cyan-bright)); }
-.settings-tab-panel .setting-override input[type="checkbox"]:checked::after { transform: translateX(14px); }
-.settings-tab-panel .setting-override input[type="checkbox"]:focus-visible { outline: 2px solid var(--cyan-bright); outline-offset: 3px; }
-.settings-tab-panel .setting-unlimited input[type="checkbox"]:checked { box-shadow: none; }
-.setting-override input:disabled, .setting-unlimited input:disabled { opacity: 0.5; cursor: default; }
 .setting-policy-note { grid-column: 1; grid-row: 2; margin: 0; min-height: 2.8em; font-size: var(--fs-body); line-height: 1.4; color: var(--text-muted); }
 .settings-feedback { width: 100%; min-height: 1.5em; font-size: var(--fs-body); }
 .settings-immediate { padding-top: 1.5rem; border-top: 1px solid var(--line); }
@@ -5005,9 +4920,6 @@ fieldset.settings-block { min-width: 0; }
 }
 
 /* General tab — scaling options */
-.scaling-options {
-  margin-top: 1.5rem;
-}
 .scaling-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 16rem;
@@ -5219,17 +5131,6 @@ fieldset.settings-block { min-width: 0; }
 .app-detail-header .status-pill.status-suspended,
 .app-detail-header .status-pill.status-unknown { color: var(--text-muted); background: var(--gray-bg); }
 
-.meta-chip {
-  font-family: var(--mono);
-  font-size: var(--fs-label);
-  color: var(--text-soft);
-  background: var(--bg-deep);
-  border: 1px solid var(--line-2);
-  border-radius: var(--radius);
-  padding: 0.1rem 0.45rem;
-}
-.meta-chip[hidden] { display: none; }
-
 /* Release strip: what is live, when it went live, what deployed it, and a way
    into the full history. One line on wide screens; on narrow ones the
    sentence wraps and the history link drops below it. */
@@ -5260,7 +5161,6 @@ fieldset.settings-block { min-width: 0; }
   overflow-wrap: anywhere;
 }
 .release-summary time { color: var(--text); font-variant-numeric: tabular-nums; }
-.release-age { color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .release-source .provenance-provider {
   display: inline-grid;
   width: 22px;
@@ -5365,8 +5265,6 @@ fieldset.settings-block { min-width: 0; }
 .autoscale-load-fill { display: block; width: var(--session-position); height: 100%; border-radius: inherit; background: var(--cyan-bright); }
 .autoscale-load-labels { color: var(--text-soft); font-size: var(--fs-label); font-variant-numeric: tabular-nums; }
 .autoscale-load-labels[hidden] { display: none; }
-.cpu-replica-detail { margin: 0; }
-.cpu-replica-detail[hidden] { display: none; }
 .cpu-heat { margin: 0; }
 .cpu-heat-label { display: flex; justify-content: space-between; gap: 0.5rem; color: var(--text); font-size: var(--fs-body); font-weight: 650; }
 .cpu-heat-unit { color: var(--text-muted); font-size: var(--fs-label); font-weight: 500; }
@@ -5758,7 +5656,7 @@ fieldset.settings-block { min-width: 0; }
 .kebab-menu > button[aria-expanded="true"] {
   border-color: var(--cyan-bright);
   color: var(--cyan-bright);
-  background: rgba(56,189,248,0.08);
+  background: rgba(var(--cyan-rgb), 0.08);
 }
 .kebab-list {
   position: absolute;
@@ -5788,7 +5686,7 @@ fieldset.settings-block { min-width: 0; }
 .kebab-list button:focus-visible {
   outline: 2px solid var(--cyan-bright);
   outline-offset: -2px;
-  background: rgba(56, 189, 248, 0.1);
+  background: rgba(var(--cyan-rgb), 0.1);
   color: var(--cyan-bright);
 }
 
@@ -6175,7 +6073,7 @@ fieldset.settings-block { min-width: 0; }
 .fleet-health-headline { color: var(--text-soft); font-variant-numeric: tabular-nums; }
 .fleet-health-chip { color: var(--red-text); font-size: var(--fs-mono); padding: 2px 8px; border: 1px solid var(--line); border-radius: var(--radius-pill); }
 .fleet-health-lost { border-color: var(--red-text); }
-.kebab-list button:hover { background: rgba(56, 189, 248, 0.1); color: var(--cyan-bright); }
+.kebab-list button:hover { background: rgba(var(--cyan-rgb), 0.1); color: var(--cyan-bright); }
 
 @media (max-width: 1180px) {
   .overview-grid,
@@ -6318,7 +6216,7 @@ fieldset.settings-block { min-width: 0; }
 .settings-tab-panel .logs-field input[type="search"]:focus {
   outline: none;
   border-color: var(--cyan-bright);
-  box-shadow: 0 0 0 3px rgba(56,189,248,0.15);
+  box-shadow: 0 0 0 3px rgba(var(--cyan-rgb), 0.15);
 }
 .logs-pane-header {
   display: flex;
@@ -6640,7 +6538,7 @@ fieldset.settings-block { min-width: 0; }
 }
 .deployment-current-badge {
   color: var(--cyan-bright);
-  border-color: rgba(56,189,248,0.5);
+  border-color: rgba(var(--cyan-rgb), 0.5);
 }
 .deployment-failed-badge {
   color: var(--red-text);
@@ -6702,7 +6600,7 @@ fieldset.settings-block { min-width: 0; }
 .rollback-btn:hover:not(:disabled) {
   border-color: var(--cyan-bright);
   color: var(--cyan-bright);
-  background: rgba(56,189,248,0.08);
+  background: rgba(var(--cyan-rgb), 0.08);
 }
 .rollback-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
@@ -7279,7 +7177,6 @@ footer.brand-footer a { color:inherit; }
   color: var(--cyan); font: inherit; font-size: var(--fs-label); font-weight: 650; cursor: pointer;
 }
 .ov-res-toggle:hover { color: var(--cyan-bright); }
-.ov-res-clear { margin-top: 14px; color: var(--text-soft); font-size: var(--fs-mono); line-height: 1.45; }
 
 /* Top consumers: attribution, not alarm. The share bar is one neutral weight
    throughout, so a large app reads as large rather than as a problem. */
@@ -7475,8 +7372,7 @@ a.ov-activity-target:hover { color: var(--text); }
   .ov-hotspot-values,
   .ov-consumer-values,
   .ov-pressure-state,
-  .ov-res-toggle,
-  .ov-res-clear { font-size: var(--fs-body); }
+  .ov-res-toggle { font-size: var(--fs-body); }
 }
 
 @media (hover: none), (pointer: coarse), (max-width: 760px) {
@@ -7527,7 +7423,6 @@ a.ov-activity-target:hover { color: var(--text); }
 .lp-search:focus { outline: none; border-color: var(--cyan-bright); box-shadow: 0 0 0 3px var(--accent-dim); }
 
 .lp-section { font-size: var(--fs-body); font-weight: 650; color: var(--text-soft); letter-spacing: -0.01em; margin: 6px 0 12px; }
-.lp-section-icon { margin-right: 6px; }
 .lp-results > .lp-grid:not(:last-child) { margin-bottom: 22px; }
 
 .lp-group + .lp-group { margin-top: 22px; }
@@ -7646,7 +7541,7 @@ a.lp-tile:hover .lp-tile-go { color: var(--cyan-bright); transform: translateX(3
 }
 .emoji-picker-cell:hover,
 .emoji-picker-cell:focus-visible {
-  border-color: var(--cyan-bright); background: rgba(56,189,248,0.08);
+  border-color: var(--cyan-bright); background: rgba(var(--cyan-rgb), 0.08);
   outline: none;
 }
 
@@ -8255,12 +8150,12 @@ a.lp-tile:hover .lp-tile-go { color: var(--cyan-bright); transform: translateX(3
   box-shadow: none;
 }
 
-:root[data-theme="light"] :is(.toolbar button:not(.toolbar-btn-quiet), .btn-primary, .modal-actions button[type="submit"], .grant-row button, .login-box button[type="submit"], .emptystate-btn-primary, .env-btn-primary) {
+:root[data-theme="light"] :is(.toolbar button:not(.toolbar-btn-quiet), .btn-primary, .modal-actions button[type="submit"], .login-box button[type="submit"], .emptystate-btn-primary, .env-btn-primary) {
   background: var(--brand-primary);
   color: var(--surface);
   box-shadow: none;
 }
-:root[data-theme="light"] :is(.toolbar button:not(.toolbar-btn-quiet), .btn-primary, .modal-actions button[type="submit"], .grant-row button, .login-box button[type="submit"], .emptystate-btn-primary, .env-btn-primary):hover:not(:disabled) {
+:root[data-theme="light"] :is(.toolbar button:not(.toolbar-btn-quiet), .btn-primary, .modal-actions button[type="submit"], .login-box button[type="submit"], .emptystate-btn-primary, .env-btn-primary):hover:not(:disabled) {
   background: var(--primary-hover);
   color: var(--surface);
   filter: none;
@@ -8370,7 +8265,7 @@ a.lp-tile:hover .lp-tile-go { color: var(--cyan-bright); transform: translateX(3
   letter-spacing: -0.02em;
   overflow-wrap: anywhere;
 }
-.page-header :is(.page-description, .identity-page-intro, .workspace-intro > p) {
+.page-header :is(.page-description, .identity-page-intro) {
   max-width: 65ch;
   margin: 8px 0 0;
   color: var(--text-soft);

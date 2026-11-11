@@ -1,7 +1,7 @@
 /* Overview and viewer Apps content layouts. Shared navigation lives in
    style.css so its appearance stays consistent across every route. */
 #overview-view, #launchpad-view { position: relative; }
-.workspace-intro p, .lp-sub { margin-top: 8px; color: var(--text-soft); font-size: var(--fs-body); }
+.lp-sub { margin-top: 8px; color: var(--text-soft); font-size: var(--fs-body); }
 .ov-grid { max-width: none; gap: 20px; }
 .ov-scope { position: static; max-width: none; }
 .ov-scope-field { min-width: 0; }

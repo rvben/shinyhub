@@ -199,7 +199,7 @@ const kebabControls = new WeakMap();
 
 // formatStatus (status → display label) is imported from views/status-label.js
 // so the cards, detail pill, sidebar, and replica badges all speak with one
-// voice. Badges no longer use `text-transform: uppercase`, so casing matters.
+// voice. Badges render the label text as written (no `text-transform`), so casing matters.
 
 document.addEventListener('DOMContentLoaded', () => {
   enhancePageHeaders(document);
@@ -626,7 +626,12 @@ document.addEventListener('DOMContentLoaded', () => {
   // This is what a one-app change costs: no /api/apps, no grid rebuild, and no
   // change to what the metrics poller is watching. Returns the app model, or
   // null when the fleet does not hold that slug.
-  function syncCardFromModel(slug, live = null) {
+  //
+  // The attention rail and the results line summarise the whole fleet, so they
+  // are refreshed here by default. A caller applying many slugs in one pass
+  // (the metrics poll) passes { fleetSurfaces: false } and refreshes them once
+  // itself, which keeps a tick linear in the number of apps.
+  function syncCardFromModel(slug, live = null, { fleetSurfaces = true } = {}) {
     const app = state.apps && state.apps.find((item) => item.slug === slug);
     if (!app) return null;
     if (live) {
@@ -642,8 +647,10 @@ document.addEventListener('DOMContentLoaded', () => {
     if (card) syncCardPrimaryActions(card, app);
     const factsEl = grid.querySelector(`.app-card-facts[data-slug="${slug}"]`);
     if (factsEl) renderCardFacts(factsEl, app, live);
-    refreshAttentionRail();
-    updateAppsResults();
+    if (fleetSurfaces) {
+      refreshAttentionRail();
+      updateAppsResults();
+    }
     return app;
   }
 
@@ -6301,7 +6308,7 @@ document.addEventListener('DOMContentLoaded', () => {
       // from /metrics; m.deploying flags an executing deploy; m.replicas gives
       // the facts line its readiness count). The index stays scan-first:
       // release/readiness here, detailed CPU/RAM on the app overview.
-      syncCardFromModel(slug, m);
+      syncCardFromModel(slug, m, { fleetSurfaces: false });
       // Detail header (only when the detail view for this slug is visible).
       const detailView = document.getElementById('app-detail-view');
       if (!detailView.hidden && detailApp?.slug === slug && (location.pathname === `/apps/${slug}` || location.pathname.startsWith(`/apps/${slug}/`))) {
@@ -6338,11 +6345,16 @@ document.addEventListener('DOMContentLoaded', () => {
         }
       }
     },
-    // A failed background metrics poll used to fail silently — no onError was
-    // wired, so the CPU/RAM line just stopped updating with no visible signal.
-    // A 401 specifically means the session died while the dashboard was open
-    // in the background; log the user out instead of polling a dead session
-    // forever. metrics-controller.js reports a non-2xx as `Error('status N')`.
+    // Once per completed poll: the attention rail and results line summarise
+    // the whole fleet, so they are refreshed after every slug has been applied.
+    onBatch: () => {
+      refreshAttentionRail();
+      updateAppsResults();
+    },
+    // A failed metrics poll marks the detail capacity panel as stale. A 401
+    // means the session died while the dashboard was open in the background, so
+    // the user is logged out instead of polling a dead session forever.
+    // metrics-controller.js reports a non-2xx as `Error('status N')`.
     onError: (slug, err) => {
       if (detailApp?.slug === slug && (location.pathname === `/apps/${slug}` || location.pathname.startsWith(`/apps/${slug}/`))) {
         markDetailCapacityError(document);
@@ -6424,10 +6436,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  // A failed view mount used to leave the shell blank with no message (the
-  // v0.8.7 dashboard-blanking class). The router now catches mount throws and
-  // routes them here: hide every main view and reveal the generic error state
-  // so one view's failure never takes down the whole dashboard.
+  // The router routes view-mount failures here: hide every main view and reveal
+  // the generic error state so one view's failure never blanks the whole
+  // dashboard.
   const routeErrorView = document.getElementById('route-error-view');
   const routeErrorReload = document.getElementById('route-error-reload');
   if (routeErrorReload) {

@@ -388,10 +388,9 @@ export function mountAppDetail(ctx) {
     if (sessionIdentity !== ctx.state.sessionIdentity) return {};
     if (resp.status === 404) { ctx.navigate('/apps', { replace: true }); return {}; }
     if (resp.status === 401) { ctx.onUnauthorized(); return {}; }
-    // A silent `return {}` here used to leave the main panel totally blank with
-    // no error or retry (a 500/502 read as a successful, empty mount). Throw so
-    // the router's error boundary (showRouteError in app.js) catches it and
-    // reveals #route-error-view with a Reload button instead.
+    // A non-OK response throws rather than returning an empty mount, so the
+    // router's error boundary (showRouteError in app.js) reveals
+    // #route-error-view with a Reload button instead of a blank panel.
     if (!resp.ok) { throw new Error(`Failed to load app (HTTP ${resp.status}).`); }
     // GET /api/apps/:slug returns a wrapped envelope; normalizeAppEnvelope folds
     // the envelope-level fields (can_manage, runtime_mode, resource_enforcement,
