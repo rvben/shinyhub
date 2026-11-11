@@ -192,3 +192,66 @@ func TestRunMaintenanceFinalizesStaleUsageSessionsIndependentOfRetention(t *test
 		t.Fatal("expected crashed-1 to be finalized (ended_at set) despite retention being disabled")
 	}
 }
+
+// TestRunMaintenanceScheduleListFailureDoesNotSkipLaterPrunes proves the
+// retention knobs are independent: a schedule-run prune that cannot list its
+// schedules must not stop fleet run and development session retention from
+// running in the same pass.
+func TestRunMaintenanceScheduleListFailureDoesNotSkipLaterPrunes(t *testing.T) {
+	store := dbtest.New(t)
+	if err := store.CreateUser(db.CreateUserParams{Username: "owner4", PasswordHash: "hash", Role: "developer"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, _ := store.GetUserByUsername("owner4")
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "independent-demo", Name: "Independent Demo", OwnerID: owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := store.GetAppBySlug("independent-demo")
+
+	for _, id := range []string{"run-old", "run-new"} {
+		if _, _, err := store.CreateFleetRun(db.CreateFleetRunParams{
+			ID: id, FleetID: "acme", Kind: "fleet_apply",
+		}); err != nil {
+			t.Fatalf("create fleet run %s: %v", id, err)
+		}
+		if err := store.FinishFleetRun(id, "succeeded", 0, ""); err != nil {
+			t.Fatalf("finish fleet run %s: %v", id, err)
+		}
+	}
+	if err := store.UpsertDevelopmentSession(db.UpsertDevelopmentSessionParams{
+		ID: "sess-old", AppID: app.ID, TargetKind: db.DevelopmentTargetExisting,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EndDevelopmentSession(app.ID, "sess-old", time.Now().UTC().Add(-100*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Moving the table aside makes the schedule listing fail the way an
+	// unavailable or broken database would, without touching the other tables.
+	if _, err := store.DB().Exec(`ALTER TABLE app_schedules RENAME TO app_schedules_unavailable`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ListAllScheduleIDs(); err == nil {
+		t.Fatal("setup failed: the schedule listing still succeeds, so this test cannot observe the failure path")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // maintenance still runs its prompt first pass, then exits.
+	runMaintenance(ctx, store, nil, nil, config.MaintenanceConfig{
+		ScheduleRunRetentionCount:       1,
+		FleetRunRetentionCount:          1,
+		DevelopmentSessionRetentionDays: 30,
+		Interval:                        time.Hour,
+	}, config.UsageConfig{Enabled: false})
+
+	if _, err := store.GetFleetRun("run-old"); err != db.ErrNotFound {
+		t.Errorf("fleet run retention was skipped after the schedule listing failed: run-old err = %v", err)
+	}
+	if _, err := store.GetFleetRun("run-new"); err != nil {
+		t.Errorf("expected run-new to survive prune, got %v", err)
+	}
+	if _, err := store.GetDevelopmentSession(app.ID, "sess-old"); err != db.ErrNotFound {
+		t.Errorf("development session retention was skipped after the schedule listing failed: sess-old err = %v", err)
+	}
+}

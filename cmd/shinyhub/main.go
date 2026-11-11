@@ -659,10 +659,11 @@ func runMaintenance(ctx context.Context, store *db.Store, manager *process.Manag
 			} else if n > 0 {
 				slog.Info("pruned_schedule_activations", "removed", n, "keep_terminal_per_schedule", keepRuns)
 			}
+			// A failed listing leaves ids empty, so only this prune is skipped:
+			// each retention knob below is independent and still runs.
 			ids, err := store.ListAllScheduleIDs()
 			if err != nil {
 				slog.Warn("prune_schedule_runs_list_failed", "err", err)
-				return
 			}
 			var total int64
 			for _, id := range ids {
