@@ -7174,11 +7174,23 @@ document.addEventListener('DOMContentLoaded', () => {
     const container = document.getElementById('schedules-list');
     const addBtn = document.getElementById('schedules-add-btn');
     if (!container) return;
-    container.querySelectorAll('.schedule-actions-menu').forEach(menu => kebabControls.get(menu)?.close());
     if (addBtn) addBtn.hidden = !surface.options.canManage;
+    // A poll that changes nothing must leave the rendered nodes alone: an open
+    // actions menu lives in them and would otherwise close under the user.
+    // The root check re-renders when anything else has replaced the list.
+    const unchanged = markup => surface.renderedListMarkup === markup
+      && surface.renderedListRoot != null && container.firstElementChild === surface.renderedListRoot;
+    const commit = markup => {
+      container.querySelectorAll('.schedule-actions-menu').forEach(menu => kebabControls.get(menu)?.close());
+      container.innerHTML = markup;
+      surface.renderedListMarkup = markup;
+      surface.renderedListRoot = container.firstElementChild;
+    };
     if (schedules.length === 0) {
 			const retained = deletedActivationHistoryMarkup(surface, schedules);
-      container.innerHTML = `<div class="schedules-empty"><h3>No scheduled jobs yet</h3><p>Schedules run data preparation and maintenance commands independently of the app process.</p>${surface.options.canManage ? '<button type="button" class="btn-primary" data-schedule-empty-add>Add first schedule</button>' : ''}</div>${retained}`;
+      const emptyMarkup = `<div class="schedules-empty"><h3>No scheduled jobs yet</h3><p>Schedules run data preparation and maintenance commands independently of the app process.</p>${surface.options.canManage ? '<button type="button" class="btn-primary" data-schedule-empty-add>Add first schedule</button>' : ''}</div>${retained}`;
+      if (unchanged(emptyMarkup)) return;
+      commit(emptyMarkup);
       container.querySelector('[data-schedule-empty-add]')?.addEventListener('click', () => openScheduleForm(surface.slug, null));
       return;
     }
@@ -7199,7 +7211,7 @@ document.addEventListener('DOMContentLoaded', () => {
           </button>
           <ul class="kebab-list" role="menu" hidden>
             ${s.retired ? '' : `<li role="none"><button type="button" role="menuitem" data-action="run" data-id="${s.id}" data-name="${escapeHtml(s.name)}" data-schedule-focus="schedule-${s.id}-run">Run now</button></li>`}
-            ${s.retired ? '' : `<li role="none"><button type="button" role="menuitem" data-action="edit" data-schedule='${escapeHtml(JSON.stringify(s))}' data-schedule-focus="schedule-${s.id}-edit">Edit schedule</button></li>`}
+            ${s.retired ? '' : `<li role="none"><button type="button" role="menuitem" data-action="edit" data-id="${s.id}" data-schedule-focus="schedule-${s.id}-edit">Edit schedule</button></li>`}
             <li role="none" class="schedule-menu-danger"><button type="button" role="menuitem" data-action="delete" data-id="${s.id}" data-name="${escapeHtml(s.name)}" data-schedule-focus="schedule-${s.id}-delete">Delete schedule</button></li>
           </ul>
         </div>` : '';
@@ -7227,10 +7239,12 @@ document.addEventListener('DOMContentLoaded', () => {
         <td class="table-actions" data-label="Actions"><div class="schedule-row-actions">${actions}</div></td>
       </tr>`;
     }).join('');
-    container.innerHTML = `<table>
+    const listMarkup = `<table>
       <thead><tr><th scope="col">Schedule</th><th scope="col">Job status</th><th scope="col">Next run</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
       <tbody>${rows}</tbody>
     </table>${deletedActivationHistoryMarkup(surface, schedules)}`;
+    if (unchanged(listMarkup)) return;
+    commit(listMarkup);
 
     container.querySelectorAll('.schedule-actions-menu').forEach(menu => {
       kebabControls.set(menu, wireKebab(menu.querySelector(':scope > button'), menu.querySelector('.kebab-list'), menu.closest('tr')));
@@ -7242,7 +7256,12 @@ document.addEventListener('DOMContentLoaded', () => {
         const id = parseInt(btn.dataset.id, 10);
         if (action === 'run') runScheduleNow(surface.slug, id, btn.dataset.name, btn);
         else if (action === 'delete') deleteSchedule(surface.slug, id, btn.dataset.name, btn);
-        else if (action === 'edit') openScheduleForm(surface.slug, JSON.parse(btn.dataset.schedule));
+        else if (action === 'edit') {
+          // Read at click time: rows outlive the poll that rendered them, so
+          // the form opens on the schedule as last reported, not as rendered.
+          const current = (surface.schedules || []).find(item => item.id === id);
+          if (current) openScheduleForm(surface.slug, current);
+        }
       });
     });
   }

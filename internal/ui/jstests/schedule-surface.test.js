@@ -36,7 +36,7 @@ const run = (overrides = {}) => ({
 // Exercise the real list, detail, history and lifecycle functions together.
 // Only unrelated mutation handlers, menu wiring and wall-clock timers are
 // replaced; no request, rendering or ownership logic is recreated here.
-function harness(t, api) {
+function harness(t, api, overrides = {}) {
   const dom = new JSDOM(html, { pretendToBeVisual: true });
   const doc = dom.window.document;
   doc.getElementById('app-detail-view').hidden = false;
@@ -58,6 +58,7 @@ function harness(t, api) {
     kebabControls: new WeakMap(), wireKebab: () => ({ close() {} }),
     runScheduleNow() {}, deleteSchedule() {}, openScheduleForm() {}, cancelScheduleActivation() {},
     retryScheduleConvergence() {}, openScheduleRunLogs() {}, cancelScheduleRun() {},
+    ...overrides,
   };
   const controls = new Function(...Object.keys(scope), `
     ${source.slice(escapeStart, escapeEnd)}
@@ -301,3 +302,42 @@ for (const action of ['pagination', 'retry']) {
     });
   }
 }
+
+test('an unchanged poll keeps the rendered rows so an open actions menu survives it', async t => {
+  // The success age advances on every real poll without changing anything the
+  // row shows, so the fixture advances it too.
+  let age = 600;
+  let current = [schedule({last_success_age_s: age})];
+  const edited = [];
+  const h = harness(t, async () => response(current.map(item => ({...item, last_success_age_s: age += 30}))),
+    {openScheduleForm: (slug, item) => edited.push(item)});
+  h.mount();
+  await settle();
+  const row = h.doc.querySelector('#schedules-list tbody tr');
+  const toggle = row.querySelector('.schedule-actions-menu > button');
+  const menu = row.querySelector('.kebab-list');
+  toggle.setAttribute('aria-expanded', 'true');
+  menu.hidden = false;
+
+  await h.poll();
+  assert.equal(h.doc.querySelector('#schedules-list tbody tr'), row, 'identical data must not rebuild the row');
+  assert.equal(toggle.isConnected && toggle.getAttribute('aria-expanded'), 'true');
+  assert.equal(menu.isConnected && menu.hidden, false);
+  row.querySelector('[data-action="edit"]').click();
+  assert.equal(edited.length, 1);
+  assert.equal(edited[0].last_success_age_s, age, 'a surviving row must edit the schedule as last reported');
+
+  current = [schedule({name: 'Renamed job'})];
+  await h.poll();
+  assert.notEqual(h.doc.querySelector('#schedules-list tbody tr'), row, 'changed data must rebuild the row');
+  assert.equal(h.doc.querySelector('.schedule-name-link').textContent, 'Renamed job');
+});
+
+test('a list replaced from outside is rendered again even when the data is unchanged', async t => {
+  const h = harness(t, async () => response([schedule()]));
+  h.mount();
+  await settle();
+  h.doc.getElementById('schedules-list').innerHTML = '<p>Replaced</p>';
+  await h.poll();
+  assert.equal(h.doc.querySelector('.schedule-name-link').textContent, 'Refresh data');
+});
