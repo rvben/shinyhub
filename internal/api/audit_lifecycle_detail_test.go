@@ -106,3 +106,52 @@ func TestStopApp_AuditDetailRecordsThePreviousStatus(t *testing.T) {
 		t.Errorf("detail.previous_status recorded the post-stop status instead of the pre-stop one (%q)", before.Status)
 	}
 }
+
+// TestAuditEvent_FleetRunStampedOnEveryMutation pins that an action taken
+// under a registered fleet run is attributed to that run even when its handler
+// builds the audit record by hand. Without it, GET /api/audit?run=<id> shows
+// only part of what the run did.
+func TestAuditEvent_FleetRunStampedOnEveryMutation(t *testing.T) {
+	srv, store, _ := newLimitEnforcementServer(t)
+	ownerID, token := seedAuditActor(t, store)
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "run-scoped", Name: "Run Scoped", OwnerID: ownerID}); err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	if err := store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: "run-scoped", Status: "running"}); err != nil {
+		t.Fatalf("mark app running: %v", err)
+	}
+	const runID = "fedcba9876543210fedcba9876543210"
+	registerFleetStateRunWithFleet(t, srv.Router(), token, runID, "audit-run-stamp")
+
+	stop := func(header string) {
+		t.Helper()
+		req := authedRequest(t, "POST", "/api/apps/run-scoped/stop", nil, token)
+		if header != "" {
+			req.Header.Set("X-Shinyhub-Run-Id", header)
+		}
+		rec := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("stop app: expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+	}
+	latestStopRun := func() string {
+		t.Helper()
+		events, err := store.ListAuditEvents("stop", 1, 0)
+		if err != nil || len(events) != 1 {
+			t.Fatalf("load stop audit event: n=%d err=%v", len(events), err)
+		}
+		return events[0].RunID
+	}
+
+	stop(runID)
+	if got := latestStopRun(); got != runID {
+		t.Errorf("stop under a registered run recorded run_id %q, want %q", got, runID)
+	}
+
+	// An unregistered id is treated as absent, never recorded as attribution.
+	stop("00000000000000000000000000000000")
+	if got := latestStopRun(); got != "" {
+		t.Errorf("stop with an unregistered run header recorded run_id %q, want none", got)
+	}
+}

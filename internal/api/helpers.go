@@ -171,6 +171,12 @@ func requestAuditCredential(r *http.Request, p *db.AuditEventParams) {
 
 func (s *Server) logAuditEvent(r *http.Request, p db.AuditEventParams) {
 	requestAuditCredential(r, &p)
+	// Handlers that build their params by hand carry no run attribution, so it
+	// is resolved here: every action taken under a registered fleet run is then
+	// listed by that run, whichever handler recorded it.
+	if p.RunID == "" {
+		p.RunID = s.knownFleetRunID(r)
+	}
 	s.store.LogAuditEvent(p)
 }
 
