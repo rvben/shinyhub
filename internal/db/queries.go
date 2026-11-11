@@ -3875,7 +3875,7 @@ func (s *Store) UserCanAccessApp(slug string, userID int64) (bool, error) {
 			SELECT 1 FROM app_group_access aga
 			    JOIN user_groups ug ON ug.group_name = aga.group_name
 			    WHERE aga.app_slug = ? AND ug.user_id = ?
-		)`, slug, userID, slug, userID, slug, userID).Scan(&count)
+		) AS grants`, slug, userID, slug, userID, slug, userID).Scan(&count)
 	if err != nil {
 		return false, err
 	}
