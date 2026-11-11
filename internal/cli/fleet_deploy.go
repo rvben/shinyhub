@@ -87,11 +87,39 @@ func deployAppBundleFromSpec(cfg *cliConfig, slug string, spec bundleBuildSpec, 
 }
 
 func deployAppBundleFromSpecWithDowntime(cfg *cliConfig, slug string, spec bundleBuildSpec, visibility, project string, out io.Writer, runID string, timeout time.Duration, allowDowntime bool, preconditions ...*string) (promoted string, committed bool, deployRuns []deployRunRef, kind deployfail.Kind, err error) {
+	return deployAppBundleCached(cfg, slug, spec, &builtBundle{}, visibility, project, out, runID, timeout, allowDowntime, preconditions...)
+}
+
+// builtBundle memoizes the zipped upload for one app so that retries of the
+// same deploy send the bytes the first attempt built (and the digest
+// preconditions describe) instead of walking, deflating and hashing the source
+// tree again on every attempt. A failed build is not memoized.
+type builtBundle struct {
+	data    []byte
+	summary string
+	ready   bool
+}
+
+func (b *builtBundle) build(spec bundleBuildSpec) ([]byte, string, error) {
+	if b.ready {
+		return b.data, b.summary, nil
+	}
+	buf, summary, err := zipDirFromSpec(spec)
+	if err != nil {
+		return nil, "", err
+	}
+	b.data, b.summary, b.ready = buf.Bytes(), summary, true
+	return b.data, b.summary, nil
+}
+
+// deployAppBundleCached is deployAppBundleFromSpecWithDowntime with the bundle
+// build memoized in bundle, which the caller shares across attempts.
+func deployAppBundleCached(cfg *cliConfig, slug string, spec bundleBuildSpec, bundle *builtBundle, visibility, project string, out io.Writer, runID string, timeout time.Duration, allowDowntime bool, preconditions ...*string) (promoted string, committed bool, deployRuns []deployRunRef, kind deployfail.Kind, err error) {
 	if err := ensureAppCoreWithAvailability(cfg, slug, visibility, project, spec.Availability, out, false, runID); err != nil {
 		return "", false, nil, ensureFailureKind(err), err
 	}
 	updateFleetProgress(out, "Building bundle", "", time.Time{}, false)
-	buf, summary, err := zipDirFromSpec(spec)
+	body, summary, err := bundle.build(spec)
 	if err != nil {
 		return "", false, nil, deployfail.ZipError, fmt.Errorf("bundle %s: %w", slug, err)
 	}
@@ -100,7 +128,7 @@ func deployAppBundleFromSpecWithDowntime(cfg *cliConfig, slug string, spec bundl
 	}
 
 	updateFleetProgress(out, "Deploying bundle", summary, time.Time{}, false)
-	req, err := newBundleUploadRequest(context.Background(), cfg.Host+"/api/apps/"+slug+"/deploy", buf.Bytes())
+	req, err := newBundleUploadRequest(context.Background(), cfg.Host+"/api/apps/"+slug+"/deploy", body)
 	if err != nil {
 		// A malformed URL/method, not a packaging failure.
 		return "", false, nil, deployfail.Unknown, err

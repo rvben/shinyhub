@@ -84,6 +84,22 @@ func TestDigestBundleSpec_IncludesSharedSnapshot(t *testing.T) {
 	}
 }
 
+// digestLocalDir returns the content digest of a source directory as the
+// upload path computes it: previewBundleSpec builds the same zip `deploy`
+// sends and runs bundle.DigestZipReader, the function the server applies to
+// the received bytes.
+func digestLocalDir(dir string) (string, error) {
+	return digestBundleSpec(bundleBuildSpec{Dir: dir})
+}
+
+func digestBundleSpec(spec bundleBuildSpec) (string, error) {
+	preview, err := previewBundleSpec(spec)
+	if err != nil {
+		return "", err
+	}
+	return preview.Digest, nil
+}
+
 func mustWrite(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

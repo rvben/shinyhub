@@ -180,11 +180,14 @@ func deployWithRetry(cfg *cliConfig, slug string, spec bundleBuildSpec, visibili
 		ifRevision = &opt.recoveryRevision
 	}
 	var capacityDeadline time.Time
+	// One build serves every attempt: pre-commit retries (capacity waits,
+	// transport errors) re-send the same bytes rather than re-zipping the tree.
+	var built builtBundle
 	for attempts = 1; attempts <= total; attempts++ {
 		var c bool
 		var ff []deployRunRef
 		var kind deployfail.Kind
-		promoted, c, ff, kind, err = deployAppBundleFromSpecWithDowntime(cfg, slug, spec, visibility, project, out, opt.runID, opt.healthTimeout, opt.allowDowntime, ifDigest, ifManagedBy, ifRevision)
+		promoted, c, ff, kind, err = deployAppBundleCached(cfg, slug, spec, &built, visibility, project, out, opt.runID, opt.healthTimeout, opt.allowDowntime, ifDigest, ifManagedBy, ifRevision)
 		committed = committed || c
 		// Keep the deploy-triggered run refs from whichever attempt actually fired them.
 		// A later retry of an already-created schedule returns none (the gate is

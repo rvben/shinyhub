@@ -102,3 +102,48 @@ func TestUnpreservedCapacityIsMutatingFailure(t *testing.T) {
 		t.Fatalf("stream treated mutating error as capacity refusal: %s %v", kind, err)
 	}
 }
+
+// A capacity retry re-sends the bundle the first attempt built. The source
+// tree is edited while the server refuses the first upload; the second upload
+// must still carry the original bytes, which are the ones the digest
+// preconditions describe.
+func TestDeployWithRetryUploadsOneBuildAcrossCapacityRetries(t *testing.T) {
+	dir := t.TempDir()
+	appFile := filepath.Join(dir, "app.py")
+	mustWrite(t, appFile, "print('original')\n")
+	var uploads [][]byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/apps/demo/deploy":
+			f, _, err := r.FormFile("bundle")
+			if err != nil {
+				t.Errorf("bundle part: %v", err)
+				return
+			}
+			body, _ := io.ReadAll(f)
+			uploads = append(uploads, body)
+			if len(uploads) == 1 {
+				mustWrite(t, appFile, "print('edited during the capacity wait, and longer')\n")
+				w.Header().Set("X-ShinyHub-Conflict", "generation-handoff-deferred")
+				w.WriteHeader(409)
+				json.NewEncoder(w).Encode(map[string]any{"update_state": "blocked_capacity", "failure_kind": "capacity", "error": "working version preserved", "capacity_retryable": true, "retry_after_seconds": 1})
+				return
+			}
+			io.WriteString(w, `{"status":"ok"}`)
+		case "/api/apps/demo":
+			io.WriteString(w, `{"app":{"slug":"demo","status":"running"}}`)
+		case "/api/apps":
+			io.WriteString(w, `[{"slug":"demo","content_digest":"sha256:new"}]`)
+		default:
+			io.WriteString(w, `{}`)
+		}
+	}))
+	defer srv.Close()
+	_, attempts, _, _, _, err := deployWithRetry(&cliConfig{Host: srv.URL, Token: "test"}, "demo", bundleBuildSpec{Dir: dir}, "private", "", convergeOpts{context: context.Background(), preconditions: true, capacityWait: 5 * time.Second}, io.Discard, "sha256:old", "fleet:test")
+	if err != nil || attempts != 2 || len(uploads) != 2 {
+		t.Fatalf("attempts=%d uploads=%d err=%v", attempts, len(uploads), err)
+	}
+	if string(uploads[0]) != string(uploads[1]) {
+		t.Fatal("the retry uploaded a different bundle than the first attempt built")
+	}
+}
