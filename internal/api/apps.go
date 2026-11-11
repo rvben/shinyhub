@@ -6179,10 +6179,16 @@ func (s *Server) metricAppsForUser(u *auth.ContextUser, rawSlugs string) ([]*db.
 			return nil, err
 		}
 		for _, app := range fetched {
-			if ok, verr := s.canViewApp(u, app); verr == nil && ok {
+			// Unknown or not-viewable slugs are silently skipped. A check that
+			// could not be answered is neither, so it fails the request rather
+			// than reporting the app as absent.
+			ok, verr := s.canViewApp(u, app)
+			if verr != nil {
+				return nil, verr
+			}
+			if ok {
 				apps = append(apps, app)
 			}
-			// unknown or not-viewable slugs are silently skipped
 		}
 	} else {
 		// What "every app" means depends on the caller, exactly as it does for

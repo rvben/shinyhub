@@ -356,3 +356,53 @@ func TestBatchMetrics_RequiresAuth(t *testing.T) {
 		t.Errorf("status = %d, want 401 for an unauthenticated batch request", rec.Code)
 	}
 }
+
+// A failed access check is not the same fact as "not visible". Answering 200
+// with the app left out would tell the dashboard the app does not exist while
+// the server simply could not decide, so the batch must fail instead.
+func TestBatchMetrics_AccessCheckFailureIsNotReportedAsInvisible(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := testHashPassword("pass")
+	store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: hash, Role: "developer"})
+	owner, _ := store.GetUserByUsername("owner")
+	store.CreateUser(db.CreateUserParams{Username: "member", PasswordHash: hash, Role: "viewer"})
+	member, _ := store.GetUserByUsername("member")
+	store.CreateApp(db.CreateAppParams{Slug: "granted", Name: "Granted", OwnerID: owner.ID})
+	if err := store.GrantAppAccess("granted", member.ID); err != nil {
+		t.Fatal(err)
+	}
+	token, _ := auth.IssueJWT(member.ID, "member", "viewer", "test-secret")
+
+	get := func() *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rec, authedRequest(t, "GET", "/api/apps/metrics?slugs=granted", nil, token))
+		return rec
+	}
+
+	// Positive control: with a working membership lookup the member sees the app.
+	rec := get()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("control status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Metrics map[string]json.RawMessage `json:"metrics"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := body.Metrics["granted"]; !ok {
+		t.Fatal("setup failed: the member cannot see the granted app, so a later absence proves nothing")
+	}
+
+	if _, err := store.DB().Exec(`ALTER TABLE app_members RENAME TO app_members_unavailable`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UserCanAccessApp("granted", member.ID); err == nil {
+		t.Fatal("setup failed: the access check still succeeds, so this test cannot observe the failure path")
+	}
+
+	rec = get()
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 when the access check itself failed: %s", rec.Code, rec.Body.String())
+	}
+}
