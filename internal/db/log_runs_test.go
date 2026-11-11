@@ -147,9 +147,30 @@ func TestAppLogWriterAndReaderStreamSharedOutput(t *testing.T) {
 	reader := store.NewAppLogReader(runID)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	_, cursor, err := reader.SnapshotTail(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := make(chan logstream.Record, 4)
+	go reader.FollowFrom(ctx, cursor, records)
 	lines := make(chan string, 1)
-	go reader.Follow(ctx, lines)
-	time.Sleep(50 * time.Millisecond)
+	go func() {
+		for {
+			select {
+			case record := <-records:
+				if record.StreamState != "" {
+					continue
+				}
+				select {
+				case lines <- record.Line:
+				case <-ctx.Done():
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 	writer, err := store.NewAppLogWriter(runID, db.AppLogRetentionBytes)
 	if err != nil {
 		t.Fatal(err)

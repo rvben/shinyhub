@@ -362,7 +362,7 @@ func TestLogReader_Follow(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "app.log")
 
-	// Write initial content before Follow starts
+	// Write initial content before the follower starts
 	lf, err := OpenLogFile(path, 1<<20)
 	if err != nil {
 		t.Fatal(err)
@@ -373,20 +373,24 @@ func TestLogReader_Follow(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	ch := make(chan string, 10)
-	go lr.Follow(ctx, ch)
+	// The snapshot cursor sits after the existing content, so the follower
+	// delivers only what is written from here on.
+	_, cursor, err := lr.SnapshotTail(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch := make(chan logstream.Record, 10)
+	go lr.FollowFrom(ctx, cursor, ch)
 
-	// Write a new line after Follow has started
-	time.Sleep(200 * time.Millisecond)
 	lf.Write([]byte("new line\n"))
 
 	select {
-	case line := <-ch:
-		if line != "new line" {
-			t.Errorf("expected 'new line', got %q", line)
+	case record := <-ch:
+		if record.Line != "new line" {
+			t.Errorf("expected 'new line', got %q", record.Line)
 		}
 	case <-ctx.Done():
-		t.Error("timed out waiting for Follow to deliver line")
+		t.Error("timed out waiting for FollowFrom to deliver line")
 	}
 	lf.Close()
 }

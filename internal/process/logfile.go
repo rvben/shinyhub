@@ -538,29 +538,6 @@ const followReadHeadroom = 64 * 1024
 // stays generous rather than tied to DefaultLogMaxSize.
 const maxLogFollowRead = 64 << 20
 
-// Follow sends new lines written to the log file to lines until ctx is
-// cancelled. It polls the file at 100 ms intervals.
-func (r *LogReader) Follow(ctx context.Context, lines chan<- string) {
-	var offset int64
-	if info, err := os.Stat(r.path); err == nil {
-		offset = info.Size()
-	}
-	records := make(chan logstream.Record, cap(lines))
-	go r.FollowFrom(ctx, offset, records)
-	for {
-		select {
-		case record := <-records:
-			select {
-			case lines <- record.Line:
-			case <-ctx.Done():
-				return
-			}
-		case <-ctx.Done():
-			return
-		}
-	}
-}
-
 // FollowFrom sends records written strictly after offset. If rotation replaced
 // the primary with a shorter file, the cursor resets to the new file's start so
 // the follower continues instead of seeking forever beyond EOF.

@@ -30,12 +30,28 @@ const defaultLogTail = 200
 // the entire (up to 5 MB rotated) log in memory per request.
 const maxLogTail = 10000
 
+// queryBool reads a boolean query parameter that accepts true/1 and false/0.
+// An absent or empty parameter yields def. Any other value writes a 400 naming
+// the parameter and reports ok=false, so the caller only has to return.
+func queryBool(w http.ResponseWriter, q url.Values, name string, def bool) (value, ok bool) {
+	switch q.Get(name) {
+	case "":
+		return def, true
+	case "true", "1":
+		return true, true
+	case "false", "0":
+		return false, true
+	default:
+		writeError(w, http.StatusBadRequest, name+" must be true or false")
+		return false, false
+	}
+}
+
 type appLogReader interface {
 	ReadAll() ([]byte, error)
 	SnapshotTail(int) ([]logstream.Record, int64, error)
 	FollowFrom(context.Context, int64, chan<- logstream.Record)
 	Tail(int) ([]string, error)
-	Follow(context.Context, chan<- string)
 }
 
 type logSourceResponse struct {
@@ -358,42 +374,17 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		tail = n
 	}
 
-	follow := true
-	if raw := q.Get("follow"); raw != "" {
-		switch raw {
-		case "true", "1":
-			follow = true
-		case "false", "0":
-			follow = false
-		default:
-			writeError(w, http.StatusBadRequest, "follow must be true or false")
-			return
-		}
+	follow, ok := queryBool(w, q, "follow", true)
+	if !ok {
+		return
 	}
-
-	download := false
-	if raw := q.Get("download"); raw != "" {
-		switch raw {
-		case "true", "1":
-			download = true
-		case "false", "0":
-			download = false
-		default:
-			writeError(w, http.StatusBadRequest, "download must be true or false")
-			return
-		}
+	download, ok := queryBool(w, q, "download", false)
+	if !ok {
+		return
 	}
-
-	providerRead := false
-	if raw := q.Get("provider"); raw != "" {
-		switch raw {
-		case "true", "1":
-			providerRead = true
-		case "false", "0":
-		default:
-			writeError(w, http.StatusBadRequest, "provider must be true or false")
-			return
-		}
+	providerRead, ok := queryBool(w, q, "provider", false)
+	if !ok {
+		return
 	}
 	if providerRead {
 		runID := q.Get("run")

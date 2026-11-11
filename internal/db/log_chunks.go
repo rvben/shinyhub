@@ -522,30 +522,6 @@ func (r *AppLogReader) Tail(n int) ([]string, error) {
 	return lines, nil
 }
 
-func (r *AppLogReader) Follow(ctx context.Context, lines chan<- string) {
-	offset, _, err := r.store.AppLogEndOffset(r.runID)
-	if err != nil {
-		offset = 0
-	}
-	records := make(chan logstream.Record, cap(lines))
-	go r.FollowFrom(ctx, offset, records)
-	for {
-		select {
-		case record := <-records:
-			if record.StreamState != "" {
-				continue
-			}
-			select {
-			case lines <- record.Line:
-			case <-ctx.Done():
-				return
-			}
-		case <-ctx.Done():
-			return
-		}
-	}
-}
-
 // FollowFrom streams records after an absolute shared-log cursor.
 func (r *AppLogReader) FollowFrom(ctx context.Context, offset int64, records chan<- logstream.Record) {
 	// Catch up once before joining the shared follower. This preserves the
