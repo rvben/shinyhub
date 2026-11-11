@@ -173,6 +173,20 @@ test-worker: worker-deps
 	@node -e 'const [maj,min]=process.versions.node.split(".").map(Number); if (maj<22 || (maj===22 && min<18)) { console.error(`Node $${process.versions.node} cannot run TypeScript tests directly (22.18+ required)`); process.exit(1); }'
 	node --test deploy/cloudflare-demo/src/*.test.ts
 
+# check-worker type-checks the demo Worker with its own tsc.
+.PHONY: check-worker test-worker-runtime test-worker-python
+check-worker: worker-deps
+	cd deploy/cloudflare-demo && npm run check
+
+# test-worker-runtime exercises WebSocket forwarding in the Workers runtime.
+test-worker-runtime: worker-deps
+	cd deploy/cloudflare-demo && WRANGLER_SEND_METRICS=false npm run test:runtime
+
+# test-worker-python runs the Worker's application startup readiness and error
+# alert tests.
+test-worker-python:
+	cd deploy/cloudflare-demo && python3 -m unittest test_startup_readiness.py test_worker_errors_alert.py
+
 # test-identity runs the client-helper suites plus the cross-language
 # conformance check. Kept out of the default `test` target so the core Go/JS
 # gate does not require uv or R; wire it into CI as its own step.
@@ -387,6 +401,18 @@ test-acceptance:
 	cd loadtest/render/driver && npx --no-install playwright install chromium
 	PYTHON_VERSION='$(PYTHON_VERSION)' npm run test:acceptance
 
+.PHONY: test-recovery test-live-upgrade
+
+# Backup, restore and upgrade acceptance. The recovery source is built from the
+# v0.22.0 tag, so the tag is fetched first.
+test-recovery:
+	git fetch --no-tags origin refs/tags/v0.22.0:refs/tags/v0.22.0
+	npm run test:recovery
+
+# Live upgrade with real Shiny sessions.
+test-live-upgrade:
+	npm run test:live-upgrade
+
 .PHONY: test-browser-session-relays-e2e test-browser-reload-producers-e2e test-browser-update-capacity-e2e
 
 # Real Shiny reload relay, admission, revocation and bookmark restore contract.
@@ -463,6 +489,64 @@ test-release-asset-e2e:
 wait-pypi:
 	@test -n "$(VERSION)" || { echo "usage: make wait-pypi VERSION=<X.Y.Z>" >&2; exit 2; }
 	./scripts/wait-pypi.sh "$(VERSION)"
+
+# Release packaging and verification steps. The release workflow only calls
+# these targets; each can be run locally against a built tree or a published
+# tag. build-wheel expects the platform binary under
+# packaging/python/src/shinyhub/_binary/ and SHINYHUB_WHEEL_PLATFORM in the
+# environment; VERSION defaults to package.json's.
+.PHONY: build-wheel build-sdist smoke-wheel verify-pypi-install build-identity verify-identity-wheel verify-release-notes resolve-image-digest
+
+build-wheel:
+	python -m pip install --upgrade pip build hatchling
+	SHINYHUB_WHEEL_VERSION="$(VERSION)" python -m build --wheel packaging/python/
+
+build-sdist:
+	python -m pip install --upgrade pip build hatchling
+	SHINYHUB_WHEEL_VERSION="$(VERSION)" python -m build --sdist packaging/python/
+
+# smoke-wheel installs the wheel built by build-wheel into a fresh venv and
+# requires its binary to report VERSION.
+smoke-wheel:
+	./scripts/smoke-wheel.sh "$(VERSION)"
+
+# verify-pypi-install installs exactly shinyhub==VERSION from PyPI into a fresh
+# venv and requires its binary to report VERSION.
+verify-pypi-install:
+	./scripts/verify-pypi-install.sh "$(VERSION)"
+
+build-identity:
+	python -m pip install --upgrade pip build
+	python -m build packaging/python-identity/
+
+verify-identity-wheel:
+	./scripts/verify-identity-wheel.sh
+
+# verify-release-notes compares the body GitHub published for TAG with
+# tmp/release-notes.md (see release-notes) and rewrites it on drift, appending
+# drift=true to GITHUB_OUTPUT (stdout when unset). Mutates the release: needs gh
+# authenticated with write access.
+verify-release-notes:
+	@test -n "$(TAG)" || { echo "usage: make verify-release-notes TAG=<vX.Y.Z>" >&2; exit 2; }
+	GITHUB_REF_NAME="$(TAG)" GITHUB_OUTPUT="$${GITHUB_OUTPUT:-/dev/stdout}" ./scripts/verify-release-notes.sh
+
+# resolve-image-digest appends digest=<manifest digest> of the published image
+# for TAG to GITHUB_OUTPUT (stdout when unset).
+resolve-image-digest:
+	@test -n "$(TAG)" || { echo "usage: make resolve-image-digest TAG=<vX.Y.Z>" >&2; exit 2; }
+	GITHUB_REF_NAME="$(TAG)" GITHUB_OUTPUT="$${GITHUB_OUTPUT:-/dev/stdout}" ./scripts/resolve-image-digest.sh
+
+# Documentation build checks, shared by the docs workflow.
+.PHONY: docs-check-tracked docs-verify-payload
+
+# docs-check-tracked fails when internal planning or report files are tracked.
+docs-check-tracked:
+	./scripts/docs-check-tracked.sh
+
+# docs-verify-payload checks the built site/ directory (zensical build) holds
+# the expected public files and no internal material.
+docs-verify-payload:
+	./scripts/docs-verify-payload.sh
 
 # test-wait-pypi-e2e runs wait-pypi against local fixture indexes: complete,
 # missing a wheel, not JSON, and absent. Needs python3 and curl, no network.

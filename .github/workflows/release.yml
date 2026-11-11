@@ -250,34 +250,7 @@ jobs:
         id: verify-notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          # GitHub round-trips neither line endings nor trailing blank lines
-          # reliably, so normalize both before comparing.
-          norm() {
-            sed 's/\r$//' "$1" | awk 'NF {last = NR} {line[NR] = $0} END {for (i = 1; i <= last; i++) print line[i]}'
-          }
-          published() {
-            gh release view "$GITHUB_REF_NAME" --json body -q .body > tmp/published-body.md
-            norm tmp/published-body.md > tmp/notes-published.md
-          }
-          norm tmp/release-notes.md > tmp/notes-sent.md
-          published
-          if cmp -s tmp/notes-sent.md tmp/notes-published.md; then
-            echo "Release body matches CHANGELOG.md ($(wc -l < tmp/notes-sent.md | tr -d ' ') lines)"
-            exit 0
-          fi
-          echo "::warning::Published release body is not the CHANGELOG.md section handed to GoReleaser; rewriting it"
-          diff -u tmp/notes-sent.md tmp/notes-published.md || true
-          echo "drift=true" >> "$GITHUB_OUTPUT"
-          gh release edit "$GITHUB_REF_NAME" --notes-file tmp/release-notes.md
-          published
-          if ! cmp -s tmp/notes-sent.md tmp/notes-published.md; then
-            echo "::error::Rewriting the release body from CHANGELOG.md did not take"
-            diff -u tmp/notes-sent.md tmp/notes-published.md || true
-            exit 1
-          fi
-          echo "Release body corrected from CHANGELOG.md"
+        run: make verify-release-notes TAG="${GITHUB_REF_NAME}"
 
       # SLSA build provenance. These run after publish: the artifacts are already
       # released, so an attestation hiccup is re-runnable and never blocks the
@@ -285,10 +258,7 @@ jobs:
       # bare version.
       - name: Resolve published image digest
         id: image
-        run: |
-          ref="ghcr.io/rvben/shinyhub:${GITHUB_REF_NAME#v}"
-          digest=$(docker buildx imagetools inspect "$ref" --format '{{.Manifest.Digest}}')
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+        run: make resolve-image-digest TAG="${GITHUB_REF_NAME}"
 
       - name: Attest release binaries (SLSA provenance)
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -356,23 +326,11 @@ jobs:
       - name: Build wheel
         env:
           SHINYHUB_WHEEL_PLATFORM: ${{ matrix.wheel-platform }}
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip build hatchling
-          export SHINYHUB_WHEEL_VERSION="${GITHUB_REF_NAME#v}"
-          python -m build --wheel packaging/python/
+        run: make build-wheel VERSION="${GITHUB_REF_NAME#v}"
 
       - name: Smoke-test wheel on native runner
         if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
-        run: |
-          set -euo pipefail
-          python -m venv /tmp/venv
-          /tmp/venv/bin/pip install packaging/python/dist/*.whl
-          OUT="$(/tmp/venv/bin/shinyhub --version)"
-          echo "Binary reported: $OUT"
-          EXPECTED="${GITHUB_REF_NAME#v}"
-          echo "$OUT" | grep -q "$EXPECTED" \
-            || { echo "shinyhub --version output '$OUT' does not contain '$EXPECTED'"; exit 1; }
+        run: make smoke-wheel VERSION="${GITHUB_REF_NAME#v}"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -395,11 +353,7 @@ jobs:
           python-version: "3.12"
 
       - name: Build sdist
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip build hatchling
-          export SHINYHUB_WHEEL_VERSION="${GITHUB_REF_NAME#v}"
-          python -m build --sdist packaging/python/
+        run: make build-sdist VERSION="${GITHUB_REF_NAME#v}"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -446,15 +400,7 @@ jobs:
         run: make wait-pypi VERSION="${GITHUB_REF_NAME#v}"
 
       - name: Install this version from PyPI
-        run: |
-          set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
-          python -m venv /tmp/pypi-venv
-          /tmp/pypi-venv/bin/pip install --no-cache-dir --index-url https://pypi.org/simple/ "shinyhub==${VERSION}"
-          OUT="$(/tmp/pypi-venv/bin/shinyhub --version)"
-          echo "Installed binary reported: ${OUT}"
-          echo "${OUT}" | grep -qF "${VERSION}" \
-            || { echo "::error::shinyhub --version printed '${OUT}', not ${VERSION}"; exit 1; }
+        run: make verify-pypi-install VERSION="${GITHUB_REF_NAME#v}"
 
   # Publish the app-facing SDK, shinyhub-identity: the pure-Python helper a Shiny/
   # Streamlit/Dash app imports to read its forwarded identity (docs/identity.md).
@@ -479,19 +425,10 @@ jobs:
           python-version: "3.12"
 
       - name: Build shinyhub-identity
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip build
-          python -m build packaging/python-identity/
+        run: make build-identity
 
       - name: Verify the built wheel installs and passes its tests
-        run: |
-          set -euo pipefail
-          python -m venv /tmp/id-venv
-          /tmp/id-venv/bin/pip install --upgrade pip pytest
-          /tmp/id-venv/bin/pip install packaging/python-identity/dist/*.whl
-          /tmp/id-venv/bin/python -c "from shinyhub_identity import current_user; print('import ok')"
-          /tmp/id-venv/bin/pytest packaging/python-identity/tests/ -q
+        run: make verify-identity-wheel
 
       - name: Publish to PyPI (skip if version already exists)
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3

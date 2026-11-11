@@ -160,23 +160,16 @@ jobs:
           cache-dependency-path: deploy/cloudflare-demo/package-lock.json
 
       - name: Type-check the demo Worker
-        working-directory: deploy/cloudflare-demo
-        run: |
-          npm ci
-          npm run check
+        run: make check-worker
 
       - name: Test (demo Worker)
         run: make test-worker
 
       - name: Test WebSocket forwarding in the Workers runtime
-        working-directory: deploy/cloudflare-demo
-        env:
-          WRANGLER_SEND_METRICS: "false"
-        run: npm run test:runtime
+        run: make test-worker-runtime
 
       - name: Test application startup readiness and error alerts
-        working-directory: deploy/cloudflare-demo
-        run: python3 -m unittest test_startup_readiness.py test_worker_errors_alert.py
+        run: make test-worker-python
 
   # The race suite is split in two jobs of about equal length: internal/api is
   # a third of the suite's race time on its own and every other package fits
@@ -287,11 +280,9 @@ jobs:
         run: npm run test:acceptance
       - name: Backup, restore, and upgrade acceptance
         if: ${{ !cancelled() }}
-        run: |
-          git fetch --no-tags origin refs/tags/v0.22.0:refs/tags/v0.22.0
-          npm run test:recovery
+        run: make test-recovery
       - name: Live upgrade with real Shiny sessions
-        run: npm run test:live-upgrade
+        run: make test-live-upgrade
       - name: Retain acceptance diagnostics
         if: always()
         uses: actions/upload-artifact@v6
