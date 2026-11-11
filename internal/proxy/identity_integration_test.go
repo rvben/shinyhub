@@ -17,12 +17,12 @@ import (
 )
 
 // chainStore satisfies the unexported access.store interface via structural typing.
-// GetAppBySlug returns a fixed app; UserCanAccessApp always grants access.
+// GetAppForAccess returns a fixed app; UserCanAccessApp always grants access.
 type chainStore struct {
 	app *db.App
 }
 
-func (s chainStore) GetAppBySlug(slug string) (*db.App, error) {
+func (s chainStore) GetAppForAccess(slug string) (*db.App, error) {
 	if s.app != nil && s.app.Slug == slug {
 		return s.app, nil
 	}

@@ -26,8 +26,43 @@ func ResolveServingWorkerIsolation(reader ServingWorkerIsolationReader, app *App
 			return "", err
 		}
 	}
+	return effectiveWorkerIsolation(isolation, app.WorkerIsolation, defaultIsolation)
+}
+
+// servingWorkerIsolationSQL reads the recorded isolation of an app's serving
+// deployment in one statement. The serving deployment is the active generation
+// when that deployment succeeded, otherwise the newest succeeded release that
+// is not a serving-only activation: the same selection GetServingDeployment
+// makes. The isolation value itself is never coalesced, so an empty recorded
+// value on the serving deployment stays distinguishable from no deployment.
+const servingWorkerIsolationSQL = `
+	SELECT d.worker_isolation FROM deployments d
+	WHERE d.id = COALESCE(
+		(SELECT x.id FROM apps a
+		   JOIN deployments x ON x.id = a.active_deployment_id AND x.app_id = a.id
+		  WHERE a.id = ? AND x.status = 'succeeded'),
+		(SELECT id FROM deployments
+		  WHERE app_id = ? AND status = 'succeeded' AND serving_activation_id IS NULL
+		  ORDER BY id DESC LIMIT 1))`
+
+// ServingWorkerIsolation resolves the same answer as
+// ResolveServingWorkerIsolation over this store, in a single query.
+func (s *Store) ServingWorkerIsolation(app *App, defaultIsolation string) (string, error) {
+	var recorded string
+	err := s.db.QueryRow(servingWorkerIsolationSQL, app.ID, app.ID).Scan(&recorded)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	return effectiveWorkerIsolation(recorded, app.WorkerIsolation, defaultIsolation)
+}
+
+// effectiveWorkerIsolation applies the fallback chain to a serving deployment's
+// recorded isolation: the app's desired setting, then the server default, then
+// multiplex. It rejects a value that is not a known isolation mode.
+func effectiveWorkerIsolation(recorded, desired, defaultIsolation string) (string, error) {
+	isolation := recorded
 	if isolation == "" {
-		isolation = app.WorkerIsolation
+		isolation = desired
 	}
 	if isolation == "" {
 		isolation = defaultIsolation
@@ -39,10 +74,6 @@ func ResolveServingWorkerIsolation(reader ServingWorkerIsolationReader, app *App
 		return "", fmt.Errorf("invalid serving worker isolation %q", isolation)
 	}
 	return isolation, nil
-}
-
-func (s *Store) ServingWorkerIsolation(app *App, defaultIsolation string) (string, error) {
-	return ResolveServingWorkerIsolation(s, app, defaultIsolation)
 }
 
 func validDeploymentWorkerIsolation(isolation string) bool {

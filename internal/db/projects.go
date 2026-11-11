@@ -94,6 +94,33 @@ func (s *Store) ListProjects(limit, offset int) ([]*ProjectListItem, error) {
 	return out, rows.Err()
 }
 
+// ProjectDisplay is the part of a project an app payload is decorated with.
+type ProjectDisplay struct {
+	Slug      string
+	Name      string
+	IconEmoji string
+}
+
+// ListProjectDisplay returns the display fields of every project. It reads
+// the projects table alone, so decorating an app list does not count the apps
+// of each project the way ListProjects does.
+func (s *Store) ListProjectDisplay() ([]ProjectDisplay, error) {
+	rows, err := s.db.Query(`SELECT slug, name, icon_emoji FROM projects ORDER BY slug`)
+	if err != nil {
+		return nil, fmt.Errorf("list project display: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+	var out []ProjectDisplay
+	for rows.Next() {
+		var p ProjectDisplay
+		if err := rows.Scan(&p.Slug, &p.Name, &p.IconEmoji); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
 // UpsertProject inserts a project if its slug is free and reports whether it
 // created one. It NEVER overwrites an existing row: POST /api/projects is
 // idempotent, and renaming goes through UpdateProject. created is derived from

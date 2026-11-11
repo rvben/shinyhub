@@ -13,7 +13,7 @@ import (
 )
 
 type neverDeployedStore interface {
-	GetAppBySlug(slug string) (*db.App, error)
+	GetAppForAccess(slug string) (*db.App, error)
 	GetMemberRole(slug string, userID int64) (string, error)
 	HasAnyDeployment(appID int64) (bool, error)
 }
@@ -54,7 +54,7 @@ func NeverDeployedMiddleware(st neverDeployedStore, jwtSecret string, revoked au
 			app, _ := r.Context().Value(authorizedAppKey{}).(*db.App)
 			if app == nil || app.Slug != slug {
 				var err error
-				app, err = st.GetAppBySlug(slug)
+				app, err = st.GetAppForAccess(slug)
 				if err != nil || app == nil {
 					next.ServeHTTP(w, r)
 					return

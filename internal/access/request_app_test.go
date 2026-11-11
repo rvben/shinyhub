@@ -14,9 +14,9 @@ type countedAppStore struct {
 	lookups int
 }
 
-func (s *countedAppStore) GetAppBySlug(slug string) (*db.App, error) {
+func (s *countedAppStore) GetAppForAccess(slug string) (*db.App, error) {
 	s.lookups++
-	return s.Store.GetAppBySlug(slug)
+	return s.Store.GetAppForAccess(slug)
 }
 
 func TestAccessChainSharesAppOnlyWithinAuthorizedRequest(t *testing.T) {

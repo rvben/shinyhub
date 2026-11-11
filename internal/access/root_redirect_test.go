@@ -96,7 +96,7 @@ func TestAccessAppRootRedirectRestoresScopedSupportCookie(t *testing.T) {
 	}
 }
 
-func (s rootRedirectStore) GetAppBySlug(slug string) (*db.App, error) {
+func (s rootRedirectStore) GetAppForAccess(slug string) (*db.App, error) {
 	if s.err != nil {
 		return nil, s.err
 	}

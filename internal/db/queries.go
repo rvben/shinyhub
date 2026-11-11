@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"math"
 	"slices"
 	"strings"
 	"time"
@@ -1332,6 +1333,17 @@ const deploymentSummarySQL = `
 const lastDeploymentStatusSQL = `(SELECT status FROM deployments WHERE app_id = apps.id AND serving_activation_id IS NULL
 		   ORDER BY created_at DESC, id DESC LIMIT 1)`
 
+// deploymentStatusOnlySQL fills the same six columns as deploymentSummarySQL
+// but computes only last_deployment_status; the other five are constants that
+// scanApp reads as their zero values. The watcher's per-tick lists use it
+// because the reconciler consults no other deployment-derived field, and the
+// release counters cost a scan of each app's deployment history.
+// release_number is 0 rather than NULL because scanApp reads it into an int.
+const deploymentStatusOnlySQL = `
+		NULL AS last_deployed_at, 0 AS release_number, NULL AS released_at,
+		NULL AS current_version, NULL AS content_digest,
+		` + lastDeploymentStatusSQL + ` AS last_deployment_status`
+
 // appColumns is the plain apps.* column list shared by every App SELECT, in the
 // exact order scanApp expects. It is kept as a single constant so the column
 // list and scanApp never drift across the queries below; each query appends
@@ -1393,6 +1405,19 @@ func (s *Store) GetAppBySlug(slug string) (*App, error) {
 		return nil, err
 	}
 	return scanApp(stmt.QueryRow(slug))
+}
+
+// GetAppForAccess returns the app's own columns for an access decision: who
+// owns it, who may reach it, and what to call it. It skips the deployment
+// summary GetAppBySlug computes, so LastDeployedAt, ReleaseNumber, ReleasedAt,
+// CurrentVersion, ContentDigest and LastDeploymentStatus are left zero.
+func (s *Store) GetAppForAccess(slug string) (*App, error) {
+	defer s.timed("GetAppForAccess")()
+	stmt, err := s.appAccessLookup.get(s, `SELECT `+appColumnsLean+` FROM apps WHERE slug = ?`)
+	if err != nil {
+		return nil, err
+	}
+	return scanAppLean(stmt.QueryRow(slug))
 }
 
 // AppRouting is the part of an app the proxy consults on every request: what
@@ -1624,9 +1649,13 @@ func (s *Store) CountAppsInSlugs(slugs []string) (int, error) {
 // ListWakingApps returns all apps whose status is 'waking'. Used by the
 // active owner's runOnce reconciler to drive apps whose wake was triggered by
 // a standby instance (which issues the BeginWake CAS but cannot deploy).
+//
+// Of the deployment-derived fields only LastDeploymentStatus is populated;
+// LastDeployedAt, ReleaseNumber, ReleasedAt, CurrentVersion and ContentDigest
+// are left at their zero values (see deploymentStatusOnlySQL).
 func (s *Store) ListWakingApps() ([]*App, error) {
 	rows, err := s.db.Query(`
-		SELECT ` + appColumns + deploymentSummarySQL + `
+		SELECT ` + appColumns + deploymentStatusOnlySQL + `
 		FROM apps WHERE status = 'waking'`)
 	if err != nil {
 		return nil, err
@@ -1688,33 +1717,6 @@ func (s *Store) ListHibernatedApps() ([]*App, error) {
 	return apps, rows.Err()
 }
 
-// ListWarmShrunkApps returns apps that currently have warm-parked replicas
-// (desired_state='warm') and are still serving (running or degraded). The
-// watcher's expansion check iterates exactly this set each tick.
-func (s *Store) ListWarmShrunkApps() ([]*App, error) {
-	rows, err := s.db.Query(`
-		SELECT ` + appColumns + deploymentSummarySQL + `
-		FROM apps
-		WHERE EXISTS (
-			SELECT 1 FROM replicas r
-			WHERE r.app_id = apps.id AND r.desired_state = 'warm'
-		)
-		AND status IN ('running', 'degraded')`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var apps []*App
-	for rows.Next() {
-		app, err := scanApp(rows)
-		if err != nil {
-			return nil, err
-		}
-		apps = append(apps, app)
-	}
-	return apps, rows.Err()
-}
-
 // CountRunningApps returns the number of apps currently in the running state.
 // Used by the fleet metrics gauge.
 func (s *Store) CountRunningApps() (int64, error) {
@@ -1745,9 +1747,13 @@ func (s *Store) CountRunningReplicas() (int64, error) {
 // a re-placed lost replica (or a recovered crashed slot) can heal the app back
 // to running; the narrower ListRunningApps stays reserved for startup recovery,
 // which must not re-adopt degraded apps.
+//
+// Of the deployment-derived fields only LastDeploymentStatus is populated;
+// LastDeployedAt, ReleaseNumber, ReleasedAt, CurrentVersion and ContentDigest
+// are left at their zero values (see deploymentStatusOnlySQL).
 func (s *Store) ListReconcilableApps() ([]*App, error) {
 	rows, err := s.db.Query(`
-		SELECT ` + appColumns + deploymentSummarySQL + `
+		SELECT ` + appColumns + deploymentStatusOnlySQL + `
 		FROM apps WHERE status IN ('running', 'degraded')`)
 	if err != nil {
 		return nil, err
@@ -3318,20 +3324,40 @@ func (s *Store) ListInflightDeployments() ([]*Deployment, error) {
 	return ds, rows.Err()
 }
 
-// ListDeploymentsBySlug returns deployments for the app identified by slug,
-// ordered newest first. It is a slug-based counterpart to ListDeployments.
+// ListDeploymentsBySlug returns every deployment for the app identified by
+// slug, newest first. It returns an empty slice (not nil) when no deployments
+// exist.
 func (s *Store) ListDeploymentsBySlug(slug string) ([]DeploymentSummary, error) {
+	result, _, err := s.ListDeploymentsBySlugPage(slug, 0, 0)
+	return result, err
+}
+
+// ListDeploymentsBySlugPage returns one page of the app's deployment history,
+// newest first, with the size of the whole history. limit <= 0 returns every
+// row from offset on. Release numbers are ranked over the whole history before
+// the page is cut, so a row carries the same number on any page.
+func (s *Store) ListDeploymentsBySlugPage(slug string, limit, offset int) ([]DeploymentSummary, int, error) {
+	if offset < 0 {
+		offset = 0
+	}
 	// release_number is the row's rank among the app's SUCCEEDED deployments by id
 	// (a human-friendly v1, v2, … shown instead of the epoch version); NULL for
 	// failed/pending rows so a failed attempt never consumes a release number.
+	// One window pass over the app's history computes every rank. A restore's
+	// source can be a row outside that history, so its number is counted
+	// directly; only restore rows pay for that.
 	// Ordered by id DESC to match ListDeployments' authoritative live-history order
 	// (the UI marks the first succeeded row Current).
-	rows, err := s.db.Query(`
+	query := `
+		WITH history AS (
+			SELECT d.id,
+			       COUNT(CASE WHEN d.status = 'succeeded' THEN 1 END) OVER (ORDER BY d.id) AS succeeded_rank
+			FROM deployments d
+			JOIN apps a ON a.id = d.app_id
+			WHERE a.slug = ? AND d.serving_activation_id IS NULL
+		)
 		SELECT d.id, d.version, d.status, d.failure_reason, d.created_at,
-		       CASE WHEN d.status = 'succeeded' THEN (
-		           SELECT COUNT(*) FROM deployments d2
-		           WHERE d2.app_id = d.app_id AND d2.status = 'succeeded' AND d2.serving_activation_id IS NULL AND d2.id <= d.id
-		       ) END AS release_number,
+		       CASE WHEN d.status = 'succeeded' THEN h.succeeded_rank END AS release_number,
 		       d.restored_from_id,
 		       CASE WHEN d.restored_from_id IS NOT NULL THEN (
 		           SELECT COUNT(*) FROM deployments d3
@@ -3341,14 +3367,32 @@ func (s *Store) ListDeploymentsBySlug(slug string) ([]DeploymentSummary, error) 
 		       d.origin_credential_id, d.origin_credential_type, d.origin_credential_name,
 		       ds.target_kind, ds.status, ds.created_at, ds.updated_at, ds.ended_at, ds.expires_at,
 		       fr.id, fr.fleet_id, fr.kind, fr.provenance, fr.created_at
-		FROM deployments d
-		JOIN apps a ON a.id = d.app_id
+		FROM history h
+		JOIN deployments d ON d.id = h.id
 		LEFT JOIN fleet_runs fr ON fr.id = d.run_id
 		LEFT JOIN development_sessions ds ON ds.id = d.development_session_id
-		WHERE a.slug = ? AND d.serving_activation_id IS NULL
-		ORDER BY d.id DESC`, slug)
+		ORDER BY d.id DESC`
+	args := []any{slug}
+	paged := limit > 0 || offset > 0
+	if limit > 0 {
+		query += ` LIMIT ? OFFSET ?`
+		args = append(args, limit, offset)
+	} else if offset > 0 {
+		// Both dialects accept a LIMIT this large; SQLite has no OFFSET without one.
+		query += ` LIMIT ? OFFSET ?`
+		args = append(args, int64(math.MaxInt64), offset)
+	}
+	total := 0
+	if paged {
+		if err := s.db.QueryRow(`
+			SELECT COUNT(*) FROM deployments d JOIN apps a ON a.id = d.app_id
+			WHERE a.slug = ? AND d.serving_activation_id IS NULL`, slug).Scan(&total); err != nil {
+			return nil, 0, err
+		}
+	}
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	result := make([]DeploymentSummary, 0)
@@ -3368,7 +3412,7 @@ func (s *Store) ListDeploymentsBySlug(slug string) ([]DeploymentSummary, error) 
 			&originCredentialID, &originCredentialType, &originCredentialName,
 			&developmentTarget, &developmentStatus, &developmentCreated, &developmentUpdated, &developmentEnded, &developmentExpires,
 			&runID, &fleetID, &kind, &raw, &runCreated); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		if release.Valid {
 			n := release.Int64
@@ -3421,7 +3465,13 @@ func (s *Store) ListDeploymentsBySlug(slug string) ([]DeploymentSummary, error) 
 		d.Provenance = p
 		result = append(result, d)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	if !paged {
+		total = len(result)
+	}
+	return result, total, nil
 }
 
 // DeploymentSummary is a public view of a deployment row, safe for API responses.
@@ -4663,10 +4713,10 @@ func (s *Store) PruneAuditEvents(retention time.Duration) (int64, error) {
 // autoscale_scale_down audit event for the named app slug, or a zero-value
 // AuditEvent and false if no such event exists.
 //
-// The ORDER BY created_at DESC, id DESC with LIMIT 1 relies on SQLite's
-// backward scan of the default created_at ordering and is fine at typical
-// audit-table sizes. A composite index on (resource_id, action, created_at DESC)
-// would speed this up if the audit_events table grows very large.
+// The lookup index on (resource_type, resource_id, action, created_at DESC)
+// narrows the scan to this app's two autoscale actions. Each action is its own
+// index range, so the newest row across both is picked by a sort over those
+// matches, not read straight off the index.
 func (s *Store) LatestAutoscaleEvent(slug string) (AuditEvent, bool, error) {
 	row := s.db.QueryRow(`
 		SELECT ae.id, ae.user_id, u.username,

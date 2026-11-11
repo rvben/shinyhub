@@ -6235,13 +6235,13 @@ func (s *Server) handleListDeployments(w http.ResponseWriter, r *http.Request) {
 	if _, _, ok := s.requireViewApp(w, r, slug); !ok {
 		return
 	}
-	deployments, err := s.store.ListDeploymentsBySlug(slug)
+	limit, offset := parsePagination(r)
+	deployments, total, err := s.store.ListDeploymentsBySlugPage(slug, limit, offset)
 	if err != nil {
 		writeInternal(w, r, "internal server error", err)
 		return
 	}
-	limit, offset := parsePagination(r)
-	writeList(w, deployments, limit, offset, nil)
+	writeListPage(w, deployments, total, limit, offset, nil)
 }
 
 // writeQuotaExceeded returns a 413 with structured detail so callers can

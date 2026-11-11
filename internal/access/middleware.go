@@ -22,7 +22,7 @@ import (
 type authorizedAppKey struct{}
 
 type store interface {
-	GetAppBySlug(slug string) (*db.App, error)
+	GetAppForAccess(slug string) (*db.App, error)
 	UserCanAccessApp(slug string, userID int64) (bool, error)
 }
 
@@ -67,7 +67,7 @@ func Middleware(st store, jwtSecret string, revoked auth.RevocationChecker, user
 				return
 			}
 
-			app, err := st.GetAppBySlug(slug)
+			app, err := st.GetAppForAccess(slug)
 			if err != nil {
 				if errors.Is(err, db.ErrNotFound) {
 					next.ServeHTTP(w, r)

@@ -947,26 +947,6 @@ func (f *fakeStore) AppFleetLastActivity(_ int64, _ int64, _ string) (int64, err
 	return f.fleetLastActivity, nil
 }
 
-// ListWarmShrunkApps returns apps in the store whose replicas include at least
-// one with desired_state='warm' and whose app status is 'running' or 'degraded'.
-func (f *fakeStore) ListWarmShrunkApps() ([]*db.App, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	var out []*db.App
-	for _, app := range f.apps {
-		if app.Status != "running" && app.Status != "degraded" {
-			continue
-		}
-		for _, r := range f.replicas[app.ID] {
-			if r.DesiredState == db.ReplicaDesiredWarm {
-				out = append(out, app)
-				break
-			}
-		}
-	}
-	return out, nil
-}
-
 func (f *fakeStore) ListHibernatedApps() ([]*db.App, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

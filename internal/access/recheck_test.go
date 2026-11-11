@@ -347,11 +347,11 @@ type errStore struct {
 	authErr error
 }
 
-func (s errStore) GetAppBySlug(slug string) (*db.App, error) {
+func (s errStore) GetAppForAccess(slug string) (*db.App, error) {
 	if s.appErr != nil {
 		return nil, s.appErr
 	}
-	return s.inner.GetAppBySlug(slug)
+	return s.inner.GetAppForAccess(slug)
 }
 
 func (s errStore) UserCanAccessApp(slug string, userID int64) (bool, error) {

@@ -367,11 +367,11 @@ func projectAuditDetail(fields map[string]any) string {
 // projectDisplay is the slug -> display metadata map used to decorate app
 // payloads. It is loaded once per request: an N-app response must not become N
 // project lookups.
-type projectDisplay map[string]*db.ProjectListItem
+type projectDisplay map[string]db.ProjectDisplay
 
 func (s *Server) loadProjectDisplay() projectDisplay {
 	out := projectDisplay{}
-	ps, err := s.store.ListProjects(0, 0)
+	ps, err := s.store.ListProjectDisplay()
 	if err != nil {
 		// Display metadata is decoration. A failure here degrades cards to
 		// their bare slug rather than failing the whole apps list.

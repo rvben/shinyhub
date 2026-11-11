@@ -1065,8 +1065,8 @@ func (w *Watcher) retryRecoveryUnreadyStop(e PendingStopEntry) {
 // warmed RAM was actually freed. On freed=true the replica rows are marked
 // suspended (resumable on wake). Otherwise it falls back to Stop + stopped,
 // which always frees RAM (the never-worse-than-cold-stop invariant).
-// hibernatePool freezes or stops app's pool and persists the resulting replica
-// state. It reports whether the pool actually reached a terminal
+//
+// It persists the resulting replica state and reports whether the pool actually reached a terminal
 // suspended/stopped state: when the manager's Stop call itself fails (the
 // process refused to die, or the runtime call errored), the replicas are left
 // as-is rather than persisted as "stopped" - the DB must not assert a state
@@ -1781,11 +1781,10 @@ func (w *Watcher) runOnce() {
 	// same tick's reconciliation instead of waiting one interval.
 	w.reviveWorkerLossCrashedApps()
 
-	// Fetch the reconcilable apps (running+degraded) once for the whole tick:
+	// One ListReconcilableApps call (running+degraded) serves the whole tick:
 	// reconcileReplicas, reconcileStatuses, and handleWarmExpand all iterate the
 	// same set, and none of them changes an app's Status field directly (only
-	// replica rows), so one shared ListReconcilableApps call safely serves all
-	// three instead of the three separate calls each used to make.
+	// replica rows), so one shared snapshot safely serves all three.
 	apps, err := w.store.ListReconcilableApps()
 	if err != nil {
 		apps = nil
@@ -1802,14 +1801,13 @@ func (w *Watcher) runOnce() {
 		appIDs[i] = app.ID
 	}
 
-	// Replica rows are batched (ListReplicasForApps) instead of one ListReplicas
-	// call per app, but still fetched TWICE: once before reconcileReplicas, and
-	// again before reconcileStatuses/handleWarmExpand. reconcileReplicas can
-	// restart a slot (restartSlot -> UpsertReplica) in this same tick, and
+	// Replica rows are read in one batch (ListReplicasForApps) and fetched
+	// TWICE: once before reconcileReplicas, and again before
+	// reconcileStatuses/handleWarmExpand. reconcileReplicas can restart a slot
+	// (restartSlot -> UpsertReplica) in this same tick, and
 	// reconcileStatuses/handleWarmExpand must see that fresh row rather than the
 	// pre-restart snapshot - otherwise a just-recovered app would be misreported
-	// as still down for one tick. A single shared fetch would be fewer queries
-	// but stale.
+	// as still down for one tick.
 	repMap, err := w.store.ListReplicasForApps(appIDs)
 	if err != nil {
 		slog.Warn("watcher: list replicas for apps failed", "err", err)
@@ -1899,8 +1897,6 @@ func (w *Watcher) reconcileReplicas(apps []*db.App, repMap map[int64][]*db.Repli
 	}
 }
 
-// servingIsolation fails closed on policy-read errors. The fallback exists
-// only for narrow test stores that predate generation policy persistence.
 func (w *Watcher) prepareColdIsolation(app *db.App) (string, error) {
 	store, ok := w.store.(coldIsolationStore)
 	manager, mok := w.mgr.(*process.Manager)
@@ -1915,7 +1911,21 @@ func (w *Watcher) prepareColdIsolation(app *db.App) (string, error) {
 	return mode, nil
 }
 
+// servingIsolation fails closed on policy-read errors. A store that resolves
+// the policy itself is asked directly; one that only exposes the two reads is
+// resolved here. The final fallback exists only for narrow test stores that
+// predate generation policy persistence.
 func (w *Watcher) servingIsolation(app *db.App) string {
+	if resolver, ok := w.store.(interface {
+		ServingWorkerIsolation(*db.App, string) (string, error)
+	}); ok {
+		mode, err := resolver.ServingWorkerIsolation(app, w.cfg.DefaultWorkerIsolation)
+		if err != nil {
+			slog.Error("watcher: serving isolation unavailable", "slug", app.Slug, "err", err)
+			return "unknown"
+		}
+		return mode
+	}
 	if reader, ok := w.store.(db.ServingWorkerIsolationReader); ok {
 		mode, err := db.ResolveServingWorkerIsolation(reader, app, w.cfg.DefaultWorkerIsolation)
 		if err != nil {
@@ -2972,20 +2982,15 @@ func (w *Watcher) handleIdleClustered(app *db.App, timeout time.Duration, runnin
 //
 // apps and repMap are the tick's shared running+degraded snapshot fetched once
 // in runOnce; the warm-shrunk subset (apps with at least one warm-parked
-// replica) is derived from repMap here instead of a dedicated
-// ListWarmShrunkApps query, since it is the same predicate over the same rows.
+// replica) is derived from repMap. That check runs first because it needs no
+// database access, while resolving the serving isolation does, and most apps
+// have no warm-parked replica.
 func (w *Watcher) handleWarmExpand(apps []*db.App, repMap map[int64][]*db.Replica) {
 	if w.warmExpand == nil {
 		return
 	}
 
 	for _, app := range apps {
-		if w.servingIsolation(app) != "multiplex" {
-			continue
-		}
-		if p, ok := w.prx.(interface{ HasDrainingGeneration(string) bool }); ok && p.HasDrainingGeneration(app.Slug) {
-			continue
-		}
 		reps := repMap[app.ID]
 
 		// Compute the shrink moment as the newest updated_at among warm-parked rows.
@@ -2996,7 +3001,13 @@ func (w *Watcher) handleWarmExpand(apps []*db.App, repMap map[int64][]*db.Replic
 			}
 		}
 		if shrinkMoment.IsZero() {
-			// No warm rows found (race with another tick that expanded); skip.
+			// The app has no warm-parked replica, so there is nothing to expand.
+			continue
+		}
+		if w.servingIsolation(app) != "multiplex" {
+			continue
+		}
+		if p, ok := w.prx.(interface{ HasDrainingGeneration(string) bool }); ok && p.HasDrainingGeneration(app.Slug) {
 			continue
 		}
 

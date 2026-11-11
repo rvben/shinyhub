@@ -124,6 +124,7 @@ type Store struct {
 	// owns their per-connection driver statements and closes them with the
 	// store.
 	appLookup        preparedStmt
+	appAccessLookup  preparedStmt
 	appRoutingLookup preparedStmt
 
 	// memory marks an in-memory SQLite store. Such a store is pinned to a single
@@ -380,6 +381,11 @@ func (s *Store) timed(op string) func() {
 // as applied without running them and lets the normal loop apply the rest.
 const legacyBaselineVersion = 12
 
+// migrateAdvisoryLockKey is the fixed Postgres advisory-lock key that serializes
+// Migrate() across control-plane instances during an HA rolling upgrade. It must
+// be identical on every instance; the value itself is arbitrary.
+const migrateAdvisoryLockKey int64 = 4017538291
+
 // Migrate applies every embedded migration that has not yet been recorded in
 // the schema_migrations ledger. Each migration runs inside its own
 // transaction; a failure aborts that migration without recording it and stops
@@ -390,11 +396,6 @@ const legacyBaselineVersion = 12
 // currently-embedded versions are recorded as already applied without being
 // re-executed. A genuinely fresh database has no core tables and runs every
 // migration from scratch.
-// migrateAdvisoryLockKey is the fixed Postgres advisory-lock key that serializes
-// Migrate() across control-plane instances during an HA rolling upgrade. It must
-// be identical on every instance; the value itself is arbitrary.
-const migrateAdvisoryLockKey int64 = 4017538291
-
 func (s *Store) Migrate() error {
 	defer s.timed("Migrate")()
 	migrations, err := loadMigrations(s.migrationsSubdir())

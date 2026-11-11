@@ -96,7 +96,7 @@ func recheckAccessAndIdentity(st store, lookup auth.UserLookup, revoked auth.Rev
 			return true, "administrator sessions revoked", nil
 		}
 	}
-	app, err := st.GetAppBySlug(p.Slug)
+	app, err := st.GetAppForAccess(p.Slug)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			if p.SupportAppID > 0 {
