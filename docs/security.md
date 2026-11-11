@@ -162,7 +162,10 @@ reverse proxy, so that nothing reaches ShinyHub unauthenticated.
 
 Operators may also explicitly expose `GET /app/<slug>/.shinyhub/availability`
 through `server.public_app_availability`, or permit app-owned declarations with
-`server.app_availability_opt_in: allow`. App opt-in defaults to denied. This
+`server.app_availability_opt_in: allow`. App-derived exposure defaults to denied. Operators may also set
+`server.app_availability_default: public` to expose apps with `inherit` intent;
+app-level `off` overrides that default but not a central allowlist. Existing
+values are preserved on upgrade, and new ordinary apps inherit an off default. This
 anonymous monitoring endpoint reveals coarse availability and fixed reason
 codes for exposed apps,
 including private apps. It returns 404 for unlisted and unknown apps, never

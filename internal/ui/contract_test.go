@@ -4850,3 +4850,7 @@ func TestAppListsRenderAWindowNotTheWholeFleet(t *testing.T) {
 	assertContains(t, "views/launchpad.js", "windowCount(tiles.length, shownTiles.get(key), GRID_PAGE)",
 		"the viewer launchpad must render one page of tiles per section")
 }
+
+func TestAvailabilitySettingUnwrapsPatchResponse(t *testing.T) {
+	assertContains(t, "app.js", "populateAvailabilitySetting(saved.app", "PATCH /api/apps/:slug returns {app}; read the server-resolved exposure from saved.app")
+}

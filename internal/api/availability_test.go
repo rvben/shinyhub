@@ -14,6 +14,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
+	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/fleet"
@@ -33,7 +34,7 @@ func TestAvailabilityDeploymentPolicyAndSparseUpdates(t *testing.T) {
 		t.Fatalf("denied deploy: %d %s", rec.Code, rec.Body)
 	}
 	a, err := s.GetAppBySlug("demo")
-	if err != nil || a.Availability != "off" || a.DeployCount != 0 {
+	if err != nil || a.Availability != "inherit" || a.DeployCount != 0 {
 		t.Fatalf("denied deployment mutated app: %+v %v", a, err)
 	}
 	srv.cfg.Server.AppAvailabilityOptIn = "allow"
@@ -316,7 +317,7 @@ func TestAvailabilityMutationPinsAuthorizedIdentity(t *testing.T) {
 				t.Fatal("handler did not return")
 			}
 			replacement, err = store.GetAppBySlug("reused")
-			if err != nil || replacement.Availability != "off" || replacement.DeployCount != 0 {
+			if err != nil || replacement.Availability != "inherit" || replacement.DeployCount != 0 {
 				t.Fatalf("replacement mutated: %+v %v", replacement, err)
 			}
 		})
@@ -493,7 +494,7 @@ func TestAvailabilityPatchAuditsChangesExactlyOnce(t *testing.T) {
 	for _, step := range []struct {
 		value, old string
 		count      int
-	}{{"public", "off", 1}, {"public", "off", 1}, {"off", "public", 2}, {"off", "public", 2}} {
+	}{{"public", "inherit", 1}, {"public", "inherit", 1}, {"off", "public", 2}, {"off", "public", 2}} {
 		req := httptest.NewRequest("PATCH", "/api/apps/demo", strings.NewReader(`{"availability":"`+step.value+`"}`))
 		req.Header.Set("Authorization", "Bearer "+token)
 		rec := httptest.NewRecorder()
@@ -567,5 +568,169 @@ func TestAvailabilityPatchDoesNotArmRedeploy(t *testing.T) {
 		if _, err := toml.Decode(configurationSavedTOML(after, true), &fragment); err != nil || len(fragment.App) != 1 || fragment.App[0].Config.Availability == nil || *fragment.App[0].Config.Availability != value {
 			t.Fatalf("fleet export lost saved availability: %+v %v", fragment, err)
 		}
+	}
+}
+
+func TestAvailabilityInheritanceCreationOptOutAndPreview(t *testing.T) {
+	srv, store, token := newManifestE2EServer(t)
+	srv.cfg.Server.AppAvailabilityOptIn = "allow"
+	srv.cfg.Server.AppAvailabilityDefault = "public"
+	request := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rec, req)
+		return rec
+	}
+	for _, tc := range []struct {
+		slug, extra, intent string
+		exposed             bool
+	}{
+		{"automatic", "", "inherit", true},
+		{"excluded", `,"availability":"off"`, "off", false},
+		{"explicit", `,"availability":"public"`, "public", true},
+		{"development", `,"development_session_id":"0123456789abcdef0123456789abcdef","development_target":"created"`, "off", false},
+		{"ephemeral", `,"development_session_id":"abcdef0123456789abcdef0123456789","development_target":"ephemeral","expires_at":"` + time.Now().UTC().Add(time.Hour).Format(time.RFC3339) + `"`, "off", false},
+	} {
+		rec := request("POST", "/api/apps", `{"slug":"`+tc.slug+`","name":"Example"`+tc.extra+`}`)
+		if rec.Code != 201 {
+			t.Fatalf("create %s: %d %s", tc.slug, rec.Code, rec.Body)
+		}
+		var a db.App
+		if err := json.Unmarshal(rec.Body.Bytes(), &a); err != nil || a.Availability != tc.intent || a.AvailabilityExposure == nil || a.AvailabilityExposure.Exposed != tc.exposed {
+			t.Fatalf("create exposure: %s %v", rec.Body, err)
+		}
+	}
+	// No deployment is necessary for first-boot failures to be members.
+	rows, err := store.ListAppAvailability(context.Background(), nil, true, true)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("first-boot inventory: %+v %v", rows, err)
+	}
+	rev, err := store.GetAppBySlug("automatic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec := request("PATCH", "/api/apps/automatic", `{"availability":"off"}`); rec.Code != 200 {
+		t.Fatalf("opt out: %s", rec.Body)
+	}
+	if rec := request("PATCH", "/api/apps/automatic", `{"description":"sparse update"}`); rec.Code != 200 {
+		t.Fatalf("sparse patch: %s", rec.Body)
+	}
+	if a, _ := store.GetAppBySlug("automatic"); a.Availability != "off" || appResourceRevision(a) == appResourceRevision(rev) {
+		t.Fatal("opt out lost or revision unchanged")
+	}
+	srv.cfg.Server.AppAvailabilityOptIn = "deny"
+	if rec := request("PATCH", "/api/apps/automatic", `{"availability":"inherit"}`); rec.Code != 200 {
+		t.Fatalf("reset under deny: %s", rec.Body)
+	} else {
+		var saved struct {
+			App db.App `json:"app"`
+		}
+		if json.Unmarshal(rec.Body.Bytes(), &saved) != nil || saved.App.AvailabilityExposure == nil || !saved.App.CanManage || !saved.App.AvailabilityExposure.PolicySuppressed {
+			t.Fatalf("PATCH lost effective exposure or management rights: %s", rec.Body)
+		}
+	}
+	rec := request("GET", "/api/apps/automatic", "")
+	var detail struct {
+		App db.App `json:"app"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil || detail.App.AvailabilityExposure == nil || detail.App.AvailabilityExposure.Exposed || !detail.App.AvailabilityExposure.PolicySuppressed {
+		t.Fatalf("suppression: %s %v", rec.Body, err)
+	}
+	// Server default changes do not rewrite intent, and preview is paginated.
+	srv.cfg.Server.AppAvailabilityOptIn = "allow"
+	srv.cfg.Server.AppAvailabilityDefault = "off"
+	if a, _ := store.GetAppBySlug("automatic"); a.Availability != "inherit" {
+		t.Fatal("default rewrote intent")
+	}
+	rec = request("GET", "/api/apps?availability=inherit&limit=1", "")
+	var page struct {
+		Apps  []db.App `json:"items"`
+		Total int      `json:"total"`
+	}
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &page) != nil || len(page.Apps) != 1 || page.Total != 1 {
+		t.Fatalf("preview: %d %s", rec.Code, rec.Body)
+	}
+	if rec := request("GET", "/api/apps?availability=invalid", ""); rec.Code != 400 {
+		t.Fatalf("invalid filter: %d", rec.Code)
+	}
+}
+
+func TestAvailabilityPolicyMetadataAndPreviewAuthorization(t *testing.T) {
+	srv, store, token := newManifestE2EServer(t)
+	owner, err := store.GetUserByUsername("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID, Access: "public"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateUser(db.CreateUserParams{Username: "observer", PasswordHash: "h", Role: "viewer"}); err != nil {
+		t.Fatal(err)
+	}
+	observer, err := store.GetUserByUsername("observer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	viewerToken, err := auth.IssueJWT(observer.ID, "observer", "viewer", srv.cfg.Auth.Secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := func(path, credential string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", path, nil)
+		if credential != "" {
+			req.Header.Set("Authorization", "Bearer "+credential)
+		}
+		rec := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := request("/api/apps/demo", ""); rec.Code != 401 || strings.Contains(rec.Body.String(), "availability_exposure") {
+		t.Fatalf("anonymous: %d %s", rec.Code, rec.Body)
+	}
+	rec := request("/api/apps/demo", viewerToken)
+	if rec.Code != 200 || strings.Contains(rec.Body.String(), "availability_exposure") {
+		t.Fatalf("viewer: %d %s", rec.Code, rec.Body)
+	}
+	if rec := request("/api/apps/demo", token); rec.Code != 200 || !strings.Contains(rec.Body.String(), "availability_exposure") {
+		t.Fatalf("manager: %d %s", rec.Code, rec.Body)
+	}
+	if rec := request("/api/apps?availability=off", viewerToken); rec.Code != 403 {
+		t.Fatalf("viewer preview: %d", rec.Code)
+	}
+	scoped := httptest.NewRequest("GET", "/api/apps?availability=off", nil)
+	scoped = scoped.WithContext(auth.WithUser(scoped.Context(), &auth.ContextUser{ID: owner.ID, Role: "admin", AppScope: []string{"demo"}}))
+	denied := httptest.NewRecorder()
+	srv.handleListApps(denied, scoped)
+	if denied.Code != 403 {
+		t.Fatalf("scoped preview: %d %s", denied.Code, denied.Body)
+	}
+}
+
+func TestAvailabilityInheritManifestAndPreflightUnderDeny(t *testing.T) {
+	srv, store, token := newManifestE2EServer(t)
+	owner, err := store.GetUserByUsername("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateApp(db.CreateAppParams{Slug: "demo", Name: "Demo", OwnerID: owner.ID, Availability: "off"}); err != nil {
+		t.Fatal(err)
+	}
+	srv.cfg.Server.AppAvailabilityDefault = "public"
+	srv.cfg.Server.AppAvailabilityOptIn = "deny"
+	req := httptest.NewRequest("POST", "/api/apps/demo/deploy-preflight", strings.NewReader(`{"manifest":"[app]\navailability='inherit'\n","app_type":"python"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	var result deployPreflightResponse
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &result) != nil || !result.Valid || result.AvailabilityExposure == nil || !result.AvailabilityExposure.PolicySuppressed {
+		t.Fatalf("preflight inherit under deny: %d %s", rec.Code, rec.Body)
+	}
+	if rec := deployManifest(t, srv, token, "demo", "[app]\navailability='inherit'\n"); rec.Code != 200 {
+		t.Fatalf("actual deploy disagrees: %d %s", rec.Code, rec.Body)
+	}
+	a, err := store.GetAppBySlug("demo")
+	if err != nil || a.Availability != "inherit" {
+		t.Fatalf("manifest not persisted: %+v %v", a, err)
 	}
 }

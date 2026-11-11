@@ -450,8 +450,8 @@ func normalizeAndValidateApp(a *AppSettings) error {
 	if a.MaxSessionsPerReplica != nil && (*a.MaxSessionsPerReplica < 0 || *a.MaxSessionsPerReplica > 1000) {
 		return fmt.Errorf("max_sessions_per_replica must be between 0 and 1000, got %d", *a.MaxSessionsPerReplica)
 	}
-	if a.Availability != nil && *a.Availability != "off" && *a.Availability != "public" {
-		return fmt.Errorf("availability must be off or public")
+	if a.Availability != nil && *a.Availability != "inherit" && *a.Availability != "off" && *a.Availability != "public" {
+		return fmt.Errorf("availability must be inherit, off or public")
 	}
 	if a.RenderSeconds != nil {
 		v := *a.RenderSeconds

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/rvben/shinyhub/internal/appmetaspec"
+	"github.com/rvben/shinyhub/internal/availability"
 	"github.com/rvben/shinyhub/internal/deploy"
 	slugpkg "github.com/rvben/shinyhub/internal/slug"
 	"github.com/spf13/cobra"
@@ -1234,6 +1235,7 @@ func callRestartAs(pastTense string) func(*cobra.Command, []string) error {
 // ── apps set ────────────────────────────────────────────────────────────────
 
 type appsSetFlags struct {
+	availability          string
 	hibernateTimeout      int
 	replicas              int
 	maxSessionsPerReplica int
@@ -1274,6 +1276,7 @@ func newAppsSetCmd() *cobra.Command {
 			return runAppsSet(cmd, args, f)
 		},
 	}
+	cmd.Flags().StringVar(&f.availability, "availability", "", "Anonymous monitoring: inherit | off | public (central allowlist overrides off)")
 	cmd.Flags().IntVar(&f.hibernateTimeout, "hibernate-timeout", 0,
 		"Idle timeout minutes before hibernation (-1 = reset to global default, 0 = disable, N = N minutes)")
 	cmd.Flags().IntVar(&f.replicas, "replicas", 0,
@@ -1351,10 +1354,14 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	iconChanged := cmd.Flags().Changed("icon")
 	nameChanged := cmd.Flags().Changed("name")
 	descriptionChanged := cmd.Flags().Changed("description")
+	availabilityChanged := cmd.Flags().Changed("availability")
 	projectChanged := cmd.Flags().Changed("project")
 
-	if !hibernateChanged && !replicasChanged && !capChanged && !minWarmReplicasChanged && !tierChanged && !anyAutoscaleChanged && !memoryLimitChanged && !cpuQuotaChanged && !anyWorkerChanged && !ephemeralDataOkChanged && !renderSecondsChanged && !iconChanged && !nameChanged && !descriptionChanged && !projectChanged {
-		return fmt.Errorf("at least one flag is required (e.g. --hibernate-timeout, --replicas, --tier, --max-sessions-per-replica, --min-warm-replicas, --memory-limit-mb, --cpu-quota-percent, --autoscale, --isolation, --ephemeral-data-ok, --render-seconds, --icon, --name, --description, --project)")
+	if !hibernateChanged && !replicasChanged && !capChanged && !minWarmReplicasChanged && !tierChanged && !anyAutoscaleChanged && !memoryLimitChanged && !cpuQuotaChanged && !anyWorkerChanged && !ephemeralDataOkChanged && !renderSecondsChanged && !iconChanged && !nameChanged && !descriptionChanged && !projectChanged && !availabilityChanged {
+		return fmt.Errorf("at least one flag is required (e.g. --hibernate-timeout, --replicas, --tier, --max-sessions-per-replica, --min-warm-replicas, --memory-limit-mb, --cpu-quota-percent, --autoscale, --isolation, --ephemeral-data-ok, --render-seconds, --icon, --name, --description, --project, --availability)")
+	}
+	if availabilityChanged && f.availability != "inherit" && f.availability != "off" && f.availability != "public" {
+		return validationErr("--availability must be inherit, off or public", "")
 	}
 	// Validate against the same spec the server uses so a too-long or
 	// whitespace-only value fails locally with the identical message instead of
@@ -1483,7 +1490,19 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 		}
 	}
 
+	if availabilityChanged && f.availability == "inherit" {
+		info, err := probeServer(cfg)
+		if err != nil {
+			return fmt.Errorf("verify availability inheritance support: %w", err)
+		}
+		if !info.Capabilities.AvailabilityInherit {
+			return validationErr("server does not support availability inheritance; no settings were changed", "Upgrade to a server advertising availability_inherit.")
+		}
+	}
 	payload := map[string]any{}
+	if availabilityChanged {
+		payload["availability"] = f.availability
+	}
 
 	if hibernateChanged {
 		// -1 → send null (reset to global default); 0+ → send the value.
@@ -1610,6 +1629,9 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	// (or the field's absence) leaves patchResp.RenderPacing nil, which the
 	// advisory below treats as "nothing to suggest".
 	var patchResp struct {
+		App *struct {
+			AvailabilityExposure *availability.Exposure `json:"availability_exposure"`
+		} `json:"app"`
 		RenderPacing *struct {
 			RenderSeconds                         float64 `json:"render_seconds"`
 			EffectiveCores                        float64 `json:"effective_cores"`
@@ -1622,6 +1644,17 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	_ = json.Unmarshal(out, &patchResp)
 
 	var lines []string
+	if availabilityChanged {
+		lines = append(lines, slug+": availability="+f.availability)
+		if patchResp.App != nil && patchResp.App.AvailabilityExposure != nil {
+			e := patchResp.App.AvailabilityExposure
+			state := "off"
+			if e.Exposed {
+				state = "public"
+			}
+			lines = append(lines, fmt.Sprintf("%s: effective anonymous availability %s (source %s)", slug, state, e.Source))
+		}
+	}
 	if hibernateChanged {
 		minutes, _ := payload["hibernate_timeout_minutes"].(*int)
 		switch {
@@ -1728,7 +1761,14 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 			lines = append(lines, fmt.Sprintf("%s: icon set to %s", slug, f.icon))
 		}
 	}
-	if err := renderAction(cmd, "updated", map[string]any{"slug": slug}, strings.Join(lines, "\n")); err != nil {
+	result := map[string]any{"slug": slug}
+	if availabilityChanged {
+		result["availability"] = f.availability
+		if patchResp.App != nil && patchResp.App.AvailabilityExposure != nil {
+			result["availability_exposure"] = patchResp.App.AvailabilityExposure
+		}
+	}
+	if err := renderAction(cmd, "updated", result, strings.Join(lines, "\n")); err != nil {
 		return err
 	}
 

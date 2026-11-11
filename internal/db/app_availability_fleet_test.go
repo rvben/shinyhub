@@ -35,7 +35,7 @@ func TestAvailabilityFleetMembershipAndIdentity(t *testing.T) {
 		{false, []string{"central", "missing"}, []string{"central"}},
 		{true, []string{"opted", "central", "central"}, []string{"central", "opted"}},
 	} {
-		apps, err := s.ListAppAvailability(context.Background(), tc.central, tc.allow)
+		apps, err := s.ListAppAvailability(context.Background(), tc.central, tc.allow, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -56,7 +56,7 @@ func TestAvailabilityFleetMembershipAndIdentity(t *testing.T) {
 		t.Fatalf("omission reset opt-in: %+v %v", a, err)
 	}
 	set("off")
-	apps, err := s.ListAppAvailability(context.Background(), nil, true)
+	apps, err := s.ListAppAvailability(context.Background(), nil, true, false)
 	if err != nil || len(apps) != 0 {
 		t.Fatalf("revocation: %+v %v", apps, err)
 	}
@@ -66,12 +66,12 @@ func TestAvailabilityFleetMembershipAndIdentity(t *testing.T) {
 	}
 	mustCreateApp(t, s, app.Slug, u.ID)
 	a, err = s.GetAppAvailability(context.Background(), app.Slug)
-	if err != nil || a.Availability != "off" || a.OperatorStopped {
+	if err != nil || a.Availability != "inherit" || a.OperatorStopped {
 		t.Fatalf("reused slug inherited exposure/intent: %+v %v", a, err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := s.ListAppAvailability(ctx, []string{"central"}, true); !errors.Is(err, context.Canceled) {
+	if _, err := s.ListAppAvailability(ctx, []string{"central"}, true, false); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancellation: %v", err)
 	}
 }
@@ -133,14 +133,14 @@ func TestAvailabilityFleetNeverSilentlyTruncates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	apps, err := s.ListAppAvailability(context.Background(), nil, true)
+	apps, err := s.ListAppAvailability(context.Background(), nil, true, false)
 	if !errors.Is(err, db.ErrAvailabilityFleetTooLarge) || apps != nil {
 		t.Fatalf("oversized snapshot returned partial success: len=%d err=%v", len(apps), err)
 	}
 	if _, err := s.DB().Exec(`DELETE FROM apps WHERE slug = ?`, "app-10000"); err != nil {
 		t.Fatal(err)
 	}
-	apps, err = s.ListAppAvailability(context.Background(), nil, true)
+	apps, err = s.ListAppAvailability(context.Background(), nil, true, false)
 	if err != nil || len(apps) != db.MaxAvailabilityApps {
 		t.Fatalf("exact bound rejected: len=%d err=%v", len(apps), err)
 	}
@@ -170,7 +170,7 @@ func TestAvailabilityHandoffPublishesAndCompensatesExposure(t *testing.T) {
 			t.Fatalf("want %s: %+v %v", want, a, err)
 		}
 	}
-	check("off")
+	check("inherit")
 	if err := s.PromoteDeployment(next.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestAvailabilityHandoffPublishesAndCompensatesExposure(t *testing.T) {
 	if err := s.RevertDeploymentActivation(next.ID, old.ID, "cutover failed"); err != nil {
 		t.Fatal(err)
 	}
-	check("off")
+	check("inherit")
 }
 
 // A rolling-upgrade predecessor knows only status. The additive migration must

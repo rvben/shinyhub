@@ -154,7 +154,7 @@ continues using `[dev]`; it does not select deployment environments.
 | `replicas` | int `>= 1` | Number of replica processes. See [scaling](scaling.md). |
 | `max_sessions_per_replica` | int `>= 1` | Per-replica admission cap for new cookieless sessions. |
 | `min_warm_replicas` | int `0..1000` | Minimum warm-worker floor. |
-| `availability` | `"off"` or `"public"` | App-owned anonymous availability exposure, when permitted by the server. Overrides the source bundle; omission preserves stored exposure. Independent of `visibility`. See [availability monitoring](configuration.md#anonymous-app-availability-monitoring). |
+| `availability` | `"inherit"`, `"off"` or `"public"` | App-owned anonymous availability exposure, when permitted by the server. Overrides the source bundle; omission preserves stored exposure. Independent of `visibility`. See [availability monitoring](configuration.md#anonymous-app-availability-monitoring). |
 | `render_seconds` | number `0..600` | Render pacing interval; `0` disables pacing. |
 | `env` | table of strings | Versioned plaintext environment variables, merged into the deployment bundle before build and activation. Values are redacted in plans; use `shinyhub env set --secret` for secrets. Other stored keys remain available. |
 | `autoscale` | inline table | Session-saturation autoscale policy. Reconciled atomically and drift-protected as one unit. See [autoscale](#appconfig-autoscale) below. |

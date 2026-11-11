@@ -25,6 +25,7 @@ import (
 	"github.com/rvben/shinyhub/internal/activation"
 	"github.com/rvben/shinyhub/internal/appmetaspec"
 	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/availability"
 	"github.com/rvben/shinyhub/internal/bundle"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
@@ -64,7 +65,17 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		total int
 		err   error
 	)
-	if u.HasAppScopeRestriction() {
+	if values, present := r.URL.Query()["availability"]; present {
+		if len(values) != 1 || !availability.ValidIntent(values[0]) {
+			writeError(w, http.StatusBadRequest, "availability filter must be inherit, off or public")
+			return
+		}
+		if !isPrivilegedAppOperator(u) || u.HasAppScopeRestriction() {
+			writeError(w, http.StatusForbidden, "availability filter requires an unscoped operator")
+			return
+		}
+		apps, total, err = s.store.ListAppsWithAvailability(values[0], limit, offset)
+	} else if u.HasAppScopeRestriction() {
 		// A scoped identity (deploy token with an app allowlist, see
 		// auth.deploy_token_apps) sees only its allowlisted apps, matching the
 		// per-slug gates. The allowlist is pushed into the query as a single
@@ -148,6 +159,7 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		} else {
 			_, a.CanManage = managedSlugs[a.Slug]
 		}
+		s.decorateAvailability(a)
 		replicas := s.liveReplicaView(a.Slug, replicasByApp[a.ID])
 		pool := s.elasticObservation(a.Slug)
 		// A server built without a process manager (unit tests and API-only
@@ -351,10 +363,13 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Availability == "" {
-		req.Availability = "off"
+		req.Availability = "inherit"
+		if req.DevelopmentSessionID != "" || req.DevelopmentTarget != "" || req.ExpiresAt != nil {
+			req.Availability = "off"
+		}
 	}
-	if req.Availability != "off" && req.Availability != "public" {
-		writeError(w, http.StatusBadRequest, "availability must be off or public")
+	if req.Availability != "inherit" && req.Availability != "off" && req.Availability != "public" {
+		writeError(w, http.StatusBadRequest, "availability must be inherit, off or public")
 		return
 	}
 	if req.Availability == "public" && s.cfg.Server.AppAvailabilityOptIn != "allow" {
@@ -499,6 +514,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		IPAddress: s.ClientIP(r),
 		RunID:     s.knownFleetRunID(r),
 	})
+	s.decorateAppForCaller(u, app)
 	w.Header().Set(hdrResourceRevision, appResourceRevision(app))
 	writeJSON(w, http.StatusCreated, app)
 }
@@ -556,6 +572,7 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	// management endpoints enforce authorization regardless.
 	canManage := s.effectiveCanManageApp(u, app)
 	app.CanManage = canManage
+	s.decorateAvailability(app)
 	latestActivations, err := s.store.LatestScheduleActivationsByApp(app.ID)
 	if err != nil {
 		writeInternal(w, r, "internal server error", err)
@@ -1016,8 +1033,8 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if rawVal, present := raw["availability"]; present {
-		if err := json.Unmarshal(rawVal, &newAvailability); err != nil || (newAvailability != "off" && newAvailability != "public") {
-			writeError(w, http.StatusBadRequest, "availability must be off or public")
+		if err := json.Unmarshal(rawVal, &newAvailability); err != nil || (newAvailability != "inherit" && newAvailability != "off" && newAvailability != "public") {
+			writeError(w, http.StatusBadRequest, "availability must be inherit, off or public")
 			return
 		}
 		setAvailability = true
@@ -1819,6 +1836,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		effectiveRenderSeconds = newRenderSeconds
 	}
 	effectiveCap := deploy.ResolveMaxSessionsPerReplica(app.MaxSessionsPerReplica, s.cfg.Runtime.DefaultMaxSessionsPerReplica)
+	s.decorateAppForCaller(auth.UserFromContext(r.Context()), app)
 	resp := map[string]any{"app": app}
 	if patched.RedeploySeq > 0 {
 		resp["redeploy_seq"] = patched.RedeploySeq

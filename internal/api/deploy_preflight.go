@@ -8,6 +8,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/availability"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/schedulespec"
@@ -70,11 +71,12 @@ type deployPreflightProblem struct {
 }
 
 type deployPreflightResponse struct {
-	Warnings        []string                 `json:"warnings,omitempty"`
-	ScheduleChanges []ManifestScheduleResult `json:"schedule_changes,omitempty"`
-	Valid           bool                     `json:"valid"`
-	Isolation       string                   `json:"isolation"`
-	Problems        []deployPreflightProblem `json:"problems"`
+	AvailabilityExposure *availability.Exposure   `json:"availability_exposure,omitempty"`
+	Warnings             []string                 `json:"warnings,omitempty"`
+	ScheduleChanges      []ManifestScheduleResult `json:"schedule_changes,omitempty"`
+	Valid                bool                     `json:"valid"`
+	Isolation            string                   `json:"isolation"`
+	Problems             []deployPreflightProblem `json:"problems"`
 }
 
 // rOnFargateDeployMsg is the 400 body for an R bundle placed on a Fargate
@@ -109,7 +111,7 @@ func (s *Server) handleDeployPreflight(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "not found")
 			return
 		}
-		app = &db.App{Slug: slug, Replicas: 1}
+		app = &db.App{Slug: slug, Replicas: 1, Availability: "inherit"}
 		if s.cfg.Runtime.DefaultReplicas > 1 {
 			app.Replicas = s.cfg.Runtime.DefaultReplicas
 		}
@@ -212,14 +214,10 @@ func (s *Server) deployPreflight(app *db.App, req deployPreflightRequest) (deplo
 	if req.Settings != nil {
 		projectManifestSettings(&projected, req.Settings.appSettings())
 	}
-	if projected.Availability == "public" && s.cfg.Server.AppAvailabilityOptIn != "allow" {
-		central := false
-		for _, slug := range s.cfg.Server.PublicAppAvailability {
-			central = central || slug == app.Slug
-		}
-		if !central && len(reply.Problems) == 0 {
-			reply.Warnings = append(reply.Warnings, "app availability opt-in is suppressed by server policy")
-		}
+	exposure := s.availabilityExposure(projected.Slug, projected.Availability)
+	reply.AvailabilityExposure = &exposure
+	if exposure.PolicySuppressed && len(reply.Problems) == 0 {
+		reply.Warnings = append(reply.Warnings, "app availability opt-in is suppressed by server policy")
 	}
 	if app.ID != 0 {
 		existing, err := s.store.ListSchedulesByApp(app.ID)

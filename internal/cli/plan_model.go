@@ -381,6 +381,17 @@ func fleetAppPlanResource(app fleet.AppDiff, fleetID string) planResource {
 	if app.RecoveryReason != "" {
 		resource.Notes = append(resource.Notes, app.RecoveryReason+": republish target producers and redeploy consumers; may require --allow-downtime")
 	}
+	if e := app.AvailabilityExposure; e != nil {
+		status := "off"
+		if e.Exposed {
+			status = "public"
+		}
+		note := fmt.Sprintf("anonymous availability: %s (intent %s; source %s)", status, e.Intent, e.Source)
+		if e.PolicySuppressed {
+			note += "; suppressed by server policy"
+		}
+		resource.Notes = append(resource.Notes, note)
+	}
 	for _, unmanaged := range app.Unmanaged {
 		resource.Notes = append(resource.Notes, fmt.Sprintf("unmanaged: %s=%s (default %s)", unmanaged.Key, unmanaged.Server, unmanaged.Default))
 	}

@@ -141,14 +141,14 @@ func TestFleetAvailabilityDynamicAnonymousNonWaking(t *testing.T) {
 
 type fleetAvailabilityStoreStub struct {
 	one  func(context.Context, string) (*db.AppAvailability, error)
-	list func(context.Context, []string, bool) ([]db.AppAvailability, error)
+	list func(context.Context, []string, bool, bool) ([]db.AppAvailability, error)
 }
 
 func (s fleetAvailabilityStoreStub) GetAppAvailability(c context.Context, slug string) (*db.AppAvailability, error) {
 	return s.one(c, slug)
 }
-func (s fleetAvailabilityStoreStub) ListAppAvailability(c context.Context, slugs []string, allow bool) ([]db.AppAvailability, error) {
-	return s.list(c, slugs, allow)
+func (s fleetAvailabilityStoreStub) ListAppAvailability(c context.Context, slugs []string, allow bool, defaultPublic bool) ([]db.AppAvailability, error) {
+	return s.list(c, slugs, allow, defaultPublic)
 }
 
 func TestFleetAvailabilityErrorsAndSharedBudget(t *testing.T) {
@@ -163,7 +163,7 @@ func TestFleetAvailabilityErrorsAndSharedBudget(t *testing.T) {
 			t.Fatal("busy request queried DB")
 			return nil, nil
 		},
-		list: func(ctx context.Context, slugs []string, allow bool) ([]db.AppAvailability, error) {
+		list: func(ctx context.Context, slugs []string, allow bool, defaultPublic bool) ([]db.AppAvailability, error) {
 			calls++
 			if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > time.Second {
 				t.Fatal("unbounded snapshot")
@@ -171,7 +171,7 @@ func TestFleetAvailabilityErrorsAndSharedBudget(t *testing.T) {
 			return entries, listErr
 		},
 	}
-	m := newAvailabilityMonitor([]string{"central"}, true, true, source, p, ready)
+	m := newAvailabilityMonitor([]string{"central"}, true, true, source, p, ready, false)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.shinyhub/availability", m.fleet)
 	mux.HandleFunc("/app/{slug}/.shinyhub/availability", m.app)
@@ -291,6 +291,101 @@ func TestAvailabilityOperatorPolicyAndCentralOverride(t *testing.T) {
 		}
 		if len(body.Apps) != n {
 			t.Fatalf("fleet ignored operator policy: %+v", body)
+		}
+	}
+}
+
+func TestAvailabilityDefaultFleetAndPerAppAgree(t *testing.T) {
+	for _, allow := range []bool{false, true} {
+		for _, def := range []bool{false, true} {
+			h := newTestHTTPHandler(t, func(c *config.Config) {
+				c.Server.AppAvailabilityOptIn = map[bool]string{true: "allow", false: "deny"}[allow]
+				c.Server.AppAvailabilityDefault = map[bool]string{true: "public", false: "off"}[def]
+				c.Server.PublicFleetAvailability = true
+				c.Server.PublicAppAvailability = []string{"central"}
+				c.Server.AppOrigin = "https://apps.example.com"
+			})
+			close(h.readyCh)
+			h.prx.MarkSynced()
+			if err := h.store.CreateUser(db.CreateUserParams{Username: "owner", PasswordHash: "h", Role: "developer"}); err != nil {
+				t.Fatal(err)
+			}
+			u, err := h.store.GetUserByUsername("owner")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for slug, intent := range map[string]string{"inherited": "inherit", "excluded": "off", "opted": "public", "central": "off"} {
+				if _, err := h.store.CreateApp(db.CreateAppParams{Slug: slug, Name: "Sensitive display name", OwnerID: u.ID, Access: "private", Availability: intent}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			probe := func(path string) *httptest.ResponseRecorder {
+				rec := httptest.NewRecorder()
+				h.handler.ServeHTTP(rec, httptest.NewRequest("GET", "https://apps.example.com"+path, nil))
+				return rec
+			}
+			rec := probe("/.shinyhub/availability")
+			var fleet fleetAvailabilityResponse
+			if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &fleet) != nil {
+				t.Fatalf("fleet: %d %s", rec.Code, rec.Body)
+			}
+			got := map[string]bool{}
+			for _, a := range fleet.Apps {
+				got[a.Slug] = true
+				if a.Available {
+					t.Fatal("never-deployed app reported available")
+				}
+			}
+			want := map[string]bool{"central": true}
+			if allow {
+				want["opted"] = true
+				if def {
+					want["inherited"] = true
+				}
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("allow %v default %v: got %v want %v", allow, def, got, want)
+			}
+			for _, slug := range []string{"inherited", "excluded", "opted", "central"} {
+				rec := probe("/app/" + slug + "/.shinyhub/availability")
+				code := 404
+				if want[slug] {
+					code = 503
+				}
+				if rec.Code != code {
+					t.Fatalf("%s: %d want %d", slug, rec.Code, code)
+				}
+			}
+			if strings.Contains(rec.Body.String(), "Sensitive") || strings.Contains(rec.Body.String(), "intent") {
+				t.Fatal("leaked policy metadata")
+			}
+			// An app added after handler startup inherits without a reload.
+			if _, err := h.store.CreateApp(db.CreateAppParams{Slug: "later", Name: "Later", OwnerID: u.ID, Access: "private"}); err != nil {
+				t.Fatal(err)
+			}
+			code := 404
+			if allow && def {
+				code = 503
+			}
+			if rec := probe("/app/later/.shinyhub/availability"); rec.Code != code {
+				t.Fatalf("future app: %d want %d", rec.Code, code)
+			}
+			if allow && def {
+				a, err := h.store.GetAppBySlug("later")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := h.store.CreateDeployment(db.CreateDeploymentParams{AppID: a.ID, Version: "v1", BundleDir: t.TempDir()}); err != nil {
+					t.Fatal(err)
+				}
+				if err := h.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: "later", Status: "hibernated"}); err != nil {
+					t.Fatal(err)
+				}
+				if rec := probe("/app/later/.shinyhub/availability"); rec.Code != 200 {
+					t.Fatalf("production handler ignored configured public default: %d %s", rec.Code, rec.Body)
+				}
+			}
+
 		}
 	}
 }

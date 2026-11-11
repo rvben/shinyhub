@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- Add `server.app_availability_default` and explicit per-app `inherit` intent for automatic anonymous monitoring of future apps, with owner opt-out, effective exposure in app settings and fleet plans, and a paginated operator preview. Preserve all existing opt-outs on upgrade; legacy apps require an explicit reviewed conversion. Development and ephemeral apps remain off by default.
+
+### Upgrade notice
+
+This change widens the stored availability intent in both SQLite and PostgreSQL. Back up the database before upgrading. Upgrade all control planes before enabling public inheritance; older binaries cannot start against the newer schema. A downgrade requires restoring the pre-upgrade database.
+
 ## [0.24.1](https://github.com/rvben/shinyhub/compare/v0.24.0...v0.24.1) - 2026-11-10
 
 ### Added

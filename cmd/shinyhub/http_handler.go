@@ -94,7 +94,10 @@ func buildHTTPHandler(d httpHandlerDeps) (http.Handler, error) {
 		appSessionHandler.ServeHTTP(w, r)
 	}))
 	mux.HandleFunc("GET /app/{slug}/.shinyhub/announcements.json", srv.HandleActiveAnnouncements)
-	availability := newAvailabilityMonitor(cfg.Server.PublicAppAvailability, cfg.Server.AppAvailabilityOptIn == "allow", cfg.Server.PublicFleetAvailability, store, prx, readyCh)
+	if cfg.Server.AppAvailabilityDefault == "public" && cfg.Server.AppAvailabilityOptIn != "allow" {
+		slog.Warn("app availability default public is suppressed by app_availability_opt_in deny; central allowlist remains active")
+	}
+	availability := newAvailabilityMonitor(cfg.Server.PublicAppAvailability, cfg.Server.AppAvailabilityOptIn == "allow", cfg.Server.PublicFleetAvailability, store, prx, readyCh, cfg.Server.AppAvailabilityDefault == "public")
 	mux.HandleFunc("/app/{slug}/.shinyhub/availability", availability.app)
 	mux.HandleFunc("/.shinyhub/availability", availability.fleet)
 	if cfg.Auth.SupportSessions {

@@ -289,7 +289,7 @@ In an app's `shinyhub.toml`:
 
 ```toml
 [app]
-availability = "public"  # off | public; new apps default to off
+availability = "public"  # inherit | off | public; new ordinary apps inherit an off server default
 ```
 
 Or in a fleet manifest:
@@ -305,15 +305,15 @@ source = "./sales"
 availability = "public"
 ```
 
-The effective exposure is the union of the central allowlist and app opt-ins
-permitted by the server. `availability = "off"` revokes the app opt-in, but
+The effective exposure is the union of the central allowlist and explicit or
+inherited public exposure permitted by the server. `availability = "off"` revokes the app opt-in, but
 cannot override the operator's central allowlist. Omitting the key preserves
 the stored value. Fleet config takes precedence over a source bundle and is
 reconciled even when its digest is unchanged. App settings take effect when
 committed, with no ShinyHub restart or app activation required; authorized
 owners and users with app management rights can also use
 `PATCH /api/apps/<slug>` with `{"availability":"off"}` or
-`{"availability":"public"}`. Changing only fleet monitoring config uses PATCH
+`{"availability":"public"}`, or `{"availability":"inherit"}`. Changing only fleet monitoring config uses PATCH
 without restarting workers or changing the bundle digest. New fleet apps receive
 the effective fleet or source declaration at creation,
 so a failed first boot is monitored too. A conflicting declaration in the
@@ -340,6 +340,93 @@ manifest reconciliation; it can remain exposed if the subsequent boot fails,
 which lets monitors detect that failure. A parallel generation handoff stages
 it with the candidate's settings and publishes it at successful cutover.
 A policy or manifest validation rejection does not change exposure.
+
+### Server-wide default exposure
+
+To include future ordinary apps automatically, enable app-derived exposure and
+set a public default. Fleet discovery remains a separate switch:
+
+```yaml
+server:
+  app_availability_opt_in: allow
+  app_availability_default: public  # "off" | public; default: "off"
+  public_fleet_availability: true
+```
+
+`SHINYHUB_SERVER_APP_AVAILABILITY_DEFAULT` overrides the default. This is an
+operator decision to disclose app slugs and coarse state, including private
+apps whose owners make no declaration. It changes no content access rules.
+Like the other monitoring settings, it takes effect after a restart or
+zero-downtime reload; keep it consistent across HA instances.
+
+An app's stored `availability` intent is one of:
+
+- `inherit`: follow `server.app_availability_default`, subject to `allow`.
+- `off`: opt out of the default, even when the default is public.
+- `public`: explicitly request public monitoring, subject to `allow`.
+
+New ordinary apps without a declaration store `inherit` at creation, so they
+are covered even before upload or a failed first boot. Development and ephemeral
+apps created by `deploy --watch --create` or `--ephemeral` instead start at `off`
+unless explicitly configured; their frequent creation and expiry would otherwise
+cause inventory churn. A failed request before an app record exists cannot be
+reported by this inventory.
+
+The operator's central allowlist overrides all three intents and continues to
+work under `deny`. Setting `app_availability_opt_in: deny` suppresses both explicit
+public intent and public inheritance without changing stored intent. A public
+default combined with `deny` is valid but logs a warning. Clear the central list
+as well to disable all anonymous exposure.
+
+Omission on PATCH or redeployment preserves stored intent. To resume following
+the server after an explicit opt-out, declare `availability = "inherit"`, use
+`PATCH /api/apps/<slug>` with `{"availability":"inherit"}`, choose **Follow server
+default** in the app's general settings, or run:
+
+```bash
+shinyhub apps set sales --availability inherit
+```
+
+`inherit` and `off` are accepted under `deny`; new explicit `public` remains
+rejected. Changing server defaults never rewrites app intent. Switching the
+default back to `off` withdraws only inherited exposure, leaving explicit public
+settings and central allowlists intact.
+
+**Upgrade existing apps deliberately.** Prior versions stored both an omitted
+setting and an explicit opt-out as `off`. Migration preserves every existing
+`off` and `public` value; it never guesses owner intent from old bundles or audit
+history. Existing apps therefore do not automatically inherit. Operators can
+review a paginated, authenticated `GET /api/apps?availability=off` inventory and
+use the normal audited PATCH or `apps set` above for each app approved to inherit.
+Review and convert while the server default is still `off`, then enable `public`.
+An explicit `off` in a source or fleet manifest reasserts that opt-out on its next
+deployment. For fleet-managed apps, change the fleet manifest to `inherit` as well:
+fleet apply reconciles declared intent, so UI changes and migration PATCHes that
+conflict with that manifest are drift and will be reverted. Central allowlisting
+is an alternative but prevents owner opt-out.
+
+For callers with app management rights, the authenticated app list and details add `availability_exposure` with `intent`,
+`exposed`, `source` (`app`, `default`, `allowlist`, or `none`) and
+`policy_suppressed`, plus `app_allowed` to explain whether new public declarations
+are permitted. General settings and `fleet plan` show effective exposure
+and its source, including allowlist overrides and policy suppression. An unscoped
+operator may filter the apps list by `availability=inherit|off|public`, with the
+usual pagination. The `inherit` filter previews the apps affected by a server
+default change; already allowlisted apps are identifiable from their source.
+Anonymous responses do not include this policy metadata.
+
+Servers advertise `availability_inherit`; a new fleet CLI refuses explicit
+`inherit` against older servers. Plain `deploy` to an older server rejects an
+`inherit` manifest through its normal manifest validation; upgrade the server
+before using that declaration. `fleet init` preserves all three stored intents,
+including `inherit`, so a conflicting source declaration cannot change them on
+recreation. Upgrade all control planes before enabling public inheritance:
+predecessor servers suppress inherited exposure and predecessor server creations
+still default to `off`. Old clients that explicitly send `off` continue opting
+out. Keep the fleet snapshot's 10,000-app limit and one-second deadline in mind;
+exceeding either fails the entire snapshot rather than silently truncating it.
+Deleted apps, revoked exposure and expired ephemeral apps disappear, so monitors
+still need remembered or expected membership.
 
 Probe `GET /app/sales/.shinyhub/availability` on the hostname used for apps:
 

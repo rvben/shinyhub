@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/rvben/shinyhub/internal/availability"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/fleet"
 	"github.com/rvben/shinyhub/internal/process"
@@ -48,8 +49,9 @@ type deployPreflightSettings struct {
 }
 
 type deployPreflightResponse struct {
-	Warnings        []string `json:"warnings"`
-	ScheduleChanges []struct {
+	AvailabilityExposure *availability.Exposure `json:"availability_exposure,omitempty"`
+	Warnings             []string               `json:"warnings"`
+	ScheduleChanges      []struct {
 		Name       string `json:"name"`
 		Action     string `json:"action"`
 		ScheduleID int64  `json:"schedule_id"`
@@ -177,6 +179,9 @@ func fleetServerPreflight(cfg *cliConfig, caps serverCaps, m *fleet.Manifest, di
 			reply, err := postDeployPreflight(cfg, d.Slug, req)
 			if err != nil {
 				return nil, err
+			}
+			if reply.AvailabilityExposure != nil {
+				d.AvailabilityExposure = reply.AvailabilityExposure
 			}
 			d.Warnings = append(d.Warnings, reply.Warnings...)
 			for _, change := range reply.ScheduleChanges {

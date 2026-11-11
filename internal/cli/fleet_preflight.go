@@ -212,6 +212,10 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 		if bm != nil {
 			app.Bundle = bundleFleetConfig(bm.App)
 		}
+		if intent := fleet.EffectiveConfig(*app).Availability; intent != nil && *intent == "inherit" && !caps.AvailabilityInherit {
+			resolveProblems = append(resolveProblems, fmt.Sprintf("app %q: server does not support availability inheritance; upgrade to a server advertising availability_inherit", app.Slug))
+			continue
+		}
 		// Enroll newly created apps from the effective declaration, including a
 		// source-only opt-in, before upload or preparation can fail. This metadata
 		// never participates in the content digest.
@@ -328,8 +332,9 @@ func observedFromApp(a db.App) fleet.ObservedApp {
 		a.Availability = "off"
 	}
 	return fleet.ObservedApp{
-		Slug:         a.Slug,
-		Availability: &a.Availability,
+		Slug:                 a.Slug,
+		Availability:         &a.Availability,
+		AvailabilityExposure: a.AvailabilityExposure,
 		// Taken by address so a stored empty description reads as the real
 		// value "" rather than "not observed"; the API omits the key when
 		// empty, which decodes to the same "".

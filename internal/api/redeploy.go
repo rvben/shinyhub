@@ -391,6 +391,7 @@ func (s *Server) decorateApp(app *db.App) {
 func (s *Server) decorateAppForCaller(u *auth.ContextUser, app *db.App) {
 	s.decorateApp(app)
 	app.CanManage = s.effectiveCanManageApp(u, app)
+	s.decorateAvailability(app)
 	replicas, err := s.store.ListReplicas(app.ID)
 	if err != nil {
 		slog.Error("decorate app: list replicas", "slug", app.Slug, "err", err)

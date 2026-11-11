@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/rvben/shinyhub/internal/availability"
 )
 
 // Action is the reconcile verb for one app.
@@ -22,9 +24,10 @@ const (
 // ObservedApp is the subset of GET /api/apps the diff needs. The CLI maps the
 // API payload into this; the diff stays I/O-free and API-shape-agnostic.
 type ObservedApp struct {
-	Availability *string
-	Env          map[string]string
-	Slug         string
+	AvailabilityExposure *availability.Exposure
+	Availability         *string
+	Env                  map[string]string
+	Slug                 string
 	// Name and Description are the server's stored display metadata. They are
 	// pointers for the same reason the scalars below are: nil means "not
 	// observed" (as in DeclaredConfig's zero ObservedApp) and always asserts a
@@ -116,14 +119,15 @@ type UnmanagedConfigItem struct {
 
 // AppDiff is the planned action for one app.
 type AppDiff struct {
-	Slug          string
-	Action        Action
-	Owned         bool
-	LocalDigest   string
-	ServerDigest  string
-	ConfigDrift   []ConfigDriftItem
-	Unmanaged     []UnmanagedConfigItem
-	AdoptRequired bool
+	AvailabilityExposure *availability.Exposure
+	Slug                 string
+	Action               Action
+	Owned                bool
+	LocalDigest          string
+	ServerDigest         string
+	ConfigDrift          []ConfigDriftItem
+	Unmanaged            []UnmanagedConfigItem
+	AdoptRequired        bool
 	// RecoveryReason explains a deploy of matching content. Source updates
 	// already redeploy, so only an otherwise matching bundle needs this reason.
 	RecoveryReason string
@@ -177,6 +181,16 @@ func Diff(m *Manifest, localDigests map[string]string, observed []ObservedApp) [
 		// app already matches completely and can therefore transfer ownership
 		// without creating a redundant deployment.
 		d.ConfigDrift = configDrift(app, o)
+		d.AvailabilityExposure = o.AvailabilityExposure
+		// Observed exposure explains unchanged intent only. The server preflight
+		// supplies authoritative exposure for a planned change; never label the
+		// old result as the outcome of a different intent on older servers.
+		for _, change := range d.ConfigDrift {
+			if change.Key == "availability" {
+				d.AvailabilityExposure = nil
+				break
+			}
+		}
 		d.Unmanaged = unmanagedConfig(app, o)
 		matchingSource := d.LocalDigest != "" && d.LocalDigest == o.ContentDigest
 		if matchingSource {
@@ -272,8 +286,8 @@ func unmanagedConfig(app AppEntry, o ObservedApp) []UnmanagedConfigItem {
 		addInt("hibernate_timeout_minutes", c.HibernateTimeoutMinutes, o.HibernateTimeoutMinutes, -1, "(default)")
 	}
 	addInt("max_sessions_per_replica", c.MaxSessionsPerReplica, o.MaxSessionsPerReplica, 0, "(default)")
-	if c.Availability == nil && o.Availability != nil && *o.Availability != "off" {
-		out = append(out, UnmanagedConfigItem{Key: "availability", Server: fmt.Sprintf("%q", *o.Availability), Default: "\"off\""})
+	if c.Availability == nil && o.Availability != nil && *o.Availability == "public" {
+		out = append(out, UnmanagedConfigItem{Key: "availability", Server: fmt.Sprintf("%q", *o.Availability), Default: "(server policy)"})
 	}
 	addFloat("render_seconds", c.RenderSeconds, o.RenderSeconds, 0, "0")
 	if c.IdentityHeaders == nil && o.IdentityHeaders != nil {

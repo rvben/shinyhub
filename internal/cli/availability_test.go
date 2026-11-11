@@ -8,8 +8,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/rvben/shinyhub/internal/availability"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/fleet"
 )
@@ -221,5 +223,74 @@ func TestAvailabilityFleetSourceOnlyEnrollsBeforeUpload(t *testing.T) {
 	// Enrollment must be durable even if no upload can subsequently complete.
 	if !exists || created["availability"] != "public" {
 		t.Fatalf("source opt-in not enrolled before upload: %+v", created)
+	}
+}
+
+func TestAvailabilityFleetExportPreservesEveryIntent(t *testing.T) {
+	for _, intent := range []string{"off", "inherit", "public"} {
+		doc := emitFleetManifest("prod", "./apps", []db.App{{Slug: "demo", Name: "Demo", Access: "private", Availability: intent}})
+		m, problems := fleet.ParseManifest([]byte(doc), "fleet.toml")
+		if len(problems) != 0 || m.Apps[0].Config.Availability == nil || *m.Apps[0].Config.Availability != intent {
+			t.Fatalf("export %s: %s %v", intent, doc, problems)
+		}
+	}
+}
+
+func TestAvailabilityAppsSetCapabilityGate(t *testing.T) {
+	for _, supported := range []bool{false, true} {
+		t.Run(map[bool]string{false: "old", true: "new"}[supported], func(t *testing.T) {
+			_, reqs := setupCLITestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/server-info" {
+					_ = json.NewEncoder(w).Encode(map[string]any{"version": "1.0.0", "capabilities": map[string]bool{"availability_inherit": supported}})
+					return
+				}
+				_, _ = w.Write([]byte(`{"app":{"availability":"inherit"}}`))
+			})
+			out, err := execCLI(t, "apps", "set", "demo", "--availability", "inherit")
+			patches := requestPaths(*reqs, "PATCH")
+			if supported {
+				if err != nil || len(patches) != 1 || !strings.Contains(out, `"availability":"inherit"`) {
+					t.Fatalf("supported setter: %s %v %v", out, err, patches)
+				}
+			} else if err == nil || len(patches) != 0 {
+				t.Fatalf("old server mutated: %v %v", err, patches)
+			}
+		})
+	}
+}
+
+func TestAvailabilityFleetPlanRejectsUnsupportedInheritance(t *testing.T) {
+	_, reqs := setupCLITestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/server-info" {
+			_, _ = w.Write([]byte(`{"version":"1.0.0","capabilities":{"app_availability":true}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`[]`))
+	})
+	file := writeFleetTree(t, "fleet_id='prod'\n[[app]]\nslug='demo'\nsource='./demo'\n[app.config]\navailability='inherit'\n", map[string]string{"demo": ""})
+	_, stderr, err := execCLISplit(t, "fleet", "plan", "-f", file)
+	if err == nil || !strings.Contains(stderr, "availability_inherit") || len(requestPaths(*reqs, "POST")) > 0 || len(requestPaths(*reqs, "PATCH")) > 0 {
+		t.Fatalf("gate: err=%v stderr=%s requests=%v", err, stderr, *reqs)
+	}
+}
+
+func TestAvailabilityFleetPlanExplainsEffectiveExposure(t *testing.T) {
+	e := availability.Resolve("off", true, true, true)
+	d := fleet.AppDiff{Slug: "demo", Action: fleet.ActionUnchanged, AvailabilityExposure: &e}
+	resource := fleetAppPlanResource(d, "prod")
+	if !strings.Contains(strings.Join(resource.Notes, " "), "public (intent off; source allowlist)") {
+		t.Fatalf("human plan omitted override: %+v", resource)
+	}
+	var out bytes.Buffer
+	if err := writeFleetPlanJSON(&out, &fleet.Manifest{FleetID: "prod"}, "http://server", []fleet.AppDiff{d}, nil, 0, "no_changes"); err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Apps []struct {
+			Exposure *availability.Exposure `json:"availability_exposure"`
+		} `json:"apps"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil || len(payload.Apps) != 1 || payload.Apps[0].Exposure == nil || payload.Apps[0].Exposure.Source != "allowlist" || !payload.Apps[0].Exposure.Exposed {
+		t.Fatalf("JSON plan omitted effective exposure: %s %v", out.String(), err)
 	}
 }

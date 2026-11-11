@@ -60,3 +60,33 @@ func TestAvailabilityPolicyDefaultsAndOverrides(t *testing.T) {
 		t.Fatalf("policy override affected central allowlist: %+v %v", cfg, err)
 	}
 }
+
+func TestAvailabilityDefaultConfiguration(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", testSecret)
+	path := writeYAML(t, "server:\n  app_availability_default: public\n")
+	cfg, err := config.Load(path)
+	if err != nil || cfg.Server.AppAvailabilityDefault != "public" || cfg.Server.AppAvailabilityOptIn != "deny" || cfg.Server.PublicFleetAvailability {
+		t.Fatalf("independent settings: %+v %v", cfg, err)
+	}
+	t.Setenv("SHINYHUB_SERVER_APP_AVAILABILITY_DEFAULT", "off")
+	cfg, err = config.Load(path)
+	if err != nil || cfg.Server.AppAvailabilityDefault != "off" {
+		t.Fatalf("override: %+v %v", cfg, err)
+	}
+	for _, v := range []string{"inherit", "yes", "PUBLIC"} {
+		t.Setenv("SHINYHUB_SERVER_APP_AVAILABILITY_DEFAULT", v)
+		if _, err := config.Load(path); err == nil {
+			t.Fatalf("accepted default %q", v)
+		}
+	}
+}
+
+func TestAvailabilityDefaultOffYAML(t *testing.T) {
+	t.Setenv("SHINYHUB_AUTH_SECRET", testSecret)
+	for _, v := range []string{"off", `"off"`} {
+		cfg, err := config.Load(writeYAML(t, "server:\n  app_availability_default: "+v+"\n"))
+		if err != nil || cfg.Server.AppAvailabilityDefault != "off" {
+			t.Fatalf("YAML %s: %+v %v", v, cfg, err)
+		}
+	}
+}

@@ -19,6 +19,7 @@ func TestServerInfoAdvertisesFleetCapabilities(t *testing.T) {
 	var got struct {
 		ProtocolVersion int `json:"protocol_version"`
 		Capabilities    struct {
+			AvailabilityInherit       bool `json:"availability_inherit"`
 			FleetPreconditions        bool `json:"fleet_preconditions"`
 			ContentDigest             bool `json:"content_digest"`
 			CLIConnect                bool `json:"cli_connect"`
@@ -38,6 +39,9 @@ func TestServerInfoAdvertisesFleetCapabilities(t *testing.T) {
 	}
 	if got.ProtocolVersion != protocol.CurrentVersion {
 		t.Errorf("protocol_version = %d, want %d", got.ProtocolVersion, protocol.CurrentVersion)
+	}
+	if !got.Capabilities.AvailabilityInherit {
+		t.Error("availability_inherit not advertised")
 	}
 	if !got.Capabilities.FleetPreconditions {
 		t.Errorf("fleet_preconditions not advertised")

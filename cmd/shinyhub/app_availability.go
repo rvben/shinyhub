@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/availability"
 	"github.com/rvben/shinyhub/internal/db"
 	slugpkg "github.com/rvben/shinyhub/internal/slug"
 )
@@ -35,22 +36,24 @@ type appAvailabilityResponse struct {
 const appAvailabilityConcurrency = 2
 
 type fleetAvailabilitySource interface {
-	ListAppAvailability(context.Context, []string, bool) ([]db.AppAvailability, error)
+	ListAppAvailability(context.Context, []string, bool, bool) ([]db.AppAvailability, error)
 }
 
 type availabilityMonitor struct {
-	allowed      map[string]bool
-	slugs        []string
-	allowOptIn   bool
-	fleetEnabled bool
-	store        appAvailabilitySource
-	routes       availabilityRoutes
-	ready        <-chan struct{}
-	lookups      chan struct{}
+	allowed       map[string]bool
+	slugs         []string
+	allowOptIn    bool
+	defaultPublic bool
+	fleetEnabled  bool
+	store         appAvailabilitySource
+	routes        availabilityRoutes
+	ready         <-chan struct{}
+	lookups       chan struct{}
 }
 
-func newAvailabilityMonitor(slugs []string, allowOptIn, fleetEnabled bool, store appAvailabilitySource, routes availabilityRoutes, ready <-chan struct{}) *availabilityMonitor {
+func newAvailabilityMonitor(slugs []string, allowOptIn, fleetEnabled bool, store appAvailabilitySource, routes availabilityRoutes, ready <-chan struct{}, defaultPublic bool) *availabilityMonitor {
 	m := &availabilityMonitor{allowed: make(map[string]bool, len(slugs)), slugs: append([]string(nil), slugs...), allowOptIn: allowOptIn, fleetEnabled: fleetEnabled, store: store, routes: routes, ready: ready, lookups: make(chan struct{}, appAvailabilityConcurrency)}
+	m.defaultPublic = defaultPublic
 	for _, slug := range slugs {
 		m.allowed[slug] = true
 	}
@@ -58,7 +61,7 @@ func newAvailabilityMonitor(slugs []string, allowOptIn, fleetEnabled bool, store
 }
 
 func appAvailabilityHandler(slugs []string, store appAvailabilitySource, routes availabilityRoutes, ready <-chan struct{}) http.Handler {
-	return http.HandlerFunc(newAvailabilityMonitor(slugs, false, false, store, routes, ready).app)
+	return http.HandlerFunc(newAvailabilityMonitor(slugs, false, false, store, routes, ready, false).app)
 }
 
 func availabilityMethod(w http.ResponseWriter, r *http.Request) bool {
@@ -120,7 +123,7 @@ func (m *availabilityMonitor) app(w http.ResponseWriter, r *http.Request) {
 	}
 	result := appAvailabilityResponse{Status: "unknown", Reason: "state_unavailable"}
 	if err == nil {
-		if !m.allowed[slug] && a.Availability != "public" {
+		if !availability.Resolve(a.Availability, m.allowOptIn, m.defaultPublic, m.allowed[slug]).Exposed {
 			http.NotFound(w, r)
 			return
 		}
@@ -164,7 +167,7 @@ func (m *availabilityMonitor) fleet(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return fleetAvailabilityResponse{}, "state_unavailable"
 		}
-		apps, err := source.ListAppAvailability(ctx, m.slugs, m.allowOptIn)
+		apps, err := source.ListAppAvailability(ctx, m.slugs, m.allowOptIn, m.defaultPublic)
 		if err != nil {
 			return fleetAvailabilityResponse{}, "state_unavailable"
 		}

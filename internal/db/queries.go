@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/rvben/shinyhub/internal/auth"
+	"github.com/rvben/shinyhub/internal/availability"
 	"github.com/rvben/shinyhub/internal/provenance"
 )
 
@@ -1182,8 +1183,9 @@ type App struct {
 	// RenderSeconds is the per-app render cost in seconds used to size the
 	// admission pacer. 0 disables pacing. Mirrors autoscale_target's float64
 	// round-tripping (REAL on SQLite, DOUBLE PRECISION on Postgres).
-	RenderSeconds float64 `json:"render_seconds"`
-	Availability  string  `json:"availability"`
+	RenderSeconds        float64                `json:"render_seconds"`
+	Availability         string                 `json:"availability"`
+	AvailabilityExposure *availability.Exposure `json:"availability_exposure,omitempty"`
 	// RedeploySeqLaunched counts the settings redeploys owed to this app: a
 	// PATCH that changes the pool shape of a running app advances it in the
 	// same transaction as the settings. A redeploy is owed while
@@ -1354,7 +1356,7 @@ const appColumns = `id, slug, name, project_slug, owner_id, access, status,
 var appColumnsLean = strings.TrimSuffix(appColumns, ",")
 
 type CreateAppParams struct {
-	Availability string // empty defaults to off
+	Availability string // empty defaults to inherit; development creation defaults to off
 	Slug         string
 	Name         string
 	ProjectSlug  string
@@ -1372,7 +1374,7 @@ type CreateAppParams struct {
 // 050) must never apply again.
 func (s *Store) CreateApp(p CreateAppParams) (bool, error) {
 	_, err := s.db.Exec(
-		`INSERT INTO apps (slug, name, project_slug, owner_id, access, availability) VALUES (?, ?, ?, ?, ?, COALESCE(NULLIF(?, ''), 'off'))`,
+		`INSERT INTO apps (slug, name, project_slug, owner_id, access, availability) VALUES (?, ?, ?, ?, ?, COALESCE(NULLIF(?, ''), 'inherit'))`,
 		p.Slug, p.Name, p.ProjectSlug, p.OwnerID, p.Access, p.Availability,
 	)
 	if err != nil {
@@ -5811,8 +5813,8 @@ func (s *Store) ApplyAppManifestSettings(p ApplyAppManifestSettingsParams) (bool
 	}
 
 	if p.SetAvailability {
-		if p.Availability != "off" && p.Availability != "public" {
-			return false, fmt.Errorf("availability must be off or public")
+		if p.Availability != "inherit" && p.Availability != "off" && p.Availability != "public" {
+			return false, fmt.Errorf("availability must be inherit, off or public")
 		}
 		if _, err := tx.Exec(`UPDATE apps SET availability = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, p.Availability, p.AppID); err != nil {
 			return false, fmt.Errorf("update availability: %w", err)
@@ -6142,8 +6144,8 @@ func (s *Store) patchAppSettings(p PatchAppSettingsParams) (res PatchAppSettings
 	}
 
 	if p.SetAvailability {
-		if p.Availability != "off" && p.Availability != "public" {
-			return res, fmt.Errorf("availability must be off or public")
+		if p.Availability != "inherit" && p.Availability != "off" && p.Availability != "public" {
+			return res, fmt.Errorf("availability must be inherit, off or public")
 		}
 		if _, err := tx.Exec(`UPDATE apps SET availability = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, p.Availability, appID); err != nil {
 			return res, fmt.Errorf("update availability: %w", err)

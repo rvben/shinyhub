@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rvben/shinyhub/internal/availability"
 	"github.com/rvben/shinyhub/internal/fleet"
 	"github.com/spf13/cobra"
 )
@@ -237,17 +238,18 @@ type jsonDigest struct {
 }
 
 type jsonApp struct {
-	Slug           string              `json:"slug"`
-	Action         string              `json:"action"`
-	RecoveryReason string              `json:"recovery_reason,omitempty"`
-	Owned          bool                `json:"owned"`
-	Digest         jsonDigest          `json:"digest"`
-	ConfigDrift    []jsonDriftItem     `json:"config_drift"`
-	Unmanaged      []jsonUnmanagedItem `json:"unmanaged"`
-	AdoptRequired  bool                `json:"adopt_required"`
-	AdoptFrom      string              `json:"adopt_from,omitempty"`
-	PruneEligible  bool                `json:"prune_eligible"`
-	Warnings       []string            `json:"warnings,omitempty"`
+	AvailabilityExposure *availability.Exposure `json:"availability_exposure,omitempty"`
+	Slug                 string                 `json:"slug"`
+	Action               string                 `json:"action"`
+	RecoveryReason       string                 `json:"recovery_reason,omitempty"`
+	Owned                bool                   `json:"owned"`
+	Digest               jsonDigest             `json:"digest"`
+	ConfigDrift          []jsonDriftItem        `json:"config_drift"`
+	Unmanaged            []jsonUnmanagedItem    `json:"unmanaged"`
+	AdoptRequired        bool                   `json:"adopt_required"`
+	AdoptFrom            string                 `json:"adopt_from,omitempty"`
+	PruneEligible        bool                   `json:"prune_eligible"`
+	Warnings             []string               `json:"warnings,omitempty"`
 }
 
 type jsonProject struct {
@@ -352,7 +354,8 @@ func writeFleetPlanJSONWithFile(out interface{ Write([]byte) (int, error) }, m *
 			ConfigDrift:   drift,
 			Unmanaged:     unmanaged,
 			AdoptRequired: d.AdoptRequired, AdoptFrom: d.AdoptFrom, PruneEligible: d.PruneEligible,
-			Warnings: d.Warnings,
+			Warnings:             d.Warnings,
+			AvailabilityExposure: d.AvailabilityExposure,
 		})
 	}
 	model := fleetPlanDocument("shinyhub fleet plan", file, m, host, diff, projects)

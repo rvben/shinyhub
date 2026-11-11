@@ -412,8 +412,8 @@ func validateConfig(file, who string, c *Config) []Problem {
 	if c.MinWarmReplicas != nil && (*c.MinWarmReplicas < 0 || *c.MinWarmReplicas > 1000) {
 		probs = append(probs, Problem{File: file, Msg: who + ": min_warm_replicas must be between 0 and 1000"})
 	}
-	if c.Availability != nil && *c.Availability != "off" && *c.Availability != "public" {
-		probs = append(probs, Problem{File: file, Msg: who + ": availability must be off or public"})
+	if c.Availability != nil && *c.Availability != "inherit" && *c.Availability != "off" && *c.Availability != "public" {
+		probs = append(probs, Problem{File: file, Msg: who + ": availability must be inherit, off or public"})
 	}
 	if c.RenderSeconds != nil && (math.IsNaN(*c.RenderSeconds) || math.IsInf(*c.RenderSeconds, 0) || *c.RenderSeconds < 0 || *c.RenderSeconds > 600) {
 		probs = append(probs, Problem{File: file, Msg: who + ": render_seconds must be finite and between 0 and 600"})

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+
+	"github.com/rvben/shinyhub/internal/availability"
 )
 
 // AppAvailability is a single database snapshot for anonymous monitoring. It
@@ -63,11 +65,17 @@ var ErrAvailabilityFleetTooLarge = errors.New("availability fleet exceeds snapsh
 // ListAppAvailability selects the complete exposed inventory in one statement,
 // so policy membership and database state share a snapshot. Routing observations
 // are evaluated later and may race a deployment, just like per-app probes.
-func (s *Store) ListAppAvailability(ctx context.Context, slugs []string, allowOptIn bool) ([]AppAvailability, error) {
+func (s *Store) ListAppAvailability(ctx context.Context, slugs []string, allowOptIn bool, defaultPublic bool) ([]AppAvailability, error) {
 	where := "1 = 0"
 	args := []any{}
-	if allowOptIn {
-		where = "availability = 'public'"
+	intents := availability.AppIntents(allowOptIn, defaultPublic)
+	if len(intents) > 0 {
+		placeholders := make([]string, len(intents))
+		for i, intent := range intents {
+			placeholders[i] = "?"
+			args = append(args, intent)
+		}
+		where = "availability IN (" + strings.Join(placeholders, ",") + ")"
 	}
 	if len(slugs) > 0 {
 		arg, err := s.d.slugAllowlistArg(slugs)

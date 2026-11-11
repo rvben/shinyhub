@@ -766,6 +766,18 @@
                        pattern="[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
                        autocomplete="off" spellcheck="false" placeholder="No project" aria-label="Project slug">
               </label>
+              <div class="scaling-row">
+                <span>
+                  <label class="scaling-option-title" for="general-availability">Anonymous availability</label>
+                  <span class="scaling-option-help" id="general-availability-help">Expose this app’s slug and coarse state for uptime monitoring. App content keeps its access rules. The operator’s allowlist can override Off.</span>
+                  <span class="scaling-option-help" id="general-availability-effective" aria-live="polite"></span>
+                </span>
+                <select id="general-availability" aria-describedby="general-availability-help general-availability-effective">
+                  <option value="inherit">Follow server default</option>
+                  <option value="off">Off</option>
+                  <option value="public">Public</option>
+                </select>
+              </div>
               <div class="env-form-actions">
                 <button id="general-save-btn" type="button" class="env-btn-primary" hidden disabled>Save general settings</button>
                 <div class="settings-feedback" role="status" aria-live="polite"><span id="general-dirty" class="settings-dirty" hidden>Unsaved changes</span><span id="general-status" class="hibernate-status" hidden></span></div>

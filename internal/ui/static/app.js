@@ -3062,6 +3062,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setHidden(document.getElementById('render-status'), true);
     updateRenderPacingAdvice();
 
+    populateAvailabilitySetting(app, canEdit);
     // General info: display name + description + project slug (rename / regroup).
     document.getElementById('general-name').value = app.name ?? '';
     document.getElementById('general-description').value = app.description ?? '';
@@ -3401,6 +3402,20 @@ document.addEventListener('DOMContentLoaded', () => {
     if (typeof syncSidebar === 'function') syncSidebar();
   }
 
+  function populateAvailabilitySetting(app, canEdit) {
+    const select = document.getElementById('general-availability');
+    select.value = app.availability || 'off';
+    select.dataset.original = select.value;
+    select.disabled = !canEdit;
+    select.querySelector('[value="public"]').disabled = false;
+    const exposure = app.availability_exposure;
+    const effective = document.getElementById('general-availability-effective');
+    if (!exposure) { effective.textContent = 'Effective exposure unavailable. Refresh to check.'; return; }
+    select.querySelector('[value="public"]').disabled = exposure.app_allowed === false && select.value !== 'public';
+    const source = { app: 'app setting', default: 'server default', allowlist: 'operator allowlist', none: 'server policy' }[exposure.source] || 'server policy';
+    effective.textContent = `${exposure.exposed ? 'Currently public' : 'Currently off'} (${source}).${exposure.policy_suppressed ? ' Exposure is suppressed by server policy.' : ''}${exposure.app_allowed === false ? ' New Public declarations are disabled by server policy.' : ''}`;
+  }
+
   async function saveGeneralInfo() {
     if (!settingsSlug) return;
     const slug = settingsSlug;
@@ -3411,6 +3426,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const name = document.getElementById('general-name').value.trim();
     const description = document.getElementById('general-description').value.trim();
     const project = document.getElementById('general-project').value.trim();
+    const availabilitySelect = document.getElementById('general-availability');
+    const payload = { name, description, project_slug: project };
+    if (availabilitySelect.value !== availabilitySelect.dataset.original) payload.availability = availabilitySelect.value;
     if (name.length < 1 || name.length > 128) {
       document.getElementById('general-name').setAttribute('aria-invalid', 'true');
       setError(errEl, 'Display name must be 1 to 128 characters.');
@@ -3430,7 +3448,7 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       resp = await api(`/api/apps/${encodeURIComponent(slug)}`, {
         method: 'PATCH',
-        body: JSON.stringify({ name, description, project_slug: project }),
+        body: JSON.stringify(payload),
       });
     } catch {
       if (settingsSlug !== slug) return;
@@ -3448,6 +3466,19 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
     if (settingsSlug !== slug) return;
+    let saved;
+    try { saved = await resp.json(); }
+    catch {
+      if (settingsSlug !== slug) return;
+      setError(errEl, 'Settings were saved, but the response could not be read. Refresh to check.');
+      recomputeDirty('general');
+      return;
+    }
+    if (settingsSlug !== slug) return;
+    if (saved.app) {
+      populateAvailabilitySetting(saved.app, canManageApp(state.user, saved.app));
+      if (detailApp) { detailApp.availability = saved.app.availability; detailApp.availability_exposure = saved.app.availability_exposure; }
+    }
     statusEl.textContent = 'Saved.';
     setHidden(statusEl, false);
     document.getElementById('general-name').value = name;
@@ -5098,7 +5129,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Register every settings section with the dirty tracker so Save stays
   // disabled until something changes and an "Unsaved changes" hint appears.
   registerSettingsSection('general',
-    () => [document.getElementById('general-name'), document.getElementById('general-description'), document.getElementById('general-project')],
+    () => [document.getElementById('general-name'), document.getElementById('general-description'), document.getElementById('general-project'), document.getElementById('general-availability')],
     'general-save-btn', 'general-dirty');
   registerSettingsSection('usage-privacy',
     () => [document.getElementById('usage-privacy-mode')],
