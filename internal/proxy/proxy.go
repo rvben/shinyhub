@@ -1150,6 +1150,23 @@ func (p *Proxy) stickyCookieAlreadyPins(r *http.Request, slug string, index int,
 	return ok && idx == index && dep == deploymentID
 }
 
+// routingCookie builds the cookie that pins a browser to one replica or worker
+// slot of an app. Every path that issues or expires the cookie goes through
+// here so its scope and security attributes cannot differ between them. Secure
+// follows the request scheme: set over HTTPS so the cookie is never sent in
+// cleartext, unset over plain HTTP where the browser would otherwise drop it.
+// X-Forwarded-Proto is trusted only from configured proxies.
+func (p *Proxy) routingCookie(r *http.Request, slug, value string) *http.Cookie {
+	return &http.Cookie{
+		Name:     cookiePrefix + slug,
+		Value:    value,
+		Path:     "/app/" + slug + "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   proxytrust.Scheme(r, p.trustedProxyNets()) == "https",
+	}
+}
+
 // stickyCookieValue returns the value to store in the sticky cookie for a
 // replica index and deployment ID: signed when a key is configured,
 // "<idx>.<deploymentID>" in unsigned mode.
@@ -1237,15 +1254,9 @@ func (p *Proxy) ClearGenerationAffinity(w http.ResponseWriter, r *http.Request, 
 			Secure: proxytrust.Scheme(r, p.trustedProxyNets()) == "https", MaxAge: -1,
 		})
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     cookiePrefix + slug,
-		Value:    "",
-		Path:     "/app/" + slug + "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   proxytrust.Scheme(r, p.trustedProxyNets()) == "https",
-		MaxAge:   -1,
-	})
+	expired := p.routingCookie(r, slug, "")
+	expired.MaxAge = -1
+	http.SetCookie(w, expired)
 }
 
 // SetTrustedProxies configures the upstream-proxy CIDRs whose forwarding
@@ -3709,14 +3720,7 @@ routeLookup:
 			// cookie is informational only for elastic pools; the server-side
 			// p.clients binding is the routing authority.
 			if !p.stickyCookieAlreadyPins(r, slug, d.slotID, depID) {
-				http.SetCookie(rec, &http.Cookie{
-					Name:     cookiePrefix + slug,
-					Value:    p.stickyCookieValue(slug, d.slotID, depID),
-					Path:     "/app/" + slug + "/",
-					HttpOnly: true,
-					SameSite: http.SameSiteLaxMode,
-					Secure:   proxytrust.Scheme(r, p.trustedProxyNets()) == "https",
-				})
+				http.SetCookie(rec, p.routingCookie(r, slug, p.stickyCookieValue(slug, d.slotID, depID)))
 			}
 			defer wkr.activeConns.Add(-1)
 			defer p.clientConnClosed(slug, cid, routedClientSlot)
@@ -3761,14 +3765,7 @@ routeLookup:
 				// Pin the client to its slot. deploymentID is 0 while the
 				// worker is booting; retries during boot honor the pin and the
 				// loading page reloads into a route once the worker registers.
-				http.SetCookie(rec, &http.Cookie{
-					Name:     cookiePrefix + slug,
-					Value:    p.stickyCookieValue(slug, pl.slotID, pl.deploymentID),
-					Path:     "/app/" + slug + "/",
-					HttpOnly: true,
-					SameSite: http.SameSiteLaxMode,
-					Secure:   proxytrust.Scheme(r, p.trustedProxyNets()) == "https",
-				})
+				http.SetCookie(rec, p.routingCookie(r, slug, p.stickyCookieValue(slug, pl.slotID, pl.deploymentID)))
 				if pl.spawned && spawnFn != nil {
 					safego.Go("proxy elastic spawn", func() { spawnFn(slug, pl.slotID) })
 				}
@@ -3872,18 +3869,7 @@ routeLookup:
 		return
 	}
 	if !isStickyHit {
-		http.SetCookie(rec, &http.Cookie{
-			Name:     cookiePrefix + slug,
-			Value:    p.stickyCookieValue(slug, picked.index, picked.deploymentID),
-			Path:     "/app/" + slug + "/",
-			HttpOnly: true,
-			SameSite: http.SameSiteLaxMode,
-			// Mirror the session cookie's scheme-aware policy: Secure over HTTPS
-			// (so the routing cookie is never sent in cleartext), off over plain
-			// HTTP (where the browser would otherwise drop it). X-Forwarded-Proto
-			// is trusted only from configured proxies.
-			Secure: proxytrust.Scheme(r, p.trustedProxyNets()) == "https",
-		})
+		http.SetCookie(rec, p.routingCookie(r, slug, p.stickyCookieValue(slug, picked.index, picked.deploymentID)))
 	}
 	newConns := picked.activeConns.Add(1)
 	p.mu.RUnlock()
