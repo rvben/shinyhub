@@ -411,6 +411,21 @@ type elasticTerminator interface {
 // Compile-time interface satisfaction checks.
 var _ manager = (*process.Manager)(nil)
 var _ proxyBackend = (*proxy.Proxy)(nil)
+
+// drainingGenerationReporter is implemented by a proxy that tracks drain-first
+// generations. It stays outside proxyBackend so a proxy without generations
+// satisfies the Watcher unchanged.
+type drainingGenerationReporter interface {
+	HasDrainingGeneration(slug string) bool
+}
+
+// hasDrainingGeneration reports whether an older generation of slug still owns
+// open sessions. A proxy that does not track generations has none.
+func (w *Watcher) hasDrainingGeneration(slug string) bool {
+	p, ok := w.prx.(drainingGenerationReporter)
+	return ok && p.HasDrainingGeneration(slug)
+}
+
 var _ appStore = (*db.Store)(nil)
 var _ elasticTerminator = (*ElasticSpawner)(nil)
 
@@ -1081,7 +1096,7 @@ func (w *Watcher) retryRecoveryUnreadyStop(e PendingStopEntry) {
 // would either do nothing (no manager entries for a multiplex slug) or write
 // rows that do not correspond to anything real. See hibernateElasticPool.
 func (w *Watcher) hibernatePool(app *db.App) bool {
-	if p, ok := w.prx.(interface{ HasDrainingGeneration(string) bool }); ok && p.HasDrainingGeneration(app.Slug) {
+	if w.hasDrainingGeneration(app.Slug) {
 		return false
 	}
 	resolvedIso := w.servingIsolation(app)
@@ -1268,7 +1283,7 @@ func (w *Watcher) SleepNow(slug string) error {
 		return ErrElasticNotSleepable
 	}
 
-	if p, ok := w.prx.(interface{ HasDrainingGeneration(string) bool }); ok && p.HasDrainingGeneration(slug) {
+	if w.hasDrainingGeneration(slug) {
 		return fmt.Errorf("generation is draining")
 	}
 	w.prx.Deregister(slug)
@@ -1949,7 +1964,7 @@ func (w *Watcher) servingFixedReplica(app *db.App, deploymentID int64) bool {
 	if deploymentID > 0 {
 		return current.ID == deploymentID
 	}
-	if p, ok := w.prx.(interface{ HasDrainingGeneration(string) bool }); ok && p.HasDrainingGeneration(app.Slug) {
+	if w.hasDrainingGeneration(app.Slug) {
 		return false
 	}
 	return true
@@ -2071,7 +2086,7 @@ func (w *Watcher) handleCrashedLocked(slug string, index int) {
 	if count > w.cfg.RestartMaxAttempts {
 		// A retained outgoing generation still owns routes and workers. Do
 		// not tear down the whole slug while its retirement owner is active.
-		if p, ok := w.prx.(interface{ HasDrainingGeneration(string) bool }); ok && p.HasDrainingGeneration(slug) {
+		if w.hasDrainingGeneration(slug) {
 			return
 		}
 		w.prx.Deregister(slug)
@@ -3007,7 +3022,7 @@ func (w *Watcher) handleWarmExpand(apps []*db.App, repMap map[int64][]*db.Replic
 		if w.servingIsolation(app) != "multiplex" {
 			continue
 		}
-		if p, ok := w.prx.(interface{ HasDrainingGeneration(string) bool }); ok && p.HasDrainingGeneration(app.Slug) {
+		if w.hasDrainingGeneration(app.Slug) {
 			continue
 		}
 
