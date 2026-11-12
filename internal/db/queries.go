@@ -1500,22 +1500,9 @@ func (s *Store) GetAppsBySlugs(slugs []string) ([]*App, error) {
 	if ph == "" {
 		return nil, nil
 	}
-	rows, err := s.db.Query(`
+	return s.queryApps(`
 		SELECT `+appColumns+deploymentSummarySQL+`
 		FROM apps WHERE slug IN (`+ph+`)`, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var apps []*App
-	for rows.Next() {
-		app, err := scanApp(rows)
-		if err != nil {
-			return nil, err
-		}
-		apps = append(apps, app)
-	}
-	return apps, rows.Err()
 }
 
 func (s *Store) GetAppByID(id int64) (*App, error) {
@@ -1529,23 +1516,10 @@ func (s *Store) ListApps(limit, offset int) ([]*App, error) {
 	if limit <= 0 {
 		limit = s.d.noLimit()
 	}
-	rows, err := s.db.Query(`
+	return s.queryApps(`
 		SELECT `+appColumns+deploymentSummarySQL+`
 		FROM apps ORDER BY created_at DESC
 		LIMIT ? OFFSET ?`, limit, offset)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var apps []*App
-	for rows.Next() {
-		app, err := scanApp(rows)
-		if err != nil {
-			return nil, err
-		}
-		apps = append(apps, app)
-	}
-	return apps, rows.Err()
 }
 
 // ListAppsLean is ListApps without deploymentSummarySQL: it returns the same
@@ -1607,25 +1581,12 @@ func (s *Store) ListAppsInSlugs(slugs []string, limit, offset int) ([]*App, erro
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.db.Query(`
+	return s.queryApps(`
 		SELECT `+appColumns+deploymentSummarySQL+`
 		FROM apps
 		WHERE `+s.d.slugAllowlistClause()+`
 		ORDER BY created_at DESC
 		LIMIT ? OFFSET ?`, arg, limit, offset)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var apps []*App
-	for rows.Next() {
-		app, err := scanApp(rows)
-		if err != nil {
-			return nil, err
-		}
-		apps = append(apps, app)
-	}
-	return apps, rows.Err()
 }
 
 // CountAppsInSlugs returns the number of apps in the allowlist, matching the
@@ -1654,44 +1615,18 @@ func (s *Store) CountAppsInSlugs(slugs []string) (int, error) {
 // LastDeployedAt, ReleaseNumber, ReleasedAt, CurrentVersion and ContentDigest
 // are left at their zero values (see deploymentStatusOnlySQL).
 func (s *Store) ListWakingApps() ([]*App, error) {
-	rows, err := s.db.Query(`
+	return s.queryApps(`
 		SELECT ` + appColumns + deploymentStatusOnlySQL + `
 		FROM apps WHERE status = 'waking'`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var apps []*App
-	for rows.Next() {
-		app, err := scanApp(rows)
-		if err != nil {
-			return nil, err
-		}
-		apps = append(apps, app)
-	}
-	return apps, rows.Err()
 }
 
 // ListRunningApps returns apps whose pools may still contain live processes.
 // Degraded apps are included because a schedule activation can legitimately
 // start from that state and leave a recoverable surge across server restart.
 func (s *Store) ListRunningApps() ([]*App, error) {
-	rows, err := s.db.Query(`
+	return s.queryApps(`
 		SELECT ` + appColumns + deploymentSummarySQL + `
 		FROM apps WHERE status IN ('running', 'degraded')`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var apps []*App
-	for rows.Next() {
-		app, err := scanApp(rows)
-		if err != nil {
-			return nil, err
-		}
-		apps = append(apps, app)
-	}
-	return apps, rows.Err()
 }
 
 // ListHibernatedApps returns all apps whose status is 'hibernated'. Used on
@@ -1699,22 +1634,9 @@ func (s *Store) ListRunningApps() ([]*App, error) {
 // before a server restart, so their next access is a warm resume rather than a
 // cold boot (a frozen process does not survive a service restart).
 func (s *Store) ListHibernatedApps() ([]*App, error) {
-	rows, err := s.db.Query(`
+	return s.queryApps(`
 		SELECT ` + appColumns + deploymentSummarySQL + `
 		FROM apps WHERE status = 'hibernated'`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var apps []*App
-	for rows.Next() {
-		app, err := scanApp(rows)
-		if err != nil {
-			return nil, err
-		}
-		apps = append(apps, app)
-	}
-	return apps, rows.Err()
 }
 
 // CountRunningApps returns the number of apps currently in the running state.
@@ -1752,22 +1674,9 @@ func (s *Store) CountRunningReplicas() (int64, error) {
 // LastDeployedAt, ReleaseNumber, ReleasedAt, CurrentVersion and ContentDigest
 // are left at their zero values (see deploymentStatusOnlySQL).
 func (s *Store) ListReconcilableApps() ([]*App, error) {
-	rows, err := s.db.Query(`
+	return s.queryApps(`
 		SELECT ` + appColumns + deploymentStatusOnlySQL + `
 		FROM apps WHERE status IN ('running', 'degraded')`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var apps []*App
-	for rows.Next() {
-		app, err := scanApp(rows)
-		if err != nil {
-			return nil, err
-		}
-		apps = append(apps, app)
-	}
-	return apps, rows.Err()
 }
 
 // ListCrashedAppsWithLostReplicas returns crashed apps that still have at
@@ -1777,7 +1686,7 @@ func (s *Store) ListReconcilableApps() ([]*App, error) {
 // revives exactly this set back to degraded so the lost-replica healing path
 // can re-place the slots once a healthy worker exists.
 func (s *Store) ListCrashedAppsWithLostReplicas() ([]*App, error) {
-	rows, err := s.db.Query(`
+	return s.queryApps(`
 		SELECT ` + appColumns + deploymentSummarySQL + `
 		FROM apps
 		WHERE status = 'crashed'
@@ -1785,19 +1694,6 @@ func (s *Store) ListCrashedAppsWithLostReplicas() ([]*App, error) {
 			SELECT 1 FROM replicas r
 			WHERE r.app_id = apps.id AND r.status = '` + ReplicaStatusLost + `'
 		)`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var apps []*App
-	for rows.Next() {
-		app, err := scanApp(rows)
-		if err != nil {
-			return nil, err
-		}
-		apps = append(apps, app)
-	}
-	return apps, rows.Err()
 }
 
 // ReviveCrashedApp atomically transitions a crashed app back to "degraded" and
@@ -1823,22 +1719,9 @@ func (s *Store) ReviveCrashedApp(slug string) (bool, error) {
 // and deploying apps are excluded so the controller never resurrects or fights
 // another lifecycle path; the scale primitives apply the same status guard.
 func (s *Store) ListAutoscaleApps() ([]*App, error) {
-	rows, err := s.db.Query(`
+	return s.queryApps(`
 		SELECT ` + appColumns + deploymentSummarySQL + `
 		FROM apps WHERE autoscale_enabled = 1 AND status IN ('running', 'degraded')`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var apps []*App
-	for rows.Next() {
-		app, err := scanApp(rows)
-		if err != nil {
-			return nil, err
-		}
-		apps = append(apps, app)
-	}
-	return apps, rows.Err()
 }
 
 // SetAppLastAutoscaleAt records the epoch-seconds timestamp of the most recent
@@ -1869,22 +1752,9 @@ func (s *Store) NowEpoch() (int64, error) {
 // (or a cleanup failure) between the tombstone and the row delete leaves such
 // rows behind for startup reconciliation to finish.
 func (s *Store) ListDeletingApps() ([]*App, error) {
-	rows, err := s.db.Query(`
+	return s.queryApps(`
 		SELECT ` + appColumns + deploymentSummarySQL + `
 		FROM apps WHERE status = 'deleting'`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var apps []*App
-	for rows.Next() {
-		app, err := scanApp(rows)
-		if err != nil {
-			return nil, err
-		}
-		apps = append(apps, app)
-	}
-	return apps, rows.Err()
 }
 
 // AllSlugs returns every app slug regardless of status. Used by the startup
@@ -1910,25 +1780,12 @@ func (s *Store) ListAppsVisibleToUser(userID int64, limit, offset int) ([]*App, 
 	if limit <= 0 {
 		limit = s.d.noLimit()
 	}
-	rows, err := s.db.Query(`
+	return s.queryApps(`
 		SELECT `+appColumns+deploymentSummarySQL+`
 		FROM apps
 		WHERE `+appVisibleToUserWhere+`
 		ORDER BY created_at DESC
 		LIMIT ? OFFSET ?`, userID, userID, userID, limit, offset)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var apps []*App
-	for rows.Next() {
-		app, err := scanApp(rows)
-		if err != nil {
-			return nil, err
-		}
-		apps = append(apps, app)
-	}
-	return apps, rows.Err()
 }
 
 // ListAppsVisibleToUserLean is ListAppsVisibleToUser without
@@ -1988,26 +1845,13 @@ func (s *Store) ListAppsVisibleToUserInSlugs(userID int64, slugs []string, limit
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.db.Query(`
+	return s.queryApps(`
 		SELECT `+appColumns+deploymentSummarySQL+`
 		FROM apps
 		WHERE (`+appVisibleToUserWhere+`)
 		  AND `+s.d.slugAllowlistClause()+`
 		ORDER BY created_at DESC
 		LIMIT ? OFFSET ?`, userID, userID, userID, arg, limit, offset)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var apps []*App
-	for rows.Next() {
-		app, err := scanApp(rows)
-		if err != nil {
-			return nil, err
-		}
-		apps = append(apps, app)
-	}
-	return apps, rows.Err()
 }
 
 // CountAppsVisibleToUserInSlugs returns the number of apps visible to userID
@@ -2039,25 +1883,12 @@ func (s *Store) ListPublicApps(limit, offset int) ([]*App, error) {
 	if limit <= 0 {
 		limit = s.d.noLimit()
 	}
-	rows, err := s.db.Query(`
+	return s.queryApps(`
 		SELECT `+appColumns+deploymentSummarySQL+`
 		FROM apps
 		WHERE access = 'public'
 		ORDER BY created_at DESC
 		LIMIT ? OFFSET ?`, limit, offset)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var apps []*App
-	for rows.Next() {
-		app, err := scanApp(rows)
-		if err != nil {
-			return nil, err
-		}
-		apps = append(apps, app)
-	}
-	return apps, rows.Err()
 }
 
 type UpdateAppStatusParams struct {
@@ -6369,6 +6200,26 @@ func boolToInt(b bool) int {
 // scanner interface satisfied by both *sql.Row and *sql.Rows
 type scanner interface {
 	Scan(dest ...any) error
+}
+
+// queryApps runs a query whose projection is appColumns followed by one of the
+// deployment summary fragments and returns every row as an App. A query with
+// no rows returns a nil slice.
+func (s *Store) queryApps(query string, args ...any) ([]*App, error) {
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var apps []*App
+	for rows.Next() {
+		app, err := scanApp(rows)
+		if err != nil {
+			return nil, err
+		}
+		apps = append(apps, app)
+	}
+	return apps, rows.Err()
 }
 
 func scanApp(s scanner) (*App, error) {
