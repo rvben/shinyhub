@@ -8663,8 +8663,7 @@ a.lp-tile:hover .lp-tile-go { color: var(--cyan-bright); transform: translateX(3
 /* Reserve advisory space so draft validation cannot move subsequent actions. */
 #scaling-ceiling, #autoscale-ceiling, #render-pacing-advice, #worker-capacity { min-height: 3.5rem; }
 .setting-action[aria-pressed="true"] { color: var(--text); background: var(--surface-2); border-color: var(--control-border, var(--line-2)); text-decoration: none; }
-#min-warm-inert-warning { min-height: 3em; display: block; }
-#min-warm-inert-warning[hidden] { display: block !important; visibility: hidden; }
+#min-warm-warning, #min-warm-inert-warning { display: block; }
 
 #scaling-ceiling:empty, #autoscale-ceiling:empty, #render-pacing-advice:empty, #worker-capacity:empty { display: block; visibility: hidden; }
 /* Keep the choice and its consequence together without reserved blank rows. */
@@ -8676,8 +8675,6 @@ a.lp-tile:hover .lp-tile-go { color: var(--cyan-bright); transform: translateX(3
 .privacy-details p { max-width: 65ch; margin: 0.5rem 0 1rem; color: var(--text-muted); font-size: var(--fs-body); line-height: 1.55; }
 
 #detail-configuration-panel .env-btn-secondary:disabled { opacity: .55; cursor: default; }
-#min-warm-warning { display: block; min-height: 3em; }
-#min-warm-warning[hidden] { display: block !important; visibility: hidden; }
 
 .configuration-behavior { max-width: 65ch; margin-bottom: 0.5rem; font-size: var(--fs-body); line-height: 1.5; }
 .configuration-behavior h3 { margin: 1.25rem 0 0.5rem; font-size: var(--fs-body); font-weight: 600; }
@@ -8689,8 +8686,6 @@ a.lp-tile:hover .lp-tile-go { color: var(--cyan-bright); transform: translateX(3
   #detail-configuration-panel { --configuration-compact: 1; }
   #detail-configuration-panel:not([hidden]) { display: block; }
   #detail-configuration-panel > .settings-block { padding-top: 1rem; scroll-margin-top: calc(var(--configuration-sticky-top) + 68px); }
-  #min-warm-warning[hidden], #min-warm-inert-warning[hidden] { display: none !important; }
-  #min-warm-warning, #min-warm-inert-warning { min-height: 0; }
   .worker-mode-help { min-height: 8.4em; }
 }
 
@@ -8758,7 +8753,6 @@ a.lp-tile:hover .lp-tile-go { color: var(--cyan-bright); transform: translateX(3
 .settings-policy-details > .settings-block-body { padding-top: 1rem; }
 #configuration-scaling .worker-mode-help { min-height: 0; }
 #min-warm-warning[hidden], #min-warm-inert-warning[hidden] { display: none !important; }
-#min-warm-warning, #min-warm-inert-warning { min-height: 0; }
 #configuration-scaling #scaling-ceiling[hidden], #worker-capacity:empty { display: none; }
 
 #configuration-scaling .scaling-ceiling, #autoscale-ceiling { min-height: 2.8em; padding: 0; border: 0; background: none; }
