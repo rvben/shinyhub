@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.24.4](https://github.com/rvben/shinyhub/compare/v0.24.3...v0.24.4) - 2026-11-12
+
+### Fixed
+
+- **process**: launch replicas without holding the manager lock ([fbb849b](https://github.com/rvben/shinyhub/commit/fbb849b9ee2c5130f5939128aba12393ea697182))
+
 ## [0.24.3](https://github.com/rvben/shinyhub/compare/v0.24.2...v0.24.3) - 2026-11-12
 
 ### Fixed
