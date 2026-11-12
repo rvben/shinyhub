@@ -1104,6 +1104,54 @@ func TestSpawnElasticWorker_InstrumentedHealthFailureRetriesUninstrumented(t *te
 	}
 }
 
+// A stop that cancels an instrumented worker launch must stay a stop: the
+// spawner may not relaunch the worker through the uninstrumented fallback.
+func TestSpawnElasticWorker_LaunchCancelledByStopIsNotRetried(t *testing.T) {
+	const slotID = 2
+	entered, release := make(chan struct{}), make(chan struct{})
+	rt := &recordingRuntime{exitOnSignal: true, onStart: func(call int) error {
+		if call == 1 {
+			close(entered)
+			<-release
+		}
+		return nil
+	}}
+	t.Cleanup(rt.closeExits)
+	f := newElasticTracingFixture(t, "cancelled", mustMinimalBundle(t), rt)
+	f.mgr.SetAutoInstrumentAppsDefault(true)
+	f.mgr.SetStopGrace(20 * time.Millisecond)
+	reserveDirectSpawn(t, f.prx, "cancelled", slotID)
+
+	spawned := make(chan struct{})
+	go func() {
+		defer close(spawned)
+		(&lifecycle.ElasticSpawner{Store: f.store, Manager: f.mgr, Proxy: f.prx, HealthCheck: noopHealthCheck}).Spawn("cancelled", slotID)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the runtime never received the instrumented launch")
+	}
+	// The launch is still in the runtime, so this stop only marks it
+	// cancelled and returns once its bound expires.
+	if err := f.mgr.StopReplica("cancelled", slotID); err != nil {
+		t.Fatalf("StopReplica of the launching worker: %v", err)
+	}
+	close(release)
+	select {
+	case <-spawned:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Spawn did not return after the launch was released")
+	}
+
+	if cmds := f.startedCommands(); len(cmds) != 1 {
+		t.Fatalf("started %d, want 1: the cancelled launch was relaunched: %v", len(cmds), cmds)
+	}
+	if f.mgr.HasRunning("cancelled") {
+		t.Error("a worker is running after its launch was cancelled by a stop")
+	}
+}
+
 func TestSpawnElasticWorker_UninstrumentedHealthFailureDoesNotRetry(t *testing.T) {
 	f := newElasticTracingFixture(t, "noretry", mustMinimalBundle(t), &recordingRuntime{})
 	reserveDirectSpawn(t, f.prx, "noretry", 2)

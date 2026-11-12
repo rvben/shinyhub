@@ -21,6 +21,17 @@ var ErrNoLiveWorker = errors.New("no live worker for tier")
 // a re-placement that races a slot already (re)filled is a no-op, not a failure.
 var ErrReplicaAlreadyRunning = errors.New("replica already running")
 
+// ErrReplicaStarting is returned (wrapped) by Manager.Start when another Start
+// is still launching the same slug+index slot. It wraps
+// ErrReplicaAlreadyRunning, so a caller that treats an already-filled slot as
+// a no-op treats a slot being filled the same way.
+var ErrReplicaStarting = fmt.Errorf("replica starting: %w", ErrReplicaAlreadyRunning)
+
+// ErrStartCancelled is returned (wrapped) by Manager.Start when a stop of the
+// slot, or another occupant taking it, arrived while the runtime was still
+// launching. The launched process is never published; Start stops it itself.
+var ErrStartCancelled = errors.New("replica start cancelled")
+
 // ErrReplicaNotFound is returned (wrapped) by Manager.StopReplica when the
 // slug+index slot has no live entry. Callers that distinguish an already-gone
 // replica from a real stop failure (e.g. autoscale scale-down) match this

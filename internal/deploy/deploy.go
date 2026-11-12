@@ -1667,7 +1667,9 @@ func bootReplica(p Params, idx int, tier, targetWorker string, baseCmd []string,
 	p, end := p.startPhase("deploy.replica", attribute.Int("shinyhub.replica", idx))
 	defer func() { end(err) }()
 	res, err = bootReplicaAttempt(p, idx, tier, targetWorker, baseCmd, autoInstrument, hc, timeout)
-	if err != nil && autoInstrument && baseCmd == nil && appType == "python" {
+	// A launch cancelled by a concurrent stop is not a failed launch: the stop
+	// asked for the replica to be gone, so relaunching it would undo the stop.
+	if err != nil && autoInstrument && baseCmd == nil && appType == "python" && !errors.Is(err, process.ErrStartCancelled) {
 		// The instrumented launch failed; retry with the uninstrumented fallback.
 		// bootReplicaAttempt calls ResolveLaunch with AutoInstrumentDefault:false,
 		// re-deriving the uninstrumented command through the shared seam.

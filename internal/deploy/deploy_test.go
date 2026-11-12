@@ -1849,3 +1849,78 @@ func TestResolveWorkerIsolation(t *testing.T) {
 		}
 	}
 }
+
+// gatedFirstStartRuntime holds the first Start until release is closed,
+// modelling a runtime that is still provisioning when an operator stops the
+// replica.
+type gatedFirstStartRuntime struct {
+	recordingRuntime
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (r *gatedFirstStartRuntime) Start(ctx context.Context, p process.StartParams, w io.Writer) (process.ReplicaEndpoint, error) {
+	first := false
+	r.once.Do(func() { first = true; close(r.entered) })
+	if first {
+		<-r.release
+	}
+	return r.recordingRuntime.Start(ctx, p, w)
+}
+
+// A stop that cancels an instrumented launch must stay a stop: the deploy may
+// not relaunch the replica through the uninstrumented fallback.
+func TestRun_LaunchCancelledByStopIsNotRetriedUninstrumented(t *testing.T) {
+	bundle := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bundle, "app.py"), []byte("# app"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	restoreSync := deploy.SetSyncHooksForTest(func(context.Context, string, []string) error { return nil }, func(context.Context, string, []string) error { return nil })
+	defer restoreSync()
+	restoreCmd := deploy.SetBuildCommandForTest(func(_ string, _, _ int, _ string, _ []string, _ bool) []string {
+		return []string{"sleep", "30"}
+	})
+	defer restoreCmd()
+
+	rt := &gatedFirstStartRuntime{entered: make(chan struct{}), release: make(chan struct{})}
+	mgr := process.NewManager(t.TempDir(), rt)
+	mgr.SetStopGrace(20 * time.Millisecond)
+	mgr.SetAutoInstrumentAppsDefault(true)
+	defer mgr.Stop("cancelled")
+
+	runDone := make(chan error, 1)
+	go func() {
+		_, err := deploy.Run(deploy.Params{
+			Slug: "cancelled", BundleDir: bundle, Manager: mgr, Proxy: proxy.New(),
+			HealthCheck: func(string, time.Duration, http.RoundTripper) error { return nil },
+		})
+		runDone <- err
+	}()
+	select {
+	case <-rt.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the runtime never received the instrumented launch")
+	}
+	// The launch is still in the runtime, so this stop only marks it
+	// cancelled and returns once its bound expires.
+	if err := mgr.StopReplica("cancelled", 0); err != nil {
+		t.Fatalf("StopReplica of the launching replica: %v", err)
+	}
+	close(rt.release)
+
+	select {
+	case err := <-runDone:
+		if !errors.Is(err, process.ErrStartCancelled) {
+			t.Fatalf("Run after its launch was cancelled: got %v, want ErrStartCancelled", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return after the launch was released")
+	}
+	if starts := rt.recorded(); len(starts) != 1 {
+		t.Fatalf("runtime starts = %d, want 1: the cancelled launch was relaunched", len(starts))
+	}
+	if mgr.HasRunning("cancelled") {
+		t.Error("a replica is running after its launch was cancelled by a stop")
+	}
+}
