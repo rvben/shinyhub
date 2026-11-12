@@ -2047,13 +2047,20 @@ const backendResponseHeaderTimeout = 120 * time.Second
 // newBackendTransport returns the HTTP transport for local (native/docker) and
 // VPC-internal (fargate) app backends. It mirrors http.DefaultTransport's
 // connection settings but adds a ResponseHeaderTimeout backstop and raises
-// MaxIdleConnsPerHost: every app is a single host that may carry many
+// MaxIdleConnsPerHost: every replica is a single host that may carry many
 // concurrent Shiny sessions, so the net/http default of 2 idle conns per host
 // causes needless connection churn.
+//
+// The total across hosts is left uncapped. All replicas share this transport,
+// so a total cap is reached by a handful of busy apps together, and from then
+// on each returning connection evicts another replica's idle one, which that
+// replica redials on its next request. The per-host cap and IdleConnTimeout
+// bound what stays open.
 func newBackendTransport() *http.Transport {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.ResponseHeaderTimeout = backendResponseHeaderTimeout
 	t.MaxIdleConnsPerHost = 64
+	t.MaxIdleConns = 0
 	return t
 }
 
