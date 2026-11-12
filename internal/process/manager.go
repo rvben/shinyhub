@@ -1135,88 +1135,139 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 	}
 	m.entries[poolKey] = pool
 
-	go func() {
-		// close(done) is deferred so it always fires - even on a panic below -
-		// so a concurrent StopReplica waiting on done never hangs. The recover
-		// keeps a fault in Wait or the bookkeeping from crashing the whole
-		// server. defers run LIFO, so the locked section's Unlock runs first
-		// (releasing the mutex even on panic), then recover, then close.
-		defer close(done)
-		defer func() {
-			if rec := recover(); rec != nil {
-				slog.Error("manager: exit-monitor goroutine panicked",
-					"slug", p.Slug, "idx", p.Index, "panic", rec)
-			}
-		}()
-		waitErr := rt.Wait(context.Background(), handle)
-		// A proven exit is nil or *ProcessExitError; anything else (a transport
-		// error, a lost worker) proves nothing about whether the process is
-		// still alive, so it must not be treated as an observed exit.
-		var exitErr *ProcessExitError
-		exitObserved := waitErr == nil || errors.As(waitErr, &exitErr)
-		// Consume the OOM verdict from the runtime BEFORE taking m.mu: the
-		// runtime read takes its own lock, and the verdict was stashed by Wait
-		// before it tore the cgroup down.
-		oom := consumeOOM(rt, handle.PID)
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		// Only the entry's current owner reacts to this exit. After an eviction or
-		// a replacement Start at the same key, a stale Wait sees a nil or different
-		// entry and must touch neither status nor the log file — otherwise it would
-		// close the replacement replica's log out from under it.
-		if pool := m.entries[poolKey]; p.Index < len(pool) {
-			if e := pool[p.Index]; e != nil && e.handle == handle {
-				e.exitObserved = exitObserved
-				// An unclaimed stopPending fence has no retry queue watching it, so
-				// once the exit is proven, clear it here - nothing else ever will,
-				// and the slot would otherwise stay fenced forever. A claimed fence
-				// is left alone for its owner's ReleaseStopPending.
-				if exitObserved && e.stopPending && !e.stopPendingClaimed {
-					e.stopPending = false
-				}
-				key := replicaKey{poolKey, p.Index}
-				if e.startupGuard != nil {
-					_ = e.startupGuard.Close()
-					e.startupGuard = nil
-				}
-				// Record the exit verdict BEFORE flipping Status, so no reader under
-				// m.mu can observe the crash without its cause and restart count.
-				e.info.OOMKilled = oom
-				switch {
-				case e.stopped:
-					e.info.Status = StatusStopped
-				case errors.Is(waitErr, ErrNoLiveWorker):
-					// The worker holding this replica is gone, so nothing ever
-					// established whether its container exited. That is a different
-					// fact from a crash and carries no exit cause, so no verdict is
-					// recorded: inventing one would spend the app's restart budget
-					// re-placing onto a dead worker and persist a fabricated reason.
-					// The worker-down sweep owns the transition and the re-placement.
-					e.info.Status = StatusLost
-				default:
-					verdict := replicaExitVerdict(waitErr, oom, p.MemoryLimitMB, m.lastExit[key])
-					verdict.RunID = run.RunID
-					m.lastExit[key] = verdict
-					e.info.Status = StatusCrashed
-				}
-				run.Status = e.info.Status
-				run.FinishedAt = time.Now().UTC()
-				run.OOMKilled = oom
-				if verdict, ok := m.lastExit[key]; ok && run.Status == StatusCrashed {
-					run.ExitCode, run.Signal, run.ExitReason = verdict.ExitCode, verdict.Signal, verdict.Reason
-				}
-				if lf := m.logFiles[key]; lf != nil {
-					lf.Close()
-					delete(m.logFiles, key)
-				}
-				if !m.finishLogRun(run) {
-					e.finishFailed = true
-				}
-			}
-		}
-	}()
+	go m.monitorExit(exitMonitor{
+		rt: rt, handle: handle, done: done,
+		poolKey: poolKey, slug: p.Slug, index: p.Index,
+		memoryLimitMB:   p.MemoryLimitMB,
+		closesLogOutput: true,
+	})
 
 	return info, nil
+}
+
+// exitMonitor names everything that differs between the monitor of a replica
+// the manager started and one it adopted after a restart.
+type exitMonitor struct {
+	rt     Runtime
+	handle RunHandle
+	// done is closed when the monitor returns, releasing anyone waiting for
+	// the replica to stop.
+	done chan struct{}
+	// poolKey is the m.entries key holding the replica: the app's slug, or a
+	// generation pool key for a candidate started beside the active pool.
+	poolKey string
+	slug    string
+	index   int
+	// memoryLimitMB is the limit the replica was started with, recorded in the
+	// exit verdict. Zero means it is not known.
+	memoryLimitMB int
+	// closesLogOutput is set when the manager opened a log writer for the
+	// replica under m.logFiles, which the monitor then closes on exit.
+	closesLogOutput bool
+	adopted         bool
+}
+
+// monitorExit waits for a replica to exit and records the outcome on its
+// entry: status, exit verdict, log run and any fence that the exit resolves.
+// It runs as its own goroutine for the life of the replica.
+func (m *Manager) monitorExit(mon exitMonitor) {
+	// close(done) is deferred so it always fires - even on a panic below -
+	// so a concurrent StopReplica waiting on done never hangs. The recover
+	// keeps a fault in Wait or the bookkeeping from crashing the whole
+	// server. defers run LIFO, so the locked section's Unlock runs first
+	// (releasing the mutex even on panic), then recover, then close.
+	defer close(mon.done)
+	defer func() {
+		if rec := recover(); rec != nil {
+			msg := "manager: exit-monitor goroutine panicked"
+			if mon.adopted {
+				msg = "manager: adopt exit-monitor goroutine panicked"
+			}
+			slog.Error(msg, "slug", mon.slug, "idx", mon.index, "panic", rec)
+		}
+	}()
+	waitErr := mon.rt.Wait(context.Background(), mon.handle)
+	// A proven exit is nil or *ProcessExitError; anything else (a transport
+	// error, a lost worker) proves nothing about whether the process is
+	// still alive, so it must not be treated as an observed exit.
+	var exitErr *ProcessExitError
+	exitObserved := waitErr == nil || errors.As(waitErr, &exitErr)
+	// Consume the OOM verdict from the runtime BEFORE taking m.mu: the
+	// runtime read takes its own lock, and the verdict was stashed by Wait
+	// before it tore the cgroup down.
+	oom := consumeOOM(mon.rt, mon.handle.PID)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// Only the entry's current owner reacts to this exit. After an eviction or
+	// a replacement Start at the same key, a stale Wait sees a nil or different
+	// entry and must touch neither status nor the log file - otherwise it would
+	// close the replacement replica's log out from under it.
+	pool := m.entries[mon.poolKey]
+	if mon.index >= len(pool) {
+		return
+	}
+	e := pool[mon.index]
+	if e == nil || e.handle != mon.handle {
+		return
+	}
+	e.exitObserved = exitObserved
+	// An unclaimed stopPending fence has no retry queue watching it, so
+	// once the exit is proven, clear it here - nothing else ever will,
+	// and the slot would otherwise stay fenced forever. A claimed fence
+	// is left alone for its owner's ReleaseStopPending.
+	if exitObserved && e.stopPending && !e.stopPendingClaimed {
+		e.stopPending = false
+	}
+	key := replicaKey{mon.poolKey, mon.index}
+	// Only a replica started by this manager can still hold a startup guard.
+	if e.startupGuard != nil {
+		_ = e.startupGuard.Close()
+		e.startupGuard = nil
+	}
+	// Record the exit verdict BEFORE flipping Status, so no reader under
+	// m.mu can observe the crash without its cause and restart count.
+	e.info.OOMKilled = oom
+	switch {
+	case e.stopped:
+		e.info.Status = StatusStopped
+	case errors.Is(waitErr, ErrNoLiveWorker):
+		// The worker holding this replica is gone, so nothing ever
+		// established whether its container exited. That is a different
+		// fact from a crash and carries no exit cause, so no verdict is
+		// recorded: inventing one would spend the app's restart budget
+		// re-placing onto a dead worker and persist a fabricated reason.
+		// The worker-down sweep owns the transition and the re-placement.
+		e.info.Status = StatusLost
+	default:
+		verdict := replicaExitVerdict(waitErr, oom, mon.memoryLimitMB, m.lastExit[key])
+		if e.logRun != nil {
+			verdict.RunID = e.logRun.RunID
+		}
+		m.lastExit[key] = verdict
+		e.info.Status = StatusCrashed
+	}
+	if mon.closesLogOutput {
+		if lf := m.logFiles[key]; lf != nil {
+			lf.Close()
+			delete(m.logFiles, key)
+		}
+	}
+	// An adopted replica has a log run only when its run ID survived the
+	// restart. The run on the entry is mutated in place, not a copy:
+	// EvictReplicaIfWorker reads FinishedAt off the entry to tell a finished
+	// run from a still-open one, so the terminal record must be visible there.
+	if e.logRun == nil {
+		return
+	}
+	e.logRun.Status = e.info.Status
+	e.logRun.FinishedAt = time.Now().UTC()
+	e.logRun.OOMKilled = oom
+	if verdict, ok := m.lastExit[key]; ok && e.logRun.Status == StatusCrashed {
+		e.logRun.ExitCode, e.logRun.Signal, e.logRun.ExitReason = verdict.ExitCode, verdict.Signal, verdict.Reason
+	}
+	if !m.finishLogRun(*e.logRun) {
+		e.finishFailed = true
+	}
 }
 
 // AcknowledgeReplicaStart releases a guarded native child only after its PID
@@ -2616,68 +2667,17 @@ func (m *Manager) Adopt(slug string, info ProcessInfo, handle RunHandle) {
 		observer.ObserveRecoveredWorkload(p, handle)
 	}
 
-	go func() {
-		// See the Start monitor: deferred close keeps StopReplica from hanging on
-		// a panic, recover keeps the fault from crashing the server, and the
-		// locked section's Unlock runs first (mutex released even on panic).
-		defer close(done)
-		defer func() {
-			if rec := recover(); rec != nil {
-				slog.Error("manager: adopt exit-monitor goroutine panicked",
-					"slug", slug, "idx", info.Index, "panic", rec)
-			}
-		}()
-		waitErr := rt.Wait(context.Background(), handle)
-		var exitErr *ProcessExitError
-		exitObserved := waitErr == nil || errors.As(waitErr, &exitErr)
-		oom := consumeOOM(rt, handle.PID)
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		if p := m.entries[slug]; info.Index < len(p) {
-			if e := p[info.Index]; e != nil && e.handle == handle {
-				e.exitObserved = exitObserved
-				// See the Start monitor: an unclaimed stopPending fence is cleared
-				// here once the exit is proven, since no retry queue owns it.
-				if exitObserved && e.stopPending && !e.stopPendingClaimed {
-					e.stopPending = false
-				}
-				key := replicaKey{slug, info.Index}
-				e.info.OOMKilled = oom
-				switch {
-				case e.stopped:
-					e.info.Status = StatusStopped
-				case errors.Is(waitErr, ErrNoLiveWorker):
-					// See the Start monitor: a lost worker is not a crash and has no
-					// exit cause to record.
-					e.info.Status = StatusLost
-				default:
-					// MemoryLimitMB is unknown for an adopted process (no StartParams);
-					// the watcher falls back to the app's stored limit when it is 0.
-					verdict := replicaExitVerdict(waitErr, oom, 0, m.lastExit[key])
-					if e.logRun != nil {
-						verdict.RunID = e.logRun.RunID
-					}
-					m.lastExit[key] = verdict
-					e.info.Status = StatusCrashed
-				}
-				if e.logRun != nil {
-					// Mutate the shared run (like the Start monitor does), not a
-					// copy: EvictReplicaIfWorker reads FinishedAt off the entry to
-					// tell a finished run from a still-open one, so the terminal
-					// record must be visible there.
-					e.logRun.Status = e.info.Status
-					e.logRun.FinishedAt = time.Now().UTC()
-					e.logRun.OOMKilled = oom
-					if verdict, ok := m.lastExit[key]; ok && e.logRun.Status == StatusCrashed {
-						e.logRun.ExitCode, e.logRun.Signal, e.logRun.ExitReason = verdict.ExitCode, verdict.Signal, verdict.Reason
-					}
-					if !m.finishLogRun(*e.logRun) {
-						e.finishFailed = true
-					}
-				}
-			}
-		}
-	}()
+	go m.monitorExit(exitMonitor{
+		rt: rt, handle: handle, done: done,
+		poolKey: slug, slug: slug, index: info.Index,
+		// The limit an adopted process was started with is not recorded; the
+		// watcher falls back to the app's stored limit when the verdict has 0.
+		memoryLimitMB: 0,
+		// An adopted process writes its output without the manager, so there is
+		// no log writer to close.
+		closesLogOutput: false,
+		adopted:         true,
+	})
 }
 
 // oomReporter is the optional runtime capability to report whether a just-exited
