@@ -721,6 +721,7 @@
     "views/request-coalesce.js",
     "views/resource-settings.js",
     "views/scaling-settings.js",
+    "views/schedule-surface.js",
     "views/schedule-ui.js",
     "views/select-picker.js",
     "views/session-controller.js",

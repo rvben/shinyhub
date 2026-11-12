@@ -1151,12 +1151,12 @@ func TestSPALogoutButtonRespectsServerOutcome(t *testing.T) {
 // so operators see fire times in the schedule's own zone. The form must not
 // present a browser-local preview as if it were authoritative server behavior.
 func TestScheduleTimezoneFields(t *testing.T) {
-	assertContains(t, "app.js", "s.effective_timezone",
+	assertContains(t, "views/schedule-surface.js", "s.effective_timezone",
 		"schedule table must read s.effective_timezone from the DTO to render the zone and next_fire correctly")
-	assertContains(t, "app.js", "s.timezone_inherited",
+	assertContains(t, "views/schedule-surface.js", "s.timezone_inherited",
 		"schedule table must read s.timezone_inherited to show the (inherited) hint when no per-schedule timezone is stored")
-	assertContains(t, "app.js", "s.timezone",
-		"schedule form must read s.timezone when editing an existing schedule to populate the timezone field")
+	assertContains(t, "app.js", "getElementById('sched-timezone').value = existing.timezone || ''",
+		"schedule form must read the stored timezone when editing an existing schedule to populate the timezone field")
 	assertContains(t, "app.js", "sched-timezone",
 		"schedule form must reference sched-timezone so the timezone input is populated and submitted")
 	assertContains(t, "app.js", "evaluated in ${zone}",
@@ -1171,18 +1171,18 @@ func TestScheduleTimezoneFields(t *testing.T) {
 // the dstAdvisoryMarkup helper. If the import or the call site is dropped the
 // double-fire footgun goes silent in the UI again.
 func TestScheduleDSTAdvisoryWired(t *testing.T) {
-	assertContains(t, "app.js", "dstAdvisoryMarkup,",
-		"app.js must import dstAdvisoryMarkup so the schedule table can surface the DST fall-back advisory")
-	assertContains(t, "app.js", "dstAdvisoryMarkup(s)",
+	assertContains(t, "views/schedule-surface.js", "dstAdvisoryMarkup,",
+		"the schedule surface must import dstAdvisoryMarkup so the schedule table can surface the DST fall-back advisory")
+	assertContains(t, "views/schedule-surface.js", "dstAdvisoryMarkup(s)",
 		"schedule table cron cell must call dstAdvisoryMarkup(s) to render the dst_advisory from the DTO")
 	assertContains(t, "views/schedule-ui.js", "schedule.dst_advisory",
 		"schedule-ui helper must read dst_advisory from the schedule DTO computed by the server")
 }
 
 func TestScheduleRunActivationErrorsAreVisibleAndEscaped(t *testing.T) {
-	assertContains(t, "app.js", "activationErrorDetail(run)",
+	assertContains(t, "views/schedule-surface.js", "activationErrorDetail(run)",
 		"schedule run history must read the activation_error field returned by the API")
-	assertContains(t, "app.js", "escapeHtml(activationError)",
+	assertContains(t, "views/schedule-surface.js", "escapeHtml(activationError)",
 		"historical activation errors are external process text and must be HTML-escaped")
 	assertContains(t, "style.css", ".schedule-run-activation-error",
 		"historical activation errors need a resilient visible treatment in run history")
@@ -1202,9 +1202,9 @@ func TestScheduleSurfaceSafetyContracts(t *testing.T) {
 		"schedule form failures must be announced to assistive technology")
 	assertContains(t, "views/schedule-ui.js", "No future app action",
 		"a disabled activation policy must be described as controlling future runs")
-	assertContains(t, "app.js", "Earlier policy ·",
+	assertContains(t, "views/schedule-surface.js", "Earlier policy ·",
 		"retained activation attribution must be labelled as originating under an earlier policy")
-	assertContains(t, "app.js", "surface.renderedDetailSignature === detailSignature",
+	assertContains(t, "views/schedule-surface.js", "surface.renderedDetailSignature === detailSignature",
 		"selected schedule detail must be invalidated when its DTO changes during polling")
 	assertContains(t, "views/schedule-ui.js", "last_success_age_s advances on every poll",
 		"volatile relative age must not invalidate selected detail or discard run-history pagination")
@@ -1233,27 +1233,29 @@ func TestSharedDataReadOnlyHelpIsHonest(t *testing.T) {
 // TestScheduleRunHistoryReadsSnakeCase guards the JSON contract for schedule
 // runs. db.ScheduleRun serializes with snake_case json tags (id, status,
 // exit_code, started_at; see internal/db/schedules.go), so the run-history
-// list in app.js must read those keys. If the frontend reverts to the old
+// list in views/schedule-surface.js must read those keys. If the frontend reverts to the old
 // PascalCase reads (run.Status, run.ExitCode, ...) the history rows render
 // blank and the per-run log buttons call the endpoint with an undefined id.
 func TestScheduleRunHistoryReadsSnakeCase(t *testing.T) {
 	for _, needle := range []string{"run.started_at", "run.status", "run.exit_code", "run.id"} {
-		assertContains(t, "app.js", needle,
+		assertContains(t, "views/schedule-surface.js", needle,
 			"run-history list must read snake_case ScheduleRun fields; see internal/db/schedules.go json tags")
 	}
 	// exit_code is null until a terminal state and stays null for an
 	// interrupted run, so the UI must render a neutral placeholder rather than
 	// coercing null to exit 0 or the string "null".
-	assertContains(t, "app.js", "run.exit_code == null ? '—'",
+	assertContains(t, "views/schedule-surface.js", "run.exit_code == null ? '—'",
 		"run-history must render a neutral placeholder for a null exit_code")
 	// The PascalCase reads must be gone so the regression cannot creep back.
-	b, err := fs.ReadFile(ui.Static(), "app.js")
-	if err != nil {
-		t.Fatalf("read app.js: %v", err)
-	}
-	for _, gone := range []string{"run.StartedAt", "run.Status", "run.ExitCode", "run.ID"} {
-		if strings.Contains(string(b), gone) {
-			t.Errorf("app.js must not read PascalCase %q; ScheduleRun is snake_case now", gone)
+	for _, name := range []string{"app.js", "views/schedule-surface.js"} {
+		b, err := fs.ReadFile(ui.Static(), name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		for _, gone := range []string{"run.StartedAt", "run.Status", "run.ExitCode", "run.ID"} {
+			if strings.Contains(string(b), gone) {
+				t.Errorf("%s must not read PascalCase %q; ScheduleRun is snake_case now", name, gone)
+			}
 		}
 	}
 }
@@ -3999,6 +4001,29 @@ func TestMetricsControllerOnErrorWired(t *testing.T) {
 	}
 }
 
+// TestScheduleSurfaceWiring guards the seam between the shell and the schedule
+// surface module. The list, detail, history and polling live in
+// views/schedule-surface.js so jstests/schedule-surface.test.js can import
+// them; the shell must build the surface with its own mutation handlers and
+// route the Schedules tab through it, or the tab mounts nothing.
+func TestScheduleSurfaceWiring(t *testing.T) {
+	assertContains(t, "app.js", "const scheduleSurface = createScheduleSurface({",
+		"app.js must build the schedule surface from views/schedule-surface.js")
+	assertContains(t, "app.js", "return scheduleSurface.load(slug, options);",
+		"the loadSchedules handed to the app-detail view must mount the schedule surface")
+	for _, action := range []string{
+		"runScheduleNow", "deleteSchedule", "openScheduleForm", "cancelScheduleActivation",
+		"retryScheduleConvergence", "openScheduleRunLogs", "cancelScheduleRun",
+	} {
+		assertContains(t, "views/schedule-surface.js", "actions."+action+"(",
+			"the schedule surface must reach "+action+" through the injected actions, not a shell global")
+	}
+	assertContains(t, "app.js", "runScheduleNow, deleteSchedule, openScheduleForm, cancelScheduleActivation,",
+		"app.js must hand its schedule mutation handlers to the surface")
+	assertContains(t, "app.js", "retryScheduleConvergence, openScheduleRunLogs, cancelScheduleRun,",
+		"app.js must hand its retry, log and cancel handlers to the surface")
+}
+
 // TestScheduleHandlersHardened guards UX-4/UX-9: the schedule
 // (run/delete/submit/history) handlers used to
 // call api() with no try/catch for network errors, no 401 check, and dumped
@@ -4049,15 +4074,20 @@ func TestScheduleHandlersHardened(t *testing.T) {
 	checkHandler("async function deleteSchedule(slug, id, name, btn)", "deleteSchedule")
 	checkHandler("async function cancelScheduleActivation(slug, schedID, name, btn)", "cancelScheduleActivation")
 
-	historyStart := strings.Index(src, "async function loadScheduleRunPage(")
+	sb, err := fs.ReadFile(ui.Static(), "views/schedule-surface.js")
+	if err != nil {
+		t.Fatalf("read views/schedule-surface.js: %v", err)
+	}
+	surfaceSrc := string(sb)
+	historyStart := strings.Index(surfaceSrc, "async function loadScheduleRunPage(")
 	if historyStart < 0 {
-		t.Fatal("app.js: could not find paginated schedule run-history loader")
+		t.Fatal("views/schedule-surface.js: could not find paginated schedule run-history loader")
 	}
 	historyEnd := historyStart + 3200
-	if historyEnd > len(src) {
-		historyEnd = len(src)
+	if historyEnd > len(surfaceSrc) {
+		historyEnd = len(surfaceSrc)
 	}
-	historyBody := src[historyStart:historyEnd]
+	historyBody := surfaceSrc[historyStart:historyEnd]
 	for _, want := range []string{"} catch {", "response.status === 401", "handleUnauthorized()", "data-run-history-retry"} {
 		if !strings.Contains(historyBody, want) {
 			t.Fatalf("schedule run-history loader must contain %q for recoverable, authenticated reads", want)

@@ -13,7 +13,7 @@ function section(startMarker, endMarker) {
   return source.slice(start, end);
 }
 const functions = [
-  section('  function updateCronPreview(', '  let mountedScheduleSurface = null;'),
+  section('  function updateCronPreview(', '  const scheduleSurface = createScheduleSurface({'),
   section('  function openScheduleForm(', '  async function runScheduleNow('),
 ].join('\n');
 const existing = {

@@ -2,15 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
-import * as scheduleHelpers from '../static/views/schedule-ui.js';
-import { escapeHtml } from '../static/views/html-escape.js';
+import { createScheduleSurface } from '../static/views/schedule-surface.js';
 
 const html = readFileSync(new URL('../static/index.html', import.meta.url), 'utf8');
-const source = readFileSync(new URL('../static/app.js', import.meta.url), 'utf8');
-const start = source.indexOf('  let mountedScheduleSurface = null;');
-const end = source.indexOf('  // Load and render the shared-data mounts list.', start);
-assert.ok(start >= 0 && end > start, 'Schedule controller extraction must match shipped source');
-const controller = source.slice(start, end);
 
 function deferred() {
   let resolve, reject;
@@ -31,10 +25,10 @@ const run = (overrides = {}) => ({
   started_at: '2026-11-03T04:00:00Z', finished_at: '2026-11-03T04:01:00Z', ...overrides,
 });
 
-// Exercise the real list, detail, history and lifecycle functions together.
-// Only unrelated mutation handlers, menu wiring and wall-clock timers are
+// Exercise the shipped schedule surface module against the real markup. Only
+// the mutation handlers, menu wiring and wall-clock timers it is handed are
 // replaced; no request, rendering or ownership logic is recreated here.
-function harness(t, api, overrides = {}) {
+function harness(t, api, { actions = {}, ...overrides } = {}) {
   const dom = new JSDOM(html, { pretendToBeVisual: true });
   const doc = dom.window.document;
   doc.getElementById('app-detail-view').hidden = false;
@@ -44,9 +38,7 @@ function harness(t, api, overrides = {}) {
   doc.body.append(outside);
   const calls = [], timers = new Map(), navigations = [], toasts = [];
   let timerID = 0, unauthorized = 0;
-  const scope = {
-    ...scheduleHelpers,
-    escapeHtml,
+  const surface = createScheduleSurface({
     document: doc,
     api: (path, options) => { calls.push({ path, options }); return api(path, options); },
     setTimeout: (callback, delay) => { const id = ++timerID; timers.set(id, { callback, delay }); return id; },
@@ -55,17 +47,19 @@ function harness(t, api, overrides = {}) {
     router: { navigate: (...args) => { navigations.push(args); } },
     flashToast: (...args) => toasts.push(args),
     kebabControls: new WeakMap(), wireKebab: () => ({ close() {} }),
-    runScheduleNow() {}, deleteSchedule() {}, openScheduleForm() {}, cancelScheduleActivation() {},
-    retryScheduleConvergence() {}, openScheduleRunLogs() {}, cancelScheduleRun() {},
+    actions: {
+      runScheduleNow() {}, deleteSchedule() {}, openScheduleForm() {}, cancelScheduleActivation() {},
+      retryScheduleConvergence() {}, openScheduleRunLogs() {}, cancelScheduleRun() {},
+      ...actions,
+    },
     ...overrides,
+  });
+  const controls = {
+    load: surface.load, stop: surface.stop,
+    refresh: () => surface.refresh({announce: true}),
+    poll: () => surface.refresh(),
+    get surface() { return surface.mounted(); },
   };
-  const controls = new Function(...Object.keys(scope), `
-    ${controller}
-    return {load: loadSchedules, stop: stopScheduleSurface,
-      refresh: () => refreshScheduleSurface(mountedScheduleSurface, {announce:true}),
-      poll: () => refreshScheduleSurface(mountedScheduleSurface),
-      get surface() {return mountedScheduleSurface;}};
-  `)(...Object.values(scope));
   t.after(() => { controls.stop(); dom.window.close(); });
   return { ...controls, get surface() { return controls.surface; }, doc, outside, calls, timers, navigations, toasts,
     get unauthorized() { return unauthorized; },
@@ -308,7 +302,7 @@ test('an unchanged poll keeps the rendered rows so an open actions menu survives
   let current = [schedule({last_success_age_s: age})];
   const edited = [];
   const h = harness(t, async () => response(current.map(item => ({...item, last_success_age_s: age += 30}))),
-    {openScheduleForm: (slug, item) => edited.push(item)});
+    {actions: {openScheduleForm: (slug, item) => edited.push(item)}});
   h.mount();
   await settle();
   const row = h.doc.querySelector('#schedules-list tbody tr');
