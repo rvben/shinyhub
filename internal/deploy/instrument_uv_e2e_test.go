@@ -127,23 +127,29 @@ func TestInstrumentedProjectModeLaunch_LoadsInstrumentation(t *testing.T) {
 		<-exited
 	})
 
+	// The port was released above so the app can bind it, which leaves a window
+	// in which another process can hold it and answer. A 200 therefore proves
+	// nothing about who served it; only the launched app's own access log does,
+	// so requests continue until the app itself reports one.
 	url := fmt.Sprintf("http://127.0.0.1:%d/", port)
-	served := false
-	for deadline := time.Now().Add(3 * time.Minute); time.Now().Before(deadline) && !served; {
+	const ownAccessLog = `"GET / HTTP/1.1" 200`
+	request := func() {
+		resp, err := http.Get(url)
+		if err != nil {
+			return
+		}
+		_ = resp.Body.Close()
+	}
+	for deadline := time.Now().Add(3 * time.Minute); !strings.Contains(out.String(), ownAccessLog); {
+		if time.Now().After(deadline) {
+			t.Fatalf("instrumented app never logged a 200 for %s:\n%s", url, out.String())
+		}
 		select {
 		case err := <-exited:
 			t.Fatalf("instrumented app exited before serving (%v):\n%s", err, out.String())
 		case <-time.After(250 * time.Millisecond):
 		}
-		resp, err := http.Get(url)
-		if err != nil {
-			continue
-		}
-		_ = resp.Body.Close()
-		served = resp.StatusCode == http.StatusOK
-	}
-	if !served {
-		t.Fatalf("instrumented app never answered 200 on %s:\n%s", url, out.String())
+		request()
 	}
 
 	// A sitecustomize import failure is reported at interpreter start, before
