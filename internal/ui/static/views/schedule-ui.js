@@ -6,6 +6,8 @@
 // the schedule DTO as `dst_advisory`. This module only decides how to surface
 // that string in the list; it never recomputes the advisory.
 
+import { escapeHtml } from './html-escape.js';
+
 // Short label shown on the inline warning badge. The full advisory rides in
 // the title + aria-label so the cell stays compact.
 export const DST_ADVISORY_LABEL = 'fires twice (DST)';
@@ -16,12 +18,6 @@ export function dstAdvisoryText(schedule) {
   if (!schedule || typeof schedule.dst_advisory !== 'string') return null;
   const text = schedule.dst_advisory.trim();
   return text.length > 0 ? text : null;
-}
-
-const ESCAPE = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
-
-function escapeHtml(value) {
-  return String(value).replace(/[&<>"']/g, (c) => ESCAPE[c]);
 }
 
 // Returns an inline warning badge as an HTML string for embedding in the cron

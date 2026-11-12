@@ -691,6 +691,7 @@
     "views/focus-trap.js",
     "views/freshness.js",
     "views/group-disclosure.js",
+    "views/html-escape.js",
     "views/in-flight.js",
     "views/json-request.js",
     "views/kebab-menu.js",

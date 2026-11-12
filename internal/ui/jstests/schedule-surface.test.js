@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
 import * as scheduleHelpers from '../static/views/schedule-ui.js';
+import { escapeHtml } from '../static/views/html-escape.js';
 
 const html = readFileSync(new URL('../static/index.html', import.meta.url), 'utf8');
 const source = readFileSync(new URL('../static/app.js', import.meta.url), 'utf8');
@@ -10,9 +11,6 @@ const start = source.indexOf('  let mountedScheduleSurface = null;');
 const end = source.indexOf('  // Load and render the shared-data mounts list.', start);
 assert.ok(start >= 0 && end > start, 'Schedule controller extraction must match shipped source');
 const controller = source.slice(start, end);
-const escapeStart = source.indexOf('  function escapeHtml(s)');
-const escapeEnd = source.indexOf('  // Show a brief accessible toast notification.', escapeStart);
-assert.ok(escapeStart >= 0 && escapeEnd > escapeStart);
 
 function deferred() {
   let resolve, reject;
@@ -48,6 +46,7 @@ function harness(t, api, overrides = {}) {
   let timerID = 0, unauthorized = 0;
   const scope = {
     ...scheduleHelpers,
+    escapeHtml,
     document: doc,
     api: (path, options) => { calls.push({ path, options }); return api(path, options); },
     setTimeout: (callback, delay) => { const id = ++timerID; timers.set(id, { callback, delay }); return id; },
@@ -61,7 +60,6 @@ function harness(t, api, overrides = {}) {
     ...overrides,
   };
   const controls = new Function(...Object.keys(scope), `
-    ${source.slice(escapeStart, escapeEnd)}
     ${controller}
     return {load: loadSchedules, stop: stopScheduleSurface,
       refresh: () => refreshScheduleSurface(mountedScheduleSurface, {announce:true}),

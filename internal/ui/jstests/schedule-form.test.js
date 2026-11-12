@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
+import { escapeHtml } from '../static/views/html-escape.js';
 
 const html = readFileSync(new URL('../static/index.html', import.meta.url), 'utf8');
 const source = readFileSync(new URL('../static/app.js', import.meta.url), 'utf8');
@@ -12,7 +13,6 @@ function section(startMarker, endMarker) {
   return source.slice(start, end);
 }
 const functions = [
-  section('  function escapeHtml(s)', '  // Show a brief accessible toast notification.'),
   section('  function updateCronPreview(', '  let mountedScheduleSurface = null;'),
   section('  function openScheduleForm(', '  async function runScheduleNow('),
 ].join('\n');
@@ -33,6 +33,7 @@ function harness(t) {
   const requests = [], refreshed = [];
   const scope = {
     document:doc,
+    escapeHtml,
     api:async (path, options) => { requests.push({path, options}); return {ok:true, status:200}; },
     loadSchedules:async slug => refreshed.push(slug),
     modalTrap:() => ({activate() {}, release() {}}),

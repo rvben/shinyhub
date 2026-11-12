@@ -35,6 +35,7 @@ import {
   summariseFleetHealth,
 } from '/static/views/fleet-health.js';
 import { createFocusTrap } from '/static/views/focus-trap.js';
+import { escapeHtml } from '/static/views/html-escape.js';
 import { installSelectPickerGuard } from '/static/views/select-picker.js';
 import { mountAuditLog } from '/static/views/audit-log.js';
 import { createAuditExplorer } from '/static/views/audit-explorer.js';
@@ -6897,12 +6898,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // --- Schedules + Shared Data ---
 
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
-  }
-
-  // Show a brief accessible toast notification.
-  // type: 'info' (default), 'success', or 'error'
   // Create a small icon-only copy button that copies `text` to the clipboard.
   // Uses the same is-copied / SVG pattern as the snippet copy buttons.
   function makeCopyButton(text, label) {
