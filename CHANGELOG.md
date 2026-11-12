@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.24.2](https://github.com/rvben/shinyhub/compare/v0.24.1...v0.24.2) - 2026-11-12
+
 ### Added
 
 - Add `server.app_availability_default` and explicit per-app `inherit` intent for automatic anonymous monitoring of future apps, with owner opt-out, effective exposure in app settings and fleet plans, and a paginated operator preview. Preserve all existing opt-outs on upgrade; legacy apps require an explicit reviewed conversion. Development and ephemeral apps remain off by default.
@@ -13,6 +15,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ### Upgrade notice
 
 This change widens the stored availability intent in both SQLite and PostgreSQL. Back up the database before upgrading. Upgrade all control planes before enabling public inheritance; older binaries cannot start against the newer schema. A downgrade requires restoring the pre-upgrade database.
+
+### Fixed
+
+- **deps**: build with Go 1.26.11 for the net/http fix in GO-2026-6859 ([7112098](https://github.com/rvben/shinyhub/commit/71120987a529ab9755f6f181aa529ce13e4d4421))
+- **db**: alias the access-check subquery for PostgreSQL 15 and older ([dbea471](https://github.com/rvben/shinyhub/commit/dbea4712bd8467fa28283bcddde434f908ab0e93))
+- **ui**: keep an open schedule menu across unchanged polls ([824ce4c](https://github.com/rvben/shinyhub/commit/824ce4cfb83910b6b315cfb31fb65bc084de1ed8))
+- **api**: fail batch metrics when an access check cannot be answered ([c2b2fdb](https://github.com/rvben/shinyhub/commit/c2b2fdb5a505949b493cd87caa0af8ccc447adf6))
+- **audit**: attribute hand-built audit events to their fleet run ([b4642d4](https://github.com/rvben/shinyhub/commit/b4642d46c28d32554b2e7e9f3906aae062b57ed6))
+- **maintenance**: keep pruning when the schedule listing fails ([6cdf30e](https://github.com/rvben/shinyhub/commit/6cdf30e42953e4a68e637705c8ed79d2584f203e))
+
+### Performance
+
+- **ui**: refresh fleet-wide surfaces once per metrics poll ([a64b347](https://github.com/rvben/shinyhub/commit/a64b34728e93eefbf4098524ad48bcfba9a612c6))
+- **cli**: build a fleet bundle once across deploy retries ([fc19721](https://github.com/rvben/shinyhub/commit/fc1972137216935731c06c69e5df1ffaf9137a8e))
+- **db**: narrow hot-path reads and page deployment history in SQL ([cccee09](https://github.com/rvben/shinyhub/commit/cccee09a1e19222434ba969021cf1740efb749a2))
 
 ## [0.24.1](https://github.com/rvben/shinyhub/compare/v0.24.0...v0.24.1) - 2026-11-10
 
