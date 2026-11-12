@@ -139,20 +139,11 @@ func runAppsShow(cmd *cobra.Command, args []string, f *appsShowFlags) error {
 		return err
 	}
 	slug := args[0]
-	req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug, nil)
-	if err != nil {
-		return fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", authHeader(cfg.Token))
-	resp, err := httpClient.Do(req)
+	res, err := doAPI(cfg, apiCall{Method: "GET", Path: "/api/apps/" + slug, Op: "show app"})
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return httpError(cfg.Token, "show app", resp, out)
-	}
+	out := res.Body
 
 	if format == formatJSON {
 		fmt.Fprintln(cmd.OutOrStdout(), string(out))
@@ -1078,7 +1069,7 @@ func runAppsRestart(cmd *cobra.Command, args []string, f *restartFlags) error {
 		return err
 	}
 	slug := args[0]
-	endpoint := cfg.Host + "/api/apps/" + slug + "/restart"
+	endpoint := "/api/apps/" + slug + "/restart"
 	if f.roll {
 		info, err := probeServer(cfg)
 		if err != nil {
@@ -1089,20 +1080,11 @@ func runAppsRestart(cmd *cobra.Command, args []string, f *restartFlags) error {
 		}
 		endpoint += "?roll=true"
 	}
-	req, err := http.NewRequest("POST", endpoint, nil)
-	if err != nil {
-		return fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", authHeader(cfg.Token))
-	resp, err := httpClient.Do(req)
+	res, err := doAPI(cfg, apiCall{Method: "POST", Path: endpoint, Op: "restart"})
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return httpError(cfg.Token, "restart", resp, out)
-	}
+	out := res.Body
 	if f.roll {
 		var accepted struct {
 			ActivationID        int64 `json:"activation_id"`
@@ -1178,20 +1160,11 @@ func runAppsStart(cmd *cobra.Command, args []string) error {
 // when an older server accepts deploy's start request but still reports that it
 // kept the app stopped.
 func startAppIfNotRunning(cfg *cliConfig, slug string) (map[string]any, error) {
-	req, err := http.NewRequest("POST", cfg.Host+"/api/apps/"+slug+"/restart?if_not_running=true", nil)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", authHeader(cfg.Token))
-	resp, err := httpClient.Do(req)
+	res, err := doAPI(cfg, apiCall{Method: "POST", Path: "/api/apps/" + slug + "/restart?if_not_running=true", Op: "start app"})
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return nil, httpError(cfg.Token, "start app", resp, body)
-	}
+	body := res.Body
 	var result map[string]any
 	if err := json.Unmarshal(body, &result); err != nil {
 		// Preserve compatibility with older servers that returned an empty 2xx
@@ -1212,19 +1185,8 @@ func callRestartAs(pastTense string) func(*cobra.Command, []string) error {
 			return err
 		}
 		slug := args[0]
-		req, err := http.NewRequest("POST", cfg.Host+"/api/apps/"+slug+"/restart", nil)
-		if err != nil {
-			return fmt.Errorf("build request: %w", err)
-		}
-		req.Header.Set("Authorization", authHeader(cfg.Token))
-		resp, err := httpClient.Do(req)
-		if err != nil {
+		if _, err := doAPI(cfg, apiCall{Method: "POST", Path: "/api/apps/" + slug + "/restart", Op: "start app"}); err != nil {
 			return err
-		}
-		defer resp.Body.Close()
-		out, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode >= 400 {
-			return httpError(cfg.Token, "start app", resp, out)
 		}
 		return renderAction(cmd, "running",
 			map[string]any{"slug": slug},
@@ -1605,23 +1567,12 @@ func runAppsSet(cmd *cobra.Command, args []string, f *appsSetFlags) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest("PATCH", cfg.Host+"/api/apps/"+slug, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", authHeader(cfg.Token))
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := httpClient.Do(req)
+	res, err := doAPI(cfg, apiCall{Method: "PATCH", Path: "/api/apps/" + slug, Body: body, Op: "update app"})
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return httpError(cfg.Token, "update app", resp, out)
-	}
-	if warn := resp.Header.Get("X-ShinyHub-Warning"); warn != "" {
+	out := res.Body
+	if warn := res.Header.Get("X-ShinyHub-Warning"); warn != "" {
 		fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", warn)
 	}
 
@@ -1854,20 +1805,8 @@ func runAppsAccessSet(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest("PATCH", cfg.Host+"/api/apps/"+slug+"/access", bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", authHeader(cfg.Token))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := httpClient.Do(req)
-	if err != nil {
+	if _, err := doAPI(cfg, apiCall{Method: "PATCH", Path: "/api/apps/" + slug + "/access", Body: body, Op: "set access"}); err != nil {
 		return err
-	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return httpError(cfg.Token, "set access", resp, out)
 	}
 	return renderAction(cmd, "updated",
 		map[string]any{"slug": slug, "access": accessLevel},
@@ -1914,20 +1853,9 @@ func runAppsAccessGrant(cmd *cobra.Command, args []string, f *appsAccessGrantFla
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest("POST", cfg.Host+"/api/apps/"+slug+"/members", bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", authHeader(cfg.Token))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := httpClient.Do(req)
+	res, err := doAPI(cfg, apiCall{Method: "POST", Path: "/api/apps/" + slug + "/members", Body: body, Op: "grant access"})
 	if err != nil {
 		return err
-	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return httpError(cfg.Token, "grant access", resp, out)
 	}
 	fields := map[string]any{"slug": slug, "username": username}
 	var prose string
@@ -1939,7 +1867,7 @@ func runAppsAccessGrant(cmd *cobra.Command, args []string, f *appsAccessGrantFla
 	}
 	// The server warns when the app's visibility already admits everyone
 	// (shared/public); relay it like group-grant does.
-	if warn := resp.Header.Get("X-ShinyHub-Warning"); warn != "" {
+	if warn := res.Header.Get("X-ShinyHub-Warning"); warn != "" {
 		fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", warn)
 	}
 	return renderAction(cmd, "granted", fields, prose)
@@ -1964,20 +1892,8 @@ func runAppsAccessRevoke(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest("DELETE", cfg.Host+"/api/apps/"+slug+"/members", bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", authHeader(cfg.Token))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := httpClient.Do(req)
-	if err != nil {
+	if _, err := doAPI(cfg, apiCall{Method: "DELETE", Path: "/api/apps/" + slug + "/members", Body: body, Op: "revoke access"}); err != nil {
 		return err
-	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return httpError(cfg.Token, "revoke access", resp, out)
 	}
 	return renderAction(cmd, "revoked",
 		map[string]any{"slug": slug, "username": username},
@@ -2052,22 +1968,11 @@ func runAppsAccessGroupGrant(cmd *cobra.Command, args []string, f *appsAccessGro
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest("POST", cfg.Host+"/api/apps/"+slug+"/group-access", bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", authHeader(cfg.Token))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := httpClient.Do(req)
+	res, err := doAPI(cfg, apiCall{Method: "POST", Path: "/api/apps/" + slug + "/group-access", Body: body, Op: "grant group access"})
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return httpError(cfg.Token, "grant group access", resp, out)
-	}
-	if warn := resp.Header.Get("X-ShinyHub-Warning"); warn != "" {
+	if warn := res.Header.Get("X-ShinyHub-Warning"); warn != "" {
 		fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", warn)
 	}
 	return renderAction(cmd, "granted",
@@ -2090,19 +1995,8 @@ func runAppsAccessGroupRevoke(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	slug, group := args[0], args[1]
-	req, err := http.NewRequest("DELETE", cfg.Host+"/api/apps/"+slug+"/group-access/"+group, nil)
-	if err != nil {
-		return fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", authHeader(cfg.Token))
-	resp, err := httpClient.Do(req)
-	if err != nil {
+	if _, err := doAPI(cfg, apiCall{Method: "DELETE", Path: "/api/apps/" + slug + "/group-access/" + group, Op: "revoke group access"}); err != nil {
 		return err
-	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return httpError(cfg.Token, "revoke group access", resp, out)
 	}
 	return renderAction(cmd, "revoked",
 		map[string]any{"slug": slug, "group": group},
@@ -2172,20 +2066,8 @@ func runAppsTransfer(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest("POST", cfg.Host+"/api/apps/"+slug+"/owner", bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", authHeader(cfg.Token))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := httpClient.Do(req)
-	if err != nil {
+	if _, err := doAPI(cfg, apiCall{Method: "POST", Path: "/api/apps/" + slug + "/owner", Body: body, Op: "transfer ownership"}); err != nil {
 		return err
-	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return httpError(cfg.Token, "transfer ownership", resp, out)
 	}
 	return renderAction(cmd, "transferred",
 		map[string]any{"slug": slug, "owner": username},
@@ -2338,18 +2220,14 @@ func runAppsDelete(cmd *cobra.Command, args []string, f *appsDeleteFlags) error 
 		return err
 	}
 
-	req, err := http.NewRequest("DELETE", cfg.Host+"/api/apps/"+slug, nil)
-	if err != nil {
-		return fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", authHeader(cfg.Token))
-	resp, err := httpClient.Do(req)
+	res, err := doAPI(cfg, apiCall{
+		Method: "DELETE", Path: "/api/apps/" + slug, Op: "delete app",
+		Accept: []int{http.StatusNotFound},
+	})
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode == http.StatusNotFound {
+	if res.Status == http.StatusNotFound {
 		// The app does not exist; the desired outcome (absent) is already in
 		// place. Write a notice to stderr so a typo'd slug is visible to the
 		// caller, then exit 0 with status "absent".
@@ -2357,9 +2235,6 @@ func runAppsDelete(cmd *cobra.Command, args []string, f *appsDeleteFlags) error 
 		return renderAction(cmd, "absent",
 			map[string]any{"slug": slug},
 			fmt.Sprintf("%s: already absent", slug))
-	}
-	if resp.StatusCode >= 400 {
-		return httpError(cfg.Token, "delete app", resp, out)
 	}
 	return renderAction(cmd, "deleted",
 		map[string]any{"slug": slug},
@@ -2383,19 +2258,8 @@ func runAppsStop(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	slug := args[0]
-	req, err := http.NewRequest("POST", cfg.Host+"/api/apps/"+slug+"/stop", nil)
-	if err != nil {
-		return fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", authHeader(cfg.Token))
-	resp, err := httpClient.Do(req)
-	if err != nil {
+	if _, err := doAPI(cfg, apiCall{Method: "POST", Path: "/api/apps/" + slug + "/stop", Op: "stop app"}); err != nil {
 		return err
-	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return httpError(cfg.Token, "stop app", resp, out)
 	}
 	return renderAction(cmd, "stopped",
 		map[string]any{"slug": slug},
@@ -2424,19 +2288,8 @@ func runAppsSleep(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	slug := args[0]
-	req, err := http.NewRequest("POST", cfg.Host+"/api/apps/"+slug+"/sleep", nil)
-	if err != nil {
-		return fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", authHeader(cfg.Token))
-	resp, err := httpClient.Do(req)
-	if err != nil {
+	if _, err := doAPI(cfg, apiCall{Method: "POST", Path: "/api/apps/" + slug + "/sleep", Op: "sleep app"}); err != nil {
 		return err
-	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return httpError(cfg.Token, "sleep app", resp, out)
 	}
 	return renderAction(cmd, "hibernated",
 		map[string]any{"slug": slug},
@@ -2501,20 +2354,11 @@ type tokenInfo struct {
 
 // fetchTokens retrieves all tokens for the authenticated user.
 func fetchTokens(cfg *cliConfig) ([]tokenInfo, error) {
-	req, err := http.NewRequest("GET", cfg.Host+"/api/tokens", nil)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", authHeader(cfg.Token))
-	resp, err := httpClient.Do(req)
+	res, err := doAPI(cfg, apiCall{Method: "GET", Path: "/api/tokens", Op: "list tokens"})
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return nil, httpError(cfg.Token, "list tokens", resp, out)
-	}
+	out := res.Body
 	// The server returns the standard {items,...} list envelope. This path wants
 	// the full set (to resolve a token by name), so it does not paginate.
 	var env struct {
@@ -2661,19 +2505,8 @@ func runTokensRevoke(cmd *cobra.Command, args []string, f *tokensRevokeFlags) er
 		}
 	}
 
-	req, err := http.NewRequest("DELETE", cfg.Host+"/api/tokens/"+tokenID, nil)
-	if err != nil {
-		return fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", authHeader(cfg.Token))
-	resp, err := httpClient.Do(req)
-	if err != nil {
+	if _, err := doAPI(cfg, apiCall{Method: "DELETE", Path: "/api/tokens/" + tokenID, Op: "revoke token"}); err != nil {
 		return err
-	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return httpError(cfg.Token, "revoke token", resp, out)
 	}
 	return renderAction(cmd, "revoked",
 		map[string]any{"token_id": tokenID},

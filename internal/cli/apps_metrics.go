@@ -3,8 +3,6 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 
 	"github.com/spf13/cobra"
 )
@@ -37,20 +35,11 @@ func runAppsMetrics(cmd *cobra.Command, args []string, f *appsMetricsFlags) erro
 		return err
 	}
 	slug := args[0]
-	req, err := http.NewRequest("GET", cfg.Host+"/api/apps/"+slug+"/metrics", nil)
-	if err != nil {
-		return fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", authHeader(cfg.Token))
-	resp, err := httpClient.Do(req)
+	res, err := doAPI(cfg, apiCall{Method: "GET", Path: "/api/apps/" + slug + "/metrics", Op: "app metrics"})
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return httpError(cfg.Token, "app metrics", resp, out)
-	}
+	out := res.Body
 
 	if format == formatJSON {
 		fmt.Fprintln(cmd.OutOrStdout(), string(out))

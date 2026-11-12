@@ -87,20 +87,11 @@ func runFleetPlan(cmd *cobra.Command, f *fleetPlanFlags) error {
 
 // fetchApps issues the single read-only GET /api/apps the plan needs.
 func fetchApps(cfg *cliConfig) ([]db.App, error) {
-	req, err := http.NewRequest("GET", cfg.Host+"/api/apps", nil)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", authHeader(cfg.Token))
-	resp, err := httpClient.Do(req)
+	res, err := doAPI(cfg, apiCall{Method: "GET", Path: "/api/apps", Op: "list apps"})
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return nil, httpError(cfg.Token, "list apps", resp, body)
-	}
+	body := res.Body
 	// The server returns the standard {items,...} list envelope; fleet wants the
 	// full set (reconciliation), so it does not paginate and tolerates a bare
 	// array for resilience across server versions.

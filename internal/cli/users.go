@@ -1,11 +1,9 @@
 package cli
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"strconv"
 
 	"github.com/spf13/cobra"
@@ -75,19 +73,8 @@ func newUsersRevokeSessionsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			req, err := http.NewRequest("POST", cfg.Host+"/api/users/"+strconv.FormatInt(id, 10)+"/revoke-sessions", nil)
-			if err != nil {
-				return fmt.Errorf("build request: %w", err)
-			}
-			req.Header.Set("Authorization", authHeader(cfg.Token))
-			resp, err := httpClient.Do(req)
-			if err != nil {
+			if _, err := doAPI(cfg, apiCall{Method: "POST", Path: "/api/users/" + strconv.FormatInt(id, 10) + "/revoke-sessions", Op: "revoke sessions"}); err != nil {
 				return err
-			}
-			defer resp.Body.Close()
-			out, _ := io.ReadAll(resp.Body)
-			if resp.StatusCode >= 400 {
-				return httpError(cfg.Token, "revoke sessions", resp, out)
 			}
 			return renderAction(cmd, "revoked",
 				map[string]any{"username": username},
@@ -99,20 +86,11 @@ func newUsersRevokeSessionsCmd() *cobra.Command {
 // lookupUserID resolves a username to its numeric id via GET /api/users/{username}
 // so the by-id PATCH/DELETE endpoints can target a user the operator named.
 func lookupUserID(cfg *cliConfig, username string) (int64, error) {
-	req, err := http.NewRequest("GET", cfg.Host+"/api/users/"+username, nil)
-	if err != nil {
-		return 0, fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", authHeader(cfg.Token))
-	resp, err := httpClient.Do(req)
+	res, err := doAPI(cfg, apiCall{Method: "GET", Path: "/api/users/" + username, Op: "look up user"})
 	if err != nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return 0, httpError(cfg.Token, "look up user", resp, out)
-	}
+	out := res.Body
 	var u struct {
 		ID int64 `json:"id"`
 	}
@@ -177,21 +155,11 @@ func newUsersCreateCmd() *cobra.Command {
 			return err
 		}
 		body, _ := json.Marshal(map[string]any{"username": username, "password": password, "role": role})
-		req, err := http.NewRequest("POST", cfg.Host+"/api/users", bytes.NewReader(body))
-		if err != nil {
-			return fmt.Errorf("build request: %w", err)
-		}
-		req.Header.Set("Authorization", authHeader(cfg.Token))
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := httpClient.Do(req)
+		res, err := doAPI(cfg, apiCall{Method: "POST", Path: "/api/users", Body: body, Op: "create user"})
 		if err != nil {
 			return err
 		}
-		defer resp.Body.Close()
-		out, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode >= 400 {
-			return httpError(cfg.Token, "create user", resp, out)
-		}
+		out := res.Body
 		var u struct {
 			ID   int64  `json:"id"`
 			Role string `json:"role"`
@@ -228,20 +196,8 @@ func newUsersSetRoleCmd() *cobra.Command {
 			return err
 		}
 		body, _ := json.Marshal(map[string]any{"role": role})
-		req, err := http.NewRequest("PATCH", cfg.Host+"/api/users/"+strconv.FormatInt(id, 10), bytes.NewReader(body))
-		if err != nil {
-			return fmt.Errorf("build request: %w", err)
-		}
-		req.Header.Set("Authorization", authHeader(cfg.Token))
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := httpClient.Do(req)
-		if err != nil {
+		if _, err := doAPI(cfg, apiCall{Method: "PATCH", Path: "/api/users/" + strconv.FormatInt(id, 10), Body: body, Op: "set user role"}); err != nil {
 			return err
-		}
-		defer resp.Body.Close()
-		out, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode >= 400 {
-			return httpError(cfg.Token, "set user role", resp, out)
 		}
 		return renderAction(cmd, "role_updated",
 			map[string]any{"id": id, "username": username, "role": role},
@@ -270,20 +226,8 @@ func newUsersResetPasswordCmd() *cobra.Command {
 			return err
 		}
 		body, _ := json.Marshal(map[string]any{"password": password})
-		req, err := http.NewRequest("PATCH", cfg.Host+"/api/users/"+strconv.FormatInt(id, 10)+"/password", bytes.NewReader(body))
-		if err != nil {
-			return fmt.Errorf("build request: %w", err)
-		}
-		req.Header.Set("Authorization", authHeader(cfg.Token))
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := httpClient.Do(req)
-		if err != nil {
+		if _, err := doAPI(cfg, apiCall{Method: "PATCH", Path: "/api/users/" + strconv.FormatInt(id, 10) + "/password", Body: body, Op: "reset password"}); err != nil {
 			return err
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode >= 400 {
-			out, _ := io.ReadAll(resp.Body)
-			return httpError(cfg.Token, "reset password", resp, out)
 		}
 		return renderAction(cmd, "password_reset",
 			map[string]any{"id": id, "username": username},
@@ -327,19 +271,8 @@ func newUsersDeleteCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		req, err := http.NewRequest("DELETE", cfg.Host+"/api/users/"+strconv.FormatInt(id, 10), nil)
-		if err != nil {
-			return fmt.Errorf("build request: %w", err)
-		}
-		req.Header.Set("Authorization", authHeader(cfg.Token))
-		resp, err := httpClient.Do(req)
-		if err != nil {
+		if _, err := doAPI(cfg, apiCall{Method: "DELETE", Path: "/api/users/" + strconv.FormatInt(id, 10), Op: "delete user"}); err != nil {
 			return err
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode >= 400 {
-			out, _ := io.ReadAll(resp.Body)
-			return httpError(cfg.Token, "delete user", resp, out)
 		}
 		return renderAction(cmd, "deleted",
 			map[string]any{"id": id, "username": username},

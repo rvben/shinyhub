@@ -3,8 +3,6 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 )
 
@@ -31,21 +29,11 @@ func getPaginatedListWithExtra(cfg *cliConfig, action, path string, f *listFlags
 	if f.limit < 0 {
 		return nil, 0, nil, validationErr("--limit must be >= 0", "")
 	}
-	url := cfg.Host + path + paginationQuery(path, f)
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, 0, nil, fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", authHeader(cfg.Token))
-	resp, err := httpClient.Do(req)
+	res, err := doAPI(cfg, apiCall{Method: "GET", Path: path + paginationQuery(path, f), Op: action})
 	if err != nil {
 		return nil, 0, nil, err
 	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return nil, 0, nil, httpError(cfg.Token, action, resp, out)
-	}
+	out := res.Body
 	var env struct {
 		Items []map[string]any `json:"items"`
 		Total int              `json:"total"`
