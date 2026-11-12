@@ -2913,6 +2913,22 @@ func apiTimeoutHandler(h http.Handler) http.Handler {
 	})
 }
 
+// appSubResource returns the part of an /api/apps/{slug}/<sub> path after the
+// slug. ok is false for any other path, including a bare /api/apps/{slug} and
+// an empty slug.
+func appSubResource(path string) (sub string, ok bool) {
+	const prefix = "/api/apps/"
+	if !strings.HasPrefix(path, prefix) {
+		return "", false
+	}
+	rest := path[len(prefix):]
+	slash := strings.IndexByte(rest, '/')
+	if slash <= 0 {
+		return "", false
+	}
+	return rest[slash+1:], true
+}
+
 // isLongLivedAPIRoute reports whether method+path identifies an API
 // route that must bypass the per-request timeout. Matching is exact on
 // both the HTTP method and the full /api/apps/{slug}/... shape so an
@@ -2941,16 +2957,10 @@ func apiTimeoutHandler(h http.Handler) http.Handler {
 // All other API routes keep the 30s timeout so a slow handler cannot
 // pin a server goroutine indefinitely.
 func isLongLivedAPIRoute(method, path string) bool {
-	const prefix = "/api/apps/"
-	if !strings.HasPrefix(path, prefix) {
+	sub, ok := appSubResource(path)
+	if !ok {
 		return false
 	}
-	rest := path[len(prefix):]
-	slash := strings.IndexByte(rest, '/')
-	if slash <= 0 {
-		return false // bare /api/apps/{slug}, no sub-resource
-	}
-	sub := rest[slash+1:] // path after "{slug}/"
 
 	switch sub {
 	case "logs":
@@ -3016,16 +3026,10 @@ func bodyLimitHandler(next http.Handler) http.Handler {
 // POST /api/apps/{slug}/drafts (bundle zip) and PUT /api/apps/{slug}/data/<rel>
 // (per-app data file).
 func isLargeUploadRoute(method, path string) bool {
-	const prefix = "/api/apps/"
-	if !strings.HasPrefix(path, prefix) {
+	sub, ok := appSubResource(path)
+	if !ok {
 		return false
 	}
-	rest := path[len(prefix):]
-	slash := strings.IndexByte(rest, '/')
-	if slash <= 0 {
-		return false
-	}
-	sub := rest[slash+1:]
 	if sub == "deploy" || sub == "drafts" {
 		return method == http.MethodPost
 	}
