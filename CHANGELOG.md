@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.24.3](https://github.com/rvben/shinyhub/compare/v0.24.2...v0.24.3) - 2026-11-12
+
+### Fixed
+
+- **proxy**: keep idle backend connections when more than 100 are open across apps ([5a6a5be](https://github.com/rvben/shinyhub/commit/5a6a5be522225de32d67dc86e1ca362255646c10))
+- **demo**: stop a deployment from tripping the lifecycle alert and the smoke verifier ([b295a66](https://github.com/rvben/shinyhub/commit/b295a6630495a04e15159d4de560269684dee12b))
+
 ## [0.24.2](https://github.com/rvben/shinyhub/compare/v0.24.1...v0.24.2) - 2026-11-12
 
 ### Added
