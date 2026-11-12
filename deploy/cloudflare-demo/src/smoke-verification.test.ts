@@ -74,6 +74,55 @@ test("probe markers cannot suppress ordinary cancellations, exceptions or server
   }
 });
 
+const rolloutKill = "Runtime signalled the container to exit due to a new version rollout: 143";
+const withErrorLog = (record: ReturnType<typeof probe>, ...message: unknown[]) =>
+  ({ ...record, logs: [{ level: "error", message }] });
+
+test("a rollout that replaces the container under a retry probe requires a later successful probe of the same kind", () => {
+  for (const message of [
+    [`Container error: Error: ${rolloutKill}`],
+    ["Container error:", `Error: ${rolloutKill}`],
+    [`Container error: ${rolloutKill}`],
+  ]) {
+    const inspector = smokeInspector(id);
+    for (const path of websocketPaths) inspector.ingest(trace(path));
+    inspector.ingest(withErrorLog(probe("wake", "/", "ok", 200, 5), ...message));
+    // The interrupted probe's own response cannot confirm the recovery.
+    assert.equal(inspector.check(), false);
+    inspector.ingest(probe("wake", "/", "ok", 200, 4));
+    assert.equal(inspector.check(), false);
+    inspector.ingest(probe("readiness", "/__demo/ready", "ok", 204, 6));
+    assert.equal(inspector.check(), false);
+    inspector.ingest(probe("wake", "/", "ok", 200, 6));
+    assert.equal(inspector.check(), true);
+  }
+});
+
+test("a rollout log is fatal anywhere but on a marked retry probe, and no other error log is tolerated there", () => {
+  const unmarked = probe("wake", "/", "ok", 200);
+  delete (unmarked.event.request.headers as Record<string, string>)["x-shinyhub-demo-smoke-probe"];
+  for (const record of [
+    withErrorLog(unmarked, `Container error: Error: ${rolloutKill}`),
+    withErrorLog(probe("wake", "/login", "ok", 200), `Container error: Error: ${rolloutKill}`),
+    { ...withErrorLog(probe("wake", "/", "ok", 200), `Container error: Error: ${rolloutKill}`), eventTimestamp: undefined },
+    withErrorLog(probe("wake", "/", "ok", 200), "Container error: Error: out of memory"),
+    withErrorLog(probe("wake", "/", "ok", 200), `Container error: Error: ${rolloutKill}`, "and something else"),
+    withErrorLog(probe("wake", "/", "ok", 200), `prefix Container error: Error: ${rolloutKill}`),
+    withErrorLog(probe("wake", "/", "ok", 200), { error: rolloutKill }),
+    { ...probe("wake", "/", "ok", 200), logs: [{ level: "fatal", message: [`Container error: Error: ${rolloutKill}`] }] },
+    { ...probe("wake", "/", "ok", 200), logs: [
+      { level: "error", message: [`Container error: Error: ${rolloutKill}`] },
+      { level: "error", message: ["private log"] },
+    ] },
+  ]) {
+    const inspector = smokeInspector(id);
+    inspector.ingest(record);
+    inspector.ingest(probe("wake", "/", "ok", 200, 2));
+    for (const path of websocketPaths) inspector.ingest(trace(path));
+    assert.throws(() => inspector.check(), /server-side error/);
+  }
+});
+
 test("invocation diagnostics identify safe paths and outcomes without exposing request or exception data", () => {
   const inspector = smokeInspector(id);
   inspector.ingest({ outcome: "exception", exceptions: [{ message: "private exception" }],

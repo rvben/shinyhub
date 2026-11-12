@@ -65,8 +65,12 @@ Successful streamed HTTP responses may have a `canceled` invocation outcome;
 these require the client HTTP checks to pass and never substitute for WebSocket
 close evidence. The smoke script marks its retryable wake, readiness, and version
 probes. A canceled probe without a completed response is tolerated only after
-telemetry confirms a later successful probe of the same kind; exceptions and
-error logs still fail the run. Event timestamps preserve this ordering even when
+telemetry confirms a later successful probe of the same kind. The same holds for
+a probe whose record carries the platform's "new version rollout" container
+error: a deployment replaces the container under whichever probe is in flight,
+so that probe counts as interrupted, including its own response, until a later
+one of its kind succeeds. Only that exact message, on a marked probe, is treated
+this way; every other exception and error log still fails the run. Event timestamps preserve this ordering even when
 tail records arrive late. Synthetic WebSocket clients send a correlation header because
 query values are redacted in tail events. Marked passive status probes publish
 the DO's bounded synthetic close records through the tail, so verification
@@ -255,7 +259,8 @@ disconnected object, without waking the container; exhaustion logs
 Install two custom alerts, **in this order**, after deploying the Worker:
 
 1. **ShinyHub demo — Container lifecycle errors**, using
-   `worker-lifecycle-alert.sql`. Alarm failures remain visible here.
+   `worker-lifecycle-alert.sql`. Alarm failures remain visible here, except
+   the reset every deployment causes (below).
 2. Update **ShinyHub demo — Worker errors** with `worker-errors-alert.sql`.
    This covers request/RPC errors and unknown invocation types, excluding alarms
    already covered by the lifecycle alert. Never apply this split without the
@@ -270,11 +275,27 @@ in the log drilldown or the local diagnostic summary to group related records.
 Clearing means a subsequent query window was clear, not that recovery took ten
 minutes.
 
-Both queries exclude automatic `cf-worker-event` HTTP 503 summaries: sleeping
-and readiness polling deliberately return 503. Real upstream 503s remain
+The Worker errors query excludes automatic `cf-worker-event` HTTP 503 summaries:
+sleeping and readiness polling deliberately return 503. Real upstream 503s remain
 covered by `demo_upstream_failed`; exception records with status 503 stay visible.
-Unknown invocation types/identifiers retain coverage. Do not raise the threshold
-or suppress all deployment/WebSocket errors to make the mail quiet.
+Unknown invocation types/identifiers retain coverage.
+
+Every deployment resets the Durable Object under its running alarm, which
+produces two alarm records a few minutes later: the exception `Durable Object
+reset because its code was updated.` and the alarm's `cf-worker-event` summary.
+The lifecycle query excludes that exception by its exact message, and excludes
+alarm summaries altogether, since the dataset exposes nothing that tells the
+summary of a reset from the summary of another failure. Any other alarm
+exception or error log still counts. The cost: an alarm that fails with a
+summary and no exception or log record of its own is not counted. Keep the
+query as shallow as it is: the monitor editor answers a more deeply nested
+condition with `recursion limit exceeded`, so validate any edit in its query
+preview before saving.
+
+Do not raise the threshold or suppress all deployment/WebSocket errors to make
+the mail quiet; exclude one identified signature at a time, with a test case in
+`test_worker_errors_alert.py` for it and for a neighbouring failure that must
+still count.
 
 For a deduplicated diagnostic summary, export the matching Worker log records as
 JSON/JSONL and run `node scripts/demo-error-summary.mjs < logs.json` from the repo

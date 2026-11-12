@@ -22,12 +22,20 @@ export const websocketPaths = [
   "/app/streamlit-demo/_stcore/stream",
 ];
 
-// Only these explicitly marked, retried GETs can recover from cancellation.
+// Only these explicitly marked, retried GETs can recover from an interruption:
+// a cancellation, or a rollout replacing the container underneath them.
 const retryProbes = new Map([
   ["wake", { path: "/", statuses: [200, 302, 303] }],
   ["readiness", { path: "/__demo/ready", statuses: [204] }],
   ["version", { path: "/api/server-info", statuses: [200] }],
 ]);
+
+// The one error log a retry probe may carry: the platform replacing the
+// container with the newly deployed image while the probe is in flight. The
+// whole message must match, so no other container failure can ride along.
+const rolloutKill = /^Container error: (?:Error: )?Runtime signalled the container to exit due to a new version rollout: \d+$/;
+const isRolloutKill = log => log.level === "error" && Array.isArray(log.message)
+  && log.message.every(part => typeof part === "string") && rolloutKill.test(log.message.join(" "));
 
 // Consume only this smoke run's records. Never print/store raw tail payloads:
 // unrelated visitors' request headers can include session cookies.
@@ -90,7 +98,12 @@ export function smokeInspector(id) {
         failure = "Smoke request returned HTTP 5xx";
       }
       for (const log of record.logs ?? []) {
-        if (["error", "fatal"].includes(log.level)) failure = "Smoke request emitted a server-side error";
+        if (markedProbe && isRolloutKill(log)) {
+          // The probe reached a container that was then replaced, so its own
+          // response proves nothing about the new one. Like a cancellation,
+          // it counts as interrupted until a later probe of its kind succeeds.
+          canceledProbes.set(probeKind, Math.max(canceledProbes.get(probeKind) ?? -Infinity, record.eventTimestamp));
+        } else if (["error", "fatal"].includes(log.level)) failure = "Smoke request emitted a server-side error";
         for (let message of log.message ?? []) {
           if (typeof message === "string") {
             try { message = JSON.parse(message); } catch { continue; }
