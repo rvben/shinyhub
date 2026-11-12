@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -364,6 +365,31 @@ type replicaKey struct {
 	Index int
 }
 
+// pendingStart is a slot reservation held by a Start while its runtime is
+// launching, which happens without Manager.mu. It is kept apart from entries:
+// a reader of entries sees the slot as it was before the Start began, which
+// is a moment the Start could have been ordered after, so nothing that walks
+// entries has to cope with a replica that has no handle yet. What must know
+// about the launch (a second Start of the slot, index allocation, liveness
+// questions and every stop) consults Manager.starting.
+type pendingStart struct {
+	key          replicaKey
+	slug         string
+	deploymentID int64
+	// cancelled is set by a stop that targeted the slot during the launch.
+	// The Start then publishes what it launched already marked stopped and
+	// stops it through the ordinary confirmed stop, so a process whose exit
+	// cannot be proven stays tracked and fenced like any other.
+	// Guarded by Manager.mu.
+	cancelled bool
+	// runID is the log run this launch writes, set under Manager.mu before
+	// its file is created so log pruning keeps it while the launch runs.
+	runID string
+	// done closes once the Start has published the replica, or has failed,
+	// or has finished stopping a cancelled launch.
+	done chan struct{}
+}
+
 // Manager tracks running app processes as a pool of replicas per slug.
 // entries maps slug → slice indexed by replica index; nil means that slot is down.
 type Manager struct {
@@ -373,7 +399,10 @@ type Manager struct {
 	// activePoolKeys maps a public app slug to the internal pool key selected
 	// by an atomic generation activation. Slugs absent from this map use their
 	// legacy key directly, preserving all existing manager behavior.
-	activePoolKeys           map[string]string
+	activePoolKeys map[string]string
+	// starting holds the reservation of every slot whose Start is between
+	// reserving it and publishing (or abandoning) the launched replica.
+	starting                 map[replicaKey]*pendingStart
 	logFiles                 map[replicaKey]io.WriteCloser
 	lastExit                 map[replicaKey]ExitVerdict
 	appsDir                  string
@@ -718,6 +747,7 @@ func NewManager(appsDir string, rt Runtime) *Manager {
 	return &Manager{
 		entries:        make(map[string][]*entry),
 		activePoolKeys: make(map[string]string),
+		starting:       make(map[replicaKey]*pendingStart),
 		logFiles:       make(map[replicaKey]io.WriteCloser),
 		lastExit:       make(map[replicaKey]ExitVerdict),
 		appsDir:        appsDir,
@@ -803,6 +833,11 @@ func (m *Manager) NextReplicaIndex(slug string) int {
 			if e != nil && e.info.Slug == slug && i >= next {
 				next = i + 1
 			}
+		}
+	}
+	for key, ps := range m.starting {
+		if ps.slug == slug && key.Index >= next {
+			next = key.Index + 1
 		}
 	}
 	return next
@@ -905,6 +940,34 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		defer release()
 		p.LifetimeFiles = append(p.LifetimeFiles, lifetimeFile)
 	}
+	// The slot is reserved under m.mu, launched without it, and published
+	// under it again, so a runtime that waits on a remote resource (a
+	// Fargate task acquiring an IP, a worker round trip) does not stall
+	// every status read and every stop of every other app while it waits.
+	ps, err := m.reserveStart(p)
+	if err != nil {
+		return nil, err
+	}
+	defer m.releaseStart(ps)
+	info, err := m.launchReserved(p, ps)
+	if err != nil && !errors.Is(err, ErrStartCancelled) {
+		m.mu.Lock()
+		cancelled := ps.cancelled
+		m.mu.Unlock()
+		// A launch that a stop cancelled stays cancelled when it then fails:
+		// callers that retry a failed launch must not undo the stop.
+		if cancelled {
+			err = fmt.Errorf("%w: %w", ErrStartCancelled, err)
+		}
+	}
+	return info, err
+}
+
+// reserveStart validates the target slot and records a pendingStart for it.
+func (m *Manager) reserveStart(p StartParams) (*pendingStart, error) {
+	if p.Index < 0 {
+		return nil, fmt.Errorf("start %s: replica index %d is negative", p.Slug, p.Index)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -915,11 +978,11 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		}
 		poolKey = generationPoolKey(p.Slug, p.DeploymentID)
 	}
-	pool := m.entries[poolKey]
-	for len(pool) <= p.Index {
-		pool = append(pool, nil)
+	var existing *entry
+	if pool := m.entries[poolKey]; p.Index < len(pool) {
+		existing = pool[p.Index]
 	}
-	if existing := pool[p.Index]; existing != nil {
+	if existing != nil {
 		if existing.info.Status == StatusRunning {
 			return nil, fmt.Errorf("app %s replica %d: %w", p.Slug, p.Index, ErrReplicaAlreadyRunning)
 		}
@@ -927,13 +990,38 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 			return nil, fmt.Errorf("app %s replica %d: %w", p.Slug, p.Index, ErrReplicaStopPending)
 		}
 	}
-
 	key := replicaKey{poolKey, p.Index}
+	if m.starting[key] != nil {
+		return nil, fmt.Errorf("app %s replica %d: %w", p.Slug, p.Index, ErrReplicaStarting)
+	}
 	if prev, ok := m.logFiles[key]; ok {
 		prev.Close()
 		delete(m.logFiles, key)
 	}
+	ps := &pendingStart{
+		key: key, slug: p.Slug, deploymentID: p.DeploymentID,
+		done: make(chan struct{}),
+	}
+	m.starting[key] = ps
+	return ps, nil
+}
 
+// releaseStart drops the slot reservation if the Start did not already hand
+// it over to a published entry, then wakes everyone waiting on it.
+func (m *Manager) releaseStart(ps *pendingStart) {
+	m.mu.Lock()
+	if m.starting[ps.key] == ps {
+		delete(m.starting, ps.key)
+	}
+	m.mu.Unlock()
+	close(ps.done)
+}
+
+// launchReserved runs a reserved Start: everything from provisioning to the
+// runtime launch happens without m.mu, then publishStart decides under m.mu
+// whether the launched replica takes the slot.
+func (m *Manager) launchReserved(p StartParams, ps *pendingStart) (*ProcessInfo, error) {
+	poolKey := ps.key.Slug
 	tier := p.Tier
 	if tier == "" {
 		tier = m.defaultTier
@@ -950,25 +1038,8 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 			appDataPath = ref.Path
 			p.AppDataPath = appDataPath
 
-			linkPath := filepath.Join(p.Dir, "data")
-			switch info, err := os.Lstat(linkPath); {
-			case err == nil:
-				// Something is already at <bundle>/data. Accept only if it's a symlink
-				// pointing to the correct target — that's the idempotent restart case.
-				if info.Mode()&os.ModeSymlink != 0 {
-					existing, readErr := os.Readlink(linkPath)
-					if readErr == nil && existing == appDataPath {
-						break // already correct, nothing to do
-					}
-				}
-				return nil, fmt.Errorf("bundle %s already contains a 'data' entry (%s); the platform reserves that path", p.Slug, info.Mode())
-			case !os.IsNotExist(err):
-				return nil, fmt.Errorf("stat %s: %w", linkPath, err)
-			default:
-				// Path does not exist — create the symlink.
-				if err := os.Symlink(appDataPath, linkPath); err != nil {
-					return nil, fmt.Errorf("symlink data: %w", err)
-				}
+			if err := linkBundleData(p.Slug, filepath.Join(p.Dir, "data"), appDataPath); err != nil {
+				return nil, err
 			}
 		}
 		if m.appCacheRoot != "" && p.DeploymentID > 0 {
@@ -1051,6 +1122,11 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		StartedAt: startedAt,
 	}
 	logPath := logRunPath(m.appsDir, p.Slug, p.Index, run.RunID)
+	// Register the run before its file exists, so PruneLogRunFiles, which
+	// scans under m.mu, keeps the file of a launch that is not yet published.
+	m.mu.Lock()
+	ps.runID = run.RunID
+	m.mu.Unlock()
 	lf, err := OpenLogFile(logPath, m.logMaxSize)
 	if err != nil {
 		return nil, fmt.Errorf("open log file: %w", err)
@@ -1078,8 +1154,6 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 			logWriter = &fanoutLogWriter{local: lf, shared: shared, run: run}
 		}
 	}
-	m.logFiles[key] = logWriter
-
 	// From here through publishing the entry below, a launched process can
 	// exist with nothing in m.entries pointing at it if this goroutine
 	// panics: only the next startup's recovery scan would ever reap it. So,
@@ -1093,10 +1167,14 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		}
 	}()
 
+	// The runtime gets a context that is never cancelled, even when a stop
+	// cancels this launch: a runtime interrupted mid-launch (a Fargate
+	// RunTask, a worker round trip) may leave behind a task or container
+	// whose handle it never returned, which nothing could then stop. The
+	// launch runs to completion and a cancelled one is stopped afterwards.
 	ep, err := rt.Start(context.Background(), p, logWriter)
 	if err != nil {
 		logWriter.Close()
-		delete(m.logFiles, key)
 		run.Status = StatusCrashed
 		run.FinishedAt = time.Now().UTC()
 		run.ExitReason = err.Error()
@@ -1129,11 +1207,11 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		LogRunID:     run.RunID,
 	}
 	done := make(chan struct{})
-	pool[p.Index] = &entry{
+	e := &entry{
 		info: info, handle: handle, tier: tier, logRun: &run, done: done, ownsOutput: ep.ExternalLogs == nil && !ep.DetachedOutput,
-		startupGuard: ep.StartupGuard, incarnation: m.nextIncarnation.Add(1),
+		startupGuard: ep.StartupGuard,
 	}
-	m.entries[poolKey] = pool
+	cancelled := m.publishStart(ps, e, logWriter)
 
 	go m.monitorExit(exitMonitor{
 		rt: rt, handle: handle, done: done,
@@ -1142,7 +1220,41 @@ func (m *Manager) Start(p StartParams) (*ProcessInfo, error) {
 		closesLogOutput: true,
 	})
 
+	if cancelled {
+		// A stop arrived while the runtime was launching. The replica is
+		// published, so the ordinary confirmed stop owns it from here: a
+		// proven exit vacates the slot, and an unproven one leaves the entry
+		// fenced stopPending for the next stop to retry, exactly as for a
+		// replica that was running before the stop began.
+		if err := m.stopReplicaEntry(p.Slug, poolKey, p.Index, e, true); err != nil {
+			slog.Warn("manager: stop of a replica whose start was cancelled is unconfirmed",
+				"slug", p.Slug, "idx", p.Index, "err", err)
+		}
+		return nil, fmt.Errorf("app %s replica %d: %w", p.Slug, p.Index, ErrStartCancelled)
+	}
 	return info, nil
+}
+
+// publishStart moves a launched replica from its reservation into the slot
+// and hands its log writer to the manager. It reports whether a stop
+// cancelled the launch, in which case the entry is published already marked
+// stopped so that its exit is never read as a crash.
+func (m *Manager) publishStart(ps *pendingStart, e *entry, logWriter io.WriteCloser) (cancelled bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	pool := m.entries[ps.key.Slug]
+	for len(pool) <= ps.key.Index {
+		pool = append(pool, nil)
+	}
+	e.incarnation = m.nextIncarnation.Add(1)
+	e.stopped = ps.cancelled
+	pool[ps.key.Index] = e
+	m.entries[ps.key.Slug] = pool
+	m.logFiles[ps.key] = logWriter
+	if m.starting[ps.key] == ps {
+		delete(m.starting, ps.key)
+	}
+	return ps.cancelled
 }
 
 // exitMonitor names everything that differs between the monitor of a replica
@@ -1385,6 +1497,12 @@ func (m *Manager) stopReplicaEntry(slug, poolKey string, index int, expected *en
 // and a mismatch there is itself a real proof of exit (see ErrIncarnationGone),
 // not an ordinary not-found.
 func (m *Manager) stopReplicaEntryImpl(slug, poolKey string, index int, expected *entry, requireConfirmed, viaIncarnation bool) error {
+	if expected == nil {
+		proceed, err := m.cancelPendingStart(slug, replicaKey{poolKey, index}, nil, requireConfirmed)
+		if err != nil || !proceed {
+			return err
+		}
+	}
 	m.mu.Lock()
 	pool := m.entries[poolKey]
 	if index < 0 || index >= len(pool) || pool[index] == nil || (expected != nil && pool[index] != expected) {
@@ -1531,6 +1649,95 @@ func (m *Manager) stopReplicaEntryImpl(slug, poolKey string, index int, expected
 
 	m.finalizeConfirmedStop(rt, slug, poolKey, index, e)
 	return nil
+}
+
+// cancelPendingStart cancels a Start that is still launching the replica at
+// key and waits, for as long as an ordinary stop could take, for that Start
+// to finish stopping what it launched. proceed reports whether the caller
+// should go on to stop whatever the slot now holds: it is true when nothing
+// was starting, or when the slot is still occupied after the Start finished
+// (a launch whose exit was not proven, left fenced stopPending, or the
+// predecessor of a launch that failed). A launch that does not finish in
+// time is reported as an unconfirmed stop to a caller that requires one.
+//
+// When only is non-nil, the cancellation is limited to that exact Start. A caller that
+// picked the Start out by its generation passes it, so a later Start that has
+// since reserved the same slot for another purpose is left alone; the caller
+// then finds the slot as the captured Start left it.
+func (m *Manager) cancelPendingStart(slug string, key replicaKey, only *pendingStart, requireConfirmed bool) (proceed bool, err error) {
+	m.mu.Lock()
+	ps := m.starting[key]
+	if ps == nil || (only != nil && ps != only) {
+		m.mu.Unlock()
+		return true, nil
+	}
+	ps.cancelled = true
+	m.mu.Unlock()
+
+	if !waitClosed(ps.done, 2*m.effectiveStopGrace()) {
+		slog.Warn("manager: replica is still launching after the stop grace; it will be stopped when the launch returns",
+			"slug", slug, "idx", key.Index)
+		if requireConfirmed {
+			return false, fmt.Errorf("app %s replica %d: %w", slug, key.Index, ErrStopUnconfirmed)
+		}
+		return false, nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	pool := m.entries[key.Slug]
+	return key.Index < len(pool) && pool[key.Index] != nil, nil
+}
+
+// linkBundleData makes <bundle>/data a symlink to the app's data directory.
+// Replicas of one bundle start concurrently, so another Start may create the
+// same link between the check and the create; a link that already points at
+// the right target is the expected result either way, while anything else at
+// that path is refused because the platform reserves it.
+func linkBundleData(slug, linkPath, target string) error {
+	for attempt := 0; attempt < 2; attempt++ {
+		info, err := os.Lstat(linkPath)
+		switch {
+		case err == nil:
+			if info.Mode()&os.ModeSymlink != 0 {
+				if existing, readErr := os.Readlink(linkPath); readErr == nil && existing == target {
+					return nil
+				}
+			}
+			return fmt.Errorf("bundle %s already contains a 'data' entry (%s); the platform reserves that path", slug, info.Mode())
+		case !os.IsNotExist(err):
+			return fmt.Errorf("stat %s: %w", linkPath, err)
+		}
+		err = os.Symlink(target, linkPath)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return fmt.Errorf("symlink data: %w", err)
+		}
+		// Another Start created the path first: inspect what it made.
+	}
+	return fmt.Errorf("symlink data: %s keeps changing", linkPath)
+}
+
+// effectiveStopGrace is the configured stop grace, or defaultStopGrace when
+// none is set.
+func (m *Manager) effectiveStopGrace() time.Duration {
+	if m.stopGrace > 0 {
+		return m.stopGrace
+	}
+	return defaultStopGrace
+}
+
+// waitClosed reports whether ch closes within d.
+func waitClosed(ch <-chan struct{}, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ch:
+		return true
+	case <-t.C:
+		return false
+	}
 }
 
 // recordSignal notes that sig was delivered to e's process, so a later bounded
@@ -2058,6 +2265,17 @@ func (m *Manager) stop(slug string, requireConfirmed bool) error {
 			}
 		}
 	}
+	// A replica still launching is stopped too: its slot may hold nothing
+	// yet, or only the predecessor the launch is replacing.
+	for key, ps := range m.starting {
+		if ps.slug != slug {
+			continue
+		}
+		if pool := m.entries[key.Slug]; key.Index < len(pool) && pool[key.Index] != nil && pool[key.Index].info.Slug == slug {
+			continue
+		}
+		targets = append(targets, stopTarget{poolKey: key.Slug, index: key.Index})
+	}
 	m.mu.Unlock()
 
 	if len(targets) == 0 {
@@ -2097,6 +2315,17 @@ func (m *Manager) stop(slug string, requireConfirmed bool) error {
 	return nil
 }
 
+// startingInPoolLocked reports whether a Start is launching a replica into
+// poolKey. The caller holds m.mu.
+func (m *Manager) startingInPoolLocked(poolKey string) bool {
+	for key := range m.starting {
+		if key.Slug == poolKey {
+			return true
+		}
+	}
+	return false
+}
+
 // Suspend freezes every running replica of slug via the tier runtime's
 // Snapshotter capability, releasing host RAM. It returns freed=true ONLY when
 // every replica's warmed memory was released; in that case each frozen replica's
@@ -2120,7 +2349,14 @@ func (m *Manager) Suspend(slug string) (bool, error) {
 			targets = append(targets, target{i, e.handle, e.tier})
 		}
 	}
+	launching := m.startingInPoolLocked(poolKey)
 	m.mu.Unlock()
+	if launching {
+		// A replica still launching cannot be frozen with the rest, so the
+		// pool cannot be suspended whole; the caller stops it instead, which
+		// also cancels the launch.
+		return false, nil
+	}
 	if len(targets) == 0 {
 		return false, fmt.Errorf("app %s not running", slug)
 	}
@@ -2314,7 +2550,21 @@ func (m *Manager) StopAll() error {
 			}
 		}
 	}
+	launching := make([]chan struct{}, 0, len(m.starting))
+	for _, ps := range m.starting {
+		slugSet[ps.slug] = struct{}{}
+		launching = append(launching, ps.done)
+	}
 	m.mu.Unlock()
+	// A launch the stops below cancel stops its own replica once the runtime
+	// returns, which can take longer than a stop waits. Shutdown waits for
+	// those launches so it does not leave behind a replica that is only
+	// published after StopAll returned.
+	defer func() {
+		for _, done := range launching {
+			<-done
+		}
+	}()
 	slugs := make([]string, 0, len(slugSet))
 	for slug := range slugSet {
 		slugs = append(slugs, slug)
@@ -2367,7 +2617,21 @@ func (m *Manager) Status(slug string) (*ProcessInfo, error) {
 // not a container ID). Used by the startup orphan-container sweep to decide
 // which ShinyHub-labeled containers have no live owner.
 func (m *Manager) RunningContainerIDs() map[string]bool {
+	// A launch in flight owns a container whose ID is not known yet, so the
+	// answer waits for every launch to publish or fail; otherwise a sweep
+	// would read that container as ownerless and remove it.
 	m.mu.Lock()
+	for len(m.starting) > 0 {
+		launching := make([]chan struct{}, 0, len(m.starting))
+		for _, ps := range m.starting {
+			launching = append(launching, ps.done)
+		}
+		m.mu.Unlock()
+		for _, done := range launching {
+			<-done
+		}
+		m.mu.Lock()
+	}
 	defer m.mu.Unlock()
 	ids := make(map[string]bool)
 	for _, pool := range m.entries {
@@ -2439,6 +2703,11 @@ func (m *Manager) HoldsLiveProcess(slug string) bool {
 			if e.stopPending || (e.info.Status != StatusStopped && e.info.Status != StatusCrashed) {
 				return true
 			}
+		}
+	}
+	for _, ps := range m.starting {
+		if ps.slug == slug {
+			return true
 		}
 	}
 	return false
@@ -2546,8 +2815,18 @@ func (m *Manager) SelectGeneration(slug string, deploymentID int64) error {
 // generation selected for the app.
 func (m *Manager) StopGeneration(slug string, deploymentID int64) error {
 	m.mu.Lock()
+	type launchingStart struct {
+		key replicaKey
+		ps  *pendingStart
+	}
+	var launching []launchingStart
+	for key, ps := range m.starting {
+		if ps.slug == slug && ps.deploymentID == deploymentID {
+			launching = append(launching, launchingStart{key, ps})
+		}
+	}
 	poolKey, ok := m.poolKeyForDeploymentLocked(slug, deploymentID)
-	if !ok {
+	if !ok && len(launching) == 0 {
 		m.mu.Unlock()
 		return fmt.Errorf("app %s deployment %d: %w", slug, deploymentID, ErrReplicaNotFound)
 	}
@@ -2558,14 +2837,48 @@ func (m *Manager) StopGeneration(slug string, deploymentID int64) error {
 	}
 	targets := make([]generationStopTarget, 0, len(pool))
 	for i, e := range pool {
-		if e != nil && e.info.DeploymentID == deploymentID {
+		if ok && e != nil && e.info.DeploymentID == deploymentID {
 			targets = append(targets, generationStopTarget{index: i, entry: e})
 		}
 	}
 	m.mu.Unlock()
 	var errs []error
+	// A replica of this generation that is still launching is cancelled
+	// first. If its slot still holds a replica of the generation afterwards
+	// (a launch whose exit was not proven), that replica is stopped below
+	// like any other.
+	for _, l := range launching {
+		key := l.key
+		proceed, err := m.cancelPendingStart(slug, key, l.ps, true)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if !proceed {
+			continue
+		}
+		m.mu.Lock()
+		var e *entry
+		if p := m.entries[key.Slug]; key.Index < len(p) {
+			e = p[key.Index]
+		}
+		m.mu.Unlock()
+		if e != nil && e.info.DeploymentID == deploymentID && !slices.ContainsFunc(targets, func(t generationStopTarget) bool { return t.entry == e }) {
+			if err := m.stopReplicaEntry(slug, key.Slug, key.Index, e, true); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	// A target in a slot whose launch was cancelled above was the replica that
+	// launch replaced (a crashed replica it was restarting), so it is gone
+	// because this stop already handled the slot. Any other target that has
+	// left its slot is still reported, since something else removed it.
 	for _, target := range targets {
-		if err := m.stopReplicaEntry(slug, poolKey, target.index, target.entry, true); err != nil {
+		superseded := slices.ContainsFunc(launching, func(l launchingStart) bool {
+			return l.key.Slug == poolKey && l.key.Index == target.index
+		})
+		err := m.stopReplicaEntry(slug, poolKey, target.index, target.entry, true)
+		if err != nil && !(superseded && errors.Is(err, ErrReplicaNotFound)) {
 			errs = append(errs, err)
 		}
 	}
@@ -2585,7 +2898,22 @@ func (m *Manager) StopGenerationReplica(slug string, deploymentID int64, index i
 			expected = pool[index]
 		}
 	}
+	var launchingKey replicaKey
+	var launching *pendingStart
+	for key, ps := range m.starting {
+		if ps.slug == slug && ps.deploymentID == deploymentID && key.Index == index {
+			launchingKey, launching = key, ps
+			break
+		}
+	}
 	m.mu.Unlock()
+	if launching != nil {
+		proceed, err := m.cancelPendingStart(slug, launchingKey, launching, requireConfirmed)
+		if err != nil || !proceed {
+			return err
+		}
+		return m.StopGenerationReplica(slug, deploymentID, index, requireConfirmed)
+	}
 	if !ok {
 		return fmt.Errorf("app %s deployment %d replica %d: %w", slug, deploymentID, index, ErrReplicaNotFound)
 	}
@@ -2804,8 +3132,10 @@ func (m *Manager) LogRuns(slug string) ([]LogSource, error) {
 }
 
 // PruneLogRunFiles reconciles node-local immutable files with database-retained
-// IDs. Holding m.mu across the scan excludes the small file-open-before-record
-// window in Start; active runs are additionally protected defensively.
+// IDs. A run's file can exist before the database records it, so every run
+// the manager holds, published or still launching, is kept. Holding m.mu
+// across the scan makes that set exact: a launch registers its run ID under
+// m.mu before creating the file.
 func (m *Manager) PruneLogRunFiles(retained map[string]struct{}) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -2818,6 +3148,11 @@ func (m *Manager) PruneLogRunFiles(retained map[string]struct{}) (int, error) {
 			if entry != nil && entry.logRun != nil {
 				keep[entry.logRun.RunID] = struct{}{}
 			}
+		}
+	}
+	for _, ps := range m.starting {
+		if ps.runID != "" {
+			keep[ps.runID] = struct{}{}
 		}
 	}
 	return PruneLogRunFiles(m.appsDir, keep)

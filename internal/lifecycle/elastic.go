@@ -456,7 +456,9 @@ func (s *ElasticSpawner) startAndCheck(app *db.App, dep *db.Deployment, slug str
 	})
 	if err != nil {
 		slog.Warn("elastic spawn: start process", "slug", slug, "slotID", slotID, "err", err)
-		return nil, false, true
+		// A launch cancelled by a concurrent stop must not be retried: the stop
+		// asked for the worker to be gone.
+		return nil, false, !errors.Is(err, process.ErrStartCancelled)
 	}
 
 	if guarded {
