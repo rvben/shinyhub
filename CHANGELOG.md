@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.24.5](https://github.com/rvben/shinyhub/compare/v0.24.4...v0.24.5) - 2026-11-13
+
 ### Added
 
 - **observability**: add optional Prometheus warnings for failed trace exports, dropped spans and sustained queue pressure, with setup guidance for tracing dashboard interactions.
@@ -24,6 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ### Fixed
 
 - **proxy**: upstream WebSocket 1012 service restarts and 1011 closes with reason `keepalive ping timeout` no longer set `shinyhub.ws.abnormal=true`, mark close spans as errors, or contribute to abnormal-burst warnings. Other upstream 1011 closes and upstream endings without a close code remain abnormal.
+- **tracing**: separate WebSocket lifetime from work spans ([122b15a](https://github.com/rvben/shinyhub/commit/122b15a364f3f4e12c9565b51122b348ebaf43dd))
 
 ## [0.24.4](https://github.com/rvben/shinyhub/compare/v0.24.3...v0.24.4) - 2026-11-12
 
