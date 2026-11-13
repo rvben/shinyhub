@@ -428,13 +428,22 @@ no client is watching.
   parent in the backend. For an accepted WebSocket upgrade the HTTP span ends
   once the 101 headers have been flushed. The trace buffer also records only
   this handshake duration. Rejected upgrades retain normal HTTP spans.
-- **A separate WebSocket session span**, named `WS /app/{slug}`, is a child
-  of the handshake span. It is an internal span with no `http.route`, so its
-  duration does not enter HTTP route latency aggregates. It records
-  `shinyhub.ws.bytes_to_client`, `shinyhub.ws.bytes_to_upstream`, close code
-  when available, close initiator, transport-ending side, and abnormal status.
-  Application-provided close reasons are not copied into traces. Existing
-  WebSocket lifecycle metrics and access logs retain session duration.
+- **A short WebSocket close span**, named `WS close /app/{slug}`, is emitted
+  when a tunnel ends. It starts a new trace with a span link to the original
+  handshake, so a dashboard left open for hours neither holds a span open nor
+  adds a late child to the handshake trace. The close trace follows the
+  linked handshake's sampling decision, keeping both ends together under
+  head sampling; without a valid handshake link it uses the configured ratio.
+  Collector-side sampling or retention may still remove either trace. The close
+  span is an internal span with no `http.route`; its duration covers recording
+  the close, not connection lifetime. `shinyhub.ws.session_duration_seconds` records lifetime as an
+  attribute, alongside byte totals, close code when available, close initiator,
+  transport-ending side, and abnormal status. Application-provided close
+  reasons are not copied into traces. The `shinyhub_app_sessions` gauge shows
+  live sessions; `shinyhub_ws_session_duration_seconds` measures completed
+  connection lifetimes, and `ws_session_end` logs retain close details.
+  Long sessions are normal: diagnose slow work using Shiny's per-update and
+  output spans, rather than connection lifetime.
 - **Background lifecycle spans** for the watchdog's wake, restart, and
   hibernate operations (`lifecycle.wake`, `lifecycle.restart`,
   `lifecycle.hibernate`), each tagged with `shinyhub.app.slug`, so cold-start

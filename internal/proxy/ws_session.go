@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
@@ -13,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/rvben/shinyhub/internal/rawquery"
+	"github.com/rvben/shinyhub/internal/tracing"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -420,9 +422,17 @@ func (f *wsFrameScanner) finish(onClose func(*uint16, string)) {
 	f.have, f.need, f.remaining, f.frameLen, f.closeN = 0, 0, 0, 0, 0
 }
 
-// Session spans are internal spans without http.route or HTTP status attributes:
-// their durations must never enter HTTP request latency aggregates.
-func endWSSpan(span trace.Span, e WSSessionEnd) {
+// Record a completed lifecycle event in its own trace. Linking to the handshake
+// preserves correlation without holding a span open or appending to a trace
+// that the collector may have finished processing hours ago. Session duration
+// is an attribute, never the span's duration or an HTTP latency measurement.
+func recordWSCloseSpan(tr trace.Tracer, handshake trace.SpanContext, e WSSessionEnd) {
+	opts := []trace.SpanStartOption{trace.WithSpanKind(trace.SpanKindInternal)}
+	if handshake.IsValid() {
+		opts = append(opts, trace.WithLinks(trace.Link{SpanContext: handshake}))
+	}
+	_, span := tr.Start(context.Background(), tracing.WSCloseSpanName, opts...)
+	defer span.End()
 	span.SetAttributes(
 		attribute.String("shinyhub.app.slug", e.Slug),
 		attribute.Int("shinyhub.replica", e.ReplicaIndex),
@@ -433,6 +443,7 @@ func endWSSpan(span trace.Span, e WSSessionEnd) {
 		attribute.String("shinyhub.ws.end_signal", e.EndSignal),
 		attribute.String("shinyhub.ws.transport_end_side", e.TransportEndSide),
 		attribute.Bool("shinyhub.ws.abnormal", e.Abnormal),
+		attribute.Float64("shinyhub.ws.session_duration_seconds", e.Duration.Seconds()),
 	)
 	if e.CloseCode != nil {
 		span.SetAttributes(attribute.Int("shinyhub.ws.close_code", int(*e.CloseCode)))
@@ -441,5 +452,4 @@ func endWSSpan(span trace.Span, e WSSessionEnd) {
 	if e.Abnormal {
 		span.SetStatus(codes.Error, "abnormal websocket termination")
 	}
-	span.End()
 }

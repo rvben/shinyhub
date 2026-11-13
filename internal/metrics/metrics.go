@@ -26,6 +26,7 @@ type Registry struct {
 	httpDuration            *prometheus.HistogramVec
 	admissionRejects        *prometheus.CounterVec
 	wsSessionEnds           *prometheus.CounterVec
+	wsSessionDuration       *prometheus.HistogramVec
 	wsAbnormalBursts        *prometheus.CounterVec
 	deploys                 *prometheus.CounterVec
 	generationHandoffs      *prometheus.CounterVec
@@ -107,6 +108,12 @@ func New(version string) *Registry {
 		Help: "Completed WebSocket tunnels by app, close-frame initiator or proxy action, first transport-ending side, and abnormal classification.",
 	}, []string{"slug", "closed_by", "transport_end_side", "abnormal"})
 	reg.MustRegister(wsSessionEnds)
+	wsSessionDuration := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "shinyhub_ws_session_duration_seconds",
+		Help:    "Completed WebSocket connection lifetime by app; not request latency or active work time.",
+		Buckets: []float64{1, 10, 60, 300, 900, 3600, 7200, 14400, 28800, 86400},
+	}, []string{"slug"})
+	reg.MustRegister(wsSessionDuration)
 	wsAbnormalBursts := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "shinyhub_ws_abnormal_bursts_total",
 		Help: "Worker-local abnormal WebSocket close bursts observed by this proxy instance, by app.",
@@ -279,6 +286,7 @@ func New(version string) *Registry {
 		httpDuration:            httpDuration,
 		admissionRejects:        admissionRejects,
 		wsSessionEnds:           wsSessionEnds,
+		wsSessionDuration:       wsSessionDuration,
 		wsAbnormalBursts:        wsAbnormalBursts,
 		deploys:                 deploys,
 		generationHandoffs:      generationHandoffs,
@@ -316,9 +324,10 @@ func New(version string) *Registry {
 	return r
 }
 
-// RecordWSSessionEnd counts a completed WebSocket tunnel. Slug is an app slug,
-// so series appear after that app's first close rather than being preseeded.
-func (r *Registry) RecordWSSessionEnd(slug, closedBy, transportEndSide string, abnormal bool) {
+// RecordWSSessionEnd counts a completed WebSocket tunnel and observes its lifetime.
+// Series appear after an app's first close rather than being preseeded.
+func (r *Registry) RecordWSSessionEnd(slug, closedBy, transportEndSide string, abnormal bool, duration time.Duration) {
+	r.wsSessionDuration.WithLabelValues(slug).Observe(duration.Seconds())
 	r.wsSessionEnds.WithLabelValues(slug, closedBy, transportEndSide, strconv.FormatBool(abnormal)).Inc()
 }
 

@@ -3252,11 +3252,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if ptr := p.wsEnd.Load(); ptr != nil {
 				fn = *ptr
 			}
-			if tr := p.loadSpanTracer(); p.traceCfg.Enabled && tr != nil {
-				_, sessionSpan := tr.Start(r.Context(), "WS /app/{slug}", trace.WithSpanKind(trace.SpanKindInternal))
+			if p.traceCfg.Enabled {
+				// Keep only the immutable handshake identity, not an open span or
+				// request context, for a connection that may live for hours.
+				handshake := trace.SpanContextFromContext(r.Context())
 				prior := fn
 				fn = func(e WSSessionEnd) {
-					endWSSpan(sessionSpan, e)
+					// SetTracing is startup-only; the tracer itself can be
+					// swapped or removed while this connection stays open.
+					if tr := p.loadSpanTracer(); tr != nil {
+						recordWSCloseSpan(tr, handshake, e)
+					}
 					if prior != nil {
 						prior(e)
 					}

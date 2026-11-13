@@ -27,6 +27,10 @@ import (
 	"github.com/rvben/shinyhub/internal/config"
 )
 
+// WSCloseSpanName identifies the short close event whose root sampling decision
+// follows its linked handshake. Shared by the proxy and server SDK sampler.
+const WSCloseSpanName = "WS close /app/{slug}"
+
 // TraceContext is a parsed W3C traceparent value plus the propagated tracestate.
 //
 // Per the W3C spec, traceparent is "00-<32 hex trace_id>-<16 hex span_id>-<2 hex flags>".

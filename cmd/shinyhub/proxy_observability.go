@@ -94,7 +94,7 @@ func wsSessionEndRecorder(logger *slog.Logger, metricsReg *metrics.Registry, bur
 			attrs = append(attrs, "close_reason", e.CloseReason)
 		}
 		if metricsReg != nil {
-			metricsReg.RecordWSSessionEnd(e.Slug, e.ClosedBy, e.TransportEndSide, e.Abnormal)
+			metricsReg.RecordWSSessionEnd(e.Slug, e.ClosedBy, e.TransportEndSide, e.Abnormal, e.Duration)
 		}
 		if e.Abnormal {
 			logger.Warn("ws_session_end", attrs...)

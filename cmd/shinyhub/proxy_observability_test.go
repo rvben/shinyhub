@@ -102,7 +102,7 @@ func TestWSSessionEndRecorderReportsAbnormalBursts(t *testing.T) {
 	record := wsSessionEndRecorder(logs.logger(), reg, proxy.NewWSAbnormalBurstDetector())
 
 	code := uint16(1011)
-	record(proxy.WSSessionEnd{Slug: "alpha", ReplicaIndex: 0, DeploymentID: 7, ClosedBy: "client", TransportEndSide: "client"})
+	record(proxy.WSSessionEnd{Slug: "alpha", ReplicaIndex: 0, DeploymentID: 7, ClosedBy: "client", TransportEndSide: "client", Duration: 6 * time.Hour})
 	for range 3 {
 		record(proxy.WSSessionEnd{Slug: "alpha", ReplicaIndex: 0, DeploymentID: 7, ClosedBy: "upstream", TransportEndSide: "upstream",
 			Abnormal: true, CloseCode: &code, CloseReason: "internal error"})
@@ -133,6 +133,8 @@ func TestWSSessionEndRecorderReportsAbnormalBursts(t *testing.T) {
 		`shinyhub_ws_session_ends_total{abnormal="true",closed_by="upstream",slug="alpha",transport_end_side="upstream"} 3`,
 		`shinyhub_ws_session_ends_total{abnormal="false",closed_by="client",slug="alpha",transport_end_side="client"} 1`,
 		`shinyhub_ws_abnormal_bursts_total{slug="alpha"} 1`,
+		`shinyhub_ws_session_duration_seconds_sum{slug="alpha"} 21600`,
+		`shinyhub_ws_session_duration_seconds_count{slug="alpha"} 4`,
 	} {
 		if !strings.Contains(scrape, want) {
 			t.Errorf("scrape lacks %s", want)

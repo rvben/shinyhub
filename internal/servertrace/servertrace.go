@@ -65,7 +65,7 @@ func Setup(ctx context.Context, cfg config.TracingConfig, serviceVersion, instan
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithBatcher(exp),
 		sdktrace.WithResource(buildResource(serviceVersion, instanceID, cfg.ResourceAttributes)),
-		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(cfg.SampleRatio))),
+		sdktrace.WithSampler(NewSampler(cfg.SampleRatio)),
 	)
 	prop := propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{})
 	otel.SetTracerProvider(tp)
