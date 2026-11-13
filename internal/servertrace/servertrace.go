@@ -14,6 +14,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"maps"
 	"net/http"
 	"net/url"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/httproute"
 	"go.opentelemetry.io/otel"
@@ -31,6 +33,7 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
@@ -43,6 +46,7 @@ const instrumentationScope = "github.com/rvben/shinyhub"
 // Setup in production or NewFromProvider in tests with an in-memory exporter.
 type Tracer struct {
 	tp         *sdktrace.TracerProvider
+	mp         *sdkmetric.MeterProvider
 	propagator propagation.TextMapPropagator
 	tracer     trace.Tracer
 }
@@ -57,24 +61,63 @@ func NewFromProvider(tp *sdktrace.TracerProvider, prop propagation.TextMapPropag
 // connects lazily, so Setup does not block on the collector being reachable.
 // instanceID identifies this control-plane process uniquely among several
 // (see buildResource); an empty instanceID falls back to the hostname.
-func Setup(ctx context.Context, cfg config.TracingConfig, serviceVersion, instanceID string) (*Tracer, error) {
+func Setup(ctx context.Context, cfg config.TracingConfig, serviceVersion, instanceID string, options ...SetupOption) (*Tracer, error) {
 	exp, err := newExporter(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
+	opts := setupOptions{}
+	for _, option := range options {
+		option(&opts)
+	}
+	health, err := newExportHealth(exp, opts.registerer)
+	if err != nil {
+		_ = exp.Shutdown(ctx)
+		return nil, err
+	}
+	var mp *sdkmetric.MeterProvider
+	if opts.registerer != nil {
+		mp, err = newHealthMetrics(opts.registerer)
+		if err != nil {
+			_ = exp.Shutdown(ctx)
+			for _, c := range []prometheus.Collector{health.spans, health.batches, health.lastSuccess} {
+				opts.registerer.Unregister(c)
+			}
+			return nil, err
+		}
+	}
+	if mp != nil {
+		restore, err := enableSDKProcessorMetrics()
+		if err != nil {
+			_ = exp.Shutdown(ctx)
+			_ = mp.Shutdown(ctx)
+			return nil, err
+		}
+		defer restore()
+	}
+
+	otel.SetErrorHandler(health)
 	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exp),
+		sdktrace.WithBatcher(health),
 		sdktrace.WithResource(buildResource(serviceVersion, instanceID, cfg.ResourceAttributes)),
 		sdktrace.WithSampler(NewSampler(cfg.SampleRatio)),
 	)
 	prop := propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{})
 	otel.SetTracerProvider(tp)
 	otel.SetTextMapPropagator(prop)
-	return NewFromProvider(tp, prop), nil
+	t := NewFromProvider(tp, prop)
+	t.mp = mp
+	return t, nil
 }
 
 // Shutdown flushes pending spans and stops the exporter.
-func (t *Tracer) Shutdown(ctx context.Context) error { return t.tp.Shutdown(ctx) }
+func (t *Tracer) Shutdown(ctx context.Context) error {
+	err := t.tp.Shutdown(ctx)
+	if t.mp != nil {
+		err = errors.Join(err, t.mp.Shutdown(ctx))
+	}
+	return err
+}
 
 // Tracer returns the underlying span tracer so other components (e.g. the
 // lifecycle watcher) can emit spans into the same provider/exporter.

@@ -11,8 +11,10 @@ import (
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/config"
+	"github.com/rvben/shinyhub/internal/logging"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // captureLogs swaps the process default slog logger for one writing JSON to a
@@ -22,7 +24,7 @@ func captureLogs(t *testing.T) (*bytes.Buffer, func()) {
 	t.Helper()
 	var buf bytes.Buffer
 	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	slog.SetDefault(slog.New(logging.WithTraceContext(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))))
 	return &buf, func() { slog.SetDefault(prev) }
 }
 
@@ -103,10 +105,11 @@ func TestAccessLog_CorrelatesWithActiveSpan(t *testing.T) {
 
 	// Wrap accessLog in a handler that starts a span first, mirroring how the
 	// tracer middleware sits outside the router in production.
-	var wantTraceID string
+	var wantTraceID, wantSpanID string
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := tp.Tracer("test").Start(r.Context(), "incoming")
 		wantTraceID = span.SpanContext().TraceID().String()
+		wantSpanID = span.SpanContext().SpanID().String()
 		srv.accessLog(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {})).
 			ServeHTTP(w, r.WithContext(ctx))
 		span.End()
@@ -118,6 +121,9 @@ func TestAccessLog_CorrelatesWithActiveSpan(t *testing.T) {
 	logRec := findRecord(t, buf.String(), "api_access")
 	if logRec["trace_id"] != wantTraceID {
 		t.Fatalf("access log trace_id = %v, want %q", logRec["trace_id"], wantTraceID)
+	}
+	if logRec["span_id"] != wantSpanID || logRec["trace_sampled"] != true {
+		t.Fatalf("missing span identity or sampling state: %v", logRec)
 	}
 	reqID, _ := logRec["request_id"].(string)
 	if reqID == "" {
@@ -181,5 +187,20 @@ func TestAccessLog_RejectsUnsafeInboundRequestID(t *testing.T) {
 	r := findRecord(t, buf.String(), "api_access")
 	if r["request_id"] == "bad id\nwith newline" {
 		t.Fatalf("access log echoed unsafe inbound id")
+	}
+}
+
+func TestRequestLoggerKeepsUnsampledTraceIdentity(t *testing.T) {
+	buf, restore := captureLogs(t)
+	defer restore()
+	sc := trace.NewSpanContext(trace.SpanContextConfig{TraceID: trace.TraceID{1}, SpanID: trace.SpanID{2}})
+	r := httptest.NewRequest("GET", "/api/apps", nil)
+	ctx := context.WithValue(trace.ContextWithSpanContext(r.Context(), sc), ctxKeyRequestID{}, "req-test")
+	log := reqLog(r.WithContext(ctx))
+	// A logger handed to background work retains only identity, not the request.
+	log.Warn("later failure")
+	rec := findRecord(t, buf.String(), "later failure")
+	if rec["request_id"] != "req-test" || rec["trace_id"] != sc.TraceID().String() || rec["span_id"] != sc.SpanID().String() || rec["trace_sampled"] != false {
+		t.Fatalf("missing request correlation: %v", rec)
 	}
 }

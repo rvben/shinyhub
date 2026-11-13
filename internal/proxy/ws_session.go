@@ -25,6 +25,8 @@ import (
 // identifies a close-frame sender or a known proxy action; transport EOF alone
 // leaves it unknown. TransportEndSide records the first side whose read ended.
 type WSSessionEnd struct {
+	Correlation                                                            tracing.Correlation
+	HandshakeCorrelation                                                   tracing.Correlation
 	Slug, ConnectionID, ClosedBy, EndSignal, TransportEndSide, CloseReason string
 	ReplicaIndex                                                           int
 	DeploymentID                                                           int64
@@ -426,7 +428,7 @@ func (f *wsFrameScanner) finish(onClose func(*uint16, string)) {
 // preserves correlation without holding a span open or appending to a trace
 // that the collector may have finished processing hours ago. Session duration
 // is an attribute, never the span's duration or an HTTP latency measurement.
-func recordWSCloseSpan(tr trace.Tracer, handshake trace.SpanContext, e WSSessionEnd) {
+func recordWSCloseSpan(tr trace.Tracer, handshake trace.SpanContext, e WSSessionEnd) tracing.Correlation {
 	opts := []trace.SpanStartOption{trace.WithSpanKind(trace.SpanKindInternal)}
 	if handshake.IsValid() {
 		opts = append(opts, trace.WithLinks(trace.Link{SpanContext: handshake}))
@@ -452,4 +454,9 @@ func recordWSCloseSpan(tr trace.Tracer, handshake trace.SpanContext, e WSSession
 	if e.Abnormal {
 		span.SetStatus(codes.Error, "abnormal websocket termination")
 	}
+	sc := span.SpanContext()
+	if !sc.IsValid() {
+		return tracing.Correlation{}
+	}
+	return tracing.Correlation{TraceID: sc.TraceID().String(), SpanID: sc.SpanID().String(), Sampled: sc.IsSampled()}
 }

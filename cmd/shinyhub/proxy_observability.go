@@ -6,6 +6,7 @@ import (
 
 	"github.com/rvben/shinyhub/internal/api"
 	"github.com/rvben/shinyhub/internal/db"
+	"github.com/rvben/shinyhub/internal/logging"
 	"github.com/rvben/shinyhub/internal/metrics"
 	"github.com/rvben/shinyhub/internal/proxy"
 )
@@ -62,6 +63,10 @@ func proxyAccessLogger(logger *slog.Logger) func(proxy.AccessLogEntry) {
 			"client_ip", e.ClientIP,
 			"peer", e.Peer,
 		}
+		attrs = append(attrs, logging.CorrelationValues(e.Correlation)...)
+		if e.DeploymentID > 0 {
+			attrs = append(attrs, "deployment_id", e.DeploymentID)
+		}
 		if e.ReplicaIndex >= 0 {
 			attrs = append(attrs, "replica", e.ReplicaIndex, "sticky", e.Sticky)
 		}
@@ -90,8 +95,9 @@ func wsSessionEndRecorder(logger *slog.Logger, metricsReg *metrics.Registry, bur
 		if e.CloseCode != nil {
 			attrs = append(attrs, "close_code", *e.CloseCode)
 		}
-		if e.CloseReason != "" {
-			attrs = append(attrs, "close_reason", e.CloseReason)
+		attrs = append(attrs, logging.CorrelationValues(e.Correlation)...)
+		if e.HandshakeCorrelation.TraceID != "" && e.HandshakeCorrelation.SpanID != "" {
+			attrs = append(attrs, "handshake_trace_id", e.HandshakeCorrelation.TraceID, "handshake_span_id", e.HandshakeCorrelation.SpanID, "handshake_trace_sampled", e.HandshakeCorrelation.Sampled)
 		}
 		if metricsReg != nil {
 			metricsReg.RecordWSSessionEnd(e.Slug, e.ClosedBy, e.TransportEndSide, e.Abnormal, e.Duration)
@@ -112,9 +118,6 @@ func wsSessionEndRecorder(logger *slog.Logger, metricsReg *metrics.Registry, bur
 			}
 			if burst.CloseCode != nil {
 				burstAttrs = append(burstAttrs, "close_code", *burst.CloseCode)
-			}
-			if burst.CloseReason != "" {
-				burstAttrs = append(burstAttrs, "close_reason", burst.CloseReason)
 			}
 			logger.Warn("ws_abnormal_burst", burstAttrs...)
 		}

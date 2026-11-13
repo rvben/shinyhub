@@ -479,7 +479,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	// Only now, with the slug's row committed, does the slug provably belong
 	// to this new app, so a cache still on disk is an earlier app's leftover.
 	if err := storage.DiscardLeftoverCache(s.cfg, req.Slug); err != nil {
-		slog.Warn("discard leftover result cache", "slug", req.Slug, "err", err)
+		reqLog(r).Warn("discard leftover result cache", "slug", req.Slug, "err", err)
 	}
 
 	// Apply the operator-configured default replica count when it exceeds the
@@ -489,7 +489,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		created, err := s.store.GetAppBySlug(req.Slug)
 		if err == nil {
 			if err := s.store.UpdateAppReplicas(created.ID, s.cfg.Runtime.DefaultReplicas); err != nil {
-				slog.Error("set default replicas on create", "slug", req.Slug, "err", err)
+				reqLog(r).Error("set default replicas on create", "slug", req.Slug, "err", err)
 			}
 		}
 	}

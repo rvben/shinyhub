@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **observability**: correlate contextual request and proxy logs with `trace_id`, `span_id`, and `trace_sampled`; include deployment identity and linked handshake identity on WebSocket lifecycle logs.
+- **tracing**: expose server trace export results, last successful export time, SDK queue occupancy and queue-full drops in Prometheus, with sanitized failure and recovery logs.
+
+### Changed
+
+- **proxy**: emit WebSocket `proxy_access` at handshake completion, with handshake duration and bytes. Use `ws_session_end` for connection lifetime and tunnel byte totals; update queries that previously treated WebSocket access duration as connection lifetime.
+
+### Removed
+
+- **logging**: omit application-provided `close_reason` text from WebSocket session-end and burst logs to avoid exposing sensitive payloads. Close codes remain available.
+
 ## [0.24.4](https://github.com/rvben/shinyhub/compare/v0.24.3...v0.24.4) - 2026-11-12
 
 ### Fixed

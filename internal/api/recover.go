@@ -54,7 +54,7 @@ func recoverAPI(logger *slog.Logger) func(http.Handler) http.Handler {
 				if rec == http.ErrAbortHandler {
 					panic(rec)
 				}
-				logger.Error("panic serving API request",
+				logger.ErrorContext(r.Context(), "panic serving API request",
 					"request_id", RequestIDFromContext(r.Context()),
 					"method", r.Method,
 					"path", r.URL.Path,

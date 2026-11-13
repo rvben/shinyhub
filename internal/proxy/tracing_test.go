@@ -72,6 +72,9 @@ func TestProxy_InjectsTraceparent(t *testing.T) {
 	buf := tracing.NewBuffer(10, time.Second)
 	p.SetTracing(config.TracingConfig{Enabled: true, SampleRatio: 1}, buf)
 
+	var access proxy.AccessLogEntry
+	p.SetAccessLogger(func(e proxy.AccessLogEntry) { access = e })
+
 	incoming := "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
 	req := httptest.NewRequest("GET", "/app/app/", nil)
 	req.Header.Set("traceparent", incoming)
@@ -88,6 +91,10 @@ func TestProxy_InjectsTraceparent(t *testing.T) {
 	if len(gotTraceparent) < 55 || gotTraceparent[3:35] != "0af7651916cd43dd8448eb211c80319c" {
 		t.Errorf("trace id not continued: got %q", gotTraceparent)
 	}
+	if access.Correlation.TraceID != gotTraceparent[3:35] || access.Correlation.SpanID != gotTraceparent[36:52] || !access.Correlation.Sampled {
+		t.Fatalf("proxy log correlation must match propagated identity: %v", access.Correlation)
+	}
+
 }
 
 // TestProxy_DisabledTracingLeavesHeaderAlone verifies the hot path is a no-op
@@ -326,8 +333,10 @@ func TestProxy_TracedWebSocketUpgradeSucceeds(t *testing.T) {
 				defer backend.Close()
 
 				p := proxy.New()
-				closed := make(chan struct{})
-				p.SetWSSessionEndRecorder(func(proxy.WSSessionEnd) { close(closed) })
+				accessLogs := make(chan proxy.AccessLogEntry, 2)
+				p.SetAccessLogger(func(e proxy.AccessLogEntry) { accessLogs <- e })
+				closed := make(chan proxy.WSSessionEnd, 1)
+				p.SetWSSessionEndRecorder(func(e proxy.WSSessionEnd) { closed <- e })
 				if err := p.Register("app", backend.URL); err != nil {
 					t.Fatal(err)
 				}
@@ -367,6 +376,15 @@ func TestProxy_TracedWebSocketUpgradeSucceeds(t *testing.T) {
 						break
 					}
 				}
+				var access proxy.AccessLogEntry
+				select {
+				case access = <-accessLogs:
+				case <-time.After(5 * time.Second):
+					t.Fatal("HTTP access log must arrive while socket stays open")
+				}
+				if access.Status != 101 {
+					t.Fatalf("handshake access status: %v", access)
+				}
 				// The HTTP span must export while the backend is still waiting for
 				// the first message; no session-lifetime span should be started.
 				if spans != nil {
@@ -392,6 +410,9 @@ func TestProxy_TracedWebSocketUpgradeSucceeds(t *testing.T) {
 				}
 				if len(buffered) != 1 || buffered[0].Status != 101 {
 					t.Fatalf("handshake must reach the buffer before the session closes: %v", buffered)
+				}
+				if access.Duration.Milliseconds() != buffered[0].DurationMS || access.Correlation.TraceID != buffered[0].TraceID || access.Correlation.SpanID != buffered[0].SpanID {
+					t.Fatalf("handshake log must match trace timing and identity: %v vs %v", access, buffered[0])
 				}
 				closeRecorder := spans
 				var httpSpan sdktrace.ReadOnlySpan
@@ -419,10 +440,19 @@ func TestProxy_TracedWebSocketUpgradeSucceeds(t *testing.T) {
 				}
 				// The lifecycle callback runs after close tracing; waiting for it also
 				// proves that a removed tracer emits no close span to the old provider.
+				var endEvent proxy.WSSessionEnd
 				select {
-				case <-closed:
+				case endEvent = <-closed:
 				case <-time.After(5 * time.Second):
 					t.Fatal("session close callback did not run")
+				}
+				select {
+				case <-accessLogs:
+					t.Fatal("session close must not duplicate the HTTP access log")
+				default:
+				}
+				if endEvent.HandshakeCorrelation.TraceID != access.Correlation.TraceID || endEvent.HandshakeCorrelation.SpanID != access.Correlation.SpanID || endEvent.HandshakeCorrelation.Sampled != access.Correlation.Sampled {
+					t.Fatalf("session log must identify handshake in every tracing mode: %v vs %v", endEvent, access)
 				}
 				if spans == nil {
 					return
@@ -444,10 +474,19 @@ func TestProxy_TracedWebSocketUpgradeSucceeds(t *testing.T) {
 				if len(ended) != want {
 					t.Fatalf("want %d spans on current recorder, got %d", want, len(ended))
 				}
+				if endEvent.HandshakeCorrelation.TraceID != httpSpan.SpanContext().TraceID().String() || endEvent.HandshakeCorrelation.SpanID != httpSpan.SpanContext().SpanID().String() {
+					t.Fatalf("lifecycle event must identify the handshake: %v", endEvent)
+				}
 				if want == 0 {
+					if endEvent.Correlation.TraceID != "" {
+						t.Fatal("removed tracer must not produce close identity")
+					}
 					return
 				}
 				closeSpan := ended[len(ended)-1]
+				if endEvent.Correlation.TraceID != closeSpan.SpanContext().TraceID().String() || endEvent.Correlation.SpanID != closeSpan.SpanContext().SpanID().String() || !endEvent.Correlation.Sampled {
+					t.Fatalf("lifecycle event must identify the close span: %v", endEvent)
+				}
 				if closeSpan.Name() != "WS close /app/{slug}" || closeSpan.SpanKind() != trace.SpanKindInternal {
 					t.Fatalf("unexpected close span: %s (%s)", closeSpan.Name(), closeSpan.SpanKind())
 				}

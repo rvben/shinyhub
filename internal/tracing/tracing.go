@@ -31,6 +31,22 @@ import (
 // follows its linked handshake. Shared by the proxy and server SDK sampler.
 const WSCloseSpanName = "WS close /app/{slug}"
 
+// Correlation identifies a span in logs without retaining its request context.
+// Sampled is the head sampling decision, not proof of delivery to a backend.
+type Correlation struct {
+	TraceID string
+	SpanID  string
+	Sampled bool
+}
+
+// Correlation returns empty fields when tracing has not established an identity.
+func (c TraceContext) Correlation() Correlation {
+	if c.TraceID == [16]byte{} || c.SpanID == [8]byte{} {
+		return Correlation{}
+	}
+	return Correlation{TraceID: c.TraceIDHex(), SpanID: hex.EncodeToString(c.SpanID[:]), Sampled: c.Sampled()}
+}
+
 // TraceContext is a parsed W3C traceparent value plus the propagated tracestate.
 //
 // Per the W3C spec, traceparent is "00-<32 hex trace_id>-<16 hex span_id>-<2 hex flags>".

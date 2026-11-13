@@ -9,14 +9,16 @@ import (
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deployfail"
+	"github.com/rvben/shinyhub/internal/logging"
 	"github.com/rvben/shinyhub/internal/proxytrust"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // reqLog returns a slog.Logger tagged with the request's correlation ID so
 // handler-side and async errors can be joined to the api_access log line for
 // the same request.
 func reqLog(r *http.Request) *slog.Logger {
-	return slog.With("request_id", RequestIDFromContext(r.Context()))
+	return slog.With("request_id", RequestIDFromContext(r.Context())).With(logging.CorrelationValues(logging.SpanCorrelation(trace.SpanContextFromContext(r.Context())))...)
 }
 
 // writeJSON writes v as JSON with the given HTTP status code. Encode errors are
@@ -48,7 +50,7 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 // record.
 func writeInternal(w http.ResponseWriter, r *http.Request, msg string, err error) {
 	id := RequestIDFromContext(r.Context())
-	slog.Error("api: internal error", "request_id", id, "method", r.Method, "path", r.URL.Path,
+	reqLog(r).Error("api: internal error", "method", r.Method, "path", r.URL.Path,
 		"error", msg, "err", err)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusInternalServerError)

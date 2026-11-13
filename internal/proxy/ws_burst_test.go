@@ -41,26 +41,27 @@ func TestWSAbnormalBurstDetectorGroupsWorkerAndSuppressesDuplicates(t *testing.T
 	}
 }
 
-func TestWSAbnormalBurstDetectorOnlyReportsSharedCloseReason(t *testing.T) {
+func TestWSAbnormalBurstDetectorOnlyReportsSharedCloseCode(t *testing.T) {
 	for _, mixed := range []bool{false, true} {
 		d := NewWSAbnormalBurstDetector()
 		code := uint16(1011)
 		e := WSSessionEnd{Slug: "demo", ReplicaIndex: 9, DeploymentID: 42,
-			Abnormal: true, CloseCode: &code, CloseReason: "keepalive ping timeout"}
+			Abnormal: true, CloseCode: &code}
 		_, _ = d.Record(e)
 		_, _ = d.Record(e)
 		if mixed {
-			e.CloseReason = "worker stopped"
+			differentCode := uint16(1012)
+			e.CloseCode = &differentCode
 		}
 		burst, ok := d.Record(e)
 		if !ok {
 			t.Fatal("missing burst")
 		}
-		if mixed && (burst.CloseCode != nil || burst.CloseReason != "") {
+		if mixed && (burst.CloseCode != nil) {
 			t.Fatalf("mixed causes presented as shared: %+v", burst)
 		}
-		if !mixed && (burst.CloseCode == nil || *burst.CloseCode != 1011 || burst.CloseReason != "keepalive ping timeout") {
-			t.Fatalf("shared close reason omitted: %+v", burst)
+		if !mixed && (burst.CloseCode == nil || *burst.CloseCode != 1011) {
+			t.Fatalf("shared close code omitted: %+v", burst)
 		}
 	}
 }

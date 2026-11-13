@@ -41,7 +41,7 @@ func New() *slog.Logger {
 	} else {
 		h = slog.NewTextHandler(os.Stdout, opts)
 	}
-	return slog.New(h)
+	return slog.New(WithTraceContext(h))
 }
 
 // isTTY returns true when w is a character device (best-effort).

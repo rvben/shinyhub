@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
+	"github.com/rvben/shinyhub/internal/logging"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -85,10 +86,10 @@ func (s *Server) accessLog(next http.Handler) http.Handler {
 		// active (the tracer middleware runs outside the router): stamp the
 		// request ID onto the span so a trace links back to the log line, and
 		// capture the trace ID to emit alongside the access record below.
-		var traceID string
+		var correlation []any
 		if span := trace.SpanFromContext(r.Context()); span.SpanContext().IsValid() {
 			span.SetAttributes(attribute.String("request_id", reqID))
-			traceID = span.SpanContext().TraceID().String()
+			correlation = logging.CorrelationValues(logging.SpanCorrelation(span.SpanContext()))
 		}
 
 		ww := chimw.NewWrapResponseWriter(w, r.ProtoMajor)
@@ -111,9 +112,7 @@ func (s *Server) accessLog(next http.Handler) http.Handler {
 		if route := chi.RouteContext(r.Context()).RoutePattern(); route != "" {
 			attrs = append(attrs, "route", route)
 		}
-		if traceID != "" {
-			attrs = append(attrs, "trace_id", traceID)
-		}
-		slog.Info("api_access", attrs...)
+		attrs = append(attrs, correlation...)
+		slog.InfoContext(r.Context(), "api_access", attrs...)
 	})
 }

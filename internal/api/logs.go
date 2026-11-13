@@ -422,7 +422,7 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 			s.metrics.RecordProviderLogRead(result, time.Since(started))
 		}
 		if err != nil {
-			slog.Warn("read provider logs", "slug", slug, "run_id", runID, "err", err)
+			slog.WarnContext(r.Context(), "read provider logs", "slug", slug, "run_id", runID, "err", err)
 			if errors.Is(err, process.ErrExternalLogsThrottled) {
 				w.Header().Set("Retry-After", "5")
 				writeError(w, http.StatusTooManyRequests, "provider logs are busy; retry shortly")
@@ -564,7 +564,7 @@ func streamLogReader(w http.ResponseWriter, r *http.Request, lr appLogReader, ta
 	if !resumed {
 		records, snapshotEnd, err := lr.SnapshotTail(tail)
 		if err != nil {
-			slog.Warn("logs snapshot tail", "err", err)
+			slog.WarnContext(r.Context(), "logs snapshot tail", "err", err)
 		} else {
 			cursor = snapshotEnd
 		}

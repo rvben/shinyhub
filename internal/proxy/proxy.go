@@ -400,6 +400,8 @@ type backendPool struct {
 // selected the replica. For loading-page responses (no live replica)
 // ReplicaIndex is -1.
 type AccessLogEntry struct {
+	Correlation  tracing.Correlation
+	DeploymentID int64
 	Slug         string
 	Method       string
 	Path         string
@@ -3256,12 +3258,20 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				// Keep only the immutable handshake identity, not an open span or
 				// request context, for a connection that may live for hours.
 				handshake := trace.SpanContextFromContext(r.Context())
+				if !handshake.IsValid() {
+					// Buffer-only tracing still forwards this hop's W3C identity.
+					ctx := propagation.TraceContext{}.Extract(context.Background(), propagation.HeaderCarrier(r.Header))
+					handshake = trace.SpanContextFromContext(ctx)
+				}
 				prior := fn
 				fn = func(e WSSessionEnd) {
 					// SetTracing is startup-only; the tracer itself can be
 					// swapped or removed while this connection stays open.
+					if handshake.IsValid() {
+						e.HandshakeCorrelation = tracing.Correlation{TraceID: handshake.TraceID().String(), SpanID: handshake.SpanID().String(), Sampled: handshake.IsSampled()}
+					}
 					if tr := p.loadSpanTracer(); tr != nil {
-						recordWSCloseSpan(tr, handshake, e)
+						e.Correlation = recordWSCloseSpan(tr, handshake, e)
 					}
 					if prior != nil {
 						prior(e)
@@ -3441,10 +3451,6 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				Error:        spanErr,
 			})
 		}
-	}
-	rec.onHandshake = finishHTTP
-	defer func() {
-		finishHTTP()
 		logPtr := p.accessLog.Load()
 		if logPtr == nil {
 			return
@@ -3454,12 +3460,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			resolver = *rp
 		}
 		(*logPtr)(AccessLogEntry{
+			Correlation:    traceCtx.Correlation(),
+			DeploymentID:   deploymentID,
 			Slug:           slug,
 			Method:         r.Method,
 			Path:           r.URL.Path,
 			Status:         rec.status,
 			Bytes:          rec.bytes,
-			Duration:       time.Since(start),
+			Duration:       endedAt.Sub(start),
 			ClientIP:       resolveClientIP(resolver, r),
 			Peer:           r.RemoteAddr,
 			ReplicaIndex:   replicaIndex,
@@ -3468,7 +3476,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Fallback:       rec.fallbackReason != "",
 			FallbackReason: rec.fallbackReason,
 		})
-	}()
+	}
+	rec.onHandshake = finishHTTP
+	defer finishHTTP()
 
 	// App HTML uses relative asset URLs, which require a trailing slash on
 	// the document URL. Only canonicalize confirmed app roots; misses and

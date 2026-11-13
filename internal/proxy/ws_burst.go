@@ -21,7 +21,6 @@ type WSAbnormalBurst struct {
 	Window       time.Duration
 	Span         time.Duration
 	CloseCode    *uint16
-	CloseReason  string
 }
 
 type wsBurstKey struct {
@@ -36,9 +35,8 @@ type wsBurstState struct {
 }
 
 type wsBurstEnd struct {
-	at     time.Time
-	code   *uint16
-	reason string
+	at   time.Time
+	code *uint16
 }
 
 // WSAbnormalBurstDetector is a process-local, bounded-window detector. The
@@ -82,26 +80,25 @@ func (d *WSAbnormalBurstDetector) Record(e WSSessionEnd) (WSAbnormalBurst, bool)
 			keep = append(keep, end)
 		}
 	}
-	state.ends = append(keep, wsBurstEnd{at: now, code: e.CloseCode, reason: e.CloseReason})
+	state.ends = append(keep, wsBurstEnd{at: now, code: e.CloseCode})
 	if len(state.ends) < wsBurstThreshold || !state.lastWarn.IsZero() && now.Sub(state.lastWarn) < wsBurstCooldown {
 		return WSAbnormalBurst{}, false
 	}
 	state.lastWarn = now
 	var code *uint16
-	reason := state.ends[0].reason
 	if state.ends[0].code != nil {
 		copyCode := *state.ends[0].code
 		code = &copyCode
 	}
 	for _, end := range state.ends[1:] {
-		if (code == nil) != (end.code == nil) || code != nil && *code != *end.code || reason != end.reason {
-			code, reason = nil, ""
+		if (code == nil) != (end.code == nil) || code != nil && *code != *end.code {
+			code = nil
 			break
 		}
 	}
 	return WSAbnormalBurst{
 		Slug: e.Slug, Replica: e.ReplicaIndex, DeploymentID: e.DeploymentID,
 		Count: len(state.ends), Window: wsBurstWindow, Span: now.Sub(state.ends[0].at),
-		CloseCode: code, CloseReason: reason,
+		CloseCode: code,
 	}, true
 }

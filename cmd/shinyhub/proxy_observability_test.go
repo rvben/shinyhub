@@ -13,6 +13,7 @@ import (
 	"github.com/rvben/shinyhub/internal/dbtest"
 	"github.com/rvben/shinyhub/internal/metrics"
 	"github.com/rvben/shinyhub/internal/proxy"
+	"github.com/rvben/shinyhub/internal/tracing"
 )
 
 // jsonLog captures structured log records so a test can assert on the
@@ -115,8 +116,8 @@ func TestWSSessionEndRecorderReportsAbnormalBursts(t *testing.T) {
 	if ends[0]["level"] != "INFO" || ends[1]["level"] != "WARN" {
 		t.Errorf("levels %v, %v; want a normal end at INFO and an abnormal one at WARN", ends[0]["level"], ends[1]["level"])
 	}
-	if ends[1]["close_code"] != float64(1011) || ends[1]["close_reason"] != "internal error" {
-		t.Errorf("abnormal end %v; want its close code and reason", ends[1])
+	if ends[1]["close_code"] != float64(1011) {
+		t.Errorf("abnormal end %v; want its close code", ends[1])
 	}
 	if _, ok := ends[0]["close_code"]; ok {
 		t.Errorf("an end without a close frame logged a close code: %v", ends[0])
@@ -124,6 +125,10 @@ func TestWSSessionEndRecorderReportsAbnormalBursts(t *testing.T) {
 	bursts := logs.records(t, "ws_abnormal_burst")
 	if len(bursts) != 1 || bursts[0]["count"] != float64(3) || bursts[0]["deployment_id"] != float64(7) || bursts[0]["close_code"] != float64(1011) {
 		t.Fatalf("bursts %v; want one burst of 3 on deployment 7 with the shared close code", bursts)
+	}
+
+	if strings.Contains(logs.buf.String(), "internal error") || strings.Contains(logs.buf.String(), "close_reason") {
+		t.Fatal("app-controlled close text must not appear in session or burst logs")
 	}
 
 	rec := httptest.NewRecorder()
@@ -154,5 +159,25 @@ func TestWSSessionEndRecorderLogsWithoutMetrics(t *testing.T) {
 	}
 	if n := len(logs.records(t, "ws_abnormal_burst")); n != 1 {
 		t.Fatalf("got %d ws_abnormal_burst records, want 1", n)
+	}
+}
+
+func TestLifecycleLogCorrelation(t *testing.T) {
+	c := tracing.Correlation{TraceID: "0af7651916cd43dd8448eb211c80319c", SpanID: "b7ad6b7169203331", Sampled: false}
+	var logs jsonLog
+	proxyAccessLogger(logs.logger())(proxy.AccessLogEntry{Correlation: c, DeploymentID: 7})
+	wsSessionEndRecorder(logs.logger(), nil, proxy.NewWSAbnormalBurstDetector())(proxy.WSSessionEnd{Correlation: c, HandshakeCorrelation: c})
+	for _, msg := range []string{"proxy_access", "ws_session_end"} {
+		rec := logs.records(t, msg)[0]
+		if rec["trace_id"] != c.TraceID || rec["span_id"] != c.SpanID || rec["trace_sampled"] != false {
+			t.Fatalf("%s correlation: %v", msg, rec)
+		}
+	}
+	ws := logs.records(t, "ws_session_end")[0]
+	if ws["handshake_trace_id"] != c.TraceID || ws["handshake_span_id"] != c.SpanID || ws["handshake_trace_sampled"] != false {
+		t.Fatalf("handshake correlation: %v", ws)
+	}
+	if logs.records(t, "proxy_access")[0]["deployment_id"] != float64(7) {
+		t.Fatal("missing deployment identity")
 	}
 }

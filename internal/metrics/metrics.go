@@ -397,6 +397,10 @@ func (r *Registry) RecordScheduleDispatchFailure(slug, schedule, reason string) 
 	r.dispatchFailures.WithLabelValues(slug, schedule, reason).Inc()
 }
 
+// PrometheusRegisterer allows instrumentation libraries to use this server's
+// private registry without touching the process-wide Prometheus registry.
+func (r *Registry) PrometheusRegisterer() prometheus.Registerer { return r.reg }
+
 // Register adds a custom collector to the registry. Used to wire the
 // DB-backed schedule-freshness collector from main.go.
 func (r *Registry) Register(c prometheus.Collector) error {

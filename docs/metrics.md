@@ -194,7 +194,7 @@ series count.
 | `shinyhub_ws_abnormal_bursts_total` | counter | `slug` | Worker-local groups of at least three abnormal WebSocket endings within ten seconds, with a 30-second warning cooldown. The counter is local to each ShinyHub instance. |
 
 Each completed tunnel also emits one structured `ws_session_end` log with its
-`connection_id`, replica, deployment, duration, close code and reason when observed, and bytes
+`connection_id`, replica, deployment, duration, close code when observed, and bytes
 written in each tunnel direction. `end_signal` distinguishes a close frame,
 transport end, proxy action, or unknown ending. Upstream abnormal endings are
 WARN; other endings are INFO. A transport EOF does not establish why the worker
@@ -204,7 +204,9 @@ When a known lifetime stop or generation cleanup ends a connection, the event
 uses `closed_by=lifetime` or `closed_by=drain` and stays at INFO. A
 `ws_abnormal_burst` WARN names the app, deployment, worker slot, and number of
 abnormal endings in its window, plus their observed time span. It includes a
-close code and reason only when all endings in that window agree. It reports
+close code only when all endings in that window agree. Application-provided
+close-reason text is omitted from logs and traces because it may contain
+sensitive data. It reports
 correlation, not a CPU-stall diagnosis.
 For Shiny's `/websocket/` connection, the injected interruption overlay sends a
 random connection ID on the upgrade and shows that same ID after a connected
@@ -550,7 +552,8 @@ structured log stream a log aggregator can ingest. Fields:
 - `bytes`, `duration_ms`
 - `client_ip` - the trusted-proxy-aware client IP (honest even when ShinyHub
   sits behind an edge proxy; see `server.trusted_proxies`)
-- `trace_id` - present when tracing is enabled and a span is active
+- `trace_id`, `span_id`, `trace_sampled` - present when a trace identity exists;
+  sampling indicates eligibility for export, not confirmed delivery
 
 ### Request-ID correlation
 
@@ -566,10 +569,63 @@ replaced, closing a log- and header-injection vector.
 When server tracing is enabled (see [tracing.md](tracing.md)), the access log
 and the trace are linked in both directions:
 
-- the `api_access` record carries the active span's `trace_id`, so you can
-  pivot from a log line to the trace, and
+- `api_access` and `proxy_access` records carry `trace_id`, `span_id`, and
+  `trace_sampled`, so you can find the relevant span from a log line, and
 - the server span carries the `request_id` attribute, so you can pivot from a
   trace back to the log line.
+
+For accepted WebSocket upgrades, `proxy_access` is emitted when the handshake
+finishes and reports only handshake duration. `ws_session_end` separately
+reports connection lifetime and byte totals. When a close span is created,
+its `trace_id`, `span_id`, and `trace_sampled` are recorded on that log; the
+original handshake is identified by `handshake_trace_id`, `handshake_span_id`,
+and `handshake_trace_sampled`, including when the close tracer was removed.
+Proxy access records also include `deployment_id` when known.
+
+Contextual server logs inherit active trace fields; request loggers retain
+those fields for related background work. Unsampled identities remain useful
+for joining logs, but do not imply a trace exists in the backend. Sampled
+identities may also be absent there because of export failure, collector-side
+sampling, or retention.
+
+### Trace delivery health
+
+When both tracing and metrics are enabled, the private `/metrics` registry
+includes the following server-side instruments. App processes export directly
+and are not covered by these counters.
+
+| Metric | Type | Description |
+|---|---|---|
+| `shinyhub_trace_export_batches_total` | counter | Completed export calls after exporter retries, by `result` (`success` or `failure`). |
+| `shinyhub_trace_export_spans_total` | counter | Spans in those calls, by `result` (`success` or `failure`). Failure does not establish that every span was rejected; a collector may partially accept a batch. |
+| `shinyhub_trace_export_last_success_timestamp_seconds` | gauge | Last successful export time; zero until the first success. Idle workloads need not advance this timestamp. |
+| `otel_sdk_processor_span_queue_size` | gauge | Spans waiting in the SDK batch processor's queue, excluding a batch currently being exported. |
+| `otel_sdk_processor_span_queue_capacity` | gauge | Queue capacity, respecting standard `OTEL_BSP_*` settings. |
+| `otel_sdk_processor_span_processed_total{error_type="queue_full"}` | counter | Sampled spans dropped because the SDK queue was full. |
+
+Native SDK instruments retain component and instrumentation-scope labels.
+Their current SDK feature gate, `OTEL_GO_X_OBSERVABILITY`, is enabled only
+while constructing the processor at startup, when neither it nor its legacy
+alias `OTEL_GO_X_SELF_OBSERVABILITY` has a nonempty value. The original
+environment is then restored, so this default does not leak to child processes. An explicit `false`
+disables the native SDK instruments; export-result counters remain available.
+Only native `otel.sdk.processor.span.*` instruments are exposed; per-span,
+exporter and unrelated global-meter instruments are filtered out. ShinyHub does
+not send health metrics through the trace exporter or replace the SDK's
+bounded, nonblocking queue. SDK metric names are experimental and may change with SDK upgrades.
+
+Alert on increases in failed export batches or queue-full drops. Queue
+occupancy approaching capacity is an earlier warning. A successful export means the exporter returned no error, not that a trace
+was retained downstream. Reported partial acceptance, even with an HTTP 200
+response, is counted as a failure; some spans in that batch may have been
+accepted. Monitor collector-side rejection metrics as well. Monitor the collector's own queues and downstream delivery too.
+
+A failed export emits `trace_export_failed`, rate-limited to once per minute
+while failure continues; the first successful call afterward emits
+`trace_export_recovered`. These logs work without Prometheus enabled. Error
+classifications are fixed (`timeout`, `canceled`, or `export`); raw exporter
+messages, endpoints and payloads are omitted. Other SDK errors produce bounded
+`trace_sdk_error` warnings.
 
 ## Server (control-plane) tracing
 

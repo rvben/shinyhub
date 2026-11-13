@@ -1578,7 +1578,11 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	// on the collector being reachable.
 	var tracer *servertrace.Tracer
 	if cfg.Tracing.Enabled {
-		tracer, err = servertrace.Setup(ctx, cfg.Tracing, version, cfg.Server.InstanceID)
+		var traceOptions []servertrace.SetupOption
+		if metricsReg != nil {
+			traceOptions = append(traceOptions, servertrace.WithHealthMetrics(metricsReg.PrometheusRegisterer()))
+		}
+		tracer, err = servertrace.Setup(ctx, cfg.Tracing, version, cfg.Server.InstanceID, traceOptions...)
 		if err != nil {
 			return fmt.Errorf("server tracing setup: %w", err)
 		}

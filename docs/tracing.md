@@ -528,8 +528,12 @@ no client is watching.
 
 This reuses the same `tracing` config block above; there is no separate
 server-tracing switch. Server spans and the access log are correlated in both
-directions (the span carries the `request_id`; the access-log line carries the
-`trace_id`); see [metrics.md](metrics.md) for the access-log fields.
+directions (the span carries the `request_id`; access logs carry `trace_id`,
+`span_id`, and `trace_sampled`). WebSocket-close logs identify both the close
+span and its linked handshake. See [metrics.md](metrics.md)
+for correlation fields and [trace delivery health](metrics.md#trace-delivery-health)
+for exporter failures, SDK queue pressure, and queue-full drops. Sampling is
+not a delivery acknowledgement: a sampled span may still be lost downstream.
 
 ## Scheduled jobs
 

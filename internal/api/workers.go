@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -119,7 +118,7 @@ func (a *WorkerAPI) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	certPEM, err := a.ca.SignWorkerCSR(node.NodeID, []byte(req.CSRPEM), a.certTTL)
 	if err != nil {
-		slog.Error("worker register: sign failed", "node", node.NodeID, "err", err)
+		reqLog(r).Error("worker register: sign failed", "node", node.NodeID, "err", err)
 		writeError(w, http.StatusBadRequest, "bad csr")
 		return
 	}
@@ -161,7 +160,7 @@ func (a *WorkerAPI) HandleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if req.RenewCSRPEM != "" {
 		certPEM, err := a.ca.SignWorkerCSR(nodeID, []byte(req.RenewCSRPEM), a.certTTL)
 		if err != nil {
-			slog.Error("worker heartbeat: renew sign failed", "node", nodeID, "err", err)
+			reqLog(r).Error("worker heartbeat: renew sign failed", "node", nodeID, "err", err)
 			writeError(w, http.StatusBadRequest, "bad csr")
 			return
 		}
@@ -216,7 +215,7 @@ func serveBundleByDigest(w http.ResponseWriter, r *http.Request, store *db.Store
 	zipPath := filepath.Join(appsDir, app.Slug, "bundles", dep.Version+".zip")
 	f, err := os.Open(zipPath)
 	if err != nil {
-		slog.Error("bundle fetch: open artifact", "digest", digest, "path", zipPath, "err", err)
+		reqLog(r).Error("bundle fetch: open artifact", "digest", digest, "path", zipPath, "err", err)
 		writeError(w, http.StatusNotFound, "bundle artifact missing")
 		return
 	}
