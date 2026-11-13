@@ -1,0 +1,143 @@
+rule_files:
+  - tracing-alerts.yml
+evaluation_interval: 1m
+tests:
+  - name: idle server and healthy peer remain quiet
+    interval: 1m
+    input_series:
+      - series: "shinyhub_trace_export_batches_total{job=\"shinyhub\",instance=\"one\",cluster=\"west\",result=\"failure\"}"
+        values: "0x20"
+      - series: "shinyhub_trace_export_last_success_timestamp_seconds{job=\"shinyhub\",instance=\"one\",cluster=\"west\"}"
+        values: "0x20"
+      - series: "otel_sdk_processor_span_queue_size{job=\"shinyhub\",instance=\"one\",cluster=\"west\",otel_component_name=\"batch\",otel_scope_name=\"go.opentelemetry.io/otel/sdk/trace\"}"
+        values: "0x20"
+      - series: "otel_sdk_processor_span_queue_capacity{job=\"shinyhub\",instance=\"one\",cluster=\"west\",otel_component_name=\"batch\",otel_scope_name=\"go.opentelemetry.io/otel/sdk/trace\"}"
+        values: "2048x20"
+      - series: "otel_sdk_processor_span_processed_total{job=\"shinyhub\",instance=\"one\",cluster=\"west\",otel_component_name=\"batch\",otel_scope_name=\"go.opentelemetry.io/otel/sdk/trace\",error_type=\"queue_full\"}"
+        values: "0x20"
+    alert_rule_test:
+      - alertname: ShinyHubTraceExportFailures
+        eval_time: 15m
+        exp_alerts: []
+      - alertname: ShinyHubTraceQueueDrops
+        eval_time: 15m
+        exp_alerts: []
+      - alertname: ShinyHubTraceQueuePressure
+        eval_time: 15m
+        exp_alerts: []
+  - name: sustained export failure and recovery
+    interval: 1m
+    input_series:
+      - series: "shinyhub_trace_export_batches_total{job=\"shinyhub\",instance=\"one\",cluster=\"west\",result=\"failure\"}"
+        values: "0+1x7 7x13"
+      - series: "shinyhub_trace_export_batches_total{job=\"shinyhub\",instance=\"two\",cluster=\"west\",result=\"failure\"}"
+        values: "0x21"
+    alert_rule_test:
+      - alertname: ShinyHubTraceExportFailures
+        eval_time: 4m
+        exp_alerts: []
+      - alertname: ShinyHubTraceExportFailures
+        eval_time: 6m
+        exp_alerts:
+          - exp_labels: {"job": "shinyhub", "instance": "one", "cluster": "west", "severity": "warning"}
+            exp_annotations: {"summary": "ShinyHub trace exports are failing", "description": "Server trace exports have continued failing. Check trace_export_failed logs and collector availability; sampled traces may be missing. A partially accepted batch also counts as a failed export."}
+      - alertname: ShinyHubTraceExportFailures
+        eval_time: 15m
+        exp_alerts: []
+  - name: one failed batch is transient
+    interval: 1m
+    input_series:
+      - series: "shinyhub_trace_export_batches_total{job=\"shinyhub\",instance=\"one\",cluster=\"west\",result=\"failure\"}"
+        values: "0 1x20"
+    alert_rule_test:
+      - alertname: ShinyHubTraceExportFailures
+        eval_time: 4m
+        exp_alerts: []
+      - alertname: ShinyHubTraceExportFailures
+        eval_time: 6m
+        exp_alerts: []
+  - name: dropped spans fire and resolve
+    interval: 1m
+    input_series:
+      - series: "otel_sdk_processor_span_processed_total{job=\"shinyhub\",instance=\"one\",cluster=\"west\",otel_component_name=\"batch\",otel_scope_name=\"go.opentelemetry.io/otel/sdk/trace\",error_type=\"queue_full\"}"
+        values: "0 0 1x19"
+      - series: "otel_sdk_processor_span_processed_total{job=\"shinyhub\",instance=\"two\",cluster=\"west\",otel_component_name=\"batch\",otel_scope_name=\"go.opentelemetry.io/otel/sdk/trace\",error_type=\"queue_full\"}"
+        values: "0x21"
+    alert_rule_test:
+      - alertname: ShinyHubTraceQueueDrops
+        eval_time: 2m
+        exp_alerts: []
+      - alertname: ShinyHubTraceQueueDrops
+        eval_time: 3m
+        exp_alerts:
+          - exp_labels: {"job": "shinyhub", "instance": "one", "cluster": "west", "otel_component_name": "batch", "otel_scope_name": "go.opentelemetry.io/otel/sdk/trace", "severity": "warning"}
+            exp_annotations: {"summary": "ShinyHub is dropping sampled spans", "description": "The server SDK queue has dropped spans. Check collector throughput and export failures before increasing OTEL_BSP_MAX_QUEUE_SIZE."}
+      - alertname: ShinyHubTraceQueueDrops
+        eval_time: 8m
+        exp_alerts: []
+  - name: sustained pressure affects only its component
+    interval: 1m
+    input_series:
+      - series: "otel_sdk_processor_span_queue_size{job=\"shinyhub\",instance=\"one\",cluster=\"west\",otel_component_name=\"batch\",otel_scope_name=\"go.opentelemetry.io/otel/sdk/trace\"}"
+        values: "1844x21"
+      - series: "otel_sdk_processor_span_queue_capacity{job=\"shinyhub\",instance=\"one\",cluster=\"west\",otel_component_name=\"batch\",otel_scope_name=\"go.opentelemetry.io/otel/sdk/trace\"}"
+        values: "2048x21"
+      - series: "otel_sdk_processor_span_queue_size{job=\"shinyhub\",instance=\"two\",cluster=\"west\",otel_component_name=\"batch\",otel_scope_name=\"go.opentelemetry.io/otel/sdk/trace\"}"
+        values: "0x21"
+      - series: "otel_sdk_processor_span_queue_capacity{job=\"shinyhub\",instance=\"two\",cluster=\"west\",otel_component_name=\"batch\",otel_scope_name=\"go.opentelemetry.io/otel/sdk/trace\"}"
+        values: "2048x21"
+    alert_rule_test:
+      - alertname: ShinyHubTraceQueuePressure
+        eval_time: 9m
+        exp_alerts: []
+      - alertname: ShinyHubTraceQueuePressure
+        eval_time: 10m
+        exp_alerts:
+          - exp_labels: {"job": "shinyhub", "instance": "one", "cluster": "west", "otel_component_name": "batch", "otel_scope_name": "go.opentelemetry.io/otel/sdk/trace", "severity": "warning"}
+            exp_annotations: {"summary": "ShinyHub trace queue is nearly full", "description": "The server SDK queue has stayed above 80 percent capacity for ten minutes. Check export latency and collector capacity before spans are dropped."}
+  - name: brief pressure and counter reset do not fire
+    interval: 1m
+    input_series:
+      - series: "otel_sdk_processor_span_queue_size{job=\"shinyhub\",instance=\"one\",cluster=\"west\",otel_component_name=\"batch\",otel_scope_name=\"go.opentelemetry.io/otel/sdk/trace\"}"
+        values: "1844x4 0x16"
+      - series: "otel_sdk_processor_span_queue_capacity{job=\"shinyhub\",instance=\"one\",cluster=\"west\",otel_component_name=\"batch\",otel_scope_name=\"go.opentelemetry.io/otel/sdk/trace\"}"
+        values: "2048x21"
+      - series: "otel_sdk_processor_span_processed_total{job=\"shinyhub\",instance=\"one\",cluster=\"west\",otel_component_name=\"batch\",otel_scope_name=\"go.opentelemetry.io/otel/sdk/trace\",error_type=\"queue_full\"}"
+        values: "10x3 0x17"
+    alert_rule_test:
+      - alertname: ShinyHubTraceQueuePressure
+        eval_time: 10m
+        exp_alerts: []
+      - alertname: ShinyHubTraceQueueDrops
+        eval_time: 6m
+        exp_alerts: []
+  - name: zero capacity is not pressure
+    interval: 1m
+    input_series:
+      - series: "otel_sdk_processor_span_queue_size{job=\"shinyhub\",instance=\"one\",cluster=\"west\",otel_component_name=\"batch\",otel_scope_name=\"go.opentelemetry.io/otel/sdk/trace\"}"
+        values: "1x21"
+      - series: "otel_sdk_processor_span_queue_capacity{job=\"shinyhub\",instance=\"one\",cluster=\"west\",otel_component_name=\"batch\",otel_scope_name=\"go.opentelemetry.io/otel/sdk/trace\"}"
+        values: "0x21"
+    alert_rule_test:
+      - alertname: ShinyHubTraceQueuePressure
+        eval_time: 15m
+        exp_alerts: []
+  - name: first drop counter appears above zero
+    interval: 1m
+    input_series:
+      - series: 'otel_sdk_processor_span_processed_total{job="shinyhub",instance="one",cluster="west",error_type="queue_full"}'
+        values: '_ _ 37x18'
+    alert_rule_test:
+      - alertname: ShinyHubTraceQueueDrops
+        eval_time: 2m
+        exp_alerts: []
+      - alertname: ShinyHubTraceQueueDrops
+        eval_time: 3m
+        exp_alerts:
+          - exp_labels: {job: shinyhub, instance: one, cluster: west, severity: warning}
+            exp_annotations:
+              summary: ShinyHub is dropping sampled spans
+              description: The server SDK queue has dropped spans. Check collector throughput and export failures before increasing OTEL_BSP_MAX_QUEUE_SIZE.
+      - alertname: ShinyHubTraceQueueDrops
+        eval_time: 8m
+        exp_alerts: []

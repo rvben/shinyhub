@@ -910,3 +910,16 @@ test-browser-agent-charts-e2e:
 # in both themes, desktop/compact/mobile, and expanded/collapsed/drawer states.
 test-browser-shell-e2e:
 	SHINYHUB_E2E_SHELL_ONLY=1 node scripts/dashboard-ui-browser-e2e.mjs
+
+# Validate optional Prometheus alerts, including firing, recovery and idle cases.
+# A local promtool takes precedence; CI uses the pinned official image.
+PROMETHEUS_IMAGE ?= prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06
+.PHONY: test-tracing-alerts
+test-tracing-alerts:
+	@if command -v promtool >/dev/null 2>&1; then \
+		promtool test rules deploy/prometheus/tracing-alerts.test.yml; \
+	else \
+		docker run --rm --entrypoint /bin/promtool \
+			-v "$(CURDIR)/deploy/prometheus:/rules:ro" -w /rules \
+			$(PROMETHEUS_IMAGE) test rules tracing-alerts.test.yml; \
+	fi

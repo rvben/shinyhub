@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -116,6 +117,25 @@ func TestHealthDetectsQueueDropsExportFailureAndRecovery(t *testing.T) {
 	}
 	if !foundQueue || !foundDrop {
 		t.Fatalf("missing queue pressure or drop: queue=%v drop=%v", foundQueue, foundDrop)
+	}
+	// Alert selectors must match a real scrape, not just synthetic promtool
+	// fixtures. Catch SDK/exporter metric renames before silently losing alerts.
+	rules, err := os.ReadFile("../../deploy/prometheus/tracing-alerts.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, family := range families {
+		names[family.GetName()] = true
+	}
+	selectors := regexp.MustCompile(`\b(?:shinyhub_trace_export_|otel_sdk_processor_span_)[a-z_]+\b`).FindAllString(string(rules), -1)
+	if len(selectors) == 0 {
+		t.Fatal("alert rules contain no trace health selectors")
+	}
+	for _, name := range selectors {
+		if !names[name] {
+			t.Errorf("alert metric %s absent from real SDK scrape", name)
+		}
 	}
 	unblock()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

@@ -53,6 +53,9 @@ jobs:
       - name: Minified injected scripts match their sources
         run: make ui-minify-check
 
+      - name: Test trace delivery alerts
+        run: make test-tracing-alerts
+
       - name: Test (Go)
         run: make test-go
 

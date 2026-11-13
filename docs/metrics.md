@@ -628,6 +628,37 @@ classifications are fixed (`timeout`, `canceled`, or `export`); raw exporter
 messages, endpoints and payloads are omitted. Other SDK errors produce bounded
 `trace_sdk_error` warnings.
 
+### Optional trace delivery alerts
+
+[`deploy/prometheus/tracing-alerts.yml`](../deploy/prometheus/tracing-alerts.yml)
+provides warning rules for export failures lasting five minutes, queue-full
+span drops, and queue occupancy above 80% for ten minutes. Add the rule file
+to your Prometheus configuration and route its `severity=warning` alerts in
+Alertmanager. Installing ShinyHub does not activate these rules automatically.
+
+```yaml
+rule_files:
+  - /etc/prometheus/rules/tracing-alerts.yml
+```
+
+The rules retain scrape labels such as `job`, `instance`, and `cluster`, so a
+healthy replica does not hide a failing one. Native SDK queue alerts also retain
+component and scope labels. Match these metric selectors to your ShinyHub
+scrape targets if the same Prometheus server collects other OTel Go SDKs.
+Native queue rules require the SDK metrics feature gate described above;
+export-failure rules still work when that gate is disabled. An idle server
+with an old or zero last-success timestamp stays quiet. Monitor scrape failure
+and collector health separately: missing metrics do not establish healthy
+delivery. A newly observed nonzero drop counter also alerts, so the first burst
+is covered even if the SDK had not emitted that series before. When adding a
+scrape target, this can report older drops already present in its counter.
+These rules cover server exports, not app exports or backend retention.
+
+Run `make test-tracing-alerts` to validate firing, recovery, counter resets,
+short spikes, idle workloads and replica isolation. It uses local `promtool`
+or the pinned official Prometheus Docker image. See the
+[Prometheus rule-testing reference](https://prometheus.io/docs/prometheus/latest/configuration/unit_testing_rules/).
+
 ## Server (control-plane) tracing
 
 Enabling `tracing` also instruments the control-plane API: ShinyHub emits one

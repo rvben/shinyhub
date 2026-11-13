@@ -251,15 +251,17 @@ list restores all events for that middleware.
   `reactive_update`, `output <id>`, and `reactive.calc <name>` spans under the
   instrumentation scope `co.posit.python-package.shiny`. With the default
   WebSocket exclusion (below) the session has no request span to nest under,
-  so each `session_start` and `reactive_update` is the root of its own trace;
-  overriding the exclusion per app nests them under the session's WebSocket
-  span, at the cost of one span that lasts the whole session. Verbosity is
+  so later `reactive_update` cycles start their own traces; the initial cycle
+  can be a child of `session_start`.
+  Overriding the exclusion per app may add a span that lasts the whole
+  session; parenting details depend on the installed Shiny version. Verbosity is
   controlled per app with
-  `SHINY_OTEL_COLLECT`; Posit suggests `session` in production and
-  `reactive_update` in staging. This covers renders and calc/effect
-  invalidation without writing a single span by hand - reach for manual spans
-  (next section) for your own library code inside a calc or output, which
-  Shiny's instrumentation cannot see into.
+  `SHINY_OTEL_COLLECT`: `session` records lifecycle only;
+  `reactive_update` adds interaction work cycles; `reactivity` adds individual
+  outputs and calcs. For interaction latency, use `reactive_update` with custom
+  spans around expensive work. Use `reactivity` for detailed diagnosis after
+  reviewing data exposure: Shiny can log reactive values at that level.
+  See [Posit's collection-level and privacy guidance](https://shiny.posit.co/py/docs/opentelemetry.html).
 - **WebSocket span excluded by default.** Shiny holds one long-lived
   WebSocket per session, so an uncontrolled auto-instrumented WS span would be
   one long, low-signal span for the whole visit. ShinyHub sets
@@ -313,6 +315,7 @@ platform defaults, so tuning is a few settings (UI → app → Configuration, or
 
 | Env var | Effect |
 |---|---|
+| `SHINY_OTEL_COLLECT=reactive_update` | Capture each interaction work cycle; use `reactivity` temporarily for individual outputs/calcs after reviewing reactive-value log exposure |
 | `OTEL_TRACES_SAMPLER_ARG=1.0` | Sample this app harder than the fleet `sample_ratio` |
 | `OTEL_PYTHON_STARLETTE_EXCLUDED_URLS=<regex>` | Change which paths the Starlette instrumentor skips; the platform default excludes only the session WebSocket |
 | `OTEL_PYTHON_DISABLED_INSTRUMENTATIONS=starlette` | Drop **all** Starlette/ASGI spans, including the per-request server spans, not just the WebSocket; most apps want the exclusion above instead |
@@ -332,11 +335,24 @@ tracer = trace.get_tracer(__name__)
 
 def load_cluster_data():
     with tracer.start_as_current_span("load_cluster_data"):
-        return load_data()   # nests under the ASGI request span, exports for free
+        return load_data()   # nests under the active reactive-update or HTTP span
 ```
 
-This is where the reactive-graph gap closes: wrap your heavy data loads,
-renders, and calcs by hand and they appear inside the request trace.
+Call this helper from an output or calc to see its work beneath the current
+reactive update. Keep span names fixed (for example, `dashboard.load_data`),
+and use library instrumentors for database and HTTP calls made inside it.
+Do not put input values, query parameters, SQL parameters, or result data in
+span names or attributes. Custom spans record exceptions by default; use
+`record_exception=False, set_status_on_exception=False` and a sanitized error
+status if the operation's exception messages can contain sensitive data.
+
+A dashboard session can contain many separate work traces. Join Shiny's own
+spans using `session.id` and deployment resource attributes. The proxy's
+`connection_id` and Shiny's `session.id` are separate identifiers; ShinyHub
+does not currently bridge them automatically. `reactive_update` measures
+server work, not browser click-to-paint time or time waiting in the network.
+The proxy Traces tab retains proxy HTTP spans; inspect reactive work in your
+OTLP backend.
 
 **The one footgun:** rely on the auto-configured *global* provider - call
 `trace.get_tracer(...)` and emit. Do **not** call

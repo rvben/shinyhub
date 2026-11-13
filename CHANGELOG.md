@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **observability**: add optional Prometheus warnings for failed trace exports, dropped spans and sustained queue pressure, with setup guidance for tracing dashboard interactions.
 - **proxy**: expose a bounded `shinyhub.ws.end_kind` classification in WebSocket close spans and as `end_kind` in session-end logs.
 - **observability**: correlate contextual request and proxy logs with `trace_id`, `span_id`, and `trace_sampled`; include deployment identity and linked handshake identity on WebSocket lifecycle logs.
 - **tracing**: expose server trace export results, last successful export time, SDK queue occupancy and queue-full drops in Prometheus, with sanitized failure and recovery logs.

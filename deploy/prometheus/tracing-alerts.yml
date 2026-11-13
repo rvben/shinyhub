@@ -1,0 +1,38 @@
+# Load into Prometheus rule_files. These cover ShinyHub server telemetry only;
+# managed apps export directly and need collector-side monitoring as well.
+# Narrow selectors to your ShinyHub scrape job if you also collect SDK metrics
+# from other Go services. Preserve cluster/instance labels when doing so.
+groups:
+  - name: shinyhub-trace-delivery
+    rules:
+      - alert: ShinyHubTraceExportFailures
+        expr: sum without (result) (rate(shinyhub_trace_export_batches_total{result="failure"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: ShinyHub trace exports are failing
+          description: Server trace exports have continued failing. Check trace_export_failed logs and collector availability; sampled traces may be missing. A partially accepted batch also counts as a failed export.
+      - alert: ShinyHubTraceQueueDrops
+        # Native counters may first appear at a nonzero value after a drop.
+        expr: |
+          sum without (error_type) (increase(otel_sdk_processor_span_processed_total{error_type="queue_full"}[5m])) > 0
+          or
+          sum without (error_type) (
+            otel_sdk_processor_span_processed_total{error_type="queue_full"}
+            unless otel_sdk_processor_span_processed_total{error_type="queue_full"} offset 5m
+          ) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: ShinyHub is dropping sampled spans
+          description: The server SDK queue has dropped spans. Check collector throughput and export failures before increasing OTEL_BSP_MAX_QUEUE_SIZE.
+      - alert: ShinyHubTraceQueuePressure
+        expr: (otel_sdk_processor_span_queue_size / otel_sdk_processor_span_queue_capacity > 0.8) and (otel_sdk_processor_span_queue_capacity > 0)
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: ShinyHub trace queue is nearly full
+          description: The server SDK queue has stayed above 80 percent capacity for ten minutes. Check export latency and collector capacity before spans are dropped.
