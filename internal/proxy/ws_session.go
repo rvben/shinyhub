@@ -10,8 +10,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/rvben/shinyhub/internal/rawquery"
 	"github.com/rvben/shinyhub/internal/tracing"
@@ -21,13 +19,32 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// WSEndKind is the bounded outcome exported in WebSocket close spans and logs.
+type WSEndKind string
+
+const (
+	WSEndNormal           WSEndKind = "normal"
+	WSEndRestart          WSEndKind = "restart"
+	WSEndKeepaliveTimeout WSEndKind = "keepalive_timeout"
+	WSEndUpstreamError    WSEndKind = "upstream_error"
+	WSEndTransportError   WSEndKind = "transport_error"
+	WSEndClientGone       WSEndKind = "client_gone"
+	WSEndProxyStop        WSEndKind = "proxy_stop"
+	WSEndUnknown          WSEndKind = "unknown"
+
+	wsKeepaliveTimeoutReason = "keepalive ping timeout"
+)
+
 // WSSessionEnd describes one successfully hijacked WebSocket tunnel. ClosedBy
 // identifies a close-frame sender or a known proxy action; transport EOF alone
 // leaves it unknown. TransportEndSide records the first side whose read ended.
+// CloseReason retains bounded raw protocol text for classification only; never
+// export it to logs or traces. EndKind is the corresponding bounded outcome.
 type WSSessionEnd struct {
 	Correlation                                                            tracing.Correlation
 	HandshakeCorrelation                                                   tracing.Correlation
 	Slug, ConnectionID, ClosedBy, EndSignal, TransportEndSide, CloseReason string
+	EndKind                                                                WSEndKind
 	ReplicaIndex                                                           int
 	DeploymentID                                                           int64
 	Duration                                                               time.Duration
@@ -232,9 +249,40 @@ func (s *wsSession) readyToEmitLocked() (WSSessionEnd, wsEndFn) {
 		Duration: time.Since(s.started), BytesToClient: s.bytesToClient,
 		BytesToUpstream: s.bytesToUpstream,
 	}
-	e.Abnormal = (closedBy == "upstream" || closedBy == "unknown" && s.transportEnd == "upstream") &&
-		(e.CloseCode == nil || *e.CloseCode != 1000 && *e.CloseCode != 1001)
+	e.EndKind, e.Abnormal = classifyWSEnd(e)
 	return e, s.onEnd
+}
+
+// classifyWSEnd distinguishes expected lifecycle endings from upstream failures.
+// A keepalive timeout identifies a missed heartbeat, not which peer caused it.
+func classifyWSEnd(e WSSessionEnd) (kind WSEndKind, abnormal bool) {
+	if e.CloseCode != nil {
+		switch *e.CloseCode {
+		case 1000, 1001:
+			return WSEndNormal, false
+		case 1012:
+			return WSEndRestart, false
+		}
+	}
+	if e.ClosedBy == "upstream" || e.ClosedBy == "unknown" && e.TransportEndSide == "upstream" {
+		if e.CloseCode == nil {
+			if e.ClosedBy == "unknown" {
+				return WSEndTransportError, true
+			}
+			return WSEndUpstreamError, true
+		}
+		if *e.CloseCode == 1011 && e.CloseReason == wsKeepaliveTimeoutReason {
+			return WSEndKeepaliveTimeout, false
+		}
+		return WSEndUpstreamError, true
+	}
+	if e.ClosedBy == "client" || e.ClosedBy == "unknown" && e.TransportEndSide == "client" {
+		return WSEndClientGone, false
+	}
+	if e.ClosedBy != "" && e.ClosedBy != "unknown" {
+		return WSEndProxyStop, false
+	}
+	return WSEndUnknown, false
 }
 
 // observeWSTunnel wraps the backend body after any compression translation.
@@ -405,17 +453,10 @@ func (f *wsFrameScanner) finish(onClose func(*uint16, string)) {
 			}
 		}
 		code := binary.BigEndian.Uint16(data[:2])
-		reason := string(data[2:])
-		if !utf8.ValidString(reason) {
-			reason = strings.ToValidUTF8(reason, "")
-		}
-		reason = strings.Map(func(r rune) rune {
-			if unicode.IsControl(r) {
-				return -1
-			}
-			return r
-		}, reason)
-		onClose(&code, reason)
+		// Preserve the original bytes for exact classification. Sanitizing here
+		// could turn a different or malformed reason into the known timeout.
+		// Close text is bounded by the control-frame limit and never exported.
+		onClose(&code, string(data[2:]))
 		f.seenClose = true
 	} else if f.opcode == 8 && !f.seenClose && f.frameLen == 0 {
 		onClose(nil, "")
@@ -445,6 +486,7 @@ func recordWSCloseSpan(tr trace.Tracer, handshake trace.SpanContext, e WSSession
 		attribute.String("shinyhub.ws.end_signal", e.EndSignal),
 		attribute.String("shinyhub.ws.transport_end_side", e.TransportEndSide),
 		attribute.Bool("shinyhub.ws.abnormal", e.Abnormal),
+		attribute.String("shinyhub.ws.end_kind", string(e.EndKind)),
 		attribute.Float64("shinyhub.ws.session_duration_seconds", e.Duration.Seconds()),
 	)
 	if e.CloseCode != nil {

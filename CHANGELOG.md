@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **proxy**: expose a bounded `shinyhub.ws.end_kind` classification in WebSocket close spans and as `end_kind` in session-end logs.
 - **observability**: correlate contextual request and proxy logs with `trace_id`, `span_id`, and `trace_sampled`; include deployment identity and linked handshake identity on WebSocket lifecycle logs.
 - **tracing**: expose server trace export results, last successful export time, SDK queue occupancy and queue-full drops in Prometheus, with sanitized failure and recovery logs.
 
@@ -18,6 +19,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ### Removed
 
 - **logging**: omit application-provided `close_reason` text from WebSocket session-end and burst logs to avoid exposing sensitive payloads. Close codes remain available.
+
+### Fixed
+
+- **proxy**: upstream WebSocket 1012 service restarts and 1011 closes with reason `keepalive ping timeout` no longer set `shinyhub.ws.abnormal=true`, mark close spans as errors, or contribute to abnormal-burst warnings. Other upstream 1011 closes and upstream endings without a close code remain abnormal.
 
 ## [0.24.4](https://github.com/rvben/shinyhub/compare/v0.24.3...v0.24.4) - 2026-11-12
 

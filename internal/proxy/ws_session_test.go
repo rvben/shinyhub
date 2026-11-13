@@ -6,8 +6,15 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
+
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type testWSBody struct{ io.ReadWriteCloser }
@@ -156,5 +163,111 @@ func TestWSSessionEndWaitsForBackendAndInFlightWrite(t *testing.T) {
 	e := <-events
 	if e.BytesToClient != 5 {
 		t.Fatalf("bytes to client = %d, want 5", e.BytesToClient)
+	}
+}
+
+// Exercise classification from observed frames through trace status and burst
+// detection, so consumers cannot accidentally disagree about expected endings.
+func TestWSSessionEndOutcomes(t *testing.T) {
+	for _, tc := range []struct {
+		name, side, reason, proxyReason string
+		kind                            WSEndKind
+		code                            int // Zero means no close frame; -1 means an empty close frame.
+		abnormal                        bool
+	}{
+		{name: "normal", side: "upstream", code: 1000, kind: WSEndNormal},
+		{name: "going away", side: "upstream", code: 1001, kind: WSEndNormal},
+		{name: "upstream restart", side: "upstream", code: 1012, reason: "redeploy", kind: WSEndRestart},
+		{name: "keepalive timeout", side: "upstream", code: 1011, reason: "keepalive ping timeout", kind: WSEndKeepaliveTimeout},
+		{name: "internal error", side: "upstream", code: 1011, reason: "internal error", kind: WSEndUpstreamError, abnormal: true},
+		{name: "1011 without reason", side: "upstream", code: 1011, kind: WSEndUpstreamError, abnormal: true},
+		{name: "similar reason", side: "upstream", code: 1011, reason: "keepalive ping timeout exceeded", kind: WSEndUpstreamError, abnormal: true},
+		{name: "reason with NUL suffix", side: "upstream", code: 1011, reason: "keepalive ping timeout\x00", kind: WSEndUpstreamError, abnormal: true},
+		{name: "reason with embedded control", side: "upstream", code: 1011, reason: "keepalive\x01 ping timeout", kind: WSEndUpstreamError, abnormal: true},
+		{name: "reason with invalid UTF-8", side: "upstream", code: 1011, reason: "keepalive ping timeout\xff", kind: WSEndUpstreamError, abnormal: true},
+		{name: "reason with different case", side: "upstream", code: 1011, reason: "Keepalive ping timeout", kind: WSEndUpstreamError, abnormal: true},
+		{name: "reason with whitespace", side: "upstream", code: 1011, reason: "keepalive ping timeout ", kind: WSEndUpstreamError, abnormal: true},
+		{name: "other code with timeout reason", side: "upstream", code: 1008, reason: "keepalive ping timeout", kind: WSEndUpstreamError, abnormal: true},
+		{name: "upstream EOF", side: "upstream", kind: WSEndTransportError, abnormal: true},
+		{name: "empty upstream close", side: "upstream", code: -1, kind: WSEndUpstreamError, abnormal: true},
+		{name: "client normal", side: "client", code: 1000, kind: WSEndNormal},
+		{name: "client error", side: "client", code: 1011, reason: "internal error", kind: WSEndClientGone},
+		{name: "client EOF", side: "client", kind: WSEndClientGone},
+		{name: "proxy restart", proxyReason: "proxy", code: 1012, kind: WSEndRestart},
+		{name: "proxy drain", proxyReason: "drain", kind: WSEndProxyStop},
+		{name: "proxy lifetime", proxyReason: "lifetime", kind: WSEndProxyStop},
+		{name: "unknown", kind: WSEndUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := tracetest.NewSpanRecorder()
+			tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+			t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+			bursts := NewWSAbnormalBurstDetector()
+			for i := 0; i < 3; i++ {
+				var event WSSessionEnd
+				s := &wsSession{}
+				s.start("demo", 9, 42, func(e WSSessionEnd) { event = e })
+				if tc.proxyReason != "" {
+					s.setProxyReason(tc.proxyReason)
+					if tc.code > 0 {
+						code := uint16(tc.code)
+						s.closedBy, s.closeCode = tc.proxyReason, &code
+					}
+				} else if tc.side != "" {
+					if tc.code != 0 {
+						var payload []byte
+						if tc.code > 0 {
+							payload = make([]byte, 2+len(tc.reason))
+							binary.BigEndian.PutUint16(payload, uint16(tc.code))
+							copy(payload[2:], tc.reason)
+						}
+						frame := []byte{0x88, byte(len(payload))}
+						if tc.side == "client" {
+							frame[1] |= 0x80
+							mask := []byte{1, 2, 3, 4}
+							frame = append(frame, mask...)
+							for j := range payload {
+								payload[j] ^= mask[j%4]
+							}
+						}
+						frame = append(frame, payload...)
+						for _, b := range frame {
+							s.observeRead(tc.side, []byte{b}, nil)
+						}
+					}
+					s.observeRead(tc.side, nil, io.EOF)
+				}
+				s.end()
+				if event.EndKind != tc.kind || event.Abnormal != tc.abnormal {
+					t.Fatalf("end kind=%q abnormal=%v; want %q %v", event.EndKind, event.Abnormal, tc.kind, tc.abnormal)
+				}
+				recordWSCloseSpan(tp.Tracer("test"), trace.SpanContext{}, event)
+				span := rec.Ended()[i]
+				wantStatus := codes.Unset
+				if tc.abnormal {
+					wantStatus = codes.Error
+				}
+				if span.Status().Code != wantStatus {
+					t.Fatalf("span status=%v, want %v", span.Status().Code, wantStatus)
+				}
+				attrs := map[string]string{}
+				for _, a := range span.Attributes() {
+					attrs[string(a.Key)] = a.Value.Emit()
+					if tc.reason != "" && strings.Contains(a.Value.Emit(), tc.reason) {
+						t.Fatalf("close reason leaked in %s", a.Key)
+					}
+				}
+				if attrs["shinyhub.ws.end_kind"] != string(tc.kind) || attrs["shinyhub.ws.abnormal"] != strconv.FormatBool(tc.abnormal) {
+					t.Fatalf("wrong span classification: %v", attrs)
+				}
+				if _, ok := attrs["shinyhub.ws.close_reason"]; ok {
+					t.Fatal("close reason exported")
+				}
+				_, burst := bursts.Record(event)
+				if want := tc.abnormal && i == 2; burst != want {
+					t.Fatalf("burst after %d ends=%v, want %v", i+1, burst, want)
+				}
+			}
+		})
 	}
 }

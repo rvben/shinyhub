@@ -50,7 +50,7 @@ func TestWSAbnormalBurstDetectorOnlyReportsSharedCloseCode(t *testing.T) {
 		_, _ = d.Record(e)
 		_, _ = d.Record(e)
 		if mixed {
-			differentCode := uint16(1012)
+			differentCode := uint16(1008)
 			e.CloseCode = &differentCode
 		}
 		burst, ok := d.Record(e)

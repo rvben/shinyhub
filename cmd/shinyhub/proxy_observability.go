@@ -90,7 +90,7 @@ func wsSessionEndRecorder(logger *slog.Logger, metricsReg *metrics.Registry, bur
 			"deployment_id", e.DeploymentID, "duration_ms", e.Duration.Milliseconds(),
 			"closed_by", e.ClosedBy, "end_signal", e.EndSignal,
 			"transport_end_side", e.TransportEndSide, "bytes_to_client", e.BytesToClient,
-			"bytes_to_upstream", e.BytesToUpstream, "abnormal", e.Abnormal,
+			"bytes_to_upstream", e.BytesToUpstream, "abnormal", e.Abnormal, "end_kind", e.EndKind,
 		}
 		if e.CloseCode != nil {
 			attrs = append(attrs, "close_code", *e.CloseCode)

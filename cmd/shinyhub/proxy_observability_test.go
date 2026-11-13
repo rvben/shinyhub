@@ -106,7 +106,7 @@ func TestWSSessionEndRecorderReportsAbnormalBursts(t *testing.T) {
 	record(proxy.WSSessionEnd{Slug: "alpha", ReplicaIndex: 0, DeploymentID: 7, ClosedBy: "client", TransportEndSide: "client", Duration: 6 * time.Hour})
 	for range 3 {
 		record(proxy.WSSessionEnd{Slug: "alpha", ReplicaIndex: 0, DeploymentID: 7, ClosedBy: "upstream", TransportEndSide: "upstream",
-			Abnormal: true, CloseCode: &code, CloseReason: "internal error"})
+			Abnormal: true, EndKind: proxy.WSEndUpstreamError, CloseCode: &code, CloseReason: "internal error"})
 	}
 
 	ends := logs.records(t, "ws_session_end")
@@ -115,6 +115,9 @@ func TestWSSessionEndRecorderReportsAbnormalBursts(t *testing.T) {
 	}
 	if ends[0]["level"] != "INFO" || ends[1]["level"] != "WARN" {
 		t.Errorf("levels %v, %v; want a normal end at INFO and an abnormal one at WARN", ends[0]["level"], ends[1]["level"])
+	}
+	if ends[1]["end_kind"] != string(proxy.WSEndUpstreamError) {
+		t.Errorf("end kind = %v, want upstream_error", ends[1]["end_kind"])
 	}
 	if ends[1]["close_code"] != float64(1011) {
 		t.Errorf("abnormal end %v; want its close code", ends[1])

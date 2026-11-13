@@ -438,10 +438,28 @@ no client is watching.
   span is an internal span with no `http.route`; its duration covers recording
   the close, not connection lifetime. `shinyhub.ws.session_duration_seconds` records lifetime as an
   attribute, alongside byte totals, close code when available, close initiator,
-  transport-ending side, and abnormal status. Application-provided close
-  reasons are not copied into traces. The `shinyhub_app_sessions` gauge shows
-  live sessions; `shinyhub_ws_session_duration_seconds` measures completed
+  transport-ending side, abnormal status, and `shinyhub.ws.end_kind`.
+  Application-provided close reasons are not copied into traces. The
+  `shinyhub_app_sessions` gauge shows live sessions; `shinyhub_ws_session_duration_seconds` measures completed
   connection lifetimes, and `ws_session_end` logs retain close details.
+  `shinyhub.ws.end_kind` uses the following fixed values (also logged as
+  `end_kind`):
+
+  | Value | Meaning | Abnormal / span status |
+  |---|---|---|
+  | `normal` | Close code 1000 or 1001 | false / Unset |
+  | `restart` | Close code 1012, including upstream and proxy restarts | false / Unset |
+  | `keepalive_timeout` | Upstream 1011 with reason exactly `keepalive ping timeout` | false / Unset |
+  | `upstream_error` | Other upstream close frames, including those without a status code | true / Error |
+  | `transport_error` | Upstream transport ended without a close frame | true / Error |
+  | `client_gone` | Other client close frames or client transport ends | false / Unset |
+  | `proxy_stop` | Other known proxy actions, such as drain or lifetime expiry | false / Unset |
+  | `unknown` | No observed close sender, transport-ending side, or proxy action | false / Unset |
+
+  A keepalive timeout means a heartbeat was missed; it does not establish
+  whether the cause was the client, the network, or server overload. Neither
+  restarts nor keepalive timeouts contribute to abnormal-burst warnings.
+
   Long sessions are normal: diagnose slow work using Shiny's per-update and
   output spans, rather than connection lifetime.
 - **Background lifecycle spans** for the watchdog's wake, restart, and
