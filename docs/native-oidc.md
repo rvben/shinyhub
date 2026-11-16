@@ -455,6 +455,15 @@ username does not make subjects portable across registrations.
 
 ### Revocation and session freshness
 
+When a verified ID token is refused because the required authorization claim is
+absent (`missing_groups: reject`) or empty (`require_groups: true`), ShinyHub also
+revokes existing browser sessions for that linked identity. The stored issuer,
+client ID and subject must all match; this does not provision or relink accounts.
+Malformed tokens and provider failures do not establish authorization loss and
+do not trigger this revocation. Entra may refuse an unassigned user before issuing
+an ID token, so that case still relies on session expiry or administrative
+revocation. Personal API keys remain separate credentials (see below).
+
 Native browser renewal does **not** contact Entra or refresh authorization claims.
 The five-minute example limits each browser session, including renewed cookies,
 WebSockets and streaming responses, to five minutes from its original login.

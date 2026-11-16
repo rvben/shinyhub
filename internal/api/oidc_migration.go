@@ -189,6 +189,17 @@ func (s *Server) clearOIDCLogoutHint(r *http.Request) {
 	}
 }
 
+// Call only after ID-token verification and an authoritative policy refusal.
+// Provider errors and malformed tokens are not evidence of authorization loss.
+func (s *Server) rejectOIDCAuthorization(w http.ResponseWriter, r *http.Request, reason, message, sub string) {
+	if err := s.store.RevokeOIDCUserSessions(s.oidcProvider.IssuerURL, s.oidcProvider.ClientID, sub); err != nil {
+		writeInternal(w, r, "could not revoke refused OIDC sessions", err)
+		return
+	}
+	s.auditOIDCRefusal(r, reason, sub)
+	writeError(w, http.StatusForbidden, message)
+}
+
 // Refusals after token verification are actionable migration audit events.
 func (s *Server) auditOIDCRefusal(r *http.Request, reason, sub string) {
 	event := db.AuditEventParams{Action: "login_refused", ResourceType: "user", IPAddress: s.ClientIP(r), Detail: db.AuditDetail(map[string]any{"reason": reason, "provider": providerOIDC, "sub": sub})}

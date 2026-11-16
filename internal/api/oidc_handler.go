@@ -171,8 +171,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	if !oidcUser.GroupsClaimPresent && !oidcUser.GroupsClaimMalformed {
 		switch s.cfg.OAuth.OIDC.MissingGroups {
 		case "reject":
-			s.auditOIDCRefusal(r, "claim_absent", oidcUser.Sub)
-			writeError(w, http.StatusForbidden, "required OIDC authorization claim is absent")
+			s.rejectOIDCAuthorization(w, r, "claim_absent", "required OIDC authorization claim is absent", oidcUser.Sub)
 			return
 		case "empty":
 			oidcUser.Groups = []string{}
@@ -190,8 +189,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.cfg.OAuth.OIDC.RequireGroups && len(oidcUser.Groups) == 0 {
-		s.auditOIDCRefusal(r, "groups_required", oidcUser.Sub)
-		writeError(w, http.StatusForbidden, "OIDC sign-in requires an assigned role or group")
+		s.rejectOIDCAuthorization(w, r, "groups_required", "OIDC sign-in requires an assigned role or group", oidcUser.Sub)
 		return
 	}
 	username, err := oidcUser.Username(s.cfg.OAuth.OIDC.UsernameClaim, s.cfg.OAuth.OIDC.UsernameRequired, s.cfg.OAuth.OIDC.UsernameStripDomain)

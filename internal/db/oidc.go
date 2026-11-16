@@ -39,6 +39,36 @@ func (s *Store) CheckOIDCProvider(issuer, clientID string) error {
 	return nil
 }
 
+// RevokeOIDCUserSessions invalidates sessions only for an identity already
+// linked under the exact bound authority. A refused login must not establish
+// a binding, provision an account, or resolve a subject from another authority.
+func (s *Store) RevokeOIDCUserSessions(issuer, clientID, sub string) error {
+	if issuer == "" || clientID == "" || sub == "" {
+		return ErrOIDCLinkConflict
+	}
+	ctx := context.Background()
+	tx, err := s.d.beginWrite(ctx, s.rawDB(), 0)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var userID int64
+	err = tx.QueryRowContext(ctx, `UPDATE users SET token_epoch = token_epoch + 1
+		WHERE id IN (SELECT user_id FROM oauth_accounts WHERE provider = 'oidc' AND provider_id = ?)
+		AND EXISTS (SELECT 1 FROM oidc_provider_binding WHERE id = 1 AND issuer = ? AND client_id = ?)
+		RETURNING id`, sub, issuer, clientID).Scan(&userID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM oidc_sessions WHERE user_id = ?`, userID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // LinkOIDCUser never merges users or transfers credentials. It preserves the
 // original row and refuses local, managed, service and already-linked accounts.
 // dryRun runs the same checks without writing. Repeating the same link is safe.
