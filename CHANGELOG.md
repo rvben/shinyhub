@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.25.0](https://github.com/rvben/shinyhub/compare/v0.24.5...v0.25.0) - 2026-11-16
+
 ### Upgrade notice
 
 This release adds explicit native OIDC account linking, strict app-role authorization, session freshness limits and provider-coordinated logout. Upgrading does not enable those new settings automatically. The already-running service retains local administrator sign-in when enabled, including during an SSO outage; OIDC discovery must be reachable when starting with OIDC configured.
@@ -19,6 +21,15 @@ To roll back, stop the server, restore the verified pre-upgrade backup using the
 A restored 0.24.5 server may still accept unexpired candidate browser cookies signed with the same auth secret. Before reopening access, keep the server stopped and run the old binary's `shinyhub rotate-secret --config <config>` with the original auth secret and a new `SHINYHUB_NEW_AUTH_SECRET`. This re-encrypts stored secrets atomically. Configure the service with the new auth secret before restarting; all previous browser cookies become invalid. Verify local administrator sign-in, stored app secrets and API keys, which remain separate credentials. Keep the original auth secret with the pre-upgrade backup; restoring that archive again requires it.
 
 Complete the real-tenant acceptance checklist before enabling Entra SSO in production. Emulator checks do not validate Microsoft tenant consent, MFA or Conditional Access policies.
+
+### Added
+
+- **auth**: support safe native Entra OIDC migrations ([6f4371d](https://github.com/rvben/shinyhub/commit/6f4371d1d23e147721ed1a98fd5f90e0850bee77))
+
+### Fixed
+
+- **auth**: allow provider logout frames and verify HTTPS SSO ([841b1d0](https://github.com/rvben/shinyhub/commit/841b1d0ff457dddeadb20e4c8f365507683cac0c))
+- **auth**: revoke linked sessions on verified OIDC authorization refusal ([fa03d6a](https://github.com/rvben/shinyhub/commit/fa03d6a212ae7a83063d0cbe877ebefa6794302f))
 
 ## [0.24.5](https://github.com/rvben/shinyhub/compare/v0.24.4...v0.24.5) - 2026-11-13
 
