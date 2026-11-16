@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Upgrade notice
+
+This release adds explicit native OIDC account linking, strict app-role authorization, session freshness limits and provider-coordinated logout. Upgrading does not enable those new settings automatically. The already-running service retains local administrator sign-in when enabled, including during an SSO outage; OIDC discovery must be reachable when starting with OIDC configured.
+
+For SQLite deployments, stop the server and run `shinyhub backup --config <config> --out <archive>` before upgrading. Verify the archive by restoring it into a separate scratch directory and checking database integrity and the expected apps and app-data files. Retain the previous configuration and `auth.secret` (or `SHINYHUB_AUTH_SECRET`) separately; the archive contains the database, apps and app data. PostgreSQL requires its own tested dump/restore procedure. Schema 108 adds OIDC provider binding and session correlation tables.
+
+On the first upgraded start, keep any existing generic OIDC issuer and client ID unchanged: the old database did not record their authority. Confirm that authority before startup. Later issuer/client changes fail closed and require a separate identity migration; existing generic OIDC links cannot be transferred between providers by changing configuration. For legacy proxy accounts, obtain the subject from an independently verified token for the exact client, preview with `shinyhub users link-oidc <username> --issuer <issuer> --client-id <client-id> --sub <subject> --dry-run`, then repeat without `--dry-run`. See [native OIDC migration](docs/native-oidc.md#preserve-existing-accounts) for account eligibility and the full procedure.
+
+To roll back, stop the server, restore the verified pre-upgrade backup using the old binary, previous configuration and auth secret. Version 0.24.5 refuses to start against schema 108, so replacing the binary alone is insufficient. Restoring discards all database and app-data changes after the backup, including new users, tokens, deployments and OIDC links, and may restore access removed since the backup: deleted or demoted users, reset passwords, revoked API keys and removed app memberships. Reapply those changes before reopening access, using a loopback-only or firewalled service where API access is needed.
+
+A restored 0.24.5 server may still accept unexpired candidate browser cookies signed with the same auth secret. Before reopening access, keep the server stopped and run the old binary's `shinyhub rotate-secret --config <config>` with the original auth secret and a new `SHINYHUB_NEW_AUTH_SECRET`. This re-encrypts stored secrets atomically. Configure the service with the new auth secret before restarting; all previous browser cookies become invalid. Verify local administrator sign-in, stored app secrets and API keys, which remain separate credentials. Keep the original auth secret with the pre-upgrade backup; restoring that archive again requires it.
+
+Complete the real-tenant acceptance checklist before enabling Entra SSO in production. Emulator checks do not validate Microsoft tenant consent, MFA or Conditional Access policies.
+
 ## [0.24.5](https://github.com/rvben/shinyhub/compare/v0.24.4...v0.24.5) - 2026-11-13
 
 ### Added
