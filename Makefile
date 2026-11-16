@@ -54,6 +54,10 @@ test: test-go test-js test-worker
 test-entra-oidc:
 	$(ENTRA_OIDC_PYTHON) -I scripts/entra-oidc-e2e.py $(if $(ENTRA_OIDC_OUTPUT),--output "$(ENTRA_OIDC_OUTPUT)")
 
+.PHONY: test-entra-oidc-browser
+test-entra-oidc-browser:
+	uv run --project scripts/acceptance/entra-browser --frozen --python '$(PYTHON_VERSION)' python -I scripts/entra-oidc-browser-e2e.py $(if $(ENTRA_OIDC_OUTPUT),--output "$(ENTRA_OIDC_OUTPUT)")
+
 # check is the fast, deterministic pre-PR gate contributors should run.
 check: fmt-check lint lint-js ui-minify-check skill-lint test
 

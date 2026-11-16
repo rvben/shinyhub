@@ -38,6 +38,22 @@ jobs:
       - name: Native Entra-shaped OIDC acceptance (no Microsoft tenant)
         run: make test-entra-oidc ENTRA_OIDC_OUTPUT="$RUNNER_TEMP/entra-oidc"
 
+      - uses: ./.github/actions/setup-playwright
+
+      - uses: astral-sh/setup-uv@v7
+
+      - name: HTTPS Chromium OIDC acceptance (no Microsoft tenant)
+        run: make test-entra-oidc-browser ENTRA_OIDC_OUTPUT="$RUNNER_TEMP/entra-oidc-browser"
+
+      - name: HTTPS browser compatibility summary
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: entra-oidc-browser-compatibility
+          retention-days: 7
+          path: ${{ runner.temp }}/entra-oidc-browser/results.json
+          if-no-files-found: ignore
+
       # Keep only the sanitized summary; process logs and temporary credentials
       # stay off artifacts. A failed build/test still fails the job.
       - name: Compatibility summary

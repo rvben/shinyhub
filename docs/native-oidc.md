@@ -68,6 +68,32 @@ Go toolchain and target platform. The public source repository and module
 registries must remain reachable; unavailable dependencies fail the job rather
 than substituting a different source.
 
+### HTTPS browser acceptance without a tenant
+
+For a real-browser check on two isolated HTTPS loopback origins, run:
+
+```sh
+# Install Chromium using the repository's locked browser tooling (once).
+npm --prefix loadtest/render/driver ci --ignore-scripts --no-audit --no-fund
+(cd loadtest/render/driver && npx --no-install playwright install chromium)
+make test-entra-oidc-browser
+```
+
+This additionally requires `uv`, OpenSSL with `req -addext`, and Chromium.
+The target installs Python Playwright from its frozen `uv.lock` automatically.
+Keep that project's Playwright version and the browser driver's npm lock in sync;
+the runner rejects mismatched versions.
+It runs the real sign-in/account-menu logout screens, checks Secure/HttpOnly/
+SameSite cookie attributes, exercises RP and cross-site iframe logout, verifies
+role demotion/refusal and session revocation, and checks local recovery during a
+provider outage. Chromium bypasses certificate errors only for the disposable
+certificate's public key. Python and Go verify its chain and hostname using
+that certificate as a private CA. No machine trust
+store or production configuration changes. As with the HTTP test, output is
+private, retained and printed; only the sanitized results summary goes to CI
+artifacts. Screenshots, browser traces, cookies and process logs are not uploaded.
+This checks Chromium's behavior, not all browsers or tenant policies.
+
 ### Real-tenant acceptance before production migration
 
 A passing emulator run establishes local compatibility. Real Microsoft Entra
@@ -82,8 +108,10 @@ test tenant completes the following on isolated HTTPS staging:
   Entra propagation delay and session freshness limits.
 - Dry-run and apply explicit links to disposable legacy accounts; verify stable
   user IDs, ownership, memberships and API keys, with local recovery available.
-- Exercise normal login, renewal/expiry and each logout path in real browsers;
-  check tenant consent, MFA and Conditional Access policies that apply.
+- Exercise normal login, renewal/expiry and each logout path in real browsers.
+  Verify that the provider's front-channel iframe commits without framing errors
+  in the browser console. Check tenant consent, MFA and Conditional Access
+  policies that apply.
 - Record the tested ShinyHub commit, tenant/app identifiers, settings, results
   and reviewer privately. Keep tokens, secrets and personal data out of reports.
 

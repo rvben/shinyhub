@@ -73,6 +73,34 @@ func oidcMigrationCookie(t *testing.T, rec *httptest.ResponseRecorder) *http.Coo
 	t.Fatalf("no session cookie: %d %s", rec.Code, rec.Body.String())
 	return nil
 }
+
+func TestOIDCFrontChannelAllowsOnlyProviderFraming(t *testing.T) {
+	srv, _, cfg := oidcMigrationServer(t, map[string]any{"sub": "alice"}, config.OIDCConfig{EndSession: true})
+	handler := api.SecurityHeaders(nil, nil, nil, nil, http.TimeoutHandler(srv.Router(), time.Minute, "timeout"))
+	issuer, err := url.Parse(cfg.OAuth.OIDC.IssuerURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest("GET", "/api/auth/oidc/frontchannel-logout?iss="+url.QueryEscape(cfg.OAuth.OIDC.IssuerURL)+"&sid=provider-session", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("front-channel notification: %d", rec.Code)
+	}
+	if rec.Header().Get("X-Frame-Options") != "" {
+		t.Fatal("valid provider iframe is blocked by X-Frame-Options")
+	}
+	want := "default-src 'none'; base-uri 'none'; frame-ancestors " + issuer.Scheme + "://" + issuer.Host
+	if rec.Header().Get("Content-Security-Policy") != want {
+		t.Fatalf("logout must admit only the configured provider origin: %q", rec.Header().Get("Content-Security-Policy"))
+	}
+	for _, path := range []string{"/api/auth/providers", "/api/auth/oidc/frontchannel-logout?iss=https://wrong.invalid&sid=provider-session"} {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if rec.Header().Get("X-Frame-Options") != "DENY" || !strings.Contains(rec.Header().Get("Content-Security-Policy"), "frame-ancestors 'none'") {
+			t.Fatalf("%s lost its framing protection", path)
+		}
+	}
+}
 func TestOIDCMigrationLinksExistingAccountAndPreservesDeepLink(t *testing.T) {
 	claims := map[string]any{"sub": "sub-a", "corp": "ABC12345", "roles": []string{"power"}}
 	srv, store, _ := oidcMigrationServer(t, claims, config.OIDCConfig{UsernameClaim: "corp", UsernameRequired: true, LinkExisting: "username", GroupsClaim: "roles", MissingGroups: "empty", RequireGroups: true})

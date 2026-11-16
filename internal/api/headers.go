@@ -84,9 +84,10 @@ const hstsValue = "max-age=63072000; includeSubDomains"
 // unless an operator points logo/favicon at a URL.
 //
 // X-Frame-Options is DENY, not SAMEORIGIN: nothing in the dashboard frames
-// itself (no <iframe> in this codebase targets a control-plane page), so
-// there is no same-origin framing use to preserve, and DENY also covers
+// itself, so there is no same-origin framing use to preserve. DENY also covers
 // legacy browsers that ignore the CSP frame-ancestors directive above.
+// The validated OIDC front-channel notification handler narrowly overrides
+// this for its provider's logout iframe; dashboard pages never do.
 func SecurityHeaders(trustedNets []*net.IPNet, scriptSources, styleSources, imgSources []string, next http.Handler) http.Handler {
 	csp := buildControlPlaneCSP(scriptSources, styleSources, imgSources, false)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -167,10 +167,23 @@ func (s *Server) handleOIDCFrontChannelLogout(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadRequest, "issuer and session id are required")
 		return
 	}
+	// The provider loads this empty response in a cross-origin iframe. Admit
+	// only its configured origin after validating the notification; dashboard
+	// pages retain the default deny policy.
+	providerURL, err := url.Parse(s.oidcProvider.IssuerURL)
+	if err != nil || providerURL.Host == "" || (providerURL.Scheme != "http" && providerURL.Scheme != "https") {
+		writeInternal(w, r, "invalid OIDC provider origin", errors.New("invalid OIDC provider origin"))
+		return
+	}
 	if err := s.store.RevokeOIDCSessions(issuer, sid, time.Now().Add(s.cfg.Auth.BrowserSessionMaxAge())); err != nil {
 		writeInternal(w, r, "could not revoke OIDC sessions", err)
 		return
 	}
+	// TimeoutHandler merges its private header map into the outer writer.
+	// Preserve an explicit nil entry so that merge also removes the outer
+	// middleware's DENY value; Del would leave it untouched.
+	w.Header()["X-Frame-Options"] = nil
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; base-uri 'none'; frame-ancestors "+providerURL.Scheme+"://"+providerURL.Host)
 	w.WriteHeader(http.StatusOK)
 }
 
