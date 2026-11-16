@@ -447,7 +447,18 @@ func (s *Server) handleSessionLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	logoutURL, err := s.oidcLogoutURL(r)
+	if err != nil {
+		reqLog(r).Warn("oidc_logout_hint_unavailable", "err", err)
+		logoutURL, _ = s.oidcProvider.LogoutURL("", s.oidcLogoutReturnURL())
+	}
 	if ok, _ := s.endBrowserSession(w, r, "logout"); ok {
+		s.clearOIDCLogoutHint(r)
+		if logoutURL != "" {
+			writeJSON(w, http.StatusOK, map[string]string{"logout_url": logoutURL})
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

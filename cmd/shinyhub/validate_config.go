@@ -1,14 +1,24 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"net/url"
 	"os"
+	"time"
 
 	"github.com/rvben/shinyhub/internal/admission"
 	"github.com/rvben/shinyhub/internal/cli"
 	"github.com/rvben/shinyhub/internal/config"
+	"github.com/rvben/shinyhub/internal/oauth"
 	"github.com/spf13/cobra"
 )
+
+var checkOIDC bool
+
+func init() {
+	validateConfigCmd.Flags().BoolVar(&checkOIDC, "check-oidc", false, "Check OIDC discovery and issuer over the network (15s timeout)")
+}
 
 var validateConfigCmd = &cobra.Command{
 	Use:   "validate-config",
@@ -19,7 +29,7 @@ var validateConfigCmd = &cobra.Command{
 		"An explicitly selected config file must exist. With no explicit path, a missing\n" +
 		"./shinyhub.yaml permits environment-only configuration, as with serve.\n" +
 		"Capacity warnings describe the machine running this command; run it on the server.\n" +
-		"Success does not verify DNS, TLS, SSO, database connectivity, or runtime readiness.",
+		"By default this does not verify DNS, TLS, SSO, database connectivity, or runtime readiness.\nUse --check-oidc to verify discovery and issuer; it does not test sign-in or client credentials.",
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		validationError := func(err error) error {
@@ -39,6 +49,30 @@ var validateConfigCmd = &cobra.Command{
 			return validationError(err)
 		}
 		cores, source, warnings := inspectUpdateCPUCapacity(cfg)
+		if cfg.OAuth.OIDC.IssuerURL != "" {
+			callback, _ := url.Parse(cfg.OAuth.OIDC.CallbackURL)
+			base, _ := url.Parse(cfg.Server.BaseURL)
+			if callback != nil && base != nil && base.Host != "" && callback.Host != base.Host {
+				warnings = append(warnings, "OIDC callback_url host differs from server.base_url; verify the registered redirect URI")
+			}
+		}
+		if checkOIDC {
+			o := cfg.OAuth.OIDC
+			if o.IssuerURL == "" {
+				return validationError(fmt.Errorf("OIDC is not configured"))
+			}
+			ctx, cancel := context.WithTimeout(cmd.Context(), 15*time.Second)
+			defer cancel()
+			provider, err := oauth.NewOIDCProvider(ctx, o.IssuerURL, o.ClientID, o.ClientSecret, o.CallbackURL, o.DisplayName, o.GroupsClaim, o.GroupsScope)
+			if err != nil {
+				return validationError(fmt.Errorf("OIDC discovery/issuer verification failed: %w", err))
+			}
+			if o.EndSession {
+				if _, err := provider.LogoutURL("", ""); err != nil {
+					return validationError(err)
+				}
+			}
+		}
 		message := "server configuration is valid"
 		for _, warning := range warnings {
 			message += "\nWarning: " + warning

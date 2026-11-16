@@ -18,3 +18,16 @@ export async function reconnectForwardAuth(api, providers) {
   if (!response.ok) throw new Error(`Reconnect failed (${response.status})`);
   return 'reload';
 }
+
+// Local revocation succeeds before the optional provider redirect is returned.
+export async function browserLogoutTarget(response, providers, fallback = '/', { providerLogout = true } = {}) {
+  if (!response.ok && response.status !== 401) throw new Error(`Logout failed (${response.status})`);
+  const data = response.status === 200 ? await response.json().catch(() => ({})) : {};
+  if (providerLogout && typeof data?.logout_url === 'string' && /^https?:\/\//.test(data.logout_url)) return data.logout_url;
+  if (providers?.oidc?.auto_redirect === true) {
+    const target = new URL(fallback, 'https://shinyhub.invalid');
+    target.searchParams.set('signed_out', '1');
+    return target.pathname + target.search + target.hash;
+  }
+  return logoutTarget(providers, fallback);
+}

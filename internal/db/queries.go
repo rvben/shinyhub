@@ -275,7 +275,13 @@ func (s *Store) CountUsersExcludingServiceAccounts() (int, error) {
 // every outstanding session JWT at its next request. Returns ErrNotFound for
 // an unknown user.
 func (s *Store) BumpTokenEpoch(userID int64) error {
-	res, err := s.db.Exec(`UPDATE users SET token_epoch = token_epoch + 1 WHERE id = ?`, userID)
+	ctx := context.Background()
+	tx, err := s.d.beginWrite(ctx, s.rawDB(), 0)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `UPDATE users SET token_epoch = token_epoch + 1 WHERE id = ?`, userID)
 	if err != nil {
 		return fmt.Errorf("bump token epoch: %w", err)
 	}
@@ -286,7 +292,10 @@ func (s *Store) BumpTokenEpoch(userID int64) error {
 	if n == 0 {
 		return ErrNotFound
 	}
-	return nil
+	if _, err := tx.ExecContext(ctx, `DELETE FROM oidc_sessions WHERE user_id = ?`, userID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // GetForwardAuthUser returns the auth.ContextUser for a username, or
@@ -4025,10 +4034,11 @@ func (s *Store) GetUserByOAuthAccount(provider, providerID string) (*User, error
 }
 
 type ProvisionOAuthUserParams struct {
-	Provider           string
-	ProviderID         string
-	UsernameCandidates []string
-	Role               string
+	CaseInsensitiveUsername bool
+	Provider                string
+	ProviderID              string
+	UsernameCandidates      []string
+	Role                    string
 }
 
 // ProvisionOAuthUser atomically resolves the platform user for an external
@@ -4100,6 +4110,15 @@ func (s *Store) ProvisionOAuthUser(p ProvisionOAuthUserParams) (*User, bool, err
 		if IsReservedUsername(name) {
 			continue
 		}
+		if p.CaseInsensitiveUsername {
+			var occupied bool
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE lower(username)=lower(?))`, name).Scan(&occupied); err != nil {
+				return nil, false, err
+			}
+			if occupied {
+				continue
+			}
+		}
 		// Wrap each attempt in a savepoint so a unique-constraint violation
 		// does not abort the outer transaction on Postgres (which marks any
 		// transaction with a failed statement as aborted until rolled back).
@@ -4125,7 +4144,7 @@ func (s *Store) ProvisionOAuthUser(p ProvisionOAuthUserParams) (*User, bool, err
 		break
 	}
 	if userID == 0 {
-		return nil, false, fmt.Errorf("create user: all candidate usernames in use")
+		return nil, false, fmt.Errorf("create user: all candidate usernames in use: %w", ErrUsernameExists)
 	}
 
 	if _, lerr := tx.ExecContext(ctx,

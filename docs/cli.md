@@ -77,6 +77,7 @@ Run and administer the server:
 | `worker` | Run ShinyHub as a remote worker that joins a control plane |
 | `healthcheck` | Exit successfully when a ShinyHub server is ready |
 | `users` | Manage user accounts (admin) |
+| `oidc-rebind-empty` | Recover a mistaken, unused OIDC provider binding offline; see [native OIDC recovery](native-oidc.md) |
 | `service-accounts` | Manage non-interactive deployment identities (admin) |
 | `tokens` | Manage API tokens |
 | `backup` | Write a consistent snapshot of all durable state to an archive |

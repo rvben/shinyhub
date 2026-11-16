@@ -186,3 +186,30 @@ func TestUsersDelete_WithYesResolvesThenDeletes(t *testing.T) {
 		t.Fatalf("expected DELETE /api/users/9, got %+v", *reqs)
 	}
 }
+
+func TestUsersLinkOIDCResolvesTargetAndPreviews(t *testing.T) {
+	_, reqs := setupCLITestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			fmt.Fprint(w, `{"id":9,"username":"sam"}`)
+			return
+		}
+		fmt.Fprint(w, `{"user_id":9,"username":"sam","linked":false,"dry_run":true}`)
+	})
+	out, err := execCLI(t, "users", "link-oidc", "sam", "--issuer", "https://issuer", "--client-id", "client", "--sub", "subject", "--dry-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(*reqs) != 2 || (*reqs)[1].Method != "POST" || (*reqs)[1].Path != "/api/users/9/link-oidc" {
+		t.Fatalf("requests=%+v", *reqs)
+	}
+	var body map[string]any
+	if err := json.Unmarshal((*reqs)[1].Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["issuer"] != "https://issuer" || body["sub"] != "subject" || body["client_id"] != "client" || body["dry_run"] != true {
+		t.Fatalf("body=%v", body)
+	}
+	if !strings.Contains(out, `"dry_run":true`) {
+		t.Fatalf("output=%s", out)
+	}
+}

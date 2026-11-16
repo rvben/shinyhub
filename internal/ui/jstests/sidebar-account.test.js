@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
 import vm from 'node:vm';
+import { browserLogoutTarget } from '../static/views/logout-navigation.js';
 import { installSidebarAccount } from '../static/views/sidebar-account.js';
 
 function setup() {
@@ -163,7 +164,7 @@ test('direct account logout shares the dirty guard, prevents duplicates and perm
     api: () => { requests++; return new Promise(resolve => { resolveRequest = resolve; }); },
     flashToast: message => { toast = message; }, sessionController: {end: () => { ended++; }},
     suppressUnloadGuard: false, window: {location:{assign: url => { destination = url; }}},
-    logoutTarget: () => '/', loginProviders: [] };
+    browserLogoutTarget, loginProviders: [] };
   vm.createContext(ctx);
   vm.runInContext(source.slice(source.indexOf("  const accountLogout ="), source.indexOf('  // Desktop sidebar collapse')), ctx);
   const direct = doc.getElementById('account-logout');

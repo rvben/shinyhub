@@ -42,6 +42,7 @@ func joinComma(ss []string) string {
 func newUsersCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "users", Short: "Manage user accounts (admin)"}
 	cmd.AddCommand(
+		newUsersLinkOIDCCmd(),
 		newUsersListCmd(),
 		newUsersCreateCmd(),
 		newUsersSetRoleCmd(),

@@ -43,6 +43,7 @@ func newMockIdP(t *testing.T, clientID string, idClaims map[string]any) *httptes
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"issuer":                                srv.URL,
+			"end_session_endpoint":                  srv.URL + "/logout",
 			"authorization_endpoint":                srv.URL + "/authorize",
 			"token_endpoint":                        srv.URL + "/token",
 			"jwks_uri":                              srv.URL + "/jwks",

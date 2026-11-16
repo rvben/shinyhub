@@ -15,7 +15,7 @@ export const AUDIT_ACTIONS = [
   'draft_create', 'draft_preview_create', 'draft_promote', 'draft_delete',
   'deploy', 'restart', 'rolling_restart', 'rollback', 'fleet_apply_started', 'fleet_apply_finished',
   // Auth actions
-  'login', 'login_failed', 'logout', 'logout_handoff', 'connect_cli',
+  'login', 'login_failed', 'login_refused', 'link_oidc', 'logout', 'logout_handoff', 'connect_cli',
   'change_own_password', 'update_profile',
   // App lifecycle (blue - config)
   'create_app', 'update_app', 'delete_app', 'stop', 'sleep', 'set_access',

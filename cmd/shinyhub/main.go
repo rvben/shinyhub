@@ -460,7 +460,7 @@ func init() {
 		"Confirm every old server and listed job process tree is stopped, then record uncertainty and clear the fence")
 	restoreCmd.Flags().Bool("force", false, "Restore even if a running server is detected (only after confirming the server is stopped)")
 	const configUsage = "Path to the server config file (overrides SHINYHUB_CONFIG; default ./shinyhub.yaml)"
-	for _, c := range []*cobra.Command{serveCmd, statusCmd, reloadCmd, validateConfigCmd, backupCmd, restoreCmd, rotateSecretCmd, migrateBackendCmd, resolveLegacyWritersCmd} {
+	for _, c := range []*cobra.Command{serveCmd, statusCmd, reloadCmd, validateConfigCmd, backupCmd, restoreCmd, rotateSecretCmd, migrateBackendCmd, resolveLegacyWritersCmd, oidcRebindCmd} {
 		c.Flags().StringVar(&configPath, "config", "", configUsage)
 	}
 }
@@ -472,7 +472,7 @@ var buildRootOnce sync.Once
 // tests to call; registration happens exactly once per process.
 func buildRoot() *cobra.Command {
 	buildRootOnce.Do(func() {
-		rootCmd.AddCommand(newOutputPumpCmd(), newLocalTokenCmd(), newRelayProtocolCmd(), newInitCmd(), serveCmd, statusCmd, reloadCmd, validateConfigCmd, backupCmd, restoreCmd, rotateSecretCmd, migrateBackendCmd, resolveLegacyWritersCmd, newHealthcheckCmd(), newWorkerCmd(), newSandboxCmd())
+		rootCmd.AddCommand(newOutputPumpCmd(), newLocalTokenCmd(), newRelayProtocolCmd(), oidcRebindCmd, newInitCmd(), serveCmd, statusCmd, reloadCmd, validateConfigCmd, backupCmd, restoreCmd, rotateSecretCmd, migrateBackendCmd, resolveLegacyWritersCmd, newHealthcheckCmd(), newWorkerCmd(), newSandboxCmd())
 		cli.AddCommandsTo(rootCmd)
 	})
 	return rootCmd
@@ -1652,6 +1652,17 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 		oidcCancel()
 		if err != nil {
 			return fmt.Errorf("oidc init: %w", err)
+		}
+		if err := store.BindOIDCProvider(p.IssuerURL, p.ClientID); err != nil {
+			return fmt.Errorf("oidc authority: %w", err)
+		}
+		if cfg.OAuth.OIDC.EndSession {
+			if _, err := p.LogoutURL("", ""); err != nil {
+				return fmt.Errorf("oidc logout: %w", err)
+			}
+			if !p.FrontChannelSessionSupported {
+				slog.Warn("oidc_frontchannel_session_support_not_advertised", "issuer", p.IssuerURL)
+			}
 		}
 		srv.SetOIDCProvider(p)
 		slog.Info("oidc configured", "display_name", cfg.OAuth.OIDC.DisplayName, "issuer", cfg.OAuth.OIDC.IssuerURL)

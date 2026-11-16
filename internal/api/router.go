@@ -41,35 +41,39 @@ import (
 
 // Server holds the dependencies shared by all API handlers.
 type Server struct {
-	announcements   announcementCache
-	trustedVerifier *trustedpublish.Verifier
-	cfg             *config.Config
-	store           *db.Store
-	manager         *process.Manager
-	proxy           *proxy.Proxy
-	github          *oauth.GitHub       // nil when GitHub OAuth is not configured
-	googleOAuth     *oauth.Google       // nil when Google OAuth is not configured
-	oidcProvider    *oauth.OIDCProvider // nil when OIDC SSO is not configured
-	sampler         process.Sampler
-	loginLimiter    rateLimiter // shared (DB-backed) on Postgres, in-memory on SQLite
-	deployLimiter   *keyedRateLimiter
-	userLimiter     *keyedRateLimiter
-	tokenLimiter    *keyedRateLimiter
-	dataLimiter     *keyedRateLimiter // per-user: data uploads
-	actionLimiter   *keyedRateLimiter // per-user: restart/rollback/manual schedule run
-	oauthLimiter    *keyedRateLimiter // per-IP: OAuth/OIDC login-start
-	connectLimiter  *keyedRateLimiter // per-IP: pending browser/CLI pairing polls
-	authFailLimiter *keyedRateLimiter // per-IP: FAILED bearer/API-token auth attempts
-	jobs            *jobs.Manager
-	scheduler       *scheduler.Scheduler
-	secretsKey      []byte
-	traceBuffer     *tracing.Buffer
-	metrics         *metrics.Registry   // nil when metrics are disabled
-	history         *history.Store      // nil when metrics-history collection is disabled
-	tracer          *servertrace.Tracer // nil when server tracing is disabled
-	providerLogs    *providerLogCoordinator
-	usagePolicy     *usage.Policy
-	router          chi.Router
+	announcements         announcementCache
+	trustedVerifier       *trustedpublish.Verifier
+	cfg                   *config.Config
+	store                 *db.Store
+	manager               *process.Manager
+	proxy                 *proxy.Proxy
+	github                *oauth.GitHub // nil when GitHub OAuth is not configured
+	googleOAuth           *oauth.Google // nil when Google OAuth is not configured
+	oidcMissingSIDWarning sync.Once
+	oidcProvider          *oauth.OIDCProvider // nil when OIDC SSO is not configured
+	sampler               process.Sampler
+	loginLimiter          rateLimiter // shared (DB-backed) on Postgres, in-memory on SQLite
+	deployLimiter         *keyedRateLimiter
+	userLimiter           *keyedRateLimiter
+	tokenLimiter          *keyedRateLimiter
+	dataLimiter           *keyedRateLimiter // per-user: data uploads
+	actionLimiter         *keyedRateLimiter // per-user: restart/rollback/manual schedule run
+	oauthLimiter          *keyedRateLimiter // per-IP: GitHub/Google OAuth
+	oidcLoginLimiter      *keyedRateLimiter // per-IP: corporate OIDC, independent request stages
+	oidcCallbackLimiter   *keyedRateLimiter
+	oidcLogoutLimiter     *keyedRateLimiter
+	connectLimiter        *keyedRateLimiter // per-IP: pending browser/CLI pairing polls
+	authFailLimiter       *keyedRateLimiter // per-IP: FAILED bearer/API-token auth attempts
+	jobs                  *jobs.Manager
+	scheduler             *scheduler.Scheduler
+	secretsKey            []byte
+	traceBuffer           *tracing.Buffer
+	metrics               *metrics.Registry   // nil when metrics are disabled
+	history               *history.Store      // nil when metrics-history collection is disabled
+	tracer                *servertrace.Tracer // nil when server tracing is disabled
+	providerLogs          *providerLogCoordinator
+	usagePolicy           *usage.Policy
+	router                chi.Router
 
 	// renderPacingCores/renderPacingSource record the effective host cores (and
 	// the source that won) used to size the render-pacing cap suggestion
@@ -264,6 +268,9 @@ func New(cfg *config.Config, store *db.Store, manager *process.Manager, prx *pro
 		dataLimiter:             newKeyedRateLimiter(120, time.Minute),
 		actionLimiter:           newKeyedRateLimiter(30, time.Minute),
 		oauthLimiter:            newKeyedRateLimiter(20, time.Minute),
+		oidcLoginLimiter:        newKeyedRateLimiter(600, time.Minute),
+		oidcCallbackLimiter:     newKeyedRateLimiter(600, time.Minute),
+		oidcLogoutLimiter:       newKeyedRateLimiter(600, time.Minute),
 		connectLimiter:          newKeyedRateLimiter(60, time.Minute),
 		authFailLimiter:         newKeyedRateLimiter(30, time.Minute),
 		deployRun:               deploy.Run,
@@ -601,7 +608,12 @@ func (s *Server) SetHistory(h *history.Store) { s.history = h }
 
 // SetOIDCProvider sets the OIDC provider after the server is constructed.
 // Must be called before the server begins handling requests.
-func (s *Server) SetOIDCProvider(p *oauth.OIDCProvider) { s.oidcProvider = p }
+func (s *Server) SetOIDCProvider(p *oauth.OIDCProvider) {
+	s.oidcProvider = p
+	if p != nil && s.cfg.OAuth.OIDC.GraphGroups {
+		p.EnableEntraGroups()
+	}
+}
 
 // SetSecretsKey sets the AES-256 key used to decrypt per-app secret env vars.
 // Must be called before the server begins handling requests.
@@ -958,13 +970,14 @@ func (s *Server) buildRouter() chi.Router {
 	r.With(s.rateLimitByIP(s.oauthLimiter)).Get("/api/auth/github/callback", s.handleGitHubCallback)
 	r.With(s.rateLimitByIP(s.oauthLimiter)).Get("/api/auth/google/login", s.handleGoogleLogin)
 	r.With(s.rateLimitByIP(s.oauthLimiter)).Get("/api/auth/google/callback", s.handleGoogleCallback)
+	r.With(s.rateLimitByIP(s.oidcLogoutLimiter)).Get("/api/auth/oidc/frontchannel-logout", s.handleOIDCFrontChannelLogout)
 	r.Get("/api/auth/providers", s.handleGetProviders)
 	r.With(s.rateLimitByIP(s.tokenLimiter)).Post("/api/auth/invitations/preview", s.handlePublicUserInvitation)
 	r.With(s.rateLimitByIP(s.tokenLimiter)).Post("/api/auth/invitations/accept", s.handlePublicUserInvitation)
 	r.With(s.rateLimitByIP(s.connectLimiter)).Get("/api/auth/cli-connect/status", s.handleCLIConnectStatus)
 	r.With(s.rateLimitByIP(s.connectLimiter)).Post("/api/auth/cli-connect/register", s.handleCLIConnectRegister)
-	r.With(s.rateLimitByIP(s.oauthLimiter)).Get("/api/auth/oidc/login", s.handleOIDCLogin)
-	r.With(s.rateLimitByIP(s.oauthLimiter)).Get("/api/auth/oidc/callback", s.handleOIDCCallback)
+	r.With(s.rateLimitByIP(s.oidcLoginLimiter)).Get("/api/auth/oidc/login", s.handleOIDCLogin)
+	r.With(s.rateLimitByIP(s.oidcCallbackLimiter)).Get("/api/auth/oidc/callback", s.handleOIDCCallback)
 	r.Get("/api/server-info", s.handleServerInfo)
 	r.Get("/api/announcements/active", s.HandleActiveAnnouncements)
 
@@ -1110,6 +1123,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/api/users/{username}", s.handleGetUser)                               // any auth: lookup by username
 		r.Patch("/api/users/{id}", s.handlePatchUser)                                 // admin: update role
 		r.Patch("/api/users/{id}/password", s.handlePatchUserPassword)                // admin: reset password
+		r.Post("/api/users/{id}/link-oidc", s.handleLinkOIDCUser)                     // admin: preserve an existing SSO account
 		r.Post("/api/users/{id}/revoke-sessions", s.handleRevokeUserSessions)         // admin: force-logout all sessions
 		r.Delete("/api/users/{id}", s.handleDeleteUser)                               // admin: delete user
 		r.Get("/api/users/{id}/support-apps", s.handleListSupportSessionApps)

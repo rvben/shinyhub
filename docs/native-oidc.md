@@ -45,8 +45,10 @@ auth:
   oauth_default_role: viewer                      # role for a first-time SSO user
   local_login: true                               # false => SSO-only (hide + reject password login)
   group_role_mappings:                            # IdP group -> ShinyHub PLATFORM role
-    platform-admins: admin
-    data-team:       operator
+    - group: platform-admins
+      role: admin
+    - group: data-team
+      role: operator
 ```
 
 Enabling OIDC requires only `issuer_url`, `client_id`, `client_secret`, and
@@ -89,7 +91,8 @@ The path is fixed; only the scheme/host vary.
 4. The callback verifies the `state` (server-side nonce **and** the binding
    cookie, constant-time), exchanges the code for tokens, verifies the ID token,
    provisions or finds the user, reconciles the role from groups, persists the
-   display name and email, issues the session cookie, and redirects to `/`.
+   display name and email, issues the session cookie, and redirects to the saved
+   app deep link (or `/` when no destination was requested).
 
 The full flow is exercised end to end against a mock IdP in
 `internal/api/oidc_e2e_test.go` (`TestOIDC_EndToEnd_*`).
@@ -120,14 +123,16 @@ admin from group membership:
 ```yaml
 auth:
   group_role_mappings:
-    platform-admins: admin
+    - group: platform-admins
+      role: admin
 ```
 
 Safety and edge behavior:
 
-- **An absent groups claim never demotes.** If the IdP omits the groups claim
-  entirely, ShinyHub leaves the user's existing role untouched (a missing claim is
-  not read as "no groups"). Verified by
+- **An absent groups claim preserves authorization by default.** If the IdP omits
+  the groups claim entirely, ShinyHub leaves the stored role and group snapshot
+  untouched. Use `missing_groups: reject` or `empty` for stricter policy (below).
+  The compatibility default is verified by
   `TestOIDC_EndToEnd_AbsentGroupsClaimDoesNotDemote`.
 - **A malformed groups claim** (present but not a string or array of strings) is
   skipped with a warning by default, leaving the role unchanged. Set
@@ -232,12 +237,10 @@ reconnect; see [proxy logout](reverse-proxy/caddy.md#browser-logout-and-reconnec
 If revocation cannot be saved, logout returns a retryable error and keeps the
 cookie available for a retry instead of reporting that the session ended.
 
-**IdP-logout boundary (by design):** ShinyHub does **not** perform RP-initiated
-(single) logout against the IdP. After a ShinyHub logout the browser may still
-hold an IdP session, so clicking "Sign in with SSO" again can re-authenticate
-without a password prompt. If you need the IdP session to end too, configure
-single-logout / a short session lifetime at the IdP; ShinyHub logging out never
-extends an IdP session, it only ends its own.
+**IdP logout is optional:** by default ShinyHub ends only its own session. The
+browser may still hold an IdP session, so signing in again can succeed without a
+password prompt. Enable `oauth.oidc.end_session` for RP-initiated and correlated
+front-channel logout; see the Entra logout section below.
 
 
 ## Behind a TLS-terminating reverse proxy
@@ -284,3 +287,286 @@ per-app identity keys). See [HA data plane](deployment/ha-data-plane.md).
   `groups_claim` (some IdPs require a `groups` scope - set `groups_scope`), and
   that `group_role_mappings` names the group exactly.
 - **Cookie not `Secure` behind a proxy:** add the proxy IP to `trusted_proxies`.
+
+## Microsoft Entra ID
+
+Use a tenant-specific v2 issuer:
+`https://login.microsoftonline.com/<tenant-id>/v2.0`. The generic verifier expects
+an exact issuer; `common` and `organizations` are not supported tenant selectors.
+Register a single-tenant **Web** application with each server's exact HTTPS
+`/api/auth/oidc/callback` redirect URI. Prefer separate registrations for production
+and test environments. Store the client secret in
+`SHINYHUB_OIDC_CLIENT_SECRET`, record its expiry, and test rotation before removing
+the previous secret. Caddy remains the TLS proxy: keep its address in
+`server.trusted_proxies`, and remove forwarded identity headers at the edge when
+switching to native login.
+
+### App roles and admission
+
+Prefer app roles to directory-wide group claims. Define role **values** matching
+your existing application authorization strings, for example `alpha_admin` and
+`beta_power_user`, then assign users or security groups to these roles on the
+**Enterprise application**. Select **Assignment required? Yes** explicitly; creating
+roles does not enable this restriction. Set `groups_claim: roles` and leave
+`groups_scope` empty. Entra does not need a `groups` scope for roles.
+
+Group-based application assignment requires the appropriate Entra P1/P2 licensing
+and does not expand nested groups. Test direct membership, guests and unassigned
+ordinary users; do not use a Global Administrator to prove assignment enforcement.
+A user rejected by Entra sees an Entra error before reaching ShinyHub. ShinyHub's
+own claim checks produce a ShinyHub 403. See Microsoft's
+[assignment guidance](https://learn.microsoft.com/en-us/entra/identity/enterprise-apps/assign-user-or-group-access-portal)
+and [app-role documentation](https://learn.microsoft.com/en-us/entra/identity-platform/howto-add-app-roles-in-apps).
+
+A corporate baseline, after validating claims in a sandbox:
+
+```yaml
+oauth:
+  oidc:
+    issuer_url: https://login.microsoftonline.com/<tenant-id>/v2.0
+    client_id: <application-client-id>
+    callback_url: https://hub.example.com/api/auth/oidc/callback
+    groups_claim: roles
+    missing_groups: reject
+    require_groups: true
+    require_valid_groups: true
+    username_claim: corporate_id
+    username_required: true
+    link_existing: off
+    auto_redirect: true
+    end_session: false
+
+auth:
+  local_login: false
+  oauth_default_role: viewer
+  session_ttl: 5m
+  session_max_age: 5m
+  group_role_mappings:
+    - group: alpha_admin
+      role: admin
+    - group: beta_power_user
+      role: developer
+```
+
+Configure `corporate_id` with the identity team; it is an illustrative claim name,
+not a built-in Entra claim. Verify the actual ID token issued **for this client**.
+The UPN (`preferred_username`) is mutable and may differ from the old AD
+`sAMAccountName`. Email and display name may be absent or mutable too; neither is
+an account-linking proof. `onprem_sid` is a SID, not the corporate username.
+An optional `username_strip_domain: true` extracts the part before `@`; use it only
+when the identity team guarantees uniqueness across every admitted domain.
+
+Apps receive role values verbatim through the existing groups contract. Choosing
+new role names requires updating app RBAC **and stored app group grants**. Existing
+user IDs alone do not preserve grants that refer to old group strings. Keep the
+old strings when equivalent permissions are intended. Platform role mappings do
+not automatically grant access inside an app.
+
+### Username and claim policy
+
+Additional `oauth.oidc` options (all default to disabled/legacy behavior):
+
+| Option | Behavior |
+|---|---|
+| `username_claim` | Read a top-level string claim as the first-login username. Converted to lowercase without lossy character substitution; allowed characters are ASCII letters, digits, `.`, `_`, `-`, maximum 64 bytes; `.` and `..` are refused. Existing linked users retain their stored username. |
+| `username_required` | Refuse login if the configured username claim is absent. A present malformed/empty claim is always refused. |
+| `username_strip_domain` | Explicitly strip the suffix beginning with `@` before username validation. |
+| `link_existing` | `off` (default), or `username` for a controlled migration using a trusted configured username claim. Email linking is deliberately unsupported. |
+| `missing_groups` | `preserve` (default): retain stored groups and role; `reject`: refuse login; `empty`: replace the snapshot with no groups and reconcile the default role. Applies to the configured claim, including `roles`. |
+| `require_groups` | Refuse sign-in with zero roles/groups, including an explicitly empty array. |
+| `auto_redirect` | Start OIDC automatically only when it is the sole browser login and the session check returns 401. Signed-out/error landings and `?no_auto_login=1` retain the sign-in button. Failed cookie loops are limited to one automatic attempt per minute; unavailable browser storage falls back to the button. |
+| `end_session` | Enable RP-initiated and session-correlated front-channel logout; requires a secure discovered logout endpoint. |
+| `graph_groups` | Opt-in Microsoft Graph resolution for Entra group overage, with `groups_claim: groups`. Not needed for app roles. |
+
+Every option has an equivalent `SHINYHUB_OIDC_<UPPERCASE_OPTION>` environment
+variable, such as `SHINYHUB_OIDC_USERNAME_CLAIM` or
+`SHINYHUB_OIDC_MISSING_GROUPS`. Boolean overrides accept `true`/`false`.
+Strict missing-claim modes also refuse malformed authorization claims instead of
+retaining stale authorization. The legacy `preserve` default is for compatibility;
+it is unsuitable as an authoritative permission-removal policy.
+
+Manual platform-role overrides still take precedence. Clear unintended overrides
+before migration. Automatic reconciliation protects the last administrator from
+demotion; strict OIDC policy refuses a new login if that guard prevents the
+expected role from taking effect. Maintain a separate recovery administrator and
+test demotion using an ordinary account.
+
+### Preserve existing accounts
+
+Back up the database and inventory user IDs, app ownership, user memberships,
+group grants, manual role overrides and personal API tokens before switching.
+Do not delete/recreate users or edit `oauth_accounts` by hand.
+
+The preferred migration is an explicit administrative link:
+
+```console
+shinyhub users link-oidc abc12345 \
+  --issuer https://login.microsoftonline.com/<tenant-id>/v2.0 \
+  --client-id <application-client-id> --sub '<verified-sub>' --dry-run
+# Review the target, then repeat without --dry-run.
+```
+
+Obtain `sub` from a verified ID token or an identity-team approved export for that
+registration. It is **not** the Entra directory object ID (`oid`), and it can differ
+between app registrations. The issuer and client ID must match the server.
+The command preserves the original user row, ownership, memberships, grants,
+API keys and usage history. It refuses service/reserved/configuration-managed
+accounts, accounts with local passwords, an identity belonging to another user,
+or users already linked to another OAuth identity. Identical repeated links are
+idempotent; successful new links are audited. Preview does not create a link.
+
+Alternatively, temporarily enable `link_existing: username`, configure a trusted
+corporate username claim and `username_required: true`, and test with a small
+cohort. Matching ignores case, preserves the existing stored username and refuses
+ambiguous matches. Automatic links are restricted to legacy proxy accounts with
+the disabled-password marker; administrators and accounts with manual role
+overrides require explicit administrative linking. Well-known email, UPN,
+display-name and subject claims cannot enable automatic linking. Conflicts fail rather than
+silently selecting a different account. Missing claims must not manufacture a new
+migration identity. Turn automatic linking off once migration is complete.
+Before enabling automatic linking, inventory legacy usernames (for example,
+`shinyhub users list --output json`) and compare them with the normalized claim.
+`abc12345`, `abc12345@corp.example` and `DOMAIN\abc12345` are different handles;
+a nonmatching handle creates a new account. `DOMAIN\user` claims are refused,
+and `username_strip_domain` only handles `@` suffixes. Use explicit linking for
+these cases. Concurrent legacy forward-auth provisioning must be disabled during
+migration: the database's legacy username uniqueness is case-sensitive.
+Reassigned corporate IDs require administrator review: matching a mutable handle
+alone cannot prove that its new holder owns the old account.
+
+The first upgraded OIDC configuration binds the database's existing generic OIDC
+links to the configured issuer/client ID. Confirm that configuration before the
+first start. Subsequent authority changes fail closed at startup; changing an
+issuer or replacing an app registration requires a separately planned identity
+migration. If a first-start typo created a binding before any OIDC accounts or
+live OIDC sessions existed, stop **every** server using that database, correct
+its config, then run from the service's working directory (or use an absolute
+SQLite DSN). The result reports the resolved SQLite database path. Run:
+
+```console
+shinyhub oidc-rebind-empty --config shinyhub.yaml --acknowledge-servers-stopped
+```
+
+This explicit recovery command refuses established OIDC identities and live
+sessions; it cannot transfer identities between registrations. Restart every
+replica with the corrected configuration. The recovery command applies pending
+database migrations before checking the binding, so back up first. A stable
+username does not make subjects portable across registrations.
+
+### Revocation and session freshness
+
+Native browser renewal does **not** contact Entra or refresh authorization claims.
+The five-minute example limits each browser session, including renewed cookies,
+WebSockets and streaming responses, to five minutes from its original login.
+At expiry the browser must perform OIDC again; an existing Entra session may make
+sign-in seamless. Active Shiny WebSockets still close at expiry and in-app state
+can be lost; choose this cap with that interruption in mind. With
+`auto_redirect: true` and `end_session: false`, later visits or other tabs can
+silently sign back in through the existing Entra session after local logout.
+Test account disablement and role removal end to end, including
+Entra's own propagation delay. A local five-minute cap cannot guarantee that an
+upstream change is visible to Entra within five minutes.
+
+OIDC login-start, callback and front-channel notifications each have an independent
+per-IP limit of 600 requests per minute per server process. Size shared-IP cohorts
+and synchronized renewal bursts within that capacity, and verify `trusted_proxies`
+so the reverse proxy is not mistaken for every user's address. Larger deployments
+need a capacity review before applying this short session example.
+
+If your policy requires an actual five-minute directory recheck with no upstream
+propagation allowance, session lifetimes alone do not satisfy it. Retain a
+revalidation-capable authentication gateway until that policy is implemented and
+verified. Native ShinyHub does not retain refresh tokens or claim continuous
+access evaluation. `session_ttl` alone is not a revocation bound because cookies
+can renew up to `session_max_age`.
+
+API keys/CI tokens are separate credentials and remain valid across browser SSO
+changes. Offboarding must revoke personal API keys separately; browser logout and
+Entra account disablement do not automatically revoke them. Prefer scoped service
+accounts for CI. See `shinyhub users revoke-sessions` and `shinyhub tokens list --all`.
+
+### Group overage (when app roles cannot be used)
+
+Entra JWTs normally contain at most 200 directory groups, including nested
+memberships. Over that limit the `groups` claim is replaced by an overage
+indicator. ShinyHub logs `oidc_groups_overage` and rejects unresolved overage when
+using groups, even under the legacy preserve policy. It never treats overage as
+an authoritative empty list. When using `roles`, unrelated directory-group
+overage does not replace or invalidate the role claim.
+
+With `graph_groups: true`, ShinyHub requests delegated Graph `User.Read` and
+resolves group IDs through `/me/transitiveMemberOf`. This is sufficient for the
+signed-in user's membership IDs; broader permissions are not the default.
+Configure Entra's group claim format as **Group ID**: non-GUID token groups are
+refused when Graph resolution is enabled. Name/SID formats cannot be mixed with
+Graph IDs. Graph returns transitive directory memberships, which can be a superset
+of a token filtered to groups assigned to the application; apps receive that full
+ID set for overage users. Hidden memberships may need additional permission. Grant consent in Entra and
+test pagination, Graph denial and outage handling. Failures refuse sign-in.
+Graph results remain GUIDs; no display-name mapping is inferred. Requests use
+fixed Microsoft Graph endpoints and validated pagination URLs, never arbitrary
+URLs from `_claim_sources`. See [Graph membership permissions](https://learn.microsoft.com/en-us/graph/api/user-list-transitivememberof?view=graph-rest-1.0).
+
+### Logout and shared machines
+
+With `end_session: true`, successful browser logout first revokes the local
+session, then supplies the discovered IdP logout URL to the dashboard with an
+`id_token_hint` and configured post-logout return URI. ID-token hints are encrypted
+in the shared database; expired hints are ignored and pruned on subsequent
+OIDC sign-ins and on server startup, including when OIDC has been disabled.
+Refresh tokens are not stored.
+Register `https://<host>/?signed_out=1` as the post-logout redirect URI with the IdP.
+For Entra, add it as an additional **Web redirect URI** on the app registration;
+see [Microsoft sign-out registration requirements](https://learn.microsoft.com/en-us/entra/identity-platform/v2-protocols-oidc#send-a-sign-out-request).
+The return page suppresses auto-login so logout does not immediately sign back in.
+The GET logout URL includes a sensitive ID-token hint and may remain in browser
+history; use managed browser profiles on shared machines and protect logout URLs
+from application/proxy logs. A corrupt or undecryptable stored hint never blocks local revocation; ShinyHub attempts provider logout
+without the hint. A browser session with no stored hint performs local logout only.
+Provider behavior may then require an account-selection or
+confirmation prompt. Successful local and front-channel logout remove matching
+hints, and revoking all user sessions clears that user's hints.
+
+Register `https://<host>/api/auth/oidc/frontchannel-logout` as the front-channel
+logout URL. Notifications require matching `iss` and `sid`; ShinyHub revokes the
+associated session families across replicas without depending on third-party
+cookies. Where supported, register `frontchannel_logout_session_required: true`
+for this client. Discovery advertises OP support as
+`frontchannel_logout_session_supported`; these are distinct metadata fields.
+ShinyHub warns when correlated support is not advertised or a login has no `sid`
+(once per server process). For Entra, verify the `sid` ID-token optional claim and
+actual `iss`/`sid` notification delivery in staging. If session correlation is
+unavailable, only RP-initiated logout applies; retain bounded browser sessions.
+See the [front-channel logout specification](https://openid.net/specs/openid-connect-frontchannel-1_0.html). Providers that do not send a correlated session ID cannot use this
+endpoint. Front-channel delivery depends on browser behavior and is not a
+replacement for bounded sessions. Ending Entra SSO is not an operating-system
+sign-out: shared machines still need managed browser/profile policy. Support-session
+re-authentication revokes only the local session and preserves `/identity`; a new
+OIDC round trip can use existing Entra SSO and does not prove fresh MFA.
+
+### Cutover, validation and recovery
+
+1. Use a separate sandbox registration and backed-up database. Run
+   `shinyhub validate-config --check-oidc` with the service environment. Discovery
+   verifies reachability/issuer with a 15-second timeout; it does not prove client
+   credentials, claim contents, assignment or successful authentication.
+2. Prepare explicit account links and role values. Verify the same numeric user ID,
+   ownership, direct memberships, group grants and identity forwarded to apps.
+3. Native OIDC and forward-auth can be configured together, but forwarded identity
+   can mask the native cookie path and overwrite authorization snapshots. Test
+   native login through a route/host with no forwarded identity headers and no
+   proxy login interception of `/api/auth/oidc/*`. Do not infer native success from
+   merely seeing an authenticated page.
+4. Test missing/empty/malformed username and role claims; role removal (including
+   the final role); local-password/service-account collisions; unassigned users;
+   wrong issuer/audience; groups overage when using groups; and multi-replica
+   callback/logout. Verify dashboard, apps, active WebSockets and personal tokens
+   separately. Confirm app deep links survive the OIDC round trip.
+5. Confirm an SSO administrator works, disable local login, then remove Caddy
+   forward-auth and the old service. Preserve proxy TLS/header trust configuration.
+   Confirm CLI/CI token deployments still work before retiring LDAP credentials.
+6. Recovery requires host access: restore the previous proxy configuration or set
+   `SHINYHUB_AUTH_LOCAL_LOGIN=true` and restart with a known local administrator.
+   Do not expose an unauthenticated identity-header route. Restore the backup only
+   after reviewing writes made since cutover; rolling the database back discards
+   those writes. Changing login configuration alone preserves account links.

@@ -86,7 +86,7 @@ export function applyLoginProviders(doc, providers) {
     oidcBtn.hidden = true;
   }
   // Carry the app return destination through the provider's server-side state.
-  const next = new URLSearchParams(doc.defaultView?.location.search || '').get('next');
+  const next = doc.defaultView?.location ? loginReturnPath(new URL(doc.defaultView.location.href)) : '';
   for (const provider of ['github', 'google', 'oidc']) {
     const link = doc.querySelector(`.${provider}-login`);
     if (link) link.href = `/api/auth/${provider}/login` + (next ? '?next=' + encodeURIComponent(next) : '');
@@ -109,4 +109,30 @@ export function groupAccessWarningText(providers) {
   if (providerVisibility(providers).oidc) return '';
   if (providerVisibility(providers).forwardAuth) return 'Your sign-in proxy must supply group names for these grants to take effect. See group sign-in help below.';
   return 'Groups can be added now. Ask an administrator to connect group sign-in; see setup below.';
+}
+
+// Redirect only after the caller has established that no session exists.
+// Signed-out and error landings retain the explicit sign-in button.
+export function oidcAutoRedirectURL(providers, href, storage = null, now = Date.now()) {
+  const v = providerVisibility(providers);
+  if (!v.oidc || providers.oidc.auto_redirect !== true || v.local || v.github || v.google || v.forwardAuth) return null;
+  const u = new URL(href);
+  if (u.searchParams.has('signed_out') || u.searchParams.has('error') || u.searchParams.has('no_auto_login')) return null;
+  if (storage) {
+    try {
+      const previous = Number(storage.getItem('shinyhub-oidc-auto-login-at'));
+      if (previous > 0 && now - previous < 60000) return null;
+      storage.setItem('shinyhub-oidc-auto-login-at', String(now));
+    } catch { return null; }
+  }
+  const next = loginReturnPath(u);
+  return '/api/auth/oidc/login' + (next ? '?next=' + encodeURIComponent(next) : '');
+}
+
+function loginReturnPath(url) {
+ const next = url.searchParams.get('next');
+ if (next) return next;
+ if (url.pathname === '/' || url.pathname === '/login') return '';
+ for (const flag of ['signed_out', 'error', 'no_auto_login']) url.searchParams.delete(flag);
+ return url.pathname + url.search + url.hash;
 }

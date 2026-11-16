@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/oauth"
@@ -36,8 +37,9 @@ func deriveOIDCNonce(secret, state string) string {
 // are currently enabled on this server instance.
 func (s *Server) handleGetProviders(w http.ResponseWriter, r *http.Request) {
 	type oidcInfo struct {
-		Enabled     bool   `json:"enabled"`
-		DisplayName string `json:"display_name,omitempty"`
+		Enabled      bool   `json:"enabled"`
+		DisplayName  string `json:"display_name,omitempty"`
+		AutoRedirect bool   `json:"auto_redirect,omitempty"`
 	}
 	type response struct {
 		// Local reports whether the built-in username/password form is usable.
@@ -65,6 +67,7 @@ func (s *Server) handleGetProviders(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.oidcProvider != nil {
 		resp.OIDC.DisplayName = s.oidcProvider.DisplayName
+		resp.OIDC.AutoRedirect = s.cfg.OAuth.OIDC.AutoRedirect && !resp.Local && !resp.GitHub && !resp.Google && !resp.ForwardAuth
 	}
 
 	w.Header().Set("Cache-Control", "no-store")
@@ -139,27 +142,115 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if oidcUser.GroupsOverage {
+		reqLog(r).Warn("oidc_groups_overage")
+		if s.cfg.OAuth.OIDC.GraphGroups {
+			oidcUser.Groups, err = s.oidcProvider.EntraGroups(r.Context(), tok)
+			if err != nil {
+				reqLog(r).Warn("oidc_graph_groups_failed", "err", err)
+				writeError(w, http.StatusBadGateway, "could not resolve OIDC groups")
+				return
+			}
+			oidcUser.GroupsClaimPresent = true
+			oidcUser.GroupsClaimMalformed = false
+		} else if s.cfg.OAuth.OIDC.GroupsClaim == "" || s.cfg.OAuth.OIDC.GroupsClaim == "groups" {
+			s.auditOIDCRefusal(r, "overage_unresolved", oidcUser.Sub)
+			writeError(w, http.StatusForbidden, "OIDC group overage requires group resolution or app roles")
+			return
+		}
+	}
+	if s.cfg.OAuth.OIDC.GraphGroups {
+		for _, group := range oidcUser.Groups {
+			if _, err := uuid.Parse(group); err != nil {
+				reqLog(r).Warn("oidc_groups_format_not_object_id")
+				writeError(w, http.StatusBadGateway, "Graph group resolution requires Group ID claim format")
+				return
+			}
+		}
+	}
+	if !oidcUser.GroupsClaimPresent && !oidcUser.GroupsClaimMalformed {
+		switch s.cfg.OAuth.OIDC.MissingGroups {
+		case "reject":
+			s.auditOIDCRefusal(r, "claim_absent", oidcUser.Sub)
+			writeError(w, http.StatusForbidden, "required OIDC authorization claim is absent")
+			return
+		case "empty":
+			oidcUser.Groups = []string{}
+			oidcUser.GroupsClaimPresent = true
+		}
+	}
+	if oidcUser.GroupsClaimMalformed && (s.cfg.OAuth.OIDC.MissingGroups == "empty" || s.cfg.OAuth.OIDC.MissingGroups == "reject") {
+		writeError(w, http.StatusBadGateway, "OIDC authorization claim is malformed")
+		return
+	}
 	if oidcUser.GroupsClaimMalformed && s.cfg.OAuth.OIDC.RequireValidGroups {
 		reqLog(r).Warn("oidc_groups_claim_malformed_refused", "sub", oidcUser.Sub)
 		writeError(w, http.StatusBadGateway, "OIDC groups claim is malformed")
 		return
 	}
 
-	username := deriveOIDCUsername(oidcUser)
+	if s.cfg.OAuth.OIDC.RequireGroups && len(oidcUser.Groups) == 0 {
+		s.auditOIDCRefusal(r, "groups_required", oidcUser.Sub)
+		writeError(w, http.StatusForbidden, "OIDC sign-in requires an assigned role or group")
+		return
+	}
+	username, err := oidcUser.Username(s.cfg.OAuth.OIDC.UsernameClaim, s.cfg.OAuth.OIDC.UsernameRequired, s.cfg.OAuth.OIDC.UsernameStripDomain)
+	if err != nil {
+		s.auditOIDCRefusal(r, "username_claim_invalid", oidcUser.Sub)
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	claimUsername := username
+	if username == "" {
+		username = deriveOIDCUsername(oidcUser)
+	}
+	if err := s.store.BindOIDCProvider(s.oidcProvider.IssuerURL, s.oidcProvider.ClientID); err != nil {
+		reqLog(r).Error("oidc_authority_refused")
+		writeError(w, http.StatusServiceUnavailable, "OIDC authority requires administrator migration")
+		return
+	}
+	if s.cfg.OAuth.OIDC.LinkExisting == "username" && claimUsername != "" {
+		_, lookupErr := s.store.GetUserByOAuthAccount("oidc", oidcUser.Sub)
+		if lookupErr != nil && !errors.Is(lookupErr, db.ErrNotFound) {
+			writeInternal(w, r, "could not look up OIDC identity", lookupErr)
+			return
+		}
+		if errors.Is(lookupErr, db.ErrNotFound) {
+			linkedUser, linked, err := s.store.LinkOIDCUserAutomatically(claimUsername, oidcUser.Sub)
+			if errors.Is(err, db.ErrOIDCLinkConflict) {
+				s.auditOIDCRefusal(r, "link_conflict", oidcUser.Sub)
+				writeError(w, http.StatusConflict, "existing account requires administrator linking")
+				return
+			}
+			if err != nil && !errors.Is(err, db.ErrNotFound) {
+				writeInternal(w, r, "could not link OIDC identity", err)
+				return
+			}
+			if linked {
+				s.logAuditEvent(r, db.AuditEventParams{Action: "link_oidc", ResourceType: "user", UserID: &linkedUser.ID, ResourceID: linkedUser.Username, IPAddress: s.ClientIP(r), Detail: db.AuditDetail(map[string]any{"method": "username", "issuer": s.oidcProvider.IssuerURL, "sub": oidcUser.Sub})})
+			}
+		}
+	}
+	candidates := []string{username, username + "-" + oidcUser.Sub[:min(8, len(oidcUser.Sub))], username + "-oidc"}
+	if claimUsername != "" {
+		candidates = []string{username}
+	}
 	user, created, err := s.store.ProvisionOAuthUser(db.ProvisionOAuthUserParams{
-		Provider:   "oidc",
-		ProviderID: oidcUser.Sub,
-		UsernameCandidates: []string{
-			username,
-			username + "-" + oidcUser.Sub[:min(8, len(oidcUser.Sub))],
-			username + "-oidc",
-		},
-		Role: s.jitOAuthRole(),
+		Provider:                "oidc",
+		ProviderID:              oidcUser.Sub,
+		UsernameCandidates:      candidates,
+		CaseInsensitiveUsername: claimUsername != "",
+		Role:                    s.jitOAuthRole(),
 	})
 	if err != nil {
 		if errors.Is(err, db.ErrReservedUsername) {
 			reqLog(r).Warn("oidc_reserved_identity_refused")
 			writeError(w, http.StatusForbidden, "this identity cannot sign in")
+			return
+		}
+		if errors.Is(err, db.ErrUsernameExists) {
+			s.auditOIDCRefusal(r, "username_in_use", oidcUser.Sub)
+			writeError(w, http.StatusConflict, "OIDC username is already in use; administrator linking is required")
 			return
 		}
 		reqLog(r).Error("oidc_provision_user_failed", "err", err)
@@ -206,10 +297,31 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 			writeInternal(w, r, "internal server error", err)
 			return
 		}
+		if s.cfg.OAuth.OIDC.MissingGroups != "" && s.cfg.OAuth.OIDC.MissingGroups != "preserve" && fresh.ManualRole == "" {
+			expected, matched := auth.ResolveGlobalRole(oidcUser.Groups, AuthMappings(s.cfg.Auth.GroupRoleMappings), s.jitOAuthRole())
+			if !matched {
+				expected = s.jitOAuthRole()
+			}
+			if fresh.Role != expected {
+				reqLog(r).Warn("oidc_role_reconciliation_refused")
+				s.logAuditEvent(r, db.AuditEventParams{UserID: &fresh.ID, Action: "login_refused", ResourceType: "user", ResourceID: fresh.Username, IPAddress: s.ClientIP(r), Detail: db.AuditDetail(map[string]any{"reason": "last_admin_reconciliation_guard"})})
+				writeError(w, http.StatusForbidden, "administrator recovery is required before OIDC access can be reconciled")
+				return
+			}
+		}
 		user = fresh
 	}
 
-	_, err = s.setBrowserSession(w, r, user.ContextUser(), time.Time{})
+	authTime := time.Now().Truncate(time.Second)
+	var sessionID string
+	if s.cfg.OAuth.OIDC.EndSession {
+		sessionID, err = s.saveOIDCSession(user.ID, oidcUser, tok, authTime)
+		if err != nil {
+			writeInternal(w, r, "could not save OIDC logout session", err)
+			return
+		}
+	}
+	_, err = s.setBrowserSession(w, r, user.ContextUser(), authTime, sessionID)
 	if err != nil {
 		writeInternal(w, r, "internal server error", err)
 		return

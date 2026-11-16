@@ -68,6 +68,11 @@ func (s *Server) setBrowserSession(w http.ResponseWriter, r *http.Request, u *au
 	if err != nil {
 		return nil, err
 	}
+	if s.cfg.OAuth.OIDC.EndSession && len(sessionID) > 0 && sessionID[0] != "" {
+		if err := s.store.ExtendOIDCSession(sessionID[0], info.AuthTime.Add(s.cfg.Auth.BrowserSessionMaxAge())); err != nil {
+			reqLog(r).Warn("oidc_session_extend_failed", "err", err)
+		}
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	auth.SetSessionCookieUntil(w, r, token, info.ExpiresAt, s.cfg.TrustedProxyNets)
 	now := time.Now()

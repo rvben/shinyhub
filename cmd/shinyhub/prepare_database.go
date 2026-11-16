@@ -56,5 +56,8 @@ func prepareDatabase(cfg *config.Config, store *db.Store, logger *slog.Logger, n
 	if err := validateStoredProducerTopology(store, cfg.Runtime); err != nil {
 		return fmt.Errorf("producer topology: %w", err)
 	}
+	if err := store.PruneOIDCSessions(); err != nil {
+		logger.Warn("prune_oidc_sessions_failed", "err", err)
+	}
 	return nil
 }

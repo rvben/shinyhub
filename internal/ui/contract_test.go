@@ -3761,7 +3761,7 @@ func TestRootHomeUIContract(t *testing.T) {
 		"the brand home link must provide restrained pointer feedback")
 	assertContains(t, "app.js", "router.register('/launchpad'",
 		"the SPA preserves legacy Launchpad bookmarks as a compatibility redirect")
-	assertContains(t, "app.js", "window.location.assign(logoutTarget(loginProviders))",
+	assertContains(t, "app.js", "window.location.assign(await browserLogoutTarget(resp, loginProviders))",
 		"logout navigates to the contextual root so the landing page shows when one is configured")
 	assertContains(t, "app.js", "suppressUnloadGuard",
 		"logout suppresses the unsaved-changes beforeunload guard so a revoked session never strands the user on-screen")

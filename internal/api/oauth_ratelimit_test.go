@@ -3,6 +3,7 @@ package api_test
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -16,8 +17,12 @@ func TestOAuthCallbacksRateLimited(t *testing.T) {
 		"/api/auth/oidc/callback?code=x&state=y",
 	} {
 		srv, _ := newTestServer(t) // fresh limiter state per endpoint
+		limit := 20
+		if strings.HasPrefix(path, "/api/auth/oidc/") {
+			limit = 600
+		}
 		var got429 bool
-		for i := 0; i < 30; i++ {
+		for i := 0; i < limit+1; i++ {
 			rec := httptest.NewRecorder()
 			srv.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 			if rec.Code == http.StatusTooManyRequests {
@@ -26,7 +31,7 @@ func TestOAuthCallbacksRateLimited(t *testing.T) {
 			}
 		}
 		if !got429 {
-			t.Errorf("%s: expected a 429 within 30 requests (callback must be rate-limited)", path)
+			t.Errorf("%s: expected a 429 after %d requests (callback must be rate-limited)", path, limit)
 		}
 	}
 }

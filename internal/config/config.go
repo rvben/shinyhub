@@ -35,14 +35,23 @@ type OAuthConfig struct {
 
 // OIDCConfig holds generic OpenID Connect provider credentials and metadata.
 type OIDCConfig struct {
-	IssuerURL          string
-	ClientID           string
-	ClientSecret       string
-	CallbackURL        string
-	DisplayName        string // e.g. "Sign in with Okta"
-	GroupsClaim        string // ID-token claim holding group names (default "groups")
-	GroupsScope        string // optional extra scope to request (e.g. "groups")
-	RequireValidGroups bool   // when true, a malformed groups claim fails the login instead of being skipped
+	GraphGroups         bool
+	EndSession          bool
+	AutoRedirect        bool
+	MissingGroups       string
+	LinkExisting        string
+	UsernameStripDomain bool
+	UsernameRequired    bool
+	UsernameClaim       string
+	IssuerURL           string
+	ClientID            string
+	ClientSecret        string
+	CallbackURL         string
+	DisplayName         string // e.g. "Sign in with Okta"
+	GroupsClaim         string // ID-token claim holding group names (default "groups")
+	GroupsScope         string // optional extra scope to request (e.g. "groups")
+	RequireGroups       bool
+	RequireValidGroups  bool // when true, a malformed groups claim fails the login instead of being skipped
 }
 
 // GitHubOAuthConfig holds GitHub OAuth2 application credentials.
@@ -66,14 +75,23 @@ type rawOAuthConfig struct {
 }
 
 type rawOIDCConfig struct {
-	IssuerURL          string `yaml:"issuer_url"`
-	ClientID           string `yaml:"client_id"`
-	ClientSecret       string `yaml:"client_secret"`
-	CallbackURL        string `yaml:"callback_url"`
-	DisplayName        string `yaml:"display_name"`
-	GroupsClaim        string `yaml:"groups_claim"`
-	GroupsScope        string `yaml:"groups_scope"`
-	RequireValidGroups bool   `yaml:"require_valid_groups"`
+	GraphGroups         bool   `yaml:"graph_groups"`
+	EndSession          bool   `yaml:"end_session"`
+	AutoRedirect        bool   `yaml:"auto_redirect"`
+	MissingGroups       string `yaml:"missing_groups"`
+	LinkExisting        string `yaml:"link_existing"`
+	UsernameStripDomain bool   `yaml:"username_strip_domain"`
+	UsernameRequired    bool   `yaml:"username_required"`
+	UsernameClaim       string `yaml:"username_claim"`
+	IssuerURL           string `yaml:"issuer_url"`
+	ClientID            string `yaml:"client_id"`
+	ClientSecret        string `yaml:"client_secret"`
+	CallbackURL         string `yaml:"callback_url"`
+	DisplayName         string `yaml:"display_name"`
+	GroupsClaim         string `yaml:"groups_claim"`
+	GroupsScope         string `yaml:"groups_scope"`
+	RequireGroups       bool   `yaml:"require_groups"`
+	RequireValidGroups  bool   `yaml:"require_valid_groups"`
 }
 
 type rawGitHubOAuthConfig struct {
@@ -1691,14 +1709,23 @@ func loadRaw(path string) (*Config, error) {
 				CallbackURL:  raw.OAuth.Google.CallbackURL,
 			},
 			OIDC: OIDCConfig{
-				IssuerURL:          raw.OAuth.OIDC.IssuerURL,
-				ClientID:           raw.OAuth.OIDC.ClientID,
-				ClientSecret:       raw.OAuth.OIDC.ClientSecret,
-				CallbackURL:        raw.OAuth.OIDC.CallbackURL,
-				DisplayName:        raw.OAuth.OIDC.DisplayName,
-				GroupsClaim:        raw.OAuth.OIDC.GroupsClaim,
-				GroupsScope:        raw.OAuth.OIDC.GroupsScope,
-				RequireValidGroups: raw.OAuth.OIDC.RequireValidGroups,
+				GraphGroups:         raw.OAuth.OIDC.GraphGroups,
+				EndSession:          raw.OAuth.OIDC.EndSession,
+				AutoRedirect:        raw.OAuth.OIDC.AutoRedirect,
+				MissingGroups:       raw.OAuth.OIDC.MissingGroups,
+				LinkExisting:        raw.OAuth.OIDC.LinkExisting,
+				UsernameStripDomain: raw.OAuth.OIDC.UsernameStripDomain,
+				UsernameRequired:    raw.OAuth.OIDC.UsernameRequired,
+				UsernameClaim:       raw.OAuth.OIDC.UsernameClaim,
+				IssuerURL:           raw.OAuth.OIDC.IssuerURL,
+				ClientID:            raw.OAuth.OIDC.ClientID,
+				ClientSecret:        raw.OAuth.OIDC.ClientSecret,
+				CallbackURL:         raw.OAuth.OIDC.CallbackURL,
+				DisplayName:         raw.OAuth.OIDC.DisplayName,
+				GroupsClaim:         raw.OAuth.OIDC.GroupsClaim,
+				GroupsScope:         raw.OAuth.OIDC.GroupsScope,
+				RequireValidGroups:  raw.OAuth.OIDC.RequireValidGroups,
+				RequireGroups:       raw.OAuth.OIDC.RequireGroups,
 			},
 		},
 	}
@@ -1730,6 +1757,9 @@ func loadRaw(path string) (*Config, error) {
 	// a healthy startup log on the default port with nothing anywhere naming the
 	// variable they set.
 	warnUnrecognizedEnv()
+	if err := cfg.OAuth.OIDC.Validate(); err != nil {
+		return nil, err
+	}
 	if err := cfg.Auth.validateSessionLifetimes(); err != nil {
 		return nil, err
 	}
@@ -3348,6 +3378,57 @@ func applyEnvWith(cfg *Config, getConfigEnv func(string) string) error {
 	}
 	if v := getConfigEnv("SHINYHUB_OIDC_GROUPS_SCOPE"); v != "" {
 		cfg.OAuth.OIDC.GroupsScope = v
+	}
+	if v := getConfigEnv("SHINYHUB_OIDC_USERNAME_CLAIM"); v != "" {
+		cfg.OAuth.OIDC.UsernameClaim = v
+	}
+	if v := getConfigEnv("SHINYHUB_OIDC_USERNAME_REQUIRED"); v != "" {
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_OIDC_USERNAME_REQUIRED: %w", err)
+		}
+		cfg.OAuth.OIDC.UsernameRequired = b
+	}
+	if v := getConfigEnv("SHINYHUB_OIDC_USERNAME_STRIP_DOMAIN"); v != "" {
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_OIDC_USERNAME_STRIP_DOMAIN: %w", err)
+		}
+		cfg.OAuth.OIDC.UsernameStripDomain = b
+	}
+	if v := getConfigEnv("SHINYHUB_OIDC_LINK_EXISTING"); v != "" {
+		cfg.OAuth.OIDC.LinkExisting = v
+	}
+	if v := getConfigEnv("SHINYHUB_OIDC_MISSING_GROUPS"); v != "" {
+		cfg.OAuth.OIDC.MissingGroups = v
+	}
+	if v := getConfigEnv("SHINYHUB_OIDC_AUTO_REDIRECT"); v != "" {
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_OIDC_AUTO_REDIRECT: %w", err)
+		}
+		cfg.OAuth.OIDC.AutoRedirect = b
+	}
+	if v := getConfigEnv("SHINYHUB_OIDC_END_SESSION"); v != "" {
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_OIDC_END_SESSION: %w", err)
+		}
+		cfg.OAuth.OIDC.EndSession = b
+	}
+	if v := getConfigEnv("SHINYHUB_OIDC_GRAPH_GROUPS"); v != "" {
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_OIDC_GRAPH_GROUPS: %w", err)
+		}
+		cfg.OAuth.OIDC.GraphGroups = b
+	}
+	if v := getConfigEnv("SHINYHUB_OIDC_REQUIRE_GROUPS"); v != "" {
+		b, err := parseBoolEnv(v)
+		if err != nil {
+			return fmt.Errorf("SHINYHUB_OIDC_REQUIRE_GROUPS: %w", err)
+		}
+		cfg.OAuth.OIDC.RequireGroups = b
 	}
 	if v := getConfigEnv("SHINYHUB_OIDC_REQUIRE_VALID_GROUPS"); v != "" {
 		b, err := parseBoolEnv(v)

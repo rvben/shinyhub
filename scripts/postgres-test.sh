@@ -32,4 +32,4 @@ done
 
 export SHINYHUB_TEST_POSTGRES_DSN="postgres://postgres:${PASS}@127.0.0.1:${PORT}/postgres?sslmode=disable"
 echo "running suite against ${SHINYHUB_TEST_POSTGRES_DSN}"
-go test ./... -count=1 -timeout 30m
+env -u SHINYHUB_TEST_PG_NAME -u SHINYHUB_TEST_PG_PORT go test ./... -count=1 -timeout 30m

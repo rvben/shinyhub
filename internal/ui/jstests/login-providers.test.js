@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
-import { providerVisibility, applyLoginProviders, groupAccessWarningText } from '../static/views/login-providers.js';
+import { providerVisibility, applyLoginProviders, groupAccessWarningText, oidcAutoRedirectURL } from '../static/views/login-providers.js';
 
 // The GitHub and Google login buttons are static markup in index.html, hidden by
 // default; this module reveals a button ONLY when /api/auth/providers reports
@@ -98,7 +98,8 @@ test('oidc enabled creates the button once with its label and reveals the separa
   assert.equal(btns.length, 1);
   assert.equal(btns[0].textContent, 'Okta');
   assert.equal(btns[0].hidden, false);
-  assert.equal(btns[0].getAttribute('href'), '/api/auth/oidc/login');
+  assert.equal(new URL(btns[0].href).pathname, '/api/auth/oidc/login');
+  assert.equal(new URL(btns[0].href).searchParams.get('next'), '/apps/demo/overview?tab=health#status');
   assert.equal(doc.querySelector('.login-separator').hidden, false);
 });
 
@@ -223,4 +224,37 @@ test('group setup guidance distinguishes an unchecked service from a sign-in pro
   assert.match(groupAccessWarningText(null),/could not be checked/);
   assert.match(groupAccessWarningText({forward_auth:true}),/proxy must supply group names/);
   assert.equal(groupAccessWarningText({forward_auth:true,oidc:{enabled:true}}),'');
+});
+
+
+test('OIDC auto-login preserves intent and leaves signed-out/error pages usable', async () => {
+ const { oidcAutoRedirectURL }=await import('../static/views/login-providers.js');
+ const providers={local:false,oidc:{enabled:true,auto_redirect:true}};
+ assert.equal(oidcAutoRedirectURL(providers,'https://hub.example/?next=%2Fapp%2Fdemo%2F'),'/api/auth/oidc/login?next=%2Fapp%2Fdemo%2F');
+ for (const query of ['signed_out=1','error=access_denied','no_auto_login=1']) assert.equal(oidcAutoRedirectURL(providers,'https://hub.example/?'+query),null);
+ for (const extra of [{local:true},{github:true},{google:true},{forward_auth:true}]) assert.equal(oidcAutoRedirectURL({...providers,...extra},'https://hub.example/'),null);
+ assert.equal(oidcAutoRedirectURL(null,'https://hub.example/'),null);
+});
+
+test('OIDC auto-login throttles failed cookie loops and tolerates blocked browser storage',async()=>{
+ const {oidcAutoRedirectURL}=await import('../static/views/login-providers.js');
+ const p={local:false,oidc:{enabled:true,auto_redirect:true}};
+ const values=new Map(); const storage={getItem:k=>values.get(k),setItem:(k,v)=>values.set(k,v)};
+ assert.equal(oidcAutoRedirectURL(p,'https://hub.example/',storage,100000),'/api/auth/oidc/login');
+ assert.equal(oidcAutoRedirectURL(p,'https://hub.example/',storage,110000),null);
+ assert.equal(oidcAutoRedirectURL(p,'https://hub.example/',storage,160001),'/api/auth/oidc/login');
+ assert.equal(oidcAutoRedirectURL(p,'https://hub.example/',{getItem(){throw new Error('blocked')}},200000),null);
+});
+
+test('automatic OIDC login preserves direct dashboard routes', () => {
+ const providers = {local:false,oidc:{enabled:true,auto_redirect:true}};
+ assert.equal(new URL(oidcAutoRedirectURL(providers, 'https://hub.example/identity?tab=keys#active'), 'https://hub.example').searchParams.get('next'), '/identity?tab=keys#active');
+});
+
+test('manual SSO after support re-auth retains the identity route', () => {
+ const doc = loginDoc();
+ doc.defaultView.history.replaceState(null, '', '/identity?signed_out=1');
+ applyLoginProviders(doc, {oidc:{enabled:true}});
+ assert.equal(new URL(doc.querySelector('.oidc-login').href).searchParams.get('next'), '/identity');
+ doc.defaultView.close();
 });

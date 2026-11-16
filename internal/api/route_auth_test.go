@@ -20,25 +20,26 @@ import (
 // here is a security decision; every other route sits behind the bearer
 // middleware.
 var publicAPIRoutes = map[string]bool{
-	"POST /api/auth/login":                true,
-	"POST /api/auth/trusted-publishing":   true,
-	"POST /api/auth/session":              true,
-	"POST /api/auth/handoff":              true,
-	"POST " + auth.ForwardAuthResumePath:  true,
-	"GET " + auth.ForwardAuthLogoutPath:   true,
-	"GET /api/auth/github/login":          true,
-	"GET /api/auth/github/callback":       true,
-	"GET /api/auth/google/login":          true,
-	"GET /api/auth/google/callback":       true,
-	"GET /api/auth/providers":             true,
-	"POST /api/auth/invitations/preview":  true,
-	"POST /api/auth/invitations/accept":   true,
-	"GET /api/auth/cli-connect/status":    true,
-	"POST /api/auth/cli-connect/register": true,
-	"GET /api/auth/oidc/login":            true,
-	"GET /api/auth/oidc/callback":         true,
-	"GET /api/server-info":                true,
-	"GET /api/announcements/active":       true,
+	"POST /api/auth/login":                   true,
+	"POST /api/auth/trusted-publishing":      true,
+	"POST /api/auth/session":                 true,
+	"POST /api/auth/handoff":                 true,
+	"POST " + auth.ForwardAuthResumePath:     true,
+	"GET " + auth.ForwardAuthLogoutPath:      true,
+	"GET /api/auth/github/login":             true,
+	"GET /api/auth/github/callback":          true,
+	"GET /api/auth/google/login":             true,
+	"GET /api/auth/google/callback":          true,
+	"GET /api/auth/providers":                true,
+	"POST /api/auth/invitations/preview":     true,
+	"POST /api/auth/invitations/accept":      true,
+	"GET /api/auth/cli-connect/status":       true,
+	"POST /api/auth/cli-connect/register":    true,
+	"GET /api/auth/oidc/login":               true,
+	"GET /api/auth/oidc/frontchannel-logout": true,
+	"GET /api/auth/oidc/callback":            true,
+	"GET /api/server-info":                   true,
+	"GET /api/announcements/active":          true,
 }
 
 // concretePath fills a chi route pattern's parameters with param and its
@@ -137,6 +138,7 @@ func TestAPIRoutesRequireAuthenticationUnlessPublic(t *testing.T) {
 // listed admits all roles at this level and leaves finer decisions, such as
 // access to one app, to its handler.
 var roleGatedAPIRoutes = map[string]string{
+	"POST /api/users/{id}/link-oidc":                      "admin",
 	"DELETE /api/service-accounts/{key}/credentials/{id}": "admin",
 	"DELETE /api/support-sessions/current":                "admin",
 	"DELETE /api/user-invitations/{id}":                   "admin",

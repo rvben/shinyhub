@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"strings"
 
 	gooidc "github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
@@ -12,14 +14,21 @@ import (
 // OIDCProvider wraps an OpenID Connect provider for use with ShinyHub's
 // auth flow. It is compatible with any OIDC-compliant IdP.
 type OIDCProvider struct {
-	verifier    *gooidc.IDTokenVerifier
-	oauth2Cfg   oauth2.Config
-	DisplayName string
-	groupsClaim string
+	verifier                     *gooidc.IDTokenVerifier
+	oauth2Cfg                    oauth2.Config
+	FrontChannelSessionSupported bool
+	DisplayName                  string
+	groupsClaim                  string
+	IssuerURL                    string
+	ClientID                     string
+	endSessionEndpoint           string
 }
 
 // OIDCUser holds the claims extracted from the ID token.
 type OIDCUser struct {
+	SID                string
+	GroupsOverage      bool
+	Claims             map[string]json.RawMessage
 	Sub                string
 	Email              string
 	Name               string
@@ -50,7 +59,15 @@ func NewOIDCProvider(ctx context.Context, issuerURL, clientID, clientSecret, cal
 	if groupsClaim == "" {
 		groupsClaim = "groups"
 	}
+	var metadata struct {
+		EndSessionEndpoint           string `json:"end_session_endpoint"`
+		FrontChannelSessionSupported bool   `json:"frontchannel_logout_session_supported"`
+	}
+	if err := provider.Claims(&metadata); err != nil {
+		return nil, err
+	}
 	return &OIDCProvider{
+		IssuerURL: issuerURL, ClientID: clientID, endSessionEndpoint: metadata.EndSessionEndpoint, FrontChannelSessionSupported: metadata.FrontChannelSessionSupported,
 		verifier: provider.Verifier(&gooidc.Config{ClientID: clientID}),
 		oauth2Cfg: oauth2.Config{
 			ClientID:     clientID,
@@ -100,7 +117,12 @@ func (p *OIDCProvider) VerifyIDToken(ctx context.Context, tok *oauth2.Token, exp
 	if err := idToken.Claims(&claims); err != nil {
 		return nil, fmt.Errorf("oidc extract claims: %w", err)
 	}
-	var sub, email, name, nonce string
+	var sub, email, name, nonce, sid string
+	_ = json.Unmarshal(claims["sid"], &sid)
+	var claimNames map[string]string
+	_ = json.Unmarshal(claims["_claim_names"], &claimNames)
+	var hasGroups bool
+	_ = json.Unmarshal(claims["hasgroups"], &hasGroups)
 	_ = json.Unmarshal(claims["sub"], &sub)
 	_ = json.Unmarshal(claims["email"], &email)
 	_ = json.Unmarshal(claims["name"], &name)
@@ -115,7 +137,8 @@ func (p *OIDCProvider) VerifyIDToken(ctx context.Context, tok *oauth2.Token, exp
 	groups, decoded := decodeGroupsClaim(rawGroups)
 	hasValue := len(rawGroups) > 0 && string(rawGroups) != "null"
 	return &OIDCUser{
-		Sub:                  sub,
+		Sub: sub,
+		SID: sid, Claims: claims, GroupsOverage: claimNames["groups"] != "" || hasGroups,
 		Email:                email,
 		Name:                 name,
 		Groups:               groups,
@@ -146,4 +169,55 @@ func decodeGroupsClaim(raw json.RawMessage) ([]string, bool) {
 		return []string{one}, true
 	}
 	return nil, false
+}
+
+// LogoutURL uses only provider discovery and the configured redirect URI.
+func (p *OIDCProvider) LogoutURL(idToken, returnURL string) (string, error) {
+	u, err := url.Parse(p.endSessionEndpoint)
+	if err != nil || u.Host == "" || u.User != nil || u.Fragment != "" || (u.Scheme != "https" && !(u.Scheme == "http" && (u.Hostname() == "localhost" || u.Hostname() == "127.0.0.1" || u.Hostname() == "::1"))) {
+		return "", fmt.Errorf("OIDC provider has no secure end_session_endpoint")
+	}
+	q := u.Query()
+	if idToken != "" {
+		q.Set("id_token_hint", idToken)
+	} else {
+		q.Del("id_token_hint")
+	}
+	q.Set("post_logout_redirect_uri", returnURL)
+	q.Set("client_id", p.ClientID)
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
+// Username reads an explicitly configured claim without lossy sanitization.
+// A missing claim may fall back for new users, but must never be used to link.
+func (u *OIDCUser) Username(claim string, required, stripDomain bool) (string, error) {
+	if claim == "" {
+		return "", nil
+	}
+	raw := u.Claims[claim]
+	var value string
+	if len(raw) == 0 || string(raw) == "null" {
+		if required {
+			return "", fmt.Errorf("required OIDC username claim is absent")
+		}
+		return "", nil
+	}
+	if err := json.Unmarshal(raw, &value); err != nil || value == "" {
+		return "", fmt.Errorf("OIDC username claim must be a non-empty string")
+	}
+	if stripDomain {
+		if i := strings.IndexByte(value, '@'); i >= 0 {
+			value = value[:i]
+		}
+	}
+	if len(value) == 0 || len(value) > 64 || value == "." || value == ".." {
+		return "", fmt.Errorf("OIDC username claim must contain 1 to 64 characters and cannot be . or ..")
+	}
+	for _, c := range value {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_' || c == '.') {
+			return "", fmt.Errorf("OIDC username claim contains unsupported characters")
+		}
+	}
+	return strings.ToLower(value), nil
 }

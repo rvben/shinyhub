@@ -434,6 +434,10 @@
     },
     {
       "method": "GET",
+      "path": "/api/auth/oidc/frontchannel-logout"
+    },
+    {
+      "method": "GET",
       "path": "/api/auth/oidc/login"
     },
     {
@@ -575,6 +579,10 @@
     {
       "method": "GET",
       "path": "/api/users/{id}/automatic-role"
+    },
+    {
+      "method": "POST",
+      "path": "/api/users/{id}/link-oidc"
     },
     {
       "method": "PATCH",

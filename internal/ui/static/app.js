@@ -16,7 +16,7 @@ import { resourceSettingsPatch } from '/static/views/resource-settings.js';
 import { createNewPersonController } from '/static/views/new-person.js';
 import { createRouter } from '/static/router.js';
 import { startAuthenticatedRouter } from '/static/auth-navigation.js';
-import { logoutTarget, reconnectForwardAuth } from '/static/views/logout-navigation.js';
+import { browserLogoutTarget, reconnectForwardAuth } from '/static/views/logout-navigation.js';
 import { createMetricsController } from '/static/metrics-controller.js';
 import { mountAppsGrid } from '/static/views/apps-grid.js';
 import { mountProjectDetail } from '/static/views/project-detail.js';
@@ -58,7 +58,7 @@ import { renderAppAttention } from '/static/views/app-attention.js';
 import { appCardActions } from '/static/views/app-card-actions.js';
 import { inspectBundleEntry } from '/static/views/bundle-filter.js';
 import { createAppCardLifecycle, requestAppRestart, restartConfirmationCopy } from '/static/views/app-card-lifecycle.js';
-import { applyLoginProviders, groupAccessWarningText } from '/static/views/login-providers.js';
+import { applyLoginProviders, groupAccessWarningText, oidcAutoRedirectURL } from '/static/views/login-providers.js';
 import { usagePrivacyErrorMessage } from '/static/views/usage-privacy.js';
 import { applyBranding } from '/static/views/branding.js';
 import { formatManifestSummary, renderDeployResult } from '/static/deploy-summary.js';
@@ -2338,7 +2338,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!resp.ok && resp.status !== 401) throw new Error(`HTTP ${resp.status}`);
       suppressUnloadGuard = true;
       sessionController.end();
-      window.location.assign(logoutTarget(loginProviders, '/identity'));
+      window.location.assign(await browserLogoutTarget(resp, loginProviders, '/identity', { providerLogout: false }));
     } catch {
       consumeSupportDraft(sessionStorage);
       supportReauth.disabled = false;
@@ -6116,6 +6116,7 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       }
       showLoggedIn(payload);
+    try { sessionStorage.removeItem('shinyhub-oidc-auto-login-at'); } catch { /* Explicit sign-in remains available. */ }
       passwordInput.value = '';
       passwordVisibility.reset(loginForm);
       // Mirror the bootstrap path: await router.start() so state.apps is
@@ -6165,7 +6166,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // non-OK status (e.g. 403 from a missing CSRF cookie): the SPA showed the
     // login form locally but the server session stayed alive, so a refresh
     // logged them straight back in. We only clear local state when the server
-    // actually killed the session — 204 (success) or 401 (already gone).
+    // actually killed the session — 200/204 (success) or 401 (already gone).
     // Anything else surfaces an error and keeps the user signed in.
     let resp;
     try {
@@ -6182,7 +6183,7 @@ document.addEventListener('DOMContentLoaded', () => {
       // shell falls through to the login view - so a full navigation does the
       // right thing in both cases without the client knowing the branding config.
       suppressUnloadGuard = true;
-      window.location.assign(logoutTarget(loginProviders));
+      window.location.assign(await browserLogoutTarget(resp, loginProviders));
       return;
     }
     logoutButton.disabled = accountLogout.disabled = false;
@@ -6797,6 +6798,14 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (response.status === 401) {
+      const redirect = oidcAutoRedirectURL(loginProviders, window.location.href, {
+        getItem: key => sessionStorage.getItem(key),
+        setItem: (key, value) => sessionStorage.setItem(key, value),
+      });
+      if (redirect) {
+        window.location.replace(redirect);
+        return;
+      }
       showLoggedOut();
       return;
     }
@@ -6808,6 +6817,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const payload = await response.json();
     showLoggedIn(payload);
+    try { sessionStorage.removeItem('shinyhub-oidc-auto-login-at'); } catch { /* Explicit sign-in remains available. */ }
     if (await startAuthenticatedRouter(router)) return;
     await handleDeployHash();
     await restorePendingSupportSession();

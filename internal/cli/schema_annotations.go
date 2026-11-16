@@ -952,6 +952,10 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	}, ArgEnums: map[string][]string{
 		"--role": {"viewer", "developer", "operator", "admin"},
 	}},
+	"oidc-rebind-empty": {Mutating: mut, OutputFields: []fieldSpec{{Name: "status", Type: "string"}, {Name: "issuer", Type: "string"}, {Name: "client_id", Type: "string"}}},
+	"users link-oidc": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string"}, {Name: "username", Type: "string"}, {Name: "user_id", Type: "integer"}, {Name: "linked", Type: "boolean"}, {Name: "dry_run", Type: "boolean"},
+	}},
 	"users reset-password": {Mutating: mut, OutputFields: []fieldSpec{
 		{Name: "status", Type: "string", Desc: "password_reset"},
 		{Name: "id", Type: "integer"},
