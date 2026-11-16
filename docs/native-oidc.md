@@ -26,6 +26,73 @@ way - see [Identity forwarding](identity.md). Native OIDC and forward-auth feed
 the same downstream contract.
 
 
+## Test without a Microsoft tenant
+
+Run the native Entra-shaped compatibility suite from a checkout:
+
+```sh
+make test-entra-oidc
+# Optional: retain private results in a chosen new/empty directory.
+make test-entra-oidc ENTRA_OIDC_OUTPUT=/tmp/shinyhub-entra-results
+# For another compatible Python executable:
+make test-entra-oidc ENTRA_OIDC_PYTHON=python3.15
+```
+
+It requires Python 3.14+, exactly Go 1.27.4 (pinned by the fixture), Git, and network access to download pinned
+provider source and Go modules. It does not require Docker, an Azure account, a
+Microsoft tenant, or cloud credentials. Both services bind to random loopback
+ports, use fresh databases, and stop on completion or failure. It never opens an
+existing ShinyHub database. Generated recovery credentials stay in the private
+test directory and the password file is removed during cleanup.
+The default run also retains its private output directory and prints its path;
+remove that directory when you no longer need the report and synthetic state.
+
+The suite builds the current ShinyHub checkout and a pinned
+[Entra emulator fixture](https://github.com/calvinchengx/entra-emulator).
+The fixture includes reviewed pending app-role and logout changes; it is not an
+upstream release. Its source commit, compatibility-patch digest, and resulting
+Git tree are checked before building. See
+[`scripts/acceptance/fixtures/entra-emulator/README.md`](https://github.com/rvben/shinyhub/blob/main/scripts/acceptance/fixtures/entra-emulator/README.md)
+for pins, attribution and the patch-removal policy.
+
+Checks cover authorization-code login, strict app-role grants/refusal and
+demotion, explicit account migration with ownership/API-key preservation,
+revocation after a verified authorization refusal, nonce/state rejection,
+callback replay, local/RP/front-channel logout, session isolation, and real timed
+session expiry. `results.json` records the checks, source/build provenance and
+binary hashes. A failure exits nonzero; CI runs the same command and retains
+only that summary, never process logs or credentials. Uncommitted local changes
+are explicitly recorded as a dirty ShinyHub build.
+CI requires a clean ShinyHub build. Binary hashes are specific to the recorded
+Go toolchain and target platform. The public source repository and module
+registries must remain reachable; unavailable dependencies fail the job rather
+than substituting a different source.
+
+### Real-tenant acceptance before production migration
+
+A passing emulator run establishes local compatibility. Real Microsoft Entra
+interoperability remains **unverified** until someone with access to a dedicated
+test tenant completes the following on isolated HTTPS staging:
+
+- Confirm the exact tenant authority, audience, callback, post-logout return and
+  front-channel logout URLs with a dedicated Web app registration.
+- Assign pilot users to explicit viewer/developer/admin app roles; verify the
+  configured corporate username and signature-verified subject mapping.
+- Exercise assignment-required rejection, role removal and demotion, including
+  Entra propagation delay and session freshness limits.
+- Dry-run and apply explicit links to disposable legacy accounts; verify stable
+  user IDs, ownership, memberships and API keys, with local recovery available.
+- Exercise normal login, renewal/expiry and each logout path in real browsers;
+  check tenant consent, MFA and Conditional Access policies that apply.
+- Record the tested ShinyHub commit, tenant/app identifiers, settings, results
+  and reviewer privately. Keep tokens, secrets and personal data out of reports.
+
+The emulator issues a role-less token for an unassigned user; it does not prove
+Microsoft's assignment-required enforcement, consent, Conditional Access, MFA,
+propagation timing, or browser cookie policy. The absence of a real test tenant
+does not block local development and CI. Keep the existing production
+authentication until this acceptance gate is completed.
+
 ## Configuration
 
 ```yaml

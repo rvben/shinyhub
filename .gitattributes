@@ -1,0 +1,2 @@
+# Preserve the checked fixture bytes; unified diff context is not source whitespace.
+scripts/acceptance/fixtures/entra-emulator/compatibility.patch -text -whitespace

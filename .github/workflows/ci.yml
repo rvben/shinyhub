@@ -16,6 +16,39 @@ permissions:
   contents: read
 
 jobs:
+  entra-oidc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.4"
+          cache-dependency-path: |
+            go.sum
+            scripts/acceptance/fixtures/entra-emulator/source.json
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - name: Native Entra-shaped OIDC acceptance (no Microsoft tenant)
+        run: make test-entra-oidc ENTRA_OIDC_OUTPUT="$RUNNER_TEMP/entra-oidc"
+
+      # Keep only the sanitized summary; process logs and temporary credentials
+      # stay off artifacts. A failed build/test still fails the job.
+      - name: Compatibility summary
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: entra-oidc-compatibility
+          retention-days: 7
+          path: ${{ runner.temp }}/entra-oidc/results.json
+          if-no-files-found: ignore
+
   test:
     runs-on: ubuntu-latest
     steps:

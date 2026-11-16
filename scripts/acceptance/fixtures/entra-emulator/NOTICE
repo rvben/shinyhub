@@ -1,0 +1,13 @@
+Entra Emulator
+Copyright 2026 Calvin Cheng and Entra Emulator contributors
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Entra Emulator is an independent, clean-room implementation of the publicly
+documented Microsoft Entra ID protocol surface (OpenID Connect / OAuth 2.0,
+Microsoft identity platform v2.0 endpoint shapes), built from Microsoft's
+public documentation and RFCs.
+
+"Microsoft Entra ID", "Azure AD", "Microsoft Graph", and "MSAL" are
+trademarks of Microsoft Corporation. This project is an independent
+developer tool, not affiliated with or endorsed by Microsoft.

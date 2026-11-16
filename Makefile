@@ -6,6 +6,7 @@ CLISPEC ?= clispec
 CLISPEC_MIN_VERSION := 0.3.1
 RACE_TIMEOUT ?= 20m
 PYTHON_VERSION ?= 3.14+gil
+ENTRA_OIDC_PYTHON ?= python3.14
 BOOKMARKS_SHINY ?= shiny>=1.8,<2
 BOOKMARKS_BROWSERS ?= --browser chromium
 BOOKMARKS_BROWSER_ENV = uv run --python '$(PYTHON_VERSION)' --with-editable . --with pytest --with pytest-asyncio --with pytest-playwright --with pytest-timeout --with '$(BOOKMARKS_SHINY)' --no-project
@@ -46,6 +47,12 @@ clean:
 	rm -rf bin tmp
 
 test: test-go test-js test-worker
+
+# Native loopback-only OIDC compatibility; no Docker or Microsoft account needed.
+# The runner reports the exact upstream source tree, patch and binary hashes.
+.PHONY: test-entra-oidc
+test-entra-oidc:
+	$(ENTRA_OIDC_PYTHON) -I scripts/entra-oidc-e2e.py $(if $(ENTRA_OIDC_OUTPUT),--output "$(ENTRA_OIDC_OUTPUT)")
 
 # check is the fast, deterministic pre-PR gate contributors should run.
 check: fmt-check lint lint-js ui-minify-check skill-lint test

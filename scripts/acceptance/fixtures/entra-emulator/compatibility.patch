@@ -1,0 +1,1743 @@
+diff --git a/README.md b/README.md
+index 55a40dc..af4c89c 100644
+--- a/README.md
++++ b/README.md
+@@ -25,6 +25,21 @@ reference, also browsable as Markdown in [`docs/`](docs/).
+ > publicly known seeded users/secrets, self-signed TLS, signing key stored unencrypted.
+ > Run it on `localhost` only. Never point real users or secrets at it.
+ 
++## Fork additions (MoinA-HO)
++
++This fork changes three things in the upstream emulator, all to match Entra ID more
++closely: two for apps that authorize users by **app roles**, and one for sign-in requests
++that ask only for an API scope:
++
++| Addition | What it does | How to use it |
++|---|---|---|
++| **User app roles in tokens** | App roles assigned to a **user** appear as `roles` in that user's ID token (for the app they signed in to) and delegated access token (for the API being called), as Entra does. Graph access tokens never carry them. | Add a role with `allowedMemberTypes: ["User"]` (`POST /admin/api/apps/{id}/roles`), then assign it: `POST /graph/v1.0/servicePrincipals/{appId}/appRoleAssignedTo` with `{"principalId": "<userId>", "principalType": "User", "resourceId": "<appId>", "appRoleId": "<roleId>"}`. |
++| **`accessTokenAcceptedVersion` per app** | Entra's manifest setting (`api.requestedAccessTokenVersion`). The emulator issues v2.0 tokens; with `2`, access tokens for the app carry `aud` = its client id, as Entra's v2.0 tokens do (Microsoft.Identity.Web expects this by default). Unset or `1` keeps the App ID URI audience, the emulator's original behaviour. | `PATCH /admin/api/apps/{id}` (or `POST /admin/api/apps`) with `{"accessTokenAcceptedVersion": 2}`; `0` clears it. Shown on the app as `accessTokenAcceptedVersion` (`null` when unset). |
++| **`openid` only required for ID tokens** | Upstream refused any authorize request without `openid`. As in Entra, a code-flow request (`response_type=code`) may now ask for resource scopes alone, for example Swagger UI requesting just `api://<app>/access_as_user`; the token response then has an access token and no ID token. Requests that return an ID token (`id_token`, `code id_token`) still need `openid`, and an empty `scope` is still refused (`AADSTS900144`). | Nothing to set: send `response_type=code` with the scopes you need. |
++
++Delegated access tokens also carry `name` and `preferred_username`, as Entra's v2.0
++tokens do.
++
+ ## Quick start
+ 
+ With [GNU Make](docs/21-platform-setup.md) — same three verbs on Linux, macOS
+diff --git a/docs/07-token-service.md b/docs/07-token-service.md
+index c7bdbc5..f1de5e8 100644
+--- a/docs/07-token-service.md
++++ b/docs/07-token-service.md
+@@ -37,6 +37,13 @@ device code); **omitted** for client credentials. `Cache-Control: no-store`,
+ 
+ ## ID token claims
+ 
++Browser sign-ins also carry `sid`, a public identifier matching the session's
++front-channel logout notifications. It is derived from the provider session with
++a domain-separated SHA-256 hash; the bearer SSO cookie is never exposed to RPs.
++Code, implicit and hybrid flows share it, and refresh-token rotations preserve it.
++Grants without a browser session omit it. Existing grants migrated from an older
++database also omit it until a fresh browser sign-in establishes the correlation.
++
+ | Claim | Value |
+ |---|---|
+ | `iss` | GUID-form issuer `${loginOrigin}/${tenantId}/v2.0` |
+diff --git a/docs/08-oidc-endpoints.md b/docs/08-oidc-endpoints.md
+index 3cb79ca..14c1d83 100644
+--- a/docs/08-oidc-endpoints.md
++++ b/docs/08-oidc-endpoints.md
+@@ -49,8 +49,9 @@ UserInfo lives on the **Graph** surface: `GET|POST /oidc/userinfo` (compat origi
+ }
+ ```
+ 
+-No Microsoft cloud-host fields (`tenant_region_scope` etc.); no front-channel-logout
+-capability flags (not implemented).
++The example above is abbreviated. Discovery also advertises front-channel logout
++and session correlation (`frontchannel_logout_supported` and
++`frontchannel_logout_session_supported`), with `sid` in `claims_supported`.
+ 
+ ## Canonical OAuth error convention (token-shaped endpoints)
+ 
+@@ -79,7 +80,8 @@ JSON, correct 4xx, `Cache-Control: no-store`:
+ ## Authorize — `GET|POST /{tenant}/oauth2/v2.0/authorize`
+ 
+ Params: `client_id`* , `response_type`* (=`code`), `redirect_uri`* (exact match against
+-registered), `scope`* (must include `openid`), `state` (echoed), `code_challenge`
++registered), `scope`* (must include `openid` when an ID token is returned; a
++`response_type=code` request may ask for resource scopes alone, as in Entra), `state` (echoed), `code_challenge`
+ (required for public clients) + `code_challenge_method` (`S256`|`plain`), `nonce`,
+ `response_mode` (`query` default | `fragment` | `form_post` auto-submit HTML), `prompt`
+ (`login`/`select_account` force picker; `none` without session → redirect
+@@ -200,7 +202,18 @@ Query: `post_logout_redirect_uri`, `client_id`, `id_token_hint` (unverified, use
+ infer client_id), `state`. Behavior: delete the session row + expire the cookie
+ (idempotent). Redirect only when `post_logout_redirect_uri` exactly matches a registered
+ redirect URI of a resolvable client — else render the "signed out" page (200). `state`
+-appended on redirect.
++appended on redirect, including when logout first renders a front-channel page.
++Only relying parties used by this session receive hidden iframe notifications;
++each notification's `sid` matches the signed browser ID token and its refresh
++descendants. Existing notification query parameters are retained, except `iss`
++and `sid`, which the provider supplies. Unsafe URLs in
++legacy registrations are skipped. The final redirect's original query encoding
++is retained when `state` is appended.
++
++Provider sign-out clears the SSO session, but does not revoke refresh grants.
++Legacy refresh chains retain their original absence of `sid` after an upgrade;
++a fresh sign-in is needed for session-correlated logout. Re-authentication that
++creates a new provider session does not transfer other RPs from the old session.
+ 
+ ## Managed identity — `GET /msi/token` (App Service protocol)
+ 
+diff --git a/docs/11-admin-api.md b/docs/11-admin-api.md
+index ac7b907..b114331 100644
+--- a/docs/11-admin-api.md
++++ b/docs/11-admin-api.md
+@@ -88,7 +88,7 @@ on add → 400 `invalid_reference`.
+ | GET / POST | `/admin/api/apps` | paged / 201 |
+ | GET / PATCH / DELETE | `/admin/api/apps/{id}` | 200 (with sub-collections) / 200 / 204 cascade |
+ 
+-App DTO: `{ id, displayName, isConfidential, appIdUri?, redirectUris[{id,uri,type}],
++App DTO: `{ id, displayName, isConfidential, appIdUri?, frontchannelLogoutUri?, redirectUris[{id,uri,type}],
+ exposedScopes[{id,value,adminConsentDisplayName,isEnabled}],
+ appRoles[{id,value,displayName,allowedMemberTypes,isEnabled}],
+ secrets[{id,displayName,hint,expiresAt,createdAt}], createdAt }` — secrets list **hint
+@@ -132,6 +132,18 @@ not verify, or a deleted credential each fail with `invalid_client` (AADSTS70021
+ Token configuration (optional claims / group claims) is managed via app PATCH fields
+ `optionalClaims`, `groupMembershipClaims`, `groupOverageLimit` (see 04).
+ 
++`frontchannelLogoutUri` is accepted on app creation and PATCH and returned on reads
++(`null` when unset). On PATCH, absent or `null` leaves it unchanged; an empty
++string clears it. Nonempty values must be
++absolute HTTP(S) URLs without userinfo or fragments; unsafe values are rejected
++before the app is changed. The registered notification URL receives `iss` and
++`sid` when a provider session that signed into the app signs out.
++
++`accessTokenAcceptedVersion` (create or PATCH; `1`, `2`, or `0` to clear; `null` in the
++DTO when unset) mirrors Entra's manifest setting: with `2`, access tokens for the app
++(delegated and client credentials) carry `aud` = the app's client id instead of its App
++ID URI, which is the audience Entra puts in v2.0 tokens.
++
+ ## Token forge (roadmap #2 — testing superpower)
+ 
+ `POST /admin/api/tokens` mints an **arbitrary signed JWT** without running any flow —
+diff --git a/e2e/go/go.mod b/e2e/go/go.mod
+index 87f911a..35bf9ba 100644
+--- a/e2e/go/go.mod
++++ b/e2e/go/go.mod
+@@ -1,6 +1,6 @@
+ module github.com/calvinchengx/entra-emulator/e2e/go
+ 
+-go 1.27.3
++go 1.27.4
+ 
+ require (
+ 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.23.3
+diff --git a/go.mod b/go.mod
+index 37dc0a2..4a57c1e 100644
+--- a/go.mod
++++ b/go.mod
+@@ -1,6 +1,6 @@
+ module github.com/calvinchengx/entra-emulator
+ 
+-go 1.27.3
++go 1.27.4
+ 
+ require (
+ 	github.com/beevik/etree v1.8.1
+diff --git a/internal/admin/groups_apps.go b/internal/admin/groups_apps.go
+index de158b9..a4a7658 100644
+--- a/internal/admin/groups_apps.go
++++ b/internal/admin/groups_apps.go
+@@ -153,6 +153,7 @@ func (a *Admin) appDTO(app *store.App) map[string]any {
+ 	scopes, _ := a.Store.ListScopes(app.ID)
+ 	roles, _ := a.Store.ListRoles(app.ID)
+ 	secrets, _ := a.Store.ListSecrets(app.ID)
++	logoutURI, _ := a.Store.FrontchannelLogoutURI(app.ID)
+ 
+ 	redirectDTOs := make([]map[string]any, 0, len(redirects))
+ 	for _, u := range redirects {
+@@ -183,11 +184,33 @@ func (a *Admin) appDTO(app *store.App) map[string]any {
+ 		"id": app.ID, "displayName": app.DisplayName, "isConfidential": app.IsConfidential,
+ 		"appIdUri": nullable(app.AppIDURI), "redirectUris": redirectDTOs,
+ 		"exposedScopes": scopeDTOs, "appRoles": roleDTOs, "secrets": secretDTOs,
+-		"groupMembershipClaims": app.GroupMembershipClaims,
+-		"createdAt":             iso(app.CreatedAt),
++		"groupMembershipClaims":      app.GroupMembershipClaims,
++		"frontchannelLogoutUri":      nullable(logoutURI),
++		"accessTokenAcceptedVersion": a.accessTokenVersionDTO(app.ID),
++		"createdAt":                  iso(app.CreatedAt),
+ 	}
+ }
+ 
++// accessTokenVersionDTO is the app's accessTokenAcceptedVersion, or nil when
++// unset (Entra's manifest shows null).
++func (a *Admin) accessTokenVersionDTO(appID string) any {
++	version, err := a.Store.AccessTokenAcceptedVersion(appID)
++	if err != nil || version == 0 {
++		return nil
++	}
++	return version
++}
++
++// validAccessTokenVersion rejects anything but 0, 1 or 2.
++func validAccessTokenVersion(w http.ResponseWriter, version *int) bool {
++	if version == nil || *version == 0 || *version == 1 || *version == 2 {
++		return true
++	}
++	httpx.WriteAdminError(w, http.StatusBadRequest, "validation_error", "Invalid app.",
++		httpx.AdminDetail{Field: "accessTokenAcceptedVersion", Message: "Must be 1 or 2 (or 0 to clear)."})
++	return false
++}
++
+ func splitCSV(s string) []string {
+ 	var out []string
+ 	start := 0
+@@ -225,7 +248,10 @@ type appBody struct {
+ 	GroupOverageLimit     *int    `json:"groupOverageLimit"`
+ 	OptionalClaims        any     `json:"optionalClaims"`
+ 	FrontchannelLogoutURI *string `json:"frontchannelLogoutUri"`
+-	RedirectUris          []struct {
++	// Entra's accessTokenAcceptedVersion: 2 makes access tokens for this app
++	// carry aud = its client id; 1 (or 0 to clear) keeps the App ID URI.
++	AccessTokenAcceptedVersion *int `json:"accessTokenAcceptedVersion"`
++	RedirectUris               []struct {
+ 		URI  string `json:"uri"`
+ 		Type string `json:"type"`
+ 	} `json:"redirectUris"`
+@@ -236,11 +262,19 @@ func (a *Admin) createApp(w http.ResponseWriter, r *http.Request) {
+ 	if !decodeBody(w, r, &b) {
+ 		return
+ 	}
++	if b.FrontchannelLogoutURI != nil && *b.FrontchannelLogoutURI != "" && !httpx.ValidFrontchannelLogoutURI(*b.FrontchannelLogoutURI) {
++		httpx.WriteAdminError(w, http.StatusBadRequest, "validation_error", "Invalid frontchannelLogoutUri.",
++			httpx.AdminDetail{Field: "frontchannelLogoutUri", Message: "Must be an absolute HTTP(S) URI without userinfo or fragment."})
++		return
++	}
+ 	if b.DisplayName == nil || *b.DisplayName == "" {
+ 		httpx.WriteAdminError(w, http.StatusBadRequest, "validation_error", "Invalid app.",
+ 			httpx.AdminDetail{Field: "displayName", Message: "Required."})
+ 		return
+ 	}
++	if !validAccessTokenVersion(w, b.AccessTokenAcceptedVersion) {
++		return
++	}
+ 	tenantID := a.Cfg.TenantID
+ 	if b.TenantID != nil && *b.TenantID != "" {
+ 		if _, err := a.Store.GetTenantByID(*b.TenantID); err != nil {
+@@ -259,12 +293,24 @@ func (a *Admin) createApp(w http.ResponseWriter, r *http.Request) {
+ 		writeStoreErr(w, err)
+ 		return
+ 	}
++	if b.FrontchannelLogoutURI != nil {
++		if err := a.Store.SetFrontchannelLogoutURI(app.ID, *b.FrontchannelLogoutURI); err != nil {
++			writeStoreErr(w, err)
++			return
++		}
++	}
+ 	for _, ru := range b.RedirectUris {
+ 		if _, err := a.Store.AddRedirectURI(app.ID, ru.URI, ru.Type); err != nil {
+ 			writeStoreErr(w, err)
+ 			return
+ 		}
+ 	}
++	if b.AccessTokenAcceptedVersion != nil {
++		if err := a.Store.SetAccessTokenAcceptedVersion(app.ID, *b.AccessTokenAcceptedVersion); err != nil {
++			writeStoreErr(w, err)
++			return
++		}
++	}
+ 	httpx.WriteJSON(w, http.StatusCreated, a.appDTO(app))
+ }
+ 
+@@ -311,6 +357,14 @@ func (a *Admin) patchApp(w http.ResponseWriter, r *http.Request) {
+ 	if !decodeBody(w, r, &b) {
+ 		return
+ 	}
++	if b.FrontchannelLogoutURI != nil && *b.FrontchannelLogoutURI != "" && !httpx.ValidFrontchannelLogoutURI(*b.FrontchannelLogoutURI) {
++		httpx.WriteAdminError(w, http.StatusBadRequest, "validation_error", "Invalid frontchannelLogoutUri.",
++			httpx.AdminDetail{Field: "frontchannelLogoutUri", Message: "Must be an absolute HTTP(S) URI without userinfo or fragment."})
++		return
++	}
++	if !validAccessTokenVersion(w, b.AccessTokenAcceptedVersion) {
++		return
++	}
+ 	applyAppBody(app, &b)
+ 	if err := a.Store.UpdateApp(app); err != nil {
+ 		writeStoreErr(w, err)
+@@ -324,6 +378,12 @@ func (a *Admin) patchApp(w http.ResponseWriter, r *http.Request) {
+ 			return
+ 		}
+ 	}
++	if b.AccessTokenAcceptedVersion != nil {
++		if err := a.Store.SetAccessTokenAcceptedVersion(app.ID, *b.AccessTokenAcceptedVersion); err != nil {
++			writeStoreErr(w, err)
++			return
++		}
++	}
+ 	httpx.WriteJSON(w, http.StatusOK, a.appDTO(app))
+ }
+ 
+diff --git a/internal/httpx/logout.go b/internal/httpx/logout.go
+new file mode 100644
+index 0000000..ca39515
+--- /dev/null
++++ b/internal/httpx/logout.go
+@@ -0,0 +1,16 @@
++package httpx
++
++import (
++	"net/url"
++	"strings"
++)
++
++// ValidFrontchannelLogoutURI accepts absolute HTTP(S) notification URLs only.
++// A javascript: iframe could execute content on the provider origin; data:
++// and other non-HTTP schemes are not valid logout notification endpoints.
++// HTTP is supported for local development; fragments and userinfo are not.
++func ValidFrontchannelLogoutURI(raw string) bool {
++	u, err := url.Parse(raw)
++	return err == nil && (u.Scheme == "http" || u.Scheme == "https") &&
++		u.Hostname() != "" && u.User == nil && !strings.Contains(raw, "#") && u.Opaque == ""
++}
+diff --git a/internal/identity/authorize.go b/internal/identity/authorize.go
+index 9f35322..333df93 100644
+--- a/internal/identity/authorize.go
++++ b/internal/identity/authorize.go
+@@ -154,7 +154,15 @@ func (i *Identity) handleAuthorize(w http.ResponseWriter, r *http.Request) {
+ 		}
+ 	}
+ 	scopes := SplitScopes(st.Scope)
+-	if !containsScope(scopes, "openid") {
++	if len(scopes) == 0 {
++		redirectErr("invalid_scope", "AADSTS900144: The request body must contain the following parameter: 'scope'.")
++		return
++	}
++	// Like Entra, openid is only required when an id_token is requested. A
++	// code-only request for a resource scope (e.g. Swagger UI asking for just
++	// api://<app>/access_as_user) is allowed and its token response simply has
++	// no id_token (tokens.BuildDelegatedResponse only mints one for openid).
++	if st.ResponseType != "code" && !containsScope(scopes, "openid") {
+ 		redirectErr("invalid_scope", "The openid scope is required.")
+ 		return
+ 	}
+@@ -216,9 +224,11 @@ func (i *Identity) handleAuthorize(w http.ResponseWriter, r *http.Request) {
+ 	if user != nil {
+ 		amr := "pwd"
+ 		var authTime int64
++		sessionID := ""
+ 		if sess != nil {
+ 			amr = sess.AuthMethod
+ 			authTime = sess.AuthTime()
++			sessionID = tokens.FrontchannelSID(sess.ID)
+ 		}
+ 		if i.Cfg.RequireConsent && prompt != "none" {
+ 			i.renderConsent(w, st, app)
+@@ -227,7 +237,7 @@ func (i *Identity) handleAuthorize(w http.ResponseWriter, r *http.Request) {
+ 		if sess != nil {
+ 			_ = i.Store.RecordSessionApp(sess.ID, app.ID)
+ 		}
+-		i.issueCodeAndDeliver(w, st, app, user, amr, authTime)
++		i.issueCodeAndDeliver(w, st, app, user, amr, authTime, sessionID)
+ 		return
+ 	}
+ 
+@@ -256,7 +266,7 @@ func (i *Identity) handleConsentDecision(w http.ResponseWriter, r *http.Request)
+ 		return
+ 	}
+ 	_ = i.Store.RecordSessionApp(sess.ID, app.ID)
+-	i.issueCodeAndDeliver(w, st, app, user, sess.AuthMethod, sess.AuthTime())
++	i.issueCodeAndDeliver(w, st, app, user, sess.AuthMethod, sess.AuthTime(), tokens.FrontchannelSID(sess.ID))
+ }
+ 
+ // renderSignIn shows the account picker or password form for the request.
+@@ -329,11 +339,15 @@ func (i *Identity) handleSignInSubmit(w http.ResponseWriter, r *http.Request) {
+ 		i.renderConsent(w, st, app)
+ 		return
+ 	}
+-	i.issueCodeAndDeliver(w, st, app, user, "pwd", authTime)
++	sessionID := ""
++	if newSess != nil {
++		sessionID = tokens.FrontchannelSID(newSess.ID)
++	}
++	i.issueCodeAndDeliver(w, st, app, user, "pwd", authTime, sessionID)
+ }
+ 
+ // issueCodeAndDeliver mints the auth code and returns it per response_mode.
+-func (i *Identity) issueCodeAndDeliver(w http.ResponseWriter, st authorizeState, app *store.App, user *store.User, amr string, authTime int64) {
++func (i *Identity) issueCodeAndDeliver(w http.ResponseWriter, st authorizeState, app *store.App, user *store.User, amr string, authTime int64, sessionID string) {
+ 	resolved := i.ResolveDelegatedScopes(SplitScopes(st.Scope))
+ 	if resolved == nil {
+ 		i.deliverAuthorizeError(w, st, "invalid_scope", "A requested resource scope is not registered.")
+@@ -343,7 +357,7 @@ func (i *Identity) issueCodeAndDeliver(w http.ResponseWriter, st authorizeState,
+ 		AppID: app.ID, UserID: user.ID, RedirectURI: st.RedirectURI,
+ 		Scopes: resolved.Granted, Resource: resolved.Resource,
+ 		CodeChallenge: st.Challenge, ChallengeMethod: st.Method, Nonce: st.Nonce, AMR: amr,
+-		AuthTime: authTime, MaxAgeRequested: st.HasMaxAge,
++		AuthTime: authTime, MaxAgeRequested: st.HasMaxAge, SessionID: sessionID,
+ 	})
+ 	if err != nil {
+ 		i.renderErrorPage(w, http.StatusInternalServerError, "Error", "Could not issue an authorization code.")
+@@ -357,7 +371,7 @@ func (i *Identity) issueCodeAndDeliver(w http.ResponseWriter, st authorizeState,
+ 		idToken, err := i.Tokens.MintIDToken(tokens.DelegatedGrant{
+ 			App: app, User: user, Scopes: resolved.Granted,
+ 			Resource: resolved.Resource, Nonce: st.Nonce, AMR: amr,
+-			AuthTime: authTime, MaxAgeRequested: st.HasMaxAge,
++			AuthTime: authTime, MaxAgeRequested: st.HasMaxAge, SessionID: sessionID,
+ 		})
+ 		if err != nil {
+ 			i.renderErrorPage(w, http.StatusInternalServerError, "Error", "Could not issue an ID token.")
+diff --git a/internal/identity/discovery.go b/internal/identity/discovery.go
+index 3c1ad5e..49cca61 100644
+--- a/internal/identity/discovery.go
++++ b/internal/identity/discovery.go
+@@ -77,9 +77,12 @@ func (i *Identity) handleDiscovery(w http.ResponseWriter, r *http.Request) {
+ 		// Both are real: RP-initiated logout at end_session_endpoint, and
+ 		// front-channel notification of the relying parties this session signed
+ 		// into (each app registers its own frontchannel_logout_uri).
+-		"http_logout_supported":            true,
+-		"frontchannel_logout_supported":    true,
+-		"code_challenge_methods_supported": []string{"S256", "plain"},
++		"http_logout_supported":         true,
++		"frontchannel_logout_supported": true,
++		// Advertise the implemented session correlation so strict RPs can
++		// discover it; this is a capability claim, not an exact metadata clone.
++		"frontchannel_logout_session_supported": true,
++		"code_challenge_methods_supported":      []string{"S256", "plain"},
+ 		// JAR by reference (RFC 9101). Inline `request` is not accepted, and
+ 		// request_parameter_supported is therefore left absent — which is also
+ 		// what real Entra advertises.
+@@ -91,7 +94,7 @@ func (i *Identity) handleDiscovery(w http.ResponseWriter, r *http.Request) {
+ 		// request carried max_age or the app opted in via optionalClaims.
+ 		"claims_supported": []string{
+ 			"sub", "iss", "aud", "exp", "iat", "nbf", "tid", "oid",
+-			"name", "preferred_username", "email", "nonce", "ver", "auth_time",
++			"name", "preferred_username", "email", "nonce", "ver", "auth_time", "sid",
+ 		},
+ 		// Cloud-instance metadata. Real Entra advertises the sovereign-cloud
+ 		// coordinates here (microsoftonline.com / graph.microsoft.com / pas.windows.net);
+diff --git a/internal/identity/logout.go b/internal/identity/logout.go
+index c4b8ced..0b41a70 100644
+--- a/internal/identity/logout.go
++++ b/internal/identity/logout.go
+@@ -5,7 +5,9 @@ import (
+ 	"html"
+ 	"net/http"
+ 	"net/url"
++	"strings"
+ 
++	"github.com/calvinchengx/entra-emulator/internal/httpx"
+ 	"github.com/calvinchengx/entra-emulator/internal/tokens"
+ )
+ 
+@@ -33,40 +35,14 @@ func (i *Identity) handleLogout(w http.ResponseWriter, r *http.Request) {
+ 
+ 	q := r.URL.Query()
+ 	if len(rpLogoutURIs) > 0 {
+-		i.renderFrontchannelLogout(w, rpLogoutURIs, i.validatedPostLogoutRedirect(q), sessionID)
++		i.renderFrontchannelLogout(w, rpLogoutURIs, i.validatedPostLogoutRedirect(q), tokens.FrontchannelSID(sessionID))
+ 		return
+ 	}
+-	target := q.Get("post_logout_redirect_uri")
++	target := i.validatedPostLogoutRedirect(q)
+ 	if target == "" {
+ 		i.renderSignedOut(w)
+ 		return
+ 	}
+-
+-	clientID := q.Get("client_id")
+-	if clientID == "" {
+-		// Best-effort inference from the unverified id_token_hint's aud.
+-		if hint := q.Get("id_token_hint"); hint != "" {
+-			if claims, err := tokens.DecodeUnverified(hint); err == nil {
+-				clientID, _ = claims["aud"].(string)
+-			}
+-		}
+-	}
+-	if clientID == "" {
+-		i.renderSignedOut(w) // never redirect to an unvalidated URI
+-		return
+-	}
+-	if ok, _ := i.Store.HasRedirectURI(clientID, target); !ok {
+-		i.renderSignedOut(w)
+-		return
+-	}
+-
+-	if state := q.Get("state"); state != "" {
+-		sep := "?"
+-		if u, err := url.Parse(target); err == nil && u.RawQuery != "" {
+-			sep = "&"
+-		}
+-		target += sep + "state=" + url.QueryEscape(state)
+-	}
+ 	http.Redirect(w, r, target, http.StatusFound)
+ }
+ 
+@@ -76,14 +52,33 @@ func (i *Identity) handleLogout(w http.ResponseWriter, r *http.Request) {
+ func (i *Identity) renderFrontchannelLogout(w http.ResponseWriter, uris []string, target, sid string) {
+ 	frames := ""
+ 	for _, u := range uris {
+-		sep := "?"
+-		if parsed, err := url.Parse(u); err == nil && parsed.RawQuery != "" {
+-			sep = "&"
++		// Old databases/imported fixtures may contain unvalidated registrations.
++		if !httpx.ValidFrontchannelLogoutURI(u) {
++			continue
++		}
++		parsed, _ := url.Parse(u) // validated above
++		// Keep application parameters byte for byte, including valueless keys
++		// and pairs net/url.ParseQuery would discard (for example, semicolons).
++		// Replace only the OP-owned fields, including percent-encoded names.
++		parts := make([]string, 0, 4)
++		for _, part := range strings.Split(parsed.RawQuery, "&") {
++			key, _, _ := strings.Cut(part, "=")
++			decoded, err := url.QueryUnescape(key)
++			if part == "" || (err == nil && (decoded == "iss" || decoded == "sid")) {
++				continue
++			}
++			parts = append(parts, part)
+ 		}
+-		src := u + sep + url.Values{"iss": {i.Cfg.Issuer}, "sid": {sid}}.Encode()
++		parts = append(parts, url.Values{"iss": {i.Cfg.Issuer}, "sid": {sid}}.Encode())
++		parsed.RawQuery = strings.Join(parts, "&")
++		src := parsed.String()
+ 		frames += fmt.Sprintf(`<iframe src="%s" style="display:none" title="logout"></iframe>`,
+ 			html.EscapeString(src))
+ 	}
++	if frames == "" && target == "" {
++		i.renderSignedOut(w)
++		return
++	}
+ 	cont := ""
+ 	if target != "" {
+ 		cont = fmt.Sprintf(`<meta http-equiv="refresh" content="1;url=%s">`, html.EscapeString(target))
+@@ -116,5 +111,15 @@ func (i *Identity) validatedPostLogoutRedirect(q url.Values) string {
+ 	if ok, _ := i.Store.HasRedirectURI(clientID, target); !ok {
+ 		return ""
+ 	}
+-	return target
++	u, err := url.Parse(target)
++	if err != nil {
++		return ""
++	}
++	if state := q.Get("state"); state != "" {
++		if u.RawQuery != "" {
++			u.RawQuery += "&"
++		}
++		u.RawQuery += "state=" + url.QueryEscape(state)
++	}
++	return u.String()
+ }
+diff --git a/internal/identity/token.go b/internal/identity/token.go
+index d7e3f46..349e76d 100644
+--- a/internal/identity/token.go
++++ b/internal/identity/token.go
+@@ -231,7 +231,7 @@ func (i *Identity) grantAuthorizationCode(w http.ResponseWriter, r *http.Request
+ 	noteAuditSubject(r, user.ID, user.UserPrincipalName)
+ 	resp, err := i.Tokens.BuildDelegatedResponse(tokens.DelegatedGrant{
+ 		App: app, User: user, Scopes: grantScopes, Resource: row.Resource, Nonce: row.Nonce, AMR: row.AMR,
+-		AuthTime: row.AuthTime, MaxAgeRequested: row.MaxAgeRequested,
++		AuthTime: row.AuthTime, MaxAgeRequested: row.MaxAgeRequested, SessionID: row.SessionID,
+ 		AuthCode: code, ScopeEcho: scopeEcho,
+ 	})
+ 	if err != nil {
+@@ -285,7 +285,7 @@ func (i *Identity) grantRefreshToken(w http.ResponseWriter, r *http.Request) {
+ 	// property of the app, so it holds for every token the app receives.
+ 	resp, err := i.Tokens.BuildDelegatedResponse(tokens.DelegatedGrant{
+ 		App: app, User: user, Scopes: redeemed.Scopes, Resource: redeemed.Resource,
+-		AMR: redeemed.AMR, AuthTime: redeemed.AuthTime,
++		AMR: redeemed.AMR, AuthTime: redeemed.AuthTime, SessionID: redeemed.SessionID,
+ 		ScopeEcho: scopeEcho, SkipRefreshToken: true,
+ 	})
+ 	if err != nil {
+@@ -371,6 +371,11 @@ func (i *Identity) grantClientCredentials(w http.ResponseWriter, r *http.Request
+ 		} else {
+ 			aud = resourceApp.ID
+ 		}
++		// Entra issues v2.0 tokens for an app set to accept them with
++		// aud = its client id, however the resource was named.
++		if version, err := i.Store.AccessTokenAcceptedVersion(resourceApp.ID); err == nil && version == 2 {
++			aud = resourceApp.ID
++		}
+ 		// App permissions: explicit appRoleAssignments are authoritative when
+ 		// present (docs/20-stateful-directory.md); otherwise fall back to
+ 		// auto-granting every enabled Application-type role.
+diff --git a/internal/server/access_token_version_test.go b/internal/server/access_token_version_test.go
+new file mode 100644
+index 0000000..80a83fd
+--- /dev/null
++++ b/internal/server/access_token_version_test.go
+@@ -0,0 +1,60 @@
++package server
++
++import (
++	"net/http"
++	"net/url"
++	"testing"
++
++	"github.com/calvinchengx/entra-emulator/internal/store"
++)
++
++// accessTokenAcceptedVersion through the admin API: validated, shown on the
++// app, and an app set to 2 gets aud = its client id in client-credentials
++// tokens even when the scope names its App ID URI.
++func TestAccessTokenAcceptedVersion(t *testing.T) {
++	hts, _, _ := newTestServer(t)
++	appURL := hts.URL + "/admin/api/apps/" + daemonID
++	tokenURL := hts.URL + "/" + tenant + "/oauth2/v2.0/token"
++
++	clientCredentialsAud := func() any {
++		t.Helper()
++		resp, body := postForm(t, http.DefaultClient, tokenURL, url.Values{
++			"grant_type":    {"client_credentials"},
++			"client_id":     {daemonID},
++			"client_secret": {store.SeedDaemonSecret},
++			"scope":         {"api://" + daemonID + "/.default"},
++		})
++		if resp.StatusCode != 200 {
++			t.Fatalf("token: %d %v", resp.StatusCode, body)
++		}
++		return decodeJWTPayload(t, body["access_token"].(string))["aud"]
++	}
++
++	if aud := clientCredentialsAud(); aud != "api://"+daemonID {
++		t.Fatalf("default aud = %v, want api://%s", aud, daemonID)
++	}
++
++	if code, body := patchJSON(t, appURL, map[string]any{"accessTokenAcceptedVersion": 3}); code != 400 {
++		t.Fatalf("version 3 should be rejected: %d %v", code, body)
++	}
++
++	code, app := patchJSON(t, appURL, map[string]any{"accessTokenAcceptedVersion": 2})
++	if code != 200 || app["accessTokenAcceptedVersion"] != float64(2) {
++		t.Fatalf("set version 2: %d %v", code, app)
++	}
++	if aud := clientCredentialsAud(); aud != daemonID {
++		t.Fatalf("version 2 aud = %v, want %s", aud, daemonID)
++	}
++
++	code, app = patchJSON(t, appURL, map[string]any{"accessTokenAcceptedVersion": 0})
++	if code != 200 || app["accessTokenAcceptedVersion"] != nil {
++		t.Fatalf("clear version: %d %v", code, app)
++	}
++
++	code, created := postJSON(t, hts.URL+"/admin/api/apps", map[string]any{
++		"displayName": "v2 app", "accessTokenAcceptedVersion": 2,
++	})
++	if code != 201 || created["accessTokenAcceptedVersion"] != float64(2) {
++		t.Fatalf("create with version 2: %d %v", code, created)
++	}
++}
+diff --git a/internal/server/authorize_openid_test.go b/internal/server/authorize_openid_test.go
+new file mode 100644
+index 0000000..366e77b
+--- /dev/null
++++ b/internal/server/authorize_openid_test.go
+@@ -0,0 +1,79 @@
++package server
++
++import (
++	"encoding/json"
++	"net/http"
++	"net/url"
++	"strings"
++	"testing"
++)
++
++// A code-flow request without openid (e.g. Swagger UI asking only for an API
++// scope) is accepted, like Entra, and the token response has no id_token.
++func TestAuthorizeCodeFlowWithoutOpenID(t *testing.T) {
++	hts, _, _ := newTestServer(t)
++	authorize := hts.URL + "/" + tenant + "/oauth2/v2.0/authorize"
++	authURL := authorize + "?" + url.Values{
++		"client_id": {spaID}, "response_type": {"code"}, "redirect_uri": {redirect},
++		"scope": {"User.Read"}, "state": {"s"},
++		"code_challenge": {pkceChallenge(verifierPK)}, "code_challenge_method": {"S256"},
++	}.Encode()
++	client := noRedirectJar()
++
++	// Reaches the sign-in page instead of redirecting with invalid_scope.
++	state := authPickerState(t, client, authURL)
++	resp, err := client.PostForm(authorize, url.Values{"__ee_state": {state}, "__ee_user": {aliceID}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	resp.Body.Close()
++	loc, _ := url.Parse(resp.Header.Get("Location"))
++	code := loc.Query().Get("code")
++	if resp.StatusCode != 302 || code == "" {
++		t.Fatalf("want 302 with code, got %d %s", resp.StatusCode, resp.Header.Get("Location"))
++	}
++
++	tokResp, err := http.PostForm(hts.URL+"/"+tenant+"/oauth2/v2.0/token", url.Values{
++		"grant_type": {"authorization_code"}, "client_id": {spaID}, "code": {code},
++		"redirect_uri": {redirect}, "code_verifier": {verifierPK},
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer tokResp.Body.Close()
++	var body map[string]any
++	_ = json.NewDecoder(tokResp.Body).Decode(&body)
++	if tokResp.StatusCode != 200 || body["access_token"] == nil {
++		t.Fatalf("want access token, got %d %v", tokResp.StatusCode, body)
++	}
++	if _, ok := body["id_token"]; ok {
++		t.Fatal("no openid requested, so no id_token expected")
++	}
++}
++
++// An id_token is still never issued without openid, and an empty scope is refused.
++func TestAuthorizeOpenIDStillRequiredForIDTokenAndScopeRequired(t *testing.T) {
++	hts, _, _ := newTestServer(t)
++	authorize := hts.URL + "/" + tenant + "/oauth2/v2.0/authorize"
++	cases := map[string]url.Values{
++		"id_token without openid": {
++			"client_id": {spaID}, "response_type": {"id_token"}, "redirect_uri": {redirect},
++			"scope": {"User.Read"}, "state": {"s"}, "nonce": {"n"},
++		},
++		"empty scope": {
++			"client_id": {spaID}, "response_type": {"code"}, "redirect_uri": {redirect},
++			"scope": {""}, "state": {"s"},
++			"code_challenge": {pkceChallenge(verifierPK)}, "code_challenge_method": {"S256"},
++		},
++	}
++	for name, q := range cases {
++		resp, err := noRedirectJar().Get(authorize + "?" + q.Encode())
++		if err != nil {
++			t.Fatal(err)
++		}
++		resp.Body.Close()
++		if resp.StatusCode != 302 || !strings.Contains(resp.Header.Get("Location"), "error=invalid_scope") {
++			t.Fatalf("%s: want redirect with invalid_scope, got %d %s", name, resp.StatusCode, resp.Header.Get("Location"))
++		}
++	}
++}
+diff --git a/internal/server/frontchannel_correlation_test.go b/internal/server/frontchannel_correlation_test.go
+new file mode 100644
+index 0000000..8c3ccc4
+--- /dev/null
++++ b/internal/server/frontchannel_correlation_test.go
+@@ -0,0 +1,254 @@
++package server
++
++import (
++	"html"
++	"io"
++	"net/http"
++	"net/url"
++	"regexp"
++	"strings"
++	"testing"
++
++	"github.com/calvinchengx/entra-emulator/internal/store"
++	"github.com/calvinchengx/entra-emulator/internal/tokens"
++)
++
++func TestCreateAppFrontchannelLogoutURI(t *testing.T) {
++	hts, _, _ := newTestServer(t)
++	want := "https://localhost:3000/signout"
++	status, app := postJSON(t, hts.URL+"/admin/api/apps", map[string]any{
++		"displayName": "Logout registration", "frontchannelLogoutUri": want,
++	})
++	if status != http.StatusCreated {
++		t.Fatalf("create: %d %v", status, app)
++	}
++	_, persisted := getJSON(t, hts.URL+"/admin/api/apps/"+app["id"].(string))
++	if persisted["frontchannelLogoutUri"] != want {
++		t.Fatalf("logout URI not persisted on creation: %v", persisted)
++	}
++}
++
++// Exercise the actual authorize, code exchange, refresh and logout endpoints.
++// A logout iframe is useful only if the RP learned the same sid in a signed
++// ID token. Never expose the provider's bearer session cookie as that sid.
++func TestFrontchannelSessionCorrelation(t *testing.T) {
++	for _, scenario := range []struct {
++		name              string
++		consent, password bool
++	}{
++		{"picker", false, false}, {"consent", true, false}, {"password", false, true}, {"password-consent", true, true},
++	} {
++		t.Run(scenario.name, func(t *testing.T) {
++			consent := scenario.consent
++			hts, cfg, st := newTestServer(t)
++			const roleID = "a1111111-1111-4111-8111-111111111111"
++			if err := st.AddRole(&store.AppRole{ID: roleID, AppID: spaID, Value: "developers", AllowedMemberTypes: "User", IsEnabled: true}); err != nil {
++				t.Fatal(err)
++			}
++			if err := st.CreateAppRoleAssignment(&store.AppRoleAssignment{ID: "correlation-role", PrincipalID: aliceID, PrincipalType: "User", ResourceID: spaID, AppRoleID: roleID, CreatedAt: st.Now()}); err != nil {
++				t.Fatal(err)
++			}
++			signer, err := tokens.EnsureActiveKey(st, cfg.TenantID)
++			if err != nil {
++				t.Fatal(err)
++			}
++			cfg.RequireConsent = consent
++			cfg.RequirePassword = scenario.password
++			status, _ := patchJSON(t, hts.URL+"/admin/api/apps/"+spaID, map[string]any{
++				"frontchannelLogoutUri": "https://localhost:3000/signout?keep=yes",
++			})
++			if status != http.StatusOK {
++				t.Fatal(status)
++			}
++			client := noRedirectJar()
++			authorize := hts.URL + "/" + tenant + "/oauth2/v2.0/authorize"
++			var sessionCookieValue string
++			var sid string
++			for n, responseType := range []string{"code", "id_token", "code id_token"} {
++				q := url.Values{
++					"client_id": {spaID}, "response_type": {responseType}, "redirect_uri": {redirect},
++					"scope": {"openid profile offline_access"}, "nonce": {"logout-nonce"},
++					"code_challenge": {pkceChallenge(verifierPK)}, "code_challenge_method": {"S256"},
++				}
++				if n > 0 {
++					q.Set("prompt", "none")
++				}
++				resp, err := client.Get(authorize + "?" + q.Encode())
++				if err != nil {
++					t.Fatal(err)
++				}
++				if n == 0 {
++					body, _ := io.ReadAll(resp.Body)
++					resp.Body.Close()
++					state := stateRe.FindStringSubmatch(string(body))
++					if state == nil {
++						t.Fatalf("no picker state: %s", body)
++					}
++					form := url.Values{"__ee_state": {html.UnescapeString(state[1])}, "__ee_user": {aliceID}}
++					if scenario.password {
++						form.Set("__ee_username", "alice@entraemulator.dev")
++						form.Set("__ee_password", "Password1!")
++					}
++					resp, err = client.PostForm(authorize, form)
++					if err != nil {
++						t.Fatal(err)
++					}
++					if consent {
++						body, _ = io.ReadAll(resp.Body)
++						resp.Body.Close()
++						state = stateRe.FindStringSubmatch(string(body))
++						if state == nil {
++							t.Fatalf("no consent state: %s", body)
++						}
++						resp, err = client.PostForm(authorize, url.Values{"__ee_state": {html.UnescapeString(state[1])}, "__ee_consent": {"1"}, "__ee_decision": {"approve"}})
++						if err != nil {
++							t.Fatal(err)
++						}
++					}
++					origin, _ := url.Parse(hts.URL)
++					for _, c := range client.Jar.Cookies(origin) {
++						if c.Name == "ee_session" {
++							sessionCookieValue = c.Value
++						}
++					}
++					if sessionCookieValue == "" {
++						t.Fatal("sign-in did not establish a provider session")
++					}
++				}
++				resp.Body.Close()
++				if resp.StatusCode != http.StatusFound {
++					t.Fatalf("authorize %s: %d", responseType, resp.StatusCode)
++				}
++				loc, err := url.Parse(resp.Header.Get("Location"))
++				if err != nil {
++					t.Fatal(err)
++				}
++				values := loc.Query()
++				if loc.Fragment != "" {
++					values, err = url.ParseQuery(loc.Fragment)
++					if err != nil {
++						t.Fatal(err)
++					}
++				}
++				assertSID := func(token string) {
++					t.Helper()
++					claims, err := tokens.VerifyRS256(&signer.PrivateKey.PublicKey, token)
++					if err != nil {
++						t.Fatalf("ID token signature: %v", err)
++					}
++					roles, _ := claims["roles"].([]any)
++					if len(roles) != 1 || roles[0] != "developers" {
++						t.Fatalf("ID token roles = %v", claims["roles"])
++					}
++					got, _ := claims["sid"].(string)
++					if got == "" || got == sessionCookieValue {
++						t.Fatalf("sid must be nonempty and distinct from the bearer cookie: %v", claims)
++					}
++					if sid == "" {
++						sid = got
++					} else if got != sid {
++						t.Fatalf("sid changed within one session: %s != %s", got, sid)
++					}
++				}
++				if responseType != "code" {
++					assertSID(values.Get("id_token"))
++				}
++				if code := values.Get("code"); code != "" {
++					response, tokens := postForm(t, client, hts.URL+"/"+tenant+"/oauth2/v2.0/token", url.Values{
++						"grant_type": {"authorization_code"}, "client_id": {spaID}, "code": {code}, "redirect_uri": {redirect}, "code_verifier": {verifierPK},
++					})
++					if response.StatusCode != http.StatusOK {
++						t.Fatalf("exchange: %v", tokens)
++					}
++					assertSID(tokens["id_token"].(string))
++					for range 2 {
++						response, tokens = postForm(t, client, hts.URL+"/"+tenant+"/oauth2/v2.0/token", url.Values{
++							"grant_type": {"refresh_token"}, "client_id": {spaID}, "refresh_token": {tokens["refresh_token"].(string)},
++						})
++						if response.StatusCode != http.StatusOK {
++							t.Fatalf("refresh: %v", tokens)
++						}
++						assertSID(tokens["id_token"].(string))
++					}
++				}
++			}
++			cfg.RequireConsent = false // the helper drives the picker, not consent
++			cfg.RequirePassword = false
++			other := driveAuthCode(t, hts, verifierPK)
++			cfg.RequireConsent = consent
++			cfg.RequirePassword = scenario.password
++			otherSID, _ := decodeJWTPayload(t, other["id_token"].(string))["sid"].(string)
++			if otherSID == "" || otherSID == sid {
++				t.Fatal("independent browser sessions need distinct logout identifiers")
++			}
++			resp, err := client.Get(hts.URL + "/" + tenant + "/oauth2/v2.0/logout")
++			if err != nil {
++				t.Fatal(err)
++			}
++			body, _ := io.ReadAll(resp.Body)
++			resp.Body.Close()
++			frame := regexp.MustCompile(`<iframe src="([^"]+)"`).FindStringSubmatch(string(body))
++			if frame == nil {
++				t.Fatalf("no logout iframe: %s", body)
++			}
++			logoutURL, err := url.Parse(html.UnescapeString(frame[1]))
++			if err != nil {
++				t.Fatal(err)
++			}
++			if logoutURL.Query().Get("sid") != sid || logoutURL.Query().Get("iss") != cfg.Issuer || logoutURL.Query().Get("keep") != "yes" {
++				t.Fatalf("iframe must preserve query and match signed token: %s", logoutURL)
++			}
++			if strings.Contains(string(body), sessionCookieValue) {
++				t.Fatal("logout page leaks bearer session cookie")
++			}
++		})
++	}
++}
++
++func TestLogoutStateWithAndWithoutFrontchannel(t *testing.T) {
++	for _, frontchannel := range []bool{false, true} {
++		t.Run(map[bool]string{false: "redirect", true: "frontchannel"}[frontchannel], func(t *testing.T) {
++			hts, _, st := newTestServer(t)
++			client := noRedirectJar()
++			// Use a real signed-in session even when there is no RP notification.
++			authorize := hts.URL + "/" + tenant + "/oauth2/v2.0/authorize"
++			state := authPickerState(t, client, authorize+"?"+url.Values{"client_id": {spaID}, "response_type": {"code"}, "redirect_uri": {redirect}, "scope": {"openid"}, "code_challenge": {pkceChallenge(verifierPK)}, "code_challenge_method": {"S256"}}.Encode())
++			resp, err := client.PostForm(authorize, url.Values{"__ee_state": {state}, "__ee_user": {aliceID}})
++			if err != nil {
++				t.Fatal(err)
++			}
++			resp.Body.Close()
++			if frontchannel {
++				if err := st.SetFrontchannelLogoutURI(spaID, "https://localhost:3000/signout"); err != nil {
++					t.Fatal(err)
++				}
++			}
++			target := "https://localhost:3000/after?z=2&keep=1&flag"
++			if _, err := st.AddRedirectURI(spaID, target, "web"); err != nil {
++				t.Fatal(err)
++			}
++			q := url.Values{"client_id": {spaID}, "post_logout_redirect_uri": {target}, "state": {"round trip + & < > \""}}
++			resp, err = client.Get(hts.URL + "/" + tenant + "/oauth2/v2.0/logout?" + q.Encode())
++			if err != nil {
++				t.Fatal(err)
++			}
++			body, _ := io.ReadAll(resp.Body)
++			resp.Body.Close()
++			location := resp.Header.Get("Location")
++			if frontchannel {
++				m := regexp.MustCompile(`content="1;url=([^"]+)"`).FindStringSubmatch(string(body))
++				if m == nil {
++					t.Fatalf("no post-logout continuation: %s", body)
++				}
++				location = html.UnescapeString(m[1])
++			}
++			u, err := url.Parse(location)
++			if err != nil {
++				t.Fatal(err)
++			}
++			if u.Query().Get("state") != q.Get("state") || !strings.HasPrefix(u.RawQuery, "z=2&keep=1&flag&state=") {
++				t.Fatalf("lost state or registered URI components: %s", location)
++			}
++		})
++	}
++}
+diff --git a/internal/server/frontchannel_migration_test.go b/internal/server/frontchannel_migration_test.go
+new file mode 100644
+index 0000000..a19645b
+--- /dev/null
++++ b/internal/server/frontchannel_migration_test.go
+@@ -0,0 +1,77 @@
++package server
++
++import (
++	"database/sql"
++	"net/http"
++	"net/http/httptest"
++	"net/url"
++	"testing"
++	"time"
++
++	"github.com/calvinchengx/entra-emulator/internal/store"
++	"github.com/calvinchengx/entra-emulator/internal/tokens"
++)
++
++func TestLegacyGrantsSurviveSessionIDMigration(t *testing.T) {
++	old, cfg, st := newTestServer(t)
++	old.Close()
++	if err := st.Close(); err != nil {
++		t.Fatal(err)
++	}
++	// Remove precisely the columns introduced by this change, then insert grants
++	// using the old schema. Reopening must migrate, rather than reset, this DB.
++	db, err := sql.Open("sqlite", cfg.DBPath)
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, query := range []string{
++		"ALTER TABLE authorization_codes DROP COLUMN session_id",
++		"ALTER TABLE refresh_tokens DROP COLUMN session_id",
++	} {
++		if _, err := db.Exec(query); err != nil {
++			t.Fatal(err)
++		}
++	}
++	now := time.Now().Unix()
++	if _, err := db.Exec(`INSERT INTO authorization_codes
++		(code,app_id,user_id,redirect_uri,scopes,expires_at,created_at)
++		VALUES (?,?,?,?,?,?,?)`, "legacy-code", spaID, aliceID, redirect, "openid offline_access", now+300, now); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := db.Exec(`INSERT INTO refresh_tokens
++		(token,app_id,user_id,scopes,expires_at,created_at) VALUES (?,?,?,?,?,?)`,
++		store.HashToken("legacy-refresh"), spaID, aliceID, "openid offline_access", now+3600, now); err != nil {
++		t.Fatal(err)
++	}
++	if err := db.Close(); err != nil {
++		t.Fatal(err)
++	}
++	st, err = store.Open(cfg.DBPath)
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { _ = st.Close() })
++	signer, err := tokens.EnsureActiveKey(st, cfg.TenantID)
++	if err != nil {
++		t.Fatal(err)
++	}
++	srv := New(cfg, st, &tokens.Service{Store: st, Signer: signer, Cfg: cfg}, nil, "test")
++	hts := httptest.NewServer(srv.Handler)
++	t.Cleanup(hts.Close)
++	endpoint := hts.URL + "/" + tenant + "/oauth2/v2.0/token"
++	for _, grant := range []url.Values{
++		{"grant_type": {"authorization_code"}, "code": {"legacy-code"}, "client_id": {spaID}, "redirect_uri": {redirect}},
++		{"grant_type": {"refresh_token"}, "refresh_token": {"legacy-refresh"}, "client_id": {spaID}},
++	} {
++		for range 3 {
++			resp, body := postForm(t, http.DefaultClient, endpoint, grant)
++			if resp.StatusCode != http.StatusOK {
++				t.Fatalf("legacy grant failed after migration: %v", body)
++			}
++			if _, ok := decodeJWTPayload(t, body["id_token"].(string))["sid"]; ok {
++				t.Fatal("legacy grants must not invent a browser session")
++			}
++			grant = url.Values{"grant_type": {"refresh_token"}, "client_id": {spaID}, "refresh_token": {body["refresh_token"].(string)}}
++		}
++	}
++}
+diff --git a/internal/server/frontchannel_validation_test.go b/internal/server/frontchannel_validation_test.go
+new file mode 100644
+index 0000000..70b5d07
+--- /dev/null
++++ b/internal/server/frontchannel_validation_test.go
+@@ -0,0 +1,129 @@
++package server
++
++import (
++	"html"
++	"io"
++	"net/http"
++	"net/url"
++	"regexp"
++	"strings"
++	"testing"
++
++	"github.com/calvinchengx/entra-emulator/internal/store"
++	"github.com/calvinchengx/entra-emulator/internal/tokens"
++)
++
++func TestFrontchannelLogoutQueryParameters(t *testing.T) {
++	hts, cfg, st := newTestServer(t)
++	for _, suffix := range []string{"?", "?keep=a%20b&iss=stale&sid=stale", "?flag&keep=a%20b&%69ss=stale", "?a=1;b=2&sid=stale"} {
++		t.Run(suffix, func(t *testing.T) {
++			if err := st.SetFrontchannelLogoutURI(spaID, "https://localhost:3000/logout"+suffix); err != nil {
++				t.Fatal(err)
++			}
++			session := &store.Session{ID: store.NewOpaqueToken(24), UserID: aliceID, CreatedAt: st.Now(), ExpiresAt: st.Now() + 3600}
++			if err := st.CreateSession(session); err != nil {
++				t.Fatal(err)
++			}
++			if err := st.RecordSessionApp(session.ID, spaID); err != nil {
++				t.Fatal(err)
++			}
++			client := noRedirectJar()
++			origin, _ := url.Parse(hts.URL)
++			client.Jar.SetCookies(origin, []*http.Cookie{{Name: "ee_session", Value: session.ID, Path: "/"}})
++			resp, err := client.Get(hts.URL + "/" + tenant + "/oauth2/v2.0/logout")
++			if err != nil {
++				t.Fatal(err)
++			}
++			body, _ := io.ReadAll(resp.Body)
++			resp.Body.Close()
++			frame := regexp.MustCompile(`<iframe src="([^"]+)"`).FindStringSubmatch(string(body))
++			if frame == nil {
++				t.Fatalf("no iframe: %s", body)
++			}
++			u, err := url.Parse(html.UnescapeString(frame[1]))
++			if err != nil {
++				t.Fatal(err)
++			}
++			q := u.Query()
++			if q.Get("iss") != cfg.Issuer || q.Get("sid") != tokens.FrontchannelSID(session.ID) || len(q["iss"]) != 1 || len(q["sid"]) != 1 {
++				t.Fatalf("wrong notification query: %s", u)
++			}
++			if strings.Contains(suffix, "keep=") && q.Get("keep") != "a b" {
++				t.Fatalf("lost existing query: %s", u)
++			}
++			if strings.HasPrefix(suffix, "?flag&") && !strings.HasPrefix(u.RawQuery, "flag&keep=a%20b&") {
++				t.Fatalf("re-encoded application query: %s", u)
++			}
++			if strings.HasPrefix(suffix, "?a=1;b=2") && !strings.HasPrefix(u.RawQuery, "a=1;b=2&") {
++				t.Fatalf("discarded application query: %s", u)
++			}
++		})
++	}
++}
++
++func TestFrontchannelLogoutRegistrationRejectsUnsafeURLs(t *testing.T) {
++	hts, _, st := newTestServer(t)
++	const safe = "https://localhost:3000/logout"
++	for _, unsafe := range []string{
++		"javascript:alert(document.domain)", "data:text/html,<script>alert(1)</script>",
++		"//attacker.example/logout", "/logout", "https://user:password@localhost:3000/logout",
++		"https://localhost:3000/logout#fragment", "https://localhost:3000/logout#", "https://localhost:bad/logout",
++	} {
++		t.Run(unsafe, func(t *testing.T) {
++			_, before := getJSON(t, hts.URL+"/admin/api/apps")
++			status, _ := postJSON(t, hts.URL+"/admin/api/apps", map[string]any{"displayName": "Unsafe", "frontchannelLogoutUri": unsafe})
++			_, after := getJSON(t, hts.URL+"/admin/api/apps")
++			beforeCount, beforeOK := before["count"].(float64)
++			afterCount, afterOK := after["count"].(float64)
++			if status != http.StatusBadRequest || !beforeOK || !afterOK || beforeCount != afterCount {
++				t.Fatal("unsafe create must fail before writing")
++			}
++			if err := st.SetFrontchannelLogoutURI(spaID, safe); err != nil {
++				t.Fatal(err)
++			}
++			status, _ = patchJSON(t, hts.URL+"/admin/api/apps/"+spaID, map[string]any{"displayName": "Must not apply", "frontchannelLogoutUri": unsafe})
++			got, err := st.FrontchannelLogoutURI(spaID)
++			if err != nil || status != http.StatusBadRequest || got != safe {
++				t.Fatal("unsafe patch must preserve existing registration")
++			}
++			app, err := st.GetApp(spaID)
++			if err != nil || app.DisplayName == "Must not apply" {
++				t.Fatal("unsafe patch must not apply other fields")
++			}
++		})
++	}
++	status, _ := patchJSON(t, hts.URL+"/admin/api/apps/"+spaID, map[string]any{"frontchannelLogoutUri": ""})
++	_, app := getJSON(t, hts.URL+"/admin/api/apps/"+spaID)
++	if status != http.StatusOK || app["frontchannelLogoutUri"] != nil {
++		t.Fatal("empty URL must clear registration")
++	}
++}
++
++func TestFrontchannelLogoutDoesNotRenderLegacyUnsafeURL(t *testing.T) {
++	hts, _, st := newTestServer(t)
++	if err := st.SetFrontchannelLogoutURI(spaID, "javascript:alert(document.domain)"); err != nil {
++		t.Fatal(err)
++	}
++	session := &store.Session{ID: store.NewOpaqueToken(24), UserID: aliceID, CreatedAt: st.Now(), ExpiresAt: st.Now() + 3600}
++	if err := st.CreateSession(session); err != nil {
++		t.Fatal(err)
++	}
++	if err := st.RecordSessionApp(session.ID, spaID); err != nil {
++		t.Fatal(err)
++	}
++	client := noRedirectJar()
++	origin, _ := url.Parse(hts.URL)
++	client.Jar.SetCookies(origin, []*http.Cookie{{Name: "ee_session", Value: session.ID, Path: "/"}})
++	resp, err := client.Get(hts.URL + "/" + tenant + "/oauth2/v2.0/logout")
++	if err != nil {
++		t.Fatal(err)
++	}
++	body, _ := io.ReadAll(resp.Body)
++	resp.Body.Close()
++	if resp.StatusCode != http.StatusOK || strings.Contains(string(body), "<iframe") || strings.Contains(string(body), "javascript:") {
++		t.Fatalf("unsafe persisted URL rendered: %s", body)
++	}
++	if _, err := st.GetSession(session.ID); err != store.ErrNotFound {
++		t.Fatal("provider session must still be cleared")
++	}
++}
+diff --git a/internal/store/accesstokenversion.go b/internal/store/accesstokenversion.go
+new file mode 100644
+index 0000000..7f98d3d
+--- /dev/null
++++ b/internal/store/accesstokenversion.go
+@@ -0,0 +1,40 @@
++package store
++
++// Access token version: Entra's per-app accessTokenAcceptedVersion
++// (api.requestedAccessTokenVersion in the Graph application resource).
++//
++// Entra pairs a v2.0 access token ("ver": "2.0") with "aud": "{client id}" and
++// a v1.0 token with "aud": the App ID URI. The emulator always issues v2.0
++// tokens, so an app set to 2 gets the client id as its audience, matching
++// Entra; unset (or 1) keeps the App ID URI audience the emulator has always
++// used, so existing behaviour is unchanged.
++
++// SetAccessTokenAcceptedVersion records an app's accepted access token
++// version: 1 or 2, or 0 to clear it.
++func (s *Store) SetAccessTokenAcceptedVersion(appID string, version int) error {
++	var value any
++	if version != 0 {
++		value = version
++	}
++	res, err := s.db.Exec(`UPDATE app_registrations SET access_token_accepted_version=? WHERE app_id=?`,
++		value, appID)
++	if err != nil {
++		return err
++	}
++	return requireRow(res)
++}
++
++// AccessTokenAcceptedVersion returns an app's accepted access token version,
++// or 0 when it is not set.
++func (s *Store) AccessTokenAcceptedVersion(appID string) (int, error) {
++	var version *int
++	err := s.db.QueryRow(`SELECT access_token_accepted_version FROM app_registrations WHERE app_id=?`,
++		appID).Scan(&version)
++	if err != nil {
++		return 0, err
++	}
++	if version == nil {
++		return 0, nil
++	}
++	return *version, nil
++}
+diff --git a/internal/store/db.go b/internal/store/db.go
+index 65d41a6..39d442d 100644
+--- a/internal/store/db.go
++++ b/internal/store/db.go
+@@ -74,7 +74,8 @@ CREATE TABLE IF NOT EXISTS app_registrations (
+   group_membership_claims TEXT NOT NULL DEFAULT 'None',
+   group_overage_limit     INTEGER,
+   created_at              INTEGER NOT NULL,
+-  frontchannel_logout_uri TEXT
++  frontchannel_logout_uri TEXT,
++  access_token_accepted_version INTEGER
+ );
+ CREATE INDEX IF NOT EXISTS idx_apps_tenant ON app_registrations(tenant_id);
+ CREATE TABLE IF NOT EXISTS app_redirect_uris (
+@@ -379,6 +380,8 @@ func (s *Store) migrate() error {
+ 	// present — ignored so re-runs are idempotent.
+ 	for _, alter := range []string{
+ 		`ALTER TABLE authorization_codes ADD COLUMN amr TEXT`,
++		`ALTER TABLE authorization_codes ADD COLUMN session_id TEXT`,
++		`ALTER TABLE refresh_tokens ADD COLUMN session_id TEXT`,
+ 		`ALTER TABLE authorization_codes ADD COLUMN auth_time INTEGER`,
+ 		`ALTER TABLE refresh_tokens ADD COLUMN amr TEXT`,
+ 		`ALTER TABLE refresh_tokens ADD COLUMN auth_time INTEGER`,
+@@ -390,6 +393,7 @@ func (s *Store) migrate() error {
+ 		`ALTER TABLE users ADD COLUMN user_type TEXT NOT NULL DEFAULT 'Member'`,
+ 		`ALTER TABLE users ADD COLUMN external_user_state TEXT`,
+ 		`ALTER TABLE app_registrations ADD COLUMN frontchannel_logout_uri TEXT`,
++		`ALTER TABLE app_registrations ADD COLUMN access_token_accepted_version INTEGER`,
+ 		`ALTER TABLE users ADD COLUMN invite_redirect_url TEXT`,
+ 	} {
+ 		if _, err := s.db.Exec(alter); err != nil &&
+diff --git a/internal/store/grants.go b/internal/store/grants.go
+index 6c24c2d..3df754a 100644
+--- a/internal/store/grants.go
++++ b/internal/store/grants.go
+@@ -70,22 +70,22 @@ func scanKey(row interface{ Scan(...any) error }) (*SigningKey, error) {
+ 
+ func (s *Store) InsertAuthCode(c *AuthCode) error {
+ 	_, err := s.db.Exec(`INSERT INTO authorization_codes
+-		(code, app_id, user_id, redirect_uri, scopes, resource, code_challenge, code_challenge_method, nonce, amr, auth_time, max_age_requested, expires_at, consumed, created_at)
+-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)`,
++		(code, app_id, user_id, redirect_uri, scopes, resource, code_challenge, code_challenge_method, nonce, amr, auth_time, max_age_requested, session_id, expires_at, consumed, created_at)
++		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)`,
+ 		c.Code, c.AppID, c.UserID, c.RedirectURI, c.Scopes, nullable(c.Resource),
+ 		nullable(c.CodeChallenge), nullable(c.CodeChallengeMethod), nullable(c.Nonce),
+-		nullable(c.AMR), c.AuthTime, c.MaxAgeRequested, c.ExpiresAt, c.CreatedAt)
++		nullable(c.AMR), c.AuthTime, c.MaxAgeRequested, nullable(c.SessionID), c.ExpiresAt, c.CreatedAt)
+ 	return mapConstraint(err)
+ }
+ 
+ func (s *Store) GetAuthCode(code string) (*AuthCode, error) {
+ 	row := s.db.QueryRow(`SELECT code, app_id, user_id, redirect_uri, scopes, COALESCE(resource,''),
+ 		COALESCE(code_challenge,''), COALESCE(code_challenge_method,''), COALESCE(nonce,''),
+-		COALESCE(amr,''), COALESCE(auth_time,0), COALESCE(max_age_requested,0),
++		COALESCE(amr,''), COALESCE(auth_time,0), COALESCE(max_age_requested,0), COALESCE(session_id,''),
+ 		expires_at, consumed, created_at FROM authorization_codes WHERE code=?`, code)
+ 	c := &AuthCode{}
+ 	err := row.Scan(&c.Code, &c.AppID, &c.UserID, &c.RedirectURI, &c.Scopes, &c.Resource,
+-		&c.CodeChallenge, &c.CodeChallengeMethod, &c.Nonce, &c.AMR, &c.AuthTime, &c.MaxAgeRequested,
++		&c.CodeChallenge, &c.CodeChallengeMethod, &c.Nonce, &c.AMR, &c.AuthTime, &c.MaxAgeRequested, &c.SessionID,
+ 		&c.ExpiresAt, &c.Consumed, &c.CreatedAt)
+ 	if errors.Is(err, sql.ErrNoRows) {
+ 		return nil, ErrNotFound
+@@ -110,11 +110,11 @@ func (s *Store) ConsumeAuthCode(code string) (bool, error) {
+ // reuse detection depends on observing revoked rows.
+ func (s *Store) GetRefreshTokenByHash(hash string) (*RefreshToken, error) {
+ 	row := s.db.QueryRow(`SELECT token, app_id, user_id, scopes, COALESCE(resource,''),
+-		COALESCE(amr,''), COALESCE(auth_time,0), COALESCE(auth_code,''),
++		COALESCE(amr,''), COALESCE(auth_time,0), COALESCE(auth_code,''), COALESCE(session_id,''),
+ 		expires_at, COALESCE(rotated_from,''), revoked, created_at FROM refresh_tokens WHERE token=?`, hash)
+ 	t := &RefreshToken{}
+ 	err := row.Scan(&t.TokenHash, &t.AppID, &t.UserID, &t.Scopes, &t.Resource,
+-		&t.AMR, &t.AuthTime, &t.AuthCode,
++		&t.AMR, &t.AuthTime, &t.AuthCode, &t.SessionID,
+ 		&t.ExpiresAt, &t.RotatedFrom, &t.Revoked, &t.CreatedAt)
+ 	if errors.Is(err, sql.ErrNoRows) {
+ 		return nil, ErrNotFound
+@@ -124,10 +124,10 @@ func (s *Store) GetRefreshTokenByHash(hash string) (*RefreshToken, error) {
+ 
+ func (s *Store) InsertRefreshToken(t *RefreshToken) error {
+ 	_, err := s.db.Exec(`INSERT INTO refresh_tokens
+-		(token, app_id, user_id, scopes, resource, amr, auth_time, auth_code, expires_at, rotated_from, revoked, created_at)
+-		VALUES (?,?,?,?,?,?,?,?,?,?,0,?)`,
++		(token, app_id, user_id, scopes, resource, amr, auth_time, auth_code, session_id, expires_at, rotated_from, revoked, created_at)
++		VALUES (?,?,?,?,?,?,?,?,?,?,?,0,?)`,
+ 		t.TokenHash, t.AppID, t.UserID, t.Scopes, nullable(t.Resource),
+-		nullable(t.AMR), t.AuthTime, nullable(t.AuthCode), t.ExpiresAt,
++		nullable(t.AMR), t.AuthTime, nullable(t.AuthCode), nullable(t.SessionID), t.ExpiresAt,
+ 		nullable(t.RotatedFrom), t.CreatedAt)
+ 	return mapConstraint(err)
+ }
+@@ -151,11 +151,11 @@ func (s *Store) RotateRefreshToken(oldHash string, successor *RefreshToken) (boo
+ 		}
+ 		won = true
+ 		_, err = tx.Exec(`INSERT INTO refresh_tokens
+-			(token, app_id, user_id, scopes, resource, amr, auth_time, auth_code, expires_at, rotated_from, revoked, created_at)
+-			VALUES (?,?,?,?,?,?,?,?,?,?,0,?)`,
++			(token, app_id, user_id, scopes, resource, amr, auth_time, auth_code, session_id, expires_at, rotated_from, revoked, created_at)
++			VALUES (?,?,?,?,?,?,?,?,?,?,?,0,?)`,
+ 			successor.TokenHash, successor.AppID, successor.UserID, successor.Scopes,
+ 			nullable(successor.Resource), nullable(successor.AMR), successor.AuthTime,
+-			nullable(successor.AuthCode), successor.ExpiresAt, oldHash, successor.CreatedAt)
++			nullable(successor.AuthCode), nullable(successor.SessionID), successor.ExpiresAt, oldHash, successor.CreatedAt)
+ 		return err
+ 	})
+ 	return won, err
+diff --git a/internal/store/types.go b/internal/store/types.go
+index dca9f00..99fec67 100644
+--- a/internal/store/types.go
++++ b/internal/store/types.go
+@@ -111,6 +111,7 @@ type SigningKey struct {
+ }
+ 
+ type AuthCode struct {
++	SessionID           string // public sid for front-channel logout correlation
+ 	Code                string
+ 	AppID               string
+ 	UserID              string
+@@ -136,6 +137,7 @@ type AuthCode struct {
+ }
+ 
+ type RefreshToken struct {
++	SessionID string // inherited public sid; never a provider session credential
+ 	TokenHash string // SHA-256 hex of the plaintext; PK
+ 	AppID     string
+ 	UserID    string
+diff --git a/internal/tokens/service.go b/internal/tokens/service.go
+index f0fd578..b572805 100644
+--- a/internal/tokens/service.go
++++ b/internal/tokens/service.go
+@@ -30,7 +30,7 @@ type Service struct {
+ var protectedClaims = map[string]bool{
+ 	"iss": true, "aud": true, "exp": true, "iat": true, "nbf": true,
+ 	"sub": true, "tid": true, "oid": true, "azp": true, "appid": true,
+-	"scp": true, "roles": true, "ver": true, "nonce": true,
++	"scp": true, "roles": true, "ver": true, "nonce": true, "sid": true,
+ 	"name": true, "preferred_username": true, "email": true,
+ }
+ 
+@@ -192,12 +192,24 @@ func (s *Service) clientInfo(userOID, tid string) string {
+ 	return base64.RawURLEncoding.EncodeToString(raw)
+ }
+ 
++// FrontchannelSID derives a public logout identifier from a bearer SSO cookie.
++// The one-way, domain-separated hash lets RPs correlate ID tokens and logout
++// notifications without giving them a credential for the provider session.
++func FrontchannelSID(sessionCookie string) string {
++	if sessionCookie == "" {
++		return ""
++	}
++	sum := sha256.Sum256([]byte("entra-emulator/frontchannel-sid/v1|" + sessionCookie))
++	return base64.RawURLEncoding.EncodeToString(sum[:])
++}
++
+ // DelegatedGrant carries everything needed to build a delegated response.
+ type DelegatedGrant struct {
+-	App      *store.App
+-	User     *store.User
+-	Scopes   []string // granted scope names (OIDC + short resource names) -> scp claim
+-	Resource string   // resolved audience ("" -> GraphResourceID)
++	SessionID string // public sid, never the provider session cookie
++	App       *store.App
++	User      *store.User
++	Scopes    []string // granted scope names (OIDC + short resource names) -> scp claim
++	Resource  string   // resolved audience ("" -> GraphResourceID)
+ 	// ScopeEcho is what the token RESPONSE's `scope` parameter reports, as
+ 	// distinct from the `scp` claim. They differ for resource scopes: `scp`
+ 	// carries short names ("access_as_user"), while the response echoes what
+@@ -267,7 +279,7 @@ func (s *Service) BuildDelegatedResponse(g DelegatedGrant) (*TokenResponse, erro
+ 	if hasScope(g.Scopes, "offline_access") && !g.SkipRefreshToken {
+ 		rt, err := s.IssueRefreshToken(RefreshRequest{
+ 			AppID: g.App.ID, UserID: g.User.ID, Scopes: g.Scopes, Resource: g.Resource,
+-			AMR: g.AMR, AuthTime: g.AuthTime, AuthCode: g.AuthCode,
++			AMR: g.AMR, AuthTime: g.AuthTime, AuthCode: g.AuthCode, SessionID: g.SessionID,
+ 		})
+ 		if err != nil {
+ 			return nil, err
+@@ -321,6 +333,13 @@ func (s *Service) mintIDToken(g DelegatedGrant, now int64) (string, error) {
+ 	if g.User.Mail != "" {
+ 		claims["email"] = g.User.Mail
+ 	}
++	if g.SessionID != "" {
++		claims["sid"] = g.SessionID
++	}
++	if roles := s.userAppRoles(g.User.ID, g.App.ID); len(roles) > 0 {
++		claims["roles"] = roles
++
++	}
+ 	if g.Nonce != "" {
+ 		claims["nonce"] = g.Nonce
+ 	}
+@@ -366,11 +385,19 @@ func (s *Service) mintAccessDelegated(g DelegatedGrant, aud string, now int64) (
+ 	// Access-token optional claims come from the RESOURCE app's config; the
+ 	// emulator resolves the resource app when the audience is a local app.
+ 	resourceApp := g.App
++	resourceResolved := false
+ 	if aud != s.Cfg.GraphResourceID {
+ 		if byURI, err := s.Store.GetAppByIDURI(aud); err == nil {
+-			resourceApp = byURI
++			resourceApp, resourceResolved = byURI, true
+ 		} else if byID, err := s.Store.GetApp(aud); err == nil {
+-			resourceApp = byID
++			resourceApp, resourceResolved = byID, true
++		}
++	}
++	// Entra issues v2.0 tokens for an app set to accept them with
++	// aud = its client id, however the resource was named in the scope.
++	if resourceResolved {
++		if version, err := s.Store.AccessTokenAcceptedVersion(resourceApp.ID); err == nil && version == 2 {
++			claims["aud"] = resourceApp.ID
+ 		}
+ 	}
+ 	// Delegated consent (docs/20-stateful-directory.md): when explicit
+@@ -386,11 +413,34 @@ func (s *Service) mintAccessDelegated(g DelegatedGrant, aud string, now int64) (
+ 		}
+ 		claims["scp"] = strings.Join(kept, " ")
+ 	}
++	// v2.0 delegated access tokens carry the user's name and username, and
++	// the app roles assigned to the user on the RESOURCE app. Graph tokens get
++	// no app roles: resourceApp falls back to the client app for Graph, and
++	// Graph reads `roles` as application permissions.
++	claims["name"] = g.User.DisplayName
++	claims["preferred_username"] = g.User.UserPrincipalName
++	if aud != s.Cfg.GraphResourceID {
++		if roles := s.userAppRoles(g.User.ID, resourceApp.ID); len(roles) > 0 {
++			claims["roles"] = roles
++		}
++	}
+ 	s.applyTokenConfig(claims, resourceApp, g.User, "accessToken")
+ 	s.enrich(claims, g.App, g.User, "accessToken")
+ 	return s.signTenant(tid, claims)
+ }
+ 
++// userAppRoles returns the values of the app roles assigned to a user on an
++// app (appRoleAssignments with principalType User). The default-access
++// assignment (zero GUID) carries no role value and is skipped. A lookup error
++// yields no roles rather than failing token issuance.
++func (s *Service) userAppRoles(userID, appID string) []string {
++	values, _, err := s.Store.AssignedAppRoleValues(userID, appID)
++	if err != nil {
++		return nil
++	}
++	return values
++}
++
+ // ---- Optional claims & group claims (docs/04, token configuration) ----
+ 
+ type optionalClaimEntry struct {
+@@ -508,6 +558,7 @@ func (s *Service) applyTokenConfig(claims map[string]any, app *store.App, user *
+ // ---- Authorization codes ----
+ 
+ type AuthCodeRequest struct {
++	SessionID                             string // public sid for the browser session
+ 	AppID, UserID, RedirectURI            string
+ 	Scopes                                []string
+ 	Resource                              string
+@@ -525,7 +576,7 @@ func (s *Service) IssueAuthCode(r AuthCodeRequest) (string, error) {
+ 		Code: code, AppID: r.AppID, UserID: r.UserID, RedirectURI: r.RedirectURI,
+ 		Scopes: strings.Join(r.Scopes, " "), Resource: r.Resource,
+ 		CodeChallenge: r.CodeChallenge, CodeChallengeMethod: r.ChallengeMethod,
+-		Nonce: r.Nonce, AMR: r.AMR, AuthTime: r.AuthTime, MaxAgeRequested: r.MaxAgeRequested,
++		Nonce: r.Nonce, AMR: r.AMR, AuthTime: r.AuthTime, MaxAgeRequested: r.MaxAgeRequested, SessionID: r.SessionID,
+ 		ExpiresAt: now + int64(s.Cfg.Lifetimes.AuthCode), CreatedAt: now,
+ 	})
+ 	if err != nil {
+@@ -607,6 +658,7 @@ func verifyPKCE(challenge, method, verifier string) bool {
+ // `rotatedFrom` and `amr` sitting adjacent in a call is exactly the shape that
+ // gets silently transposed.
+ type RefreshRequest struct {
++	SessionID     string // inherited public sid; empty for grants without a browser session
+ 	AppID, UserID string
+ 	Scopes        []string
+ 	Resource      string
+@@ -630,7 +682,7 @@ func (s *Service) IssueRefreshToken(r RefreshRequest) (string, error) {
+ 	err := s.Store.InsertRefreshToken(&store.RefreshToken{
+ 		TokenHash: store.HashToken(plain), AppID: r.AppID, UserID: r.UserID,
+ 		Scopes: strings.Join(r.Scopes, " "), Resource: r.Resource,
+-		AMR: r.AMR, AuthTime: r.AuthTime, AuthCode: r.AuthCode,
++		AMR: r.AMR, AuthTime: r.AuthTime, AuthCode: r.AuthCode, SessionID: r.SessionID,
+ 		ExpiresAt:   now + int64(refreshSec),
+ 		RotatedFrom: r.RotatedFrom, CreatedAt: now,
+ 	})
+@@ -642,6 +694,7 @@ func (s *Service) IssueRefreshToken(r RefreshRequest) (string, error) {
+ 
+ // RedeemedRefresh is the result of a successful rotation.
+ type RedeemedRefresh struct {
++	SessionID        string
+ 	UserID, Resource string
+ 	Scopes           []string
+ 	NewRefreshToken  string // plaintext successor (issued iff offline_access kept)
+@@ -698,7 +751,7 @@ func (s *Service) RedeemRefreshToken(plaintext, appID string, requestedScopes []
+ 		// auth_code for the same reason: a chain rotated a dozen times is still
+ 		// descended from the code that started it, and a replay of that code
+ 		// must reach the whole chain.
+-		AMR: row.AMR, AuthTime: row.AuthTime, AuthCode: row.AuthCode,
++		AMR: row.AMR, AuthTime: row.AuthTime, AuthCode: row.AuthCode, SessionID: row.SessionID,
+ 		ExpiresAt: now + int64(s.Cfg.Lifetimes.RefreshToken), CreatedAt: now,
+ 	})
+ 	if err != nil {
+@@ -713,7 +766,7 @@ func (s *Service) RedeemRefreshToken(plaintext, appID string, requestedScopes []
+ 	}
+ 
+ 	out := &RedeemedRefresh{UserID: row.UserID, Resource: row.Resource, Scopes: scopes,
+-		AMR: row.AMR, AuthTime: row.AuthTime}
++		AMR: row.AMR, AuthTime: row.AuthTime, SessionID: row.SessionID}
+ 	if hasScope(scopes, "offline_access") {
+ 		out.NewRefreshToken = successorPlain
+ 	}
+diff --git a/internal/tokens/service_test.go b/internal/tokens/service_test.go
+index d29fb92..23220cf 100644
+--- a/internal/tokens/service_test.go
++++ b/internal/tokens/service_test.go
+@@ -439,10 +439,12 @@ func TestEnrich(t *testing.T) {
+ 		return map[string]any{
+ 			"custom_claim": "hello-" + kind,
+ 			"sub":          "HIJACKED", // protected: must be ignored
++			"sid":          "HIJACKED", // must not redirect logout correlation
+ 		}
+ 	}
+ 	resp, err := svc.BuildDelegatedResponse(DelegatedGrant{
+ 		App: app, User: user, Scopes: []string{"openid", "User.Read"},
++		SessionID: "public-session-id",
+ 	})
+ 	if err != nil {
+ 		t.Fatal(err)
+@@ -454,10 +456,16 @@ func TestEnrich(t *testing.T) {
+ 	if c["sub"] == "HIJACKED" {
+ 		t.Fatal("enricher must not override protected sub claim")
+ 	}
++	if c["sid"] != "public-session-id" {
++		t.Fatal("enricher must not override protected sid claim")
++	}
+ 	ac, _ := DecodeUnverified(resp.AccessToken)
+ 	if ac["custom_claim"] != "hello-accessToken" {
+ 		t.Fatalf("access custom_claim = %v", ac["custom_claim"])
+ 	}
++	if _, ok := ac["sid"]; ok {
++		t.Fatal("enricher must not introduce sid into access tokens")
++	}
+ 
+ 	// nil enricher is a no-op.
+ 	svc.ClaimsEnricher = nil
+@@ -1085,3 +1093,136 @@ func TestServiceStoreErrorPaths(t *testing.T) {
+ 		t.Fatal("group lookup failure should leave the groups claim unset")
+ 	}
+ }
++
++// User app-role assignments surface as `roles` in the ID token (client app)
++// and in the delegated access token (resource app); the access token also
++// carries name and preferred_username.
++func TestDelegatedTokensCarryUserAppRoles(t *testing.T) {
++	st, svc, _ := newService(t)
++	app := makeApp(t, st, &store.App{ID: "spa-app", AppIDURI: "api://spa-app"})
++	user := makeUser(t, st, "user-roles", "Role", "Holder")
++	other := makeUser(t, st, "user-noroles", "No", "Roles")
++
++	for _, r := range []*store.AppRole{
++		{ID: "11111111-1111-4111-8111-111111111111", AppID: app.ID, Value: "TMS.NCCUser", AllowedMemberTypes: "User", IsEnabled: true},
++		{ID: "22222222-2222-4222-8222-222222222222", AppID: app.ID, Value: "TMS.SysAdmin", AllowedMemberTypes: "User", IsEnabled: true},
++	} {
++		if err := st.AddRole(r); err != nil {
++			t.Fatalf("AddRole: %v", err)
++		}
++		if err := st.CreateAppRoleAssignment(&store.AppRoleAssignment{
++			ID: "ara-" + r.Value, PrincipalID: user.ID, PrincipalType: "User",
++			ResourceID: app.ID, AppRoleID: r.ID, CreatedAt: st.Now(),
++		}); err != nil {
++			t.Fatalf("CreateAppRoleAssignment: %v", err)
++		}
++	}
++
++	resp, err := svc.BuildDelegatedResponse(DelegatedGrant{
++		App: app, User: user, Scopes: []string{"openid", "profile", "access_as_user"},
++		Resource: app.AppIDURI,
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	want := map[string]bool{"TMS.NCCUser": true, "TMS.SysAdmin": true}
++	checkRoles := func(kind string, claims map[string]any) {
++		t.Helper()
++		got, _ := claims["roles"].([]any)
++		if len(got) != len(want) {
++			t.Fatalf("%s roles = %v, want %v", kind, claims["roles"], want)
++		}
++		for _, v := range got {
++			if !want[v.(string)] {
++				t.Fatalf("%s unexpected role %v", kind, v)
++			}
++		}
++	}
++	idClaims, err := DecodeUnverified(resp.IDToken)
++	if err != nil {
++		t.Fatal(err)
++	}
++	checkRoles("id token", idClaims)
++	atClaims, err := DecodeUnverified(resp.AccessToken)
++	if err != nil {
++		t.Fatal(err)
++	}
++	checkRoles("access token", atClaims)
++	if atClaims["name"] != user.DisplayName || atClaims["preferred_username"] != user.UserPrincipalName {
++		t.Fatalf("access token name/preferred_username = %v / %v", atClaims["name"], atClaims["preferred_username"])
++	}
++
++	// A Graph access token for the same user carries no app roles.
++	respG, err := svc.BuildDelegatedResponse(DelegatedGrant{
++		App: app, User: user, Scopes: []string{"User.Read"},
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	gClaims, _ := DecodeUnverified(respG.AccessToken)
++	if _, ok := gClaims["roles"]; ok {
++		t.Fatalf("graph token should not carry app roles: %v", gClaims["roles"])
++	}
++
++	// A user with no assignments gets no roles claim at all.
++	resp2, err := svc.BuildDelegatedResponse(DelegatedGrant{
++		App: app, User: other, Scopes: []string{"openid", "access_as_user"},
++		Resource: app.AppIDURI,
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	id2, _ := DecodeUnverified(resp2.IDToken)
++	at2, _ := DecodeUnverified(resp2.AccessToken)
++	if _, ok := id2["roles"]; ok {
++		t.Fatalf("unexpected id token roles: %v", id2["roles"])
++	}
++	if _, ok := at2["roles"]; ok {
++		t.Fatalf("unexpected access token roles: %v", at2["roles"])
++	}
++}
++
++// An app set to accessTokenAcceptedVersion 2 gets aud = its client id in
++// delegated access tokens (Entra's v2.0 shape); unset keeps the App ID URI.
++// The ID token audience is the client app either way.
++func TestDelegatedAccessTokenAudienceFollowsAcceptedVersion(t *testing.T) {
++	st, svc, _ := newService(t)
++	app := makeApp(t, st, &store.App{ID: "v2-api-app", AppIDURI: "api://v2-api-app"})
++	user := makeUser(t, st, "user-v2", "Vee", "Two")
++
++	grant := DelegatedGrant{
++		App: app, User: user, Scopes: []string{"openid", "access_as_user"},
++		Resource: app.AppIDURI,
++	}
++	audiences := func() (access, id any) {
++		t.Helper()
++		resp, err := svc.BuildDelegatedResponse(grant)
++		if err != nil {
++			t.Fatal(err)
++		}
++		at, _ := DecodeUnverified(resp.AccessToken)
++		idt, _ := DecodeUnverified(resp.IDToken)
++		return at["aud"], idt["aud"]
++	}
++
++	if access, id := audiences(); access != app.AppIDURI || id != app.ID {
++		t.Fatalf("unset version: access aud = %v (want %s), id aud = %v (want %s)", access, app.AppIDURI, id, app.ID)
++	}
++
++	if err := st.SetAccessTokenAcceptedVersion(app.ID, 2); err != nil {
++		t.Fatal(err)
++	}
++	if access, id := audiences(); access != app.ID || id != app.ID {
++		t.Fatalf("version 2: access aud = %v, id aud = %v, want both %s", access, id, app.ID)
++	}
++
++	if err := st.SetAccessTokenAcceptedVersion(app.ID, 0); err != nil {
++		t.Fatal(err)
++	}
++	if v, err := st.AccessTokenAcceptedVersion(app.ID); err != nil || v != 0 {
++		t.Fatalf("cleared version = %d, %v", v, err)
++	}
++	if access, _ := audiences(); access != app.AppIDURI {
++		t.Fatalf("cleared version: access aud = %v, want %s", access, app.AppIDURI)
++	}
++}
+diff --git a/samples/externalized-authz/compat/go.mod b/samples/externalized-authz/compat/go.mod
+index 929ca76..06435e7 100644
+--- a/samples/externalized-authz/compat/go.mod
++++ b/samples/externalized-authz/compat/go.mod
+@@ -4,7 +4,7 @@
+ // e2e/go and samples/msal-go.
+ module github.com/calvinchengx/entra-emulator/samples/externalized-authz/compat
+ 
+-go 1.27.3
++go 1.27.4
+ 
+ require (
+ 	github.com/calvinchengx/entra-emulator v0.0.0
+diff --git a/samples/msal-go/go.mod b/samples/msal-go/go.mod
+index aeba8d5..c766d4d 100644
+--- a/samples/msal-go/go.mod
++++ b/samples/msal-go/go.mod
+@@ -1,7 +1,7 @@
+ // Isolated module so the MSAL Go dependency doesn't reach the emulator binary.
+ module github.com/calvinchengx/entra-emulator/samples/msal-go
+ 
+-go 1.27.3
++go 1.27.4
+ 
+ require github.com/AzureAD/microsoft-authentication-library-for-go v1.7.2
+ 

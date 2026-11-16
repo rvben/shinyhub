@@ -1,0 +1,12 @@
+{
+  "repository": "https://github.com/calvinchengx/entra-emulator.git",
+  "baseline_commit": "2f8e5d6828618d2459db6ab31e90187ca8f71815",
+  "expected_tree": "285ebcc4eddbd01850fbea756bd6d29453778c1d",
+  "patch_sha256": "28030628cad765a0a91c782d55034f26c670a61677b7ff794302d5788a17d0ae",
+  "go_version": "1.27.4",
+  "pull_requests": [
+    "https://github.com/calvinchengx/entra-emulator/pull/217",
+    "https://github.com/calvinchengx/entra-emulator/pull/263",
+    "https://github.com/calvinchengx/entra-emulator/pull/264"
+  ]
+}
