@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.25.1](https://github.com/rvben/shinyhub/compare/v0.25.0...v0.25.1) - 2026-11-17
+
+### Fixed
+
+- **serve**: preserve schema-incompatible exit under supervision ([b2ebfb9](https://github.com/rvben/shinyhub/commit/b2ebfb9217505730386c3405574d85accb9694b1))
+
 ## [0.25.0](https://github.com/rvben/shinyhub/compare/v0.24.5...v0.25.0) - 2026-11-16
 
 ### Upgrade notice
