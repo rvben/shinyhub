@@ -41,7 +41,8 @@ successor fails to start; the current server keeps serving after a failed handof
 
 For servers installed with a signal-based unit, follow the one-time transition
 in [zero-downtime upgrades](../zero-downtime-upgrades.md) before replacing
-`ExecReload`. Install the updated unit and run `systemctl daemon-reload`;
+`ExecReload`. Install the updated unit, run `systemctl daemon-reload`, and perform
+one announced restart when adding `--supervise` to an existing service;
 replacing the binary alone does not update systemd's reload command.
 
 ## Private service configuration
@@ -90,6 +91,14 @@ Installing `--supervise` on an existing signal-based or unsupervised unit needs
 one announced restart. Future handoffs retain this minimal supervisor. To verify,
 compare `systemctl show -p MainPID shinyhub` (stable supervisor) with the PID file
 (changing active server) and `shinyhub status --config /etc/shinyhub/shinyhub.yaml`.
+The supervisor stays at its starting version until a service restart; a package
+reload upgrades the active server. The maintained acceptance test covers the
+immediately preceding published stable supervisor with the candidate server.
+If the running supervisor is older than that baseline, rehearse that exact pair
+in isolation or schedule a restart before upgrading. Also restart when release
+notes require a supervisor-protocol change. `--supervise` requires ShinyHub
+0.20.9 or later; rolling back to an earlier binary also requires its compatible
+unit and a planned restart.
 
 Broker-native workers with journal output survive controller restarts when
 `server.shutdown_apps: adopt`; see [native user isolation](../native-user-isolation.md).

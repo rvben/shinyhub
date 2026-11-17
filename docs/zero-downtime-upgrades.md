@@ -35,15 +35,35 @@ restart count are checked. When a role override is used, its source files are fi
 Sampling detects observed failures; it cannot prove
 the absence of every possible transient failure under arbitrary load.
 
+After the continuity checks finish, the test kills only the active successor
+while the original session and retired relay remain alive. It requires exactly
+one automatic systemd restart, removal of the old service's processes, and a
+fresh reactive Shiny session on the candidate version. This separate crash
+phase expects the old WebSocket to disconnect; continuity is checked during the
+earlier planned handoff. Both reference and role units must use `serve --supervise`
+with a stable direct-child `MainPID`, without systemd `PIDFile=` tracking.
+Another crash check kills the supervisor's direct child and requires a
+retryable failure, one automatic restart, and a new reactive session.
+The role fixture first migrates a plain-`serve`/`PIDFile=` service through the
+role's actual unit-install task and restart handlers, before opening sessions.
+Set `SHINYHUB_E2E_LEGACY_UNIT_TEMPLATE` to a previous unit template to rehearse
+that exact starting definition; the report records its SHA-256. Without it,
+the fixture synthesizes the legacy supervision shape from the current unit.
+After crash recovery, a same-version reload verifies that closing the preserved
+browser lets the supervisor's direct child retire without a restart or loss of
+the successor PID file. A separate future-schema database verifies the supervised
+binary exits with status 7 on permanent startup refusal.
+
 To test a deployment repository's actual package tasks, handlers and hardened
 unit, set `SHINYHUB_E2E_ROLE_DIR` to its `shinyhub` Ansible role directory. The
-role must provide `tasks/package.yml` and `templates/shinyhub.service.j2`, with
-service name and runtime directory overrides. The fixture supplies its own
-configuration, credentials and paths. This does not exercise production SSO,
-the production proxy configuration, or config/environment/unit changes that
-require a full restart. The fixture starts with the selected unit installed and
-verifies package-only upgrades. Installing a changed unit through a role that
-notifies a restart remains a separate maintenance operation.
+role must provide `tasks/main.yml`, `tasks/package.yml`, and `templates/shinyhub.service.j2`, with
+an `Install ShinyHub systemd unit` task and restart handlers, service name and
+runtime directory overrides. The fixture supplies its own
+configuration, credentials and paths. The reference fixture starts with its
+selected unit installed. The role fixture first performs the legacy unit
+migration and its planned restart; both then verify package-only upgrades.
+Production SSO, the production proxy configuration, and other config,
+environment, or unit changes that require a restart remain outside this test.
 
 Run `make test-systemd-upgrade-negative` for the negative control. It deliberately
 uses stop/start instead of reload and passes only when the first failure is the
