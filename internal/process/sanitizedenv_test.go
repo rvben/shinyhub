@@ -26,6 +26,8 @@ func TestSanitizedEnv_AllowListDropsSecretsKeepsEssentials(t *testing.T) {
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "leak-me")
 	t.Setenv("GITHUB_TOKEN", "leak-me-too")
 	t.Setenv("SHINYHUB_AUTH_SECRET", "server-secret")
+	t.Setenv("NOTIFY_SOCKET", "/run/systemd/notify")
+	t.Setenv("_SHINYHUB_SUPERVISOR_PID", "1234")
 
 	env := SanitizedEnv()
 
@@ -34,7 +36,7 @@ func TestSanitizedEnv_AllowListDropsSecretsKeepsEssentials(t *testing.T) {
 			t.Errorf("allow-list dropped essential %s", keep)
 		}
 	}
-	for _, drop := range []string{"AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN", "SHINYHUB_AUTH_SECRET"} {
+	for _, drop := range []string{"AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN", "SHINYHUB_AUTH_SECRET", "NOTIFY_SOCKET", "_SHINYHUB_SUPERVISOR_PID"} {
 		if envHas(env, drop) {
 			t.Errorf("allow-list leaked secret %s into app env", drop)
 		}

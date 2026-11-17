@@ -295,6 +295,13 @@ try {
       config, command, request, check, output, sockets, report,
       previousVersion: serviceFixture?.previousVersion,
       performUpgrade: serviceFixture ? () => serviceFixture.upgrade(successor, targetVersion) : undefined });
+    if (serviceFixture) {
+      await serviceFixture.checkCrashRecovery({ context, page, sockets, appURL,
+        output, request, check, poll, targetVersion });
+      await serviceFixture.checkDirectChildCrash({ context, appURL, output, request, check, poll });
+      await serviceFixture.checkNormalRetirement({ context, sockets, appURL, output, request, check, poll });
+      await serviceFixture.checkPermanentStartupFailure({ check });
+    }
     assert.deepEqual(report.browserErrors, [], 'no browser script errors');
     report.status = 'passed';
     console.log('BROWSER LIVE UPGRADE E2E PASS');
