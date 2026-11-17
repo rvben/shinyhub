@@ -412,7 +412,7 @@ test-acceptance:
 	cd loadtest/render/driver && npx --no-install playwright install chromium
 	PYTHON_VERSION='$(PYTHON_VERSION)' npm run test:acceptance
 
-.PHONY: test-recovery test-live-upgrade
+.PHONY: test-recovery test-live-upgrade test-systemd-upgrade test-systemd-upgrade-negative
 
 # Backup, restore and upgrade acceptance. The recovery source is built from the
 # v0.22.0 tag, so the tag is fetched first.
@@ -423,6 +423,13 @@ test-recovery:
 # Live upgrade with real Shiny sessions.
 test-live-upgrade:
 	npm run test:live-upgrade
+
+# Linux + passwordless sudo, nginx and systemd; disposable state only.
+test-systemd-upgrade:
+	flock --no-fork --timeout 600 /tmp/shinyhub-systemd-upgrade.lock node scripts/browser-lifecycle-e2e.mjs --systemd-upgrade
+
+test-systemd-upgrade-negative:
+	node scripts/systemd-upgrade-negative-control.mjs
 
 .PHONY: test-browser-session-relays-e2e test-browser-reload-producers-e2e test-browser-update-capacity-e2e
 

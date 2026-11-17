@@ -1,0 +1,38 @@
+---
+# Only disposable fixture paths/service names are accepted by the driver.
+- hosts: localhost
+  connection: local
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Install candidate through the homelab package tasks
+      ansible.builtin.include_role:
+        name: "{{ fixture_role }}"
+        tasks_from: package
+      when: fixture_role | length > 0
+
+    - name: Install candidate through uv tool
+      ansible.builtin.command:
+        argv: ["{{ shinyhub_uv_bin }}", tool, install, --reinstall, --refresh, "{{ shinyhub_package_spec }}"]
+      become_user: "{{ shinyhub_user }}"
+      environment: "{{ fixture_environment }}"
+      notify: reference fixture reload
+      when: fixture_role | length == 0
+
+    - name: Apply the package handoff
+      ansible.builtin.meta: flush_handlers
+
+    - name: Verify the serving version through the TLS proxy
+      ansible.builtin.uri:
+        url: "{{ fixture_url }}/api/server-info"
+        validate_certs: false
+      register: serving
+      retries: 10
+      delay: 1
+      until: serving.status | default(0) == 200 and serving.json is defined and serving.json.version | default('') == shinyhub_version
+
+  handlers:
+    - name: reference fixture reload
+      ansible.builtin.systemd_service:
+        name: "{{ shinyhub_service_name }}"
+        state: "{{ fixture_reload_state }}"

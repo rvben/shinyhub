@@ -23,11 +23,12 @@ export async function installPreviousRelease({ root, state, command }) {
 }
 
 export async function checkLiveUpgrade({ context, page, original, appURL, state, binary, successor,
-  targetVersion, config, command, request, check, output, sockets, report }) {
+  targetVersion, config, command, request, check, output, sockets, report,
+  previousVersion = previousRelease, performUpgrade }) {
   const pid = async () => Number((await readFile(join(state, 'hub.pid'), 'utf8')).trim());
   const version = async () => (await request('GET', '/api/server-info')).version;
   const before = await version();
-  assert.equal(before, previousRelease);
+  assert.equal(before, previousVersion);
   assert.notEqual(targetVersion, before, 'the upgrade must cross server versions');
   const previousPID = await pid();
   assert.ok(Number.isInteger(previousPID) && previousPID > 1, 'the original server published its PID');
@@ -58,13 +59,19 @@ export async function checkLiveUpgrade({ context, page, original, appURL, state,
   })();
   try {
     await check('replace the server binary and acknowledge the new version', async () => {
-      await rename(successor, binary);
-      const handoff = JSON.parse(await command([binary, 'reload', '--config', config,
-        '--wait', '30s', '--output', 'json'], 'live-upgrade'));
-      result.pid = handoff.pid;
-      assert.equal(handoff.previous_pid, previousPID);
-      assert.notEqual(handoff.pid, previousPID);
-      assert.equal(await pid(), handoff.pid, 'the successor owns the configured PID file');
+      if (performUpgrade) {
+        await performUpgrade();
+        result.pid = await pid();
+        assert.notEqual(result.pid, previousPID);
+      } else {
+        await rename(successor, binary);
+        const handoff = JSON.parse(await command([binary, 'reload', '--config', config,
+          '--wait', '30s', '--output', 'json'], 'live-upgrade'));
+        result.pid = handoff.pid;
+        assert.equal(handoff.previous_pid, previousPID);
+        assert.notEqual(handoff.pid, previousPID);
+        assert.equal(await pid(), handoff.pid, 'the successor owns the configured PID file');
+      }
       result.after = await version();
       assert.equal(result.after, targetVersion);
       assert.equal((await request('GET', '/activez')).active, true);
@@ -85,6 +92,7 @@ export async function checkLiveUpgrade({ context, page, original, appURL, state,
       // Wait past the fixture's five-second drain budget to distinguish a
       // preserved session from one that is about to be disconnected.
       await delay(6000);
+      assert.equal(originalSocket.isClosed(), false, 'the original WebSocket survived');
       await page.getByRole('button', { name: 'Recalculate' }).click();
       await output(page, 'v1', 3, 500, original);
       assert.equal(originalSocket.isClosed(), false, 'the original WebSocket survived');

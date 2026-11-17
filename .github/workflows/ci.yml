@@ -304,6 +304,29 @@ jobs:
       - name: Zero-downtime handoff E2E
         run: make test-handoff
 
+  test-systemd-upgrade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-go
+      - uses: astral-sh/setup-uv@v7
+      - uses: ./.github/actions/setup-playwright
+      - name: Install isolated TLS proxy
+        run: sudo apt-get update && sudo apt-get install -y nginx
+      - name: Published wheel to candidate through Ansible and systemd
+        run: make test-systemd-upgrade test-systemd-upgrade-negative
+      - name: Retain sanitized continuity summary
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: systemd-upgrade-continuity
+          path: |
+            loadtest/results/browser-live-upgrade-*/result.json
+            loadtest/results/browser-live-upgrade-*/negative-control.json
+          if-no-files-found: ignore
+          retention-days: 7
+
   test-browser-shell:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -645,6 +668,7 @@ jobs:
       - test-postgres
       - test-remote-e2e
       - test-handoff
+      - test-systemd-upgrade
       - test-browser-shell
       - test-acceptance
       - test-browser-agent-charts

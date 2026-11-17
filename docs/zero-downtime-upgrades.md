@@ -12,6 +12,46 @@ new binary, hands off its listening sockets to the successor, drains in-flight
 WebSocket sessions, releases the ownership lease, and exits. App processes keep
 running throughout (`server.shutdown_apps: adopt`, the default).
 
+## Deployment acceptance tests
+
+`make test-systemd-upgrade` runs on a disposable Linux host with systemd,
+passwordless sudo, flock, nginx, uv, Go, Node and the render driver's Playwright
+dependencies installed. It uses synthetic accounts and fresh SQLite state;
+it does not connect to an existing ShinyHub deployment. CI runs it, and the
+release workflow requires it before publishing. The Make targets serialize these
+fixtures with a host lock: independently launched native servers can otherwise
+compete for worker ports while starting. Run these targets on a disposable host
+without other ShinyHub instances.
+
+The test selects the latest non-yanked stable PyPI version below the candidate
+version, installs its wheel with `uv tool`, starts the reference
+systemd unit, and deploys a real Shiny app behind a loopback nginx TLS proxy.
+It builds the candidate wheel from the current source, reinstalls it through
+Ansible, and invokes `systemctl reload`. Fresh authenticated HTTP probes must
+succeed throughout installation and handoff. The original browser must remain
+reactive on the same WebSocket beyond the drain deadline; a new browser session
+must also work. Served version, active server PID, supervisor PID and service
+restart count are checked. When a role override is used, its source files are fingerprinted in the report.
+Sampling detects observed failures; it cannot prove
+the absence of every possible transient failure under arbitrary load.
+
+To test a deployment repository's actual package tasks, handlers and hardened
+unit, set `SHINYHUB_E2E_ROLE_DIR` to its `shinyhub` Ansible role directory. The
+role must provide `tasks/package.yml` and `templates/shinyhub.service.j2`, with
+service name and runtime directory overrides. The fixture supplies its own
+configuration, credentials and paths. This does not exercise production SSO,
+the production proxy configuration, or config/environment/unit changes that
+require a full restart. The fixture starts with the selected unit installed and
+verifies package-only upgrades. Installing a changed unit through a role that
+notifies a restart remains a separate maintenance operation.
+
+Run `make test-systemd-upgrade-negative` for the negative control. It deliberately
+uses stop/start instead of reload and passes only when the first failure is the
+original WebSocket continuity assertion, after the candidate has started serving,
+and the HTTPS probes also observed failures during stop/start.
+Setup failures never count as successful controls. CI and the release gate run
+this control too. Cleanup only stops the fixture's uniquely named units.
+
 ## One-time setup
 
 1. Install the binary at `/usr/local/bin/shinyhub` (a real built binary; `go run`

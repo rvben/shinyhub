@@ -19,7 +19,9 @@ import { checkBookmarkContinuity } from './browser-bookmark-continuity-checks.mj
 import { checkReloadProducers } from './browser-reload-producer-checks.mjs';
 import { checkUpdateCapacity } from './browser-update-capacity-checks.mjs';
 import { checkLiveUpgrade, installPreviousRelease } from './browser-live-upgrade-checks.mjs';
-const liveUpgradeMode = process.argv.includes('--live-upgrade');
+import { systemdState, systemdFixture, cleanupSystemdFixture } from './systemd-upgrade-fixture.mjs';
+const systemdMode = process.argv.includes('--systemd-upgrade');
+const liveUpgradeMode = systemdMode || process.argv.includes('--live-upgrade');
 const capacityMode = !liveUpgradeMode && process.env.SHINYHUB_E2E_UPDATE_CAPACITY === '1';
 const producerReloadMode = !liveUpgradeMode && process.env.SHINYHUB_E2E_RELOAD_PRODUCERS === '1';
 const relayMode = liveUpgradeMode || capacityMode || producerReloadMode || process.env.SHINYHUB_E2E_SESSION_RELAYS === '1';
@@ -32,9 +34,9 @@ await mkdir(results, { recursive: true });
 const work = await mkdtemp(join(results, liveUpgradeMode ? 'browser-live-upgrade-' : 'browser-lifecycle-'));
 // Reload uses a Unix socket below state; repository paths can exceed macOS's
 // socket-path limit. mkdtemp creates a private directory on both native hosts.
-const state = await mkdtemp('/tmp/shinyhub-e2e-');
+const state = systemdMode ? systemdState() : await mkdtemp('/tmp/shinyhub-e2e-');
 const binaryOverride = !liveUpgradeMode && process.env.SHINYHUB_E2E_BINARY;
-const binary = binaryOverride ? resolve(binaryOverride) : join(liveUpgradeMode ? state : work, 'shinyhub');
+const binary = systemdMode ? join(state, '.local/bin/shinyhub') : binaryOverride ? resolve(binaryOverride) : join(liveUpgradeMode ? state : work, 'shinyhub');
 const config = join(state, 'shinyhub.yaml');
 const clientConfig = join(state, 'client.json');
 const passwordFile = join(state, 'password');
@@ -48,7 +50,7 @@ const deadline = setTimeout(() => abort.abort(new Error('lifecycle check exceede
 const stop = () => abort.abort(new Error('lifecycle check interrupted'));
 process.once('SIGINT', stop);
 process.once('SIGTERM', stop);
-let server, browser, context;
+let server, browser, context, serviceFixture;
 const children = new Set();
 const sockets = new WeakMap();
 const pythonRequest = process.env.SHINYHUB_E2E_PYTHON || process.env.PYTHON_VERSION || '3.14+gil';
@@ -81,7 +83,8 @@ async function command(args, name, extra = {}) {
 async function check(name, fn) {
   console.log(`==> ${name}`);
   const started = performance.now();
-  await fn();
+  try { await fn(); }
+  catch (error) { report.first_failure ??= { check: name, error: String(error) }; throw error; }
   report.checks.push({ name, seconds: +( (performance.now() - started) / 1000).toFixed(3) });
 }
 
@@ -135,6 +138,10 @@ async function assertDisconnected(page) {
 try {
   // Resolve to an absolute executable before enforcing only-system in the
   // isolated server. This also avoids broken ambient Python/mise shims.
+  if (systemdMode) {
+    serviceFixture = await systemdFixture({ root, state, env, command, config, report });
+    await serviceFixture.install();
+  }
   const python = (await command(['uv', 'python', 'find', '--python-preference', 'managed', pythonRequest], 'python-interpreter')).trim();
   assert.ok(python, 'selected Python interpreter was resolved');
   env.UV_PYTHON = python;
@@ -143,41 +150,53 @@ try {
     successor = join(state, 'shinyhub-next');
     targetVersion = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).version;
     await command(['go', 'build', '-ldflags', '-X main.version=' + targetVersion, '-o', successor, './cmd/shinyhub'], 'build');
-    await installPreviousRelease({ root, state, command });
+    if (!systemdMode) await installPreviousRelease({ root, state, command });
   } else if (!binaryOverride) {
     await command(['go', 'build', '-o', binary, './cmd/shinyhub'], 'build');
   }
-  report.binary_sha256 = createHash('sha256').update(await readFile(binary)).digest('hex');
+  report[systemdMode ? 'baseline_entrypoint_sha256' : 'binary_sha256'] = createHash('sha256').update(await readFile(binary)).digest('hex');
   // Reserve an ephemeral loopback port; process readiness below detects a bind race.
   const reservation = createServer();
   reservation.listen(0, '127.0.0.1');
   await once(reservation, 'listening');
   const port = reservation.address().port;
   await new Promise(resolve => reservation.close(resolve));
-  const host = `http://127.0.0.1:${port}`;
+  const upstream = `http://127.0.0.1:${port}`;
+  let host = upstream;
+  if (systemdMode) {
+    reservation.listen(0, '127.0.0.1');
+    await once(reservation, 'listening');
+    const proxyPort = reservation.address().port;
+    await new Promise(resolve => reservation.close(resolve));
+    await serviceFixture.proxy(upstream, proxyPort);
+    host = `https://127.0.0.1:${proxyPort}`;
+  }
   await writeFile(passwordFile, password, { mode: 0o600 });
   // Tiny idle fixture workers need an explicit budget on small CI runners.
   // The capacity mode keeps production defaults to exercise genuine refusal.
-  await writeFile(config, `server:\n  host: 127.0.0.1\n  port: ${port}\n  render_capacity_cores: ${relayMode ? 16 : 4}\n${capacityMode ? '  host_capacity_cores: 0.1\n' : '  update_capacity:\n    worker_cpu_request_cores: 0.1\n    reserved_cpu_cores: 0.1\n'}  drain_timeout: ${producerReloadMode ? '20s' : '5s'}\n${producerReloadMode ? '  reload_drain_timeout: 2s\n  upgrade_timeout: 5s\n' : ''}${relayMode ? `  reload_sessions: preserve\n  reload_relay_limit: 2\n  pid_file: ${JSON.stringify(join(state, 'hub.pid'))}\n` : ''}  shutdown_apps: stop\n  session_recheck_interval: ${sweepSeconds}s\nauth:\n  secret: ${randomBytes(32).toString('hex')}\ndatabase:\n  dsn: ${JSON.stringify(join(state, 'hub.db'))}\nstorage:\n  apps_dir: ${JSON.stringify(join(state, 'apps'))}\n  app_data_dir: ${JSON.stringify(join(state, 'app-data'))}\nlifecycle:\n  hibernate_timeout: 30m\n`, { mode: 0o600 });
+  await writeFile(config, `server:\n  host: 127.0.0.1\n  port: ${port}\n${systemdMode ? `  base_url: ${host}\n  trusted_proxies: [127.0.0.0/8]\n` : ''}  render_capacity_cores: ${relayMode ? 16 : 4}\n${capacityMode ? '  host_capacity_cores: 0.1\n' : '  update_capacity:\n    worker_cpu_request_cores: 0.1\n    reserved_cpu_cores: 0.1\n'}  drain_timeout: ${producerReloadMode ? '20s' : '5s'}\n${producerReloadMode ? '  reload_drain_timeout: 2s\n  upgrade_timeout: 5s\n' : ''}${relayMode ? `  reload_sessions: preserve\n  reload_relay_limit: 2\n  pid_file: ${JSON.stringify(join(state, 'hub.pid'))}\n` : ''}  shutdown_apps: ${systemdMode ? 'adopt' : 'stop'}\n  session_recheck_interval: ${sweepSeconds}s\nauth:\n  secret: ${randomBytes(32).toString('hex')}\ndatabase:\n  dsn: ${JSON.stringify(join(state, 'hub.db'))}\nstorage:\n  apps_dir: ${JSON.stringify(join(state, 'apps'))}\n  app_data_dir: ${JSON.stringify(join(state, 'app-data'))}\nlifecycle:\n  hibernate_timeout: 30m\n`, { mode: 0o600 });
   await command([binary, 'init', '--config', config, '--admin-user', username, '--admin-password-file', passwordFile], 'init', { cwd: state });
   const log = createWriteStream(join(work, 'server.log'), { mode: 0o600 });
-  server = spawn(binary, ['serve', '--config', config, '--no-browser'], { cwd: state, env, detached: true });
-  server.stdout.pipe(log, { end: false });
-  server.stderr.pipe(log, { end: false });
-  server.once('close', () => log.end());
+  if (systemdMode) { await serviceFixture.start(host); log.end(); }
+  else {
+    server = spawn(binary, ['serve', '--config', config, '--no-browser'], { cwd: state, env, detached: true });
+    server.stdout.pipe(log, { end: false });
+    server.stderr.pipe(log, { end: false });
+    server.once('close', () => log.end());
+  }
   let serverError;
-  server.on('error', error => { serverError = error; });
+  server?.on('error', error => { serverError = error; });
   await poll(async () => {
     if (serverError) throw serverError;
-    return fetch(host + '/activez', { signal: AbortSignal.timeout(2000), headers: { 'User-Agent': 'shinyhub-lifecycle-test' } }).then(r => r.ok).catch(() => false);
+    return fetch(upstream + '/activez', { signal: AbortSignal.timeout(2000), headers: { 'User-Agent': 'shinyhub-lifecycle-test' } }).then(r => r.ok).catch(() => false);
   }, 'server readiness');
-  const login = await fetch(host + '/api/auth/login', { method: 'POST', signal: abort.signal,
+  const login = await fetch(upstream + '/api/auth/login', { method: 'POST', signal: abort.signal,
     headers: { 'Content-Type': 'application/json', 'User-Agent': 'shinyhub-lifecycle-test' },
     body: JSON.stringify({ username, password }) });
   assert.equal(login.status, 200);
   const { token } = await login.json();
   const request = async (method, path, data, status = 200) => {
-    const response = await fetch(host + path, {
+    const response = await fetch(upstream + path, {
       method, signal: AbortSignal.any([abort.signal, AbortSignal.timeout(60_000)]),
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'User-Agent': 'shinyhub-lifecycle-test' },
       body: data === undefined ? undefined : JSON.stringify(data),
@@ -219,7 +238,7 @@ try {
     for (;;) {
       try {
         return await command([binary, 'deploy', app, '--config', clientConfig, '--slug', slug, '--visibility', 'private', '--output', 'json', ...flags], 'deploy',
-          { ...execution, env: { ...env, SHINYHUB_HOST: host, SHINYHUB_TOKEN: token } });
+          { ...execution, env: { ...env, SHINYHUB_HOST: upstream, SHINYHUB_TOKEN: token } });
       } catch (error) {
         // Admission legitimately refuses brief host pressure. Retry only that
         // conflict, with a deadline; deliberate capacity-refusal checks never retry.
@@ -237,8 +256,9 @@ try {
     executablePath: process.env.SHINYHUB_E2E_CHROMIUM || undefined });
   abort.signal.addEventListener('abort', () => { browser?.close().catch(() => {}); }, { once: true });
   report.browser = browser.version();
-  context = await browser.newContext({ userAgent: 'shinyhub-lifecycle-test' });
+  context = await browser.newContext({ userAgent: 'shinyhub-lifecycle-test', ignoreHTTPSErrors: systemdMode });
   context.setDefaultTimeout(30_000);
+  if (systemdMode) await poll(() => context.request.get(host + '/activez').then(r => r.ok()).catch(() => false), 'TLS proxy readiness');
   context.on('response', response => {
     if (response.url().endsWith('/.shinyhub/ready')) report.readiness.push({ status: response.status() });
   });
@@ -272,7 +292,9 @@ try {
   });
   if (liveUpgradeMode) {
     await checkLiveUpgrade({ context, page, original, appURL, state, binary, successor, targetVersion,
-      config, command, request, check, output, sockets, report });
+      config, command, request, check, output, sockets, report,
+      previousVersion: serviceFixture?.previousVersion,
+      performUpgrade: serviceFixture ? () => serviceFixture.upgrade(successor, targetVersion) : undefined });
     assert.deepEqual(report.browserErrors, [], 'no browser script errors');
     report.status = 'passed';
     console.log('BROWSER LIVE UPGRADE E2E PASS');
@@ -482,7 +504,14 @@ try {
     await Promise.race([exited, delay(20_000, undefined, { ref: false })]);
     try { process.kill(-server.pid, 'SIGKILL'); } catch { /* group is gone */ }
   }
-  await rm(state, { recursive: true, force: true });
+  if (systemdMode) {
+    try { await cleanupSystemdFixture({ state, command, work }); }
+    catch (error) { report.cleanup_error = String(error); report.status = 'failed'; process.exitCode = 1; }
+  }
+  if (!systemdMode) {
+    try { await rm(state, { recursive: true, force: true }); }
+    catch (error) { report.cleanup_error = String(error); report.status = 'failed'; process.exitCode = 1; }
+  }
   await writeFile(join(work, 'result.json'), JSON.stringify(report, null, 2) + '\n', { mode: 0o600 });
   console.log(`Local diagnostics: ${work}`);
 }
