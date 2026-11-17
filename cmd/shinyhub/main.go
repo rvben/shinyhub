@@ -125,11 +125,7 @@ var serveCmd = &cobra.Command{
 			signal.Notify(hup, syscall.SIGHUP)
 			defer signal.Stop(hup)
 			err = upgrade.Supervise(ctx, []string{os.Args[0], "serve", "--config", serverConfigPath(), "--no-browser"}, os.Environ(), cfg.Server.PIDFile, hup, logger)
-			var exit *exec.ExitError
-			if errors.As(err, &exit) {
-				return &cli.ExitCodeError{Code: exit.ExitCode(), Err: err}
-			}
-			return err
+			return supervisedServeError(err)
 		}
 		return runServe(ctx, logger, serveOptions{
 			FirstRun:  setup,
@@ -491,6 +487,21 @@ func newSandboxCmd() *cobra.Command {
 			return sandbox.RunShim(args)
 		},
 	}
+}
+
+// supervisedServeError carries a child's permanent schema refusal through the
+// outer CLI classifier, preserving systemd's RestartPreventExitStatus=7.
+func supervisedServeError(err error) error {
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		if exit.ExitCode() == 7 {
+			return &cli.ExitCodeError{Code: 7, Kind: cli.KindSchemaIncompatible, Err: err}
+		}
+		// A signal death has ExitCode() == -1; the ordinary error boundary
+		// classifies it as retryable internal failure (1).
+		return &cli.ExitCodeError{Code: exit.ExitCode(), Err: err}
+	}
+	return err
 }
 
 func main() {
