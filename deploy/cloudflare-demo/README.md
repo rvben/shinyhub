@@ -278,6 +278,9 @@ minutes.
 The Worker errors query excludes automatic `cf-worker-event` HTTP 503 summaries:
 sleeping and readiness polling deliberately return 503. Real upstream 503s remain
 covered by `demo_upstream_failed`; exception records with status 503 stay visible.
+The exact SDK log for a container signalled to exit with code 143 during a new
+version rollout is excluded unless the record itself carries a 5xx status. Other
+errors from the same request still count independently.
 Unknown invocation types/identifiers retain coverage.
 
 Every deployment resets the Durable Object under its running alarm, which

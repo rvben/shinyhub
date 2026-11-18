@@ -7,6 +7,7 @@ import unittest
 class WorkerErrorsAlertTest(unittest.TestCase):
     def test_expected_503_summaries_are_excluded_without_hiding_failures(self):
         sql = pathlib.Path(__file__).with_name("worker-errors-alert.sql").read_text()
+        rollout_exit = "Container error: Error: Runtime signalled the container to exit due to a new version rollout: 143"
         cases = [
             ("normal request", "info", None, 200, "cf-worker-event", 0),
             ("intentional asleep 503", "error", "GET /api/about", 503, "cf-worker-event", 0),
@@ -19,6 +20,12 @@ class WorkerErrorsAlertTest(unittest.TestCase):
             ("unexpected 502 summary", "info", None, 502, "cf-worker-event", 1),
             ("fatal log", "fatal", None, None, "cf-worker-log", 1),
             ("unknown log type", "error", "failure", 503, None, 1),
+            ("expected rollout exit log", "error", rollout_exit, None, "cf-worker", 0),
+            ("rollout exit on a successful response", "error", rollout_exit, 200, "cf-worker", 0),
+            ("rollout exit on a failed response", "error", rollout_exit, 500, "cf-worker", 1),
+            ("rollout exit on an upstream 503", "error", rollout_exit, 503, "cf-worker", 1),
+            ("rollout exit with another error", "error", rollout_exit + "; proxy failed", None, "cf-worker", 1),
+            ("durable object storage failure", "error", "Internal error in Durable Object storage caused object to be reset", None, "cf-worker-error", 1),
         ]
         with sqlite3.connect(":memory:") as db:
             db.execute("ATTACH DATABASE ':memory:' AS logs")
@@ -67,6 +74,7 @@ class WorkerErrorsAlertTest(unittest.TestCase):
             ("deployment reset exception", "alarm", "error", reset, None, "cf-worker-error", 0),
             ("alarm summary of that reset", "alarm", "error", scheduled, None, "cf-worker-event", 0),
             ("successful alarm summary", "alarm", "info", None, None, "cf-worker-event", 0),
+            ("storage reset exception", "alarm", "error", "Internal error in Durable Object storage caused object to be reset; reference = example", None, "cf-worker-error", 1),
             ("other alarm exception", "alarm", "error", "Network connection lost.", None, "cf-worker-error", 1),
             ("alarm error log without an error field", "alarm", "error", None, None, "cf-worker-log", 1),
             ("alarm fatal log", "alarm", "fatal", None, None, "cf-worker-log", 1),
