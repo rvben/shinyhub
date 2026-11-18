@@ -18,7 +18,7 @@ func TestPostgresFailedRestoreLeavesPreviousUsersIntact(t *testing.T) {
 	dbtest.RequirePostgres(t)
 	requirePGTools(t)
 	srcStore, srcDSN := dbtest.NewPostgres(t)
-	requirePGDumpNewerThanServer(t, srcStore)
+	requirePGClientVersions(t, srcStore)
 	if err := srcStore.CreateUser(db.CreateUserParams{Username: "replacement", PasswordHash: "x", Role: "admin"}); err != nil {
 		t.Fatal(err)
 	}

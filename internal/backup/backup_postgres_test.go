@@ -14,61 +14,57 @@ import (
 	"github.com/rvben/shinyhub/internal/dbtest"
 )
 
-// requirePGTools skips when the libpq client binaries are unavailable. A
-// Postgres-backed ShinyHub needs pg_dump/pg_restore on PATH to back up; the
-// test exercises the same dependency the production code shells out to.
+// requirePGTools allows local runs without the tools to skip. CI must exercise
+// the real pg_dump and pg_restore binaries used by the production code.
 func requirePGTools(t *testing.T) {
 	t.Helper()
 	for _, bin := range []string{"pg_dump", "pg_restore"} {
 		if _, err := exec.LookPath(bin); err != nil {
+			if os.Getenv("CI") != "" {
+				t.Fatalf("%s must be on PATH for the Postgres backup tests in CI: %v", bin, err)
+			}
 			t.Skipf("%s not on PATH; skipping Postgres backup test", bin)
 		}
 	}
 }
 
-// requirePGDumpNewerThanServer skips when the local pg_dump predates the server.
-// pg_dump refuses outright in that case ("aborting because of server version
-// mismatch"), which is an environment mismatch rather than a defect: CI runs
-// matching versions, while a developer machine commonly has an older Homebrew
-// client than the server container. Reporting it as a failure is worse than
-// useless - a suite that goes red for reasons unrelated to the code teaches
-// people to stop reading it.
-func requirePGDumpNewerThanServer(t *testing.T, store *db.Store) {
+// requirePGClientVersions checks that CI tests a matching client/server pair.
+// Locally, skip when pg_dump is too old to read the server.
+func requirePGClientVersions(t *testing.T, store *db.Store) {
 	t.Helper()
 	var serverNum int
 	if err := store.DB().QueryRow(`SHOW server_version_num`).Scan(&serverNum); err != nil {
 		t.Fatalf("read server version: %v", err)
 	}
 	serverMajor := serverNum / 10000
+	dumpMajor := pgToolMajor(t, "pg_dump")
+	if os.Getenv("CI") != "" {
+		if dumpMajor != serverMajor {
+			t.Fatalf("pg_dump major %d must match Postgres server major %d in CI", dumpMajor, serverMajor)
+		}
+		if restoreMajor := pgToolMajor(t, "pg_restore"); restoreMajor != serverMajor {
+			t.Fatalf("pg_restore major %d must match Postgres server major %d in CI", restoreMajor, serverMajor)
+		}
+	} else if dumpMajor < serverMajor {
+		t.Skipf("pg_dump %d cannot dump Postgres %d; install client tools for Postgres %d to run this test",
+			dumpMajor, serverMajor, serverMajor)
+	}
+}
 
-	out, err := exec.Command("pg_dump", "--version").Output()
+func pgToolMajor(t *testing.T, bin string) int {
+	t.Helper()
+	out, err := exec.Command(bin, "--version").Output()
 	if err != nil {
-		t.Fatalf("pg_dump --version: %v", err)
+		t.Fatalf("%s --version: %v", bin, err)
 	}
 	// "pg_dump (PostgreSQL) 16.14 (Homebrew)" -> 16
-	fields := strings.Fields(string(out))
-	clientMajor := 0
-	for _, f := range fields {
+	for _, f := range strings.Fields(string(out)) {
 		if n, err := strconv.Atoi(strings.SplitN(f, ".", 2)[0]); err == nil && n > 8 {
-			clientMajor = n
-			break
+			return n
 		}
 	}
-	if clientMajor == 0 {
-		t.Fatalf("could not parse pg_dump version from %q", strings.TrimSpace(string(out)))
-	}
-	if clientMajor < serverMajor {
-		// In CI this is a provisioning error, not a developer's environment: the
-		// workflow installs a client chosen to be >= the server. Skipping there
-		// would silently drop this coverage the moment the distro default lags,
-		// which is exactly the kind of loss a green suite should never hide.
-		if os.Getenv("CI") != "" {
-			t.Fatalf("pg_dump %d predates the server (%d); CI must install a client >= the server "+
-				"or this round-trip stops being tested", clientMajor, serverMajor)
-		}
-		t.Skipf("pg_dump %d predates the server (%d); pg_dump refuses to dump a newer server. "+
-			"Install client tools >= %d to run this test.", clientMajor, serverMajor, serverMajor)
-	}
+	t.Fatalf("could not parse %s version from %q", bin, strings.TrimSpace(string(out)))
+	return 0
 }
 
 func mkPGCfg(t *testing.T, dsn string) *config.Config {
@@ -108,7 +104,7 @@ func TestPostgresRoundTrip(t *testing.T) {
 	requirePGTools(t)
 
 	srcStore, srcDSN := dbtest.NewPostgres(t)
-	requirePGDumpNewerThanServer(t, srcStore)
+	requirePGClientVersions(t, srcStore)
 	if _, err := srcStore.DB().Exec(
 		`INSERT INTO users (username, password_hash, role) VALUES ('alice','x','admin')`); err != nil {
 		t.Fatalf("seed user: %v", err)

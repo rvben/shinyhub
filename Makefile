@@ -591,8 +591,8 @@ test-handoff:
 
 # test-postgres spins up a throwaway Postgres 16 in Docker and runs the full Go
 # suite against it (SHINYHUB_TEST_POSTGRES_DSN). Each test gets an isolated
-# database. Requires a working Docker daemon. SQLite remains the default backend
-# for `make test`.
+# database. Requires Docker and uses PostgreSQL 16 pg_dump and pg_restore on
+# PATH for the backup tests. SQLite remains the default backend for `make test`.
 test-postgres:
 	./scripts/postgres-test.sh
 

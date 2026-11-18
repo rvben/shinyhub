@@ -515,13 +515,14 @@ not equivalent browser isolation. See [support sessions](docs/support-sessions.m
 `shinyhub backup --out <archive>` writes a snapshot of the database plus the
 apps and app-data trees. The database is captured point-in-time consistent via
 SQLite `VACUUM INTO`, or, on a Postgres backend, via `pg_dump` in custom format
-(a single-transaction online dump). Postgres backups shell out to `pg_dump`, so
-it must be on the server's PATH (install `postgresql-client`); the archive
-manifest records which backend produced it. The apps and app-data trees are
-then walked while the server may still be running, so those trees are a
-best-effort, *not* a point-in-time-consistent, copy: a deploy, prune, upload,
-or app-written file that lands during the walk may be partially or
-inconsistently captured relative to the database snapshot.
+(a single-transaction online dump). Put `pg_dump` and `pg_restore` from the
+server's PostgreSQL major version on the PATH of the process running the
+backup or restore. For example, install `postgresql-client-16` for PostgreSQL
+16 on Debian or Ubuntu. A newer `pg_restore` can emit SQL settings an older
+server rejects. The archive manifest records which backend produced it.
+The backup then walks the apps and app-data trees while the server may still
+be running. A deploy, prune, upload, or app write during the walk can leave the
+file copy inconsistent with the database snapshot.
 
 This is acceptable for routine periodic backups (a deploy mid-backup is rare
 and the next backup converges). For a strictly consistent cross-tree snapshot,
