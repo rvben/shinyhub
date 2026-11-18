@@ -5,18 +5,14 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log/slog"
-	"regexp"
-	"strings"
-	"unicode"
-	"unicode/utf8"
+
+	"github.com/rvben/shinyhub/internal/entitlementpolicy"
 )
 
 // MaxAppEntitlements bounds the signed claim without silently truncating grants.
-const MaxAppEntitlements = 64
+const MaxAppEntitlements = entitlementpolicy.MaxDefinitions
 const entitlementMutationLockKey int64 = 0x5348454e54 // "SHENT"
 
-var entitlementNameRE = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
 var ErrInvalidEntitlement = errors.New("invalid entitlement")
 var ErrEntitlementLimit = errors.New("an app may define at most 64 entitlements")
 var ErrEntitlementInUse = errors.New("revoke all grants before deleting an entitlement")
@@ -24,6 +20,7 @@ var ErrEntitlementInUse = errors.New("revoke all grants before deleting an entit
 type AppEntitlement struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
+	ManagedBy   string `json:"managed_by,omitempty"`
 }
 
 // DefineAppEntitlementParams distinguishes an omitted description from an
@@ -41,6 +38,7 @@ type EntitlementGrant struct {
 	UserID      int64  `json:"user_id,omitempty"`
 	Username    string `json:"username,omitempty"`
 	Group       string `json:"group,omitempty"`
+	ManagedBy   string `json:"managed_by,omitempty"`
 }
 
 type EntitlementPrincipal struct {
@@ -52,12 +50,11 @@ func (p EntitlementPrincipal) valid() bool {
 	if p.UserID > 0 {
 		return p.Group == ""
 	}
-	return p.UserID == 0 && p.Group != "" && strings.TrimSpace(p.Group) == p.Group &&
-		len(p.Group) <= 512 && utf8.ValidString(p.Group) && strings.IndexFunc(p.Group, unicode.IsControl) < 0
+	return p.UserID == 0 && entitlementpolicy.ValidGroup(p.Group)
 }
 
 func (s *Store) ListAppEntitlements(appID int64) ([]AppEntitlement, error) {
-	rows, err := s.db.Query(`SELECT name, description FROM app_entitlements WHERE app_id = ? ORDER BY name`, appID)
+	rows, err := s.db.Query(`SELECT name, description, managed_by FROM app_entitlements WHERE app_id = ? ORDER BY name`, appID)
 	if err != nil {
 		return nil, err
 	}
@@ -65,7 +62,7 @@ func (s *Store) ListAppEntitlements(appID int64) ([]AppEntitlement, error) {
 	out := []AppEntitlement{}
 	for rows.Next() {
 		var e AppEntitlement
-		if err := rows.Scan(&e.Name, &e.Description); err != nil {
+		if err := rows.Scan(&e.Name, &e.Description, &e.ManagedBy); err != nil {
 			return nil, err
 		}
 		out = append(out, e)
@@ -76,14 +73,14 @@ func (s *Store) ListAppEntitlements(appID int64) ([]AppEntitlement, error) {
 // ListAppEntitlementGrants lists all assignments, or only the sources effective
 // for userID when nonzero. Group names use the existing IdP snapshot verbatim.
 func (s *Store) ListAppEntitlementGrants(appID, userID int64) ([]EntitlementGrant, error) {
-	query := `SELECT e.entitlement, 'user', e.user_id, u.username, ''
+	query := `SELECT e.entitlement, 'user', e.user_id, u.username, '', 'manual'
 		FROM app_user_entitlements e JOIN users u ON u.id = e.user_id WHERE e.app_id = ?`
 	args := []any{appID}
 	if userID != 0 {
 		query += ` AND e.user_id = ?`
 		args = append(args, userID)
 	}
-	query += ` UNION ALL SELECT e.entitlement, 'group', 0, '', e.group_name
+	query += ` UNION ALL SELECT e.entitlement, 'group', 0, '', e.group_name, e.managed_by
 		FROM app_group_entitlements e WHERE e.app_id = ?`
 	args = append(args, appID)
 	if userID != 0 {
@@ -99,7 +96,7 @@ func (s *Store) ListAppEntitlementGrants(appID, userID int64) ([]EntitlementGran
 	out := []EntitlementGrant{}
 	for rows.Next() {
 		var g EntitlementGrant
-		if err := rows.Scan(&g.Entitlement, &g.Source, &g.UserID, &g.Username, &g.Group); err != nil {
+		if err := rows.Scan(&g.Entitlement, &g.Source, &g.UserID, &g.Username, &g.Group, &g.ManagedBy); err != nil {
 			return nil, err
 		}
 		out = append(out, g)
@@ -131,7 +128,22 @@ func (s *Store) AppEntitlementsForUser(appID, userID int64) ([]string, error) {
 
 // mutateEntitlement commits the change and its audit event together. Unlike
 // best-effort operational auditing, a grant must not succeed without its audit.
+type entitlementEvent struct {
+	action string
+	detail map[string]any
+}
+
 func (s *Store) mutateEntitlement(appID int64, audit AuditEventParams, change func(writeTx) (map[string]any, error)) error {
+	return s.mutateEntitlements(appID, audit, func(tx writeTx, _ string) ([]entitlementEvent, error) {
+		detail, err := change(tx)
+		if detail == nil || err != nil {
+			return nil, err
+		}
+		return []entitlementEvent{{audit.Action, detail}}, nil
+	})
+}
+
+func (s *Store) mutateEntitlements(appID int64, audit AuditEventParams, change func(writeTx, string) ([]entitlementEvent, error)) error {
 	if audit.UserID == nil || *audit.UserID <= 0 {
 		return errors.New("entitlement mutation requires an audit actor")
 	}
@@ -140,53 +152,58 @@ func (s *Store) mutateEntitlement(appID int64, audit AuditEventParams, change fu
 		return err
 	}
 	defer tx.Rollback() //nolint:errcheck
-	var slug string
-	if err := tx.QueryRow(`SELECT slug FROM apps WHERE id = ?`, appID).Scan(&slug); err != nil {
+	var slug, owner string
+	query := `SELECT slug, COALESCE(managed_by, '') FROM apps WHERE id = ?`
+	if s.IsPostgres() {
+		query += " FOR UPDATE"
+	}
+	if err := tx.QueryRow(query, appID).Scan(&slug, &owner); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
 		}
 		return err
 	}
-	detail, err := change(tx)
+	events, err := change(tx, owner)
 	if err != nil {
 		return err
 	}
-	if detail == nil {
+	if len(events) == 0 {
 		return tx.Commit()
-	} // idempotent no-op
+	}
 	var actorUsername string
 	if err := tx.QueryRow(`SELECT username FROM users WHERE id = ?`, *audit.UserID).Scan(&actorUsername); err != nil {
 		return fmt.Errorf("resolve entitlement audit actor: %w", err)
 	}
-	detail["actor_user_id"], detail["actor_username"] = *audit.UserID, actorUsername
-	detail["app_id"] = appID
-	audit.ResourceType, audit.ResourceID, audit.Detail = "app", slug, AuditDetail(detail)
-	_, err = tx.Exec(`INSERT INTO audit_events (user_id, action, resource_type, resource_id, detail, ip_address,
-		credential_id, credential_type, credential_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		audit.UserID, audit.Action, audit.ResourceType, audit.ResourceID, audit.Detail, audit.IPAddress,
-		audit.CredentialID, audit.CredentialType, audit.CredentialName)
-	if err != nil {
-		s.reportAuditWriteFailure(audit.Action, err)
-		return fmt.Errorf("record entitlement audit: %w", err)
+	records := make([]AuditEventParams, 0, len(events))
+	for _, event := range events {
+		event.detail["actor_user_id"], event.detail["actor_username"] = *audit.UserID, actorUsername
+		event.detail["app_id"] = appID
+		record := audit
+		record.Action, record.ResourceType, record.ResourceID = event.action, "app", slug
+		record.Detail = AuditDetail(event.detail)
+		if err := insertAuditEvent(tx.Exec, record); err != nil {
+			s.reportAuditWriteFailure(event.action, err)
+			return fmt.Errorf("record entitlement audit: %w", err)
+		}
+		records = append(records, record)
 	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	slog.Info("audit_event", "user_id", *audit.UserID, "action", audit.Action, "resource_type", "app",
-		"resource_id", slug, "detail", audit.Detail, "ip_address", audit.IPAddress,
-		"credential_id", audit.CredentialID, "credential_type", audit.CredentialType,
-		"credential_name", audit.CredentialName, "persisted", true)
+	for _, record := range records {
+		s.emitAuditLog(record, nil)
+	}
 	return nil
 }
 
 func (s *Store) DefineAppEntitlement(appID int64, e DefineAppEntitlementParams, audit AuditEventParams) error {
-	if !entitlementNameRE.MatchString(e.Name) || (e.Description != nil && (len(*e.Description) > 512 || !utf8.ValidString(*e.Description))) {
+	if !entitlementpolicy.ValidName(e.Name) || (e.Description != nil && !entitlementpolicy.ValidDescription(*e.Description)) {
 		return ErrInvalidEntitlement
 	}
 	audit.Action = "entitlement.define"
 	return s.mutateEntitlement(appID, audit, func(tx writeTx) (map[string]any, error) {
-		var old string
-		err := tx.QueryRow(`SELECT description FROM app_entitlements WHERE app_id = ? AND name = ?`, appID, e.Name).Scan(&old)
+		var old, owner string
+		err := tx.QueryRow(`SELECT description, managed_by FROM app_entitlements WHERE app_id = ? AND name = ?`, appID, e.Name).Scan(&old, &owner)
 		exists := err == nil
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return nil, err
@@ -197,6 +214,9 @@ func (s *Store) DefineAppEntitlement(appID int64, e DefineAppEntitlementParams, 
 		}
 		if exists && old == description {
 			return nil, nil
+		}
+		if exists && owner != entitlementpolicy.Manual {
+			return nil, managedEntitlementError(owner)
 		}
 		if !exists {
 			var count int
@@ -216,6 +236,17 @@ func (s *Store) DefineAppEntitlement(appID int64, e DefineAppEntitlementParams, 
 func (s *Store) DeleteAppEntitlement(appID int64, name string, audit AuditEventParams) error {
 	audit.Action = "entitlement.delete"
 	return s.mutateEntitlement(appID, audit, func(tx writeTx) (map[string]any, error) {
+		var owner string
+		err := tx.QueryRow(`SELECT managed_by FROM app_entitlements WHERE app_id = ? AND name = ?`, appID, name).Scan(&owner)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		if err != nil {
+			return nil, err
+		}
+		if owner != entitlementpolicy.Manual {
+			return nil, managedEntitlementError(owner)
+		}
 		var used bool
 		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM app_user_entitlements WHERE app_id = ? AND entitlement = ?
 			UNION ALL SELECT 1 FROM app_group_entitlements WHERE app_id = ? AND entitlement = ?)`, appID, name, appID, name).Scan(&used); err != nil {
@@ -224,25 +255,15 @@ func (s *Store) DeleteAppEntitlement(appID int64, name string, audit AuditEventP
 		if used {
 			return nil, ErrEntitlementInUse
 		}
-		res, err := tx.Exec(`DELETE FROM app_entitlements WHERE app_id = ? AND name = ?`, appID, name)
-		if err != nil {
-			return nil, err
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return nil, err
-		}
-		if n == 0 {
-			return nil, ErrNotFound
-		}
-		return map[string]any{"entitlement": name}, nil
+		_, err = tx.Exec(`DELETE FROM app_entitlements WHERE app_id = ? AND name = ?`, appID, name)
+		return map[string]any{"entitlement": name}, err
 	})
 }
 
 // SetAppEntitlementGrant changes one source. Revocation never denies another
 // source: deleting a user grant leaves any matching group grants effective.
 func (s *Store) SetAppEntitlementGrant(appID int64, name string, principal EntitlementPrincipal, grant bool, audit AuditEventParams) error {
-	if !entitlementNameRE.MatchString(name) || !principal.valid() {
+	if !entitlementpolicy.ValidName(name) || !principal.valid() {
 		return ErrInvalidEntitlement
 	}
 	audit.Action = "entitlement.revoke"
@@ -271,6 +292,16 @@ func (s *Store) SetAppEntitlementGrant(appID int64, name string, principal Entit
 			detail = map[string]any{"entitlement": name, "source": "user", "user_id": principal.UserID, "username": username}
 		}
 		query := `DELETE FROM ` + table + ` WHERE app_id = ? AND entitlement = ? AND ` + column + ` = ?`
+		if !grant && principal.UserID == 0 {
+			var owner string
+			err := tx.QueryRow(`SELECT managed_by FROM app_group_entitlements WHERE app_id = ? AND entitlement = ? AND group_name = ?`, appID, name, principal.Group).Scan(&owner)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return nil, err
+			}
+			if err == nil && owner != entitlementpolicy.Manual {
+				return nil, managedEntitlementError(owner)
+			}
+		}
 		if grant {
 			query = `INSERT INTO ` + table + ` (app_id, entitlement, ` + column + `) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`
 		}

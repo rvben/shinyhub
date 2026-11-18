@@ -184,3 +184,52 @@ older bundle may restore its CSV behavior and stop honoring ShinyHub grants or
 revocations; reassess access before using it as a rollback. After migration,
 assignment changes require no app deployment. Direct grants currently have no
 expiry, so assign responsibility for periodic review and removal.
+
+## Manage entitlements with a fleet
+
+Declare group business permissions in the app's source `shinyhub.toml`.
+
+```toml
+[entitlements.power_user]
+description = "Run advanced financial reports"
+groups = ["finance-team"]
+```
+
+Run `shinyhub fleet plan --detailed-exitcode` to preview additions, removals,
+and any manual grants the fleet will retain. Run `shinyhub fleet apply` to
+apply the policy. The server needs to advertise the `fleet_entitlements`
+capability. Use the same app-scoped credentials that manage the app.
+Grant names must match ShinyHub's stored IdP group names exactly, including
+case. Groups that have yet to appear in any user's snapshot are valid.
+
+Existing definitions and grants remain manually managed until you explicitly
+adopt them. Set `adopt = true` to adopt the definition and list specific existing
+grants under `adopt_groups = ["finance-team"]`. Every adoption entry must also
+appear in `groups`. These settings are idempotent. If the definition or grant
+doesn't exist, apply creates it under fleet management. To use a manual
+definition with its existing description, omit `description`; to change it
+through the manifest, adopt it. Inspect ownership with `apps entitlements list`
+and `apps entitlements grants`.
+
+To revoke a fleet-managed grant, remove its group from `groups` and
+`adopt_groups`. Removing a definition revokes its managed grants. Any direct
+user grants or manual group grants keep that definition in manual management.
+Individual user grants are managed through the CLI and can still make the same
+entitlement effective after a group is removed. An explicit empty
+`[entitlements]` table clears the fleet's policy. Omitting the table preserves
+existing policy.
+
+To hand policy over to operators or recover after a fleet is renamed or
+retired, run `shinyhub apps entitlements relinquish APP OLD_FLEET_ID`. This
+returns the named fleet's definitions and group grants to manual management
+while preserving effective access. Remove the declarations from the old fleet
+to prevent it from creating grants again. A new fleet can then explicitly
+adopt the existing rows. A fleet cannot take over an app while its previous
+fleet still owns active entitlement policy.
+
+Policy updates take effect separately from the bundle lifecycle. A code rollback
+keeps the current entitlement policy. When an apply includes both a code change
+and policy changes, the app may serve the new code under the prior policy until
+the policy transaction commits. If that step fails, apply reports the failure.
+Review the existing audit log for `entitlement.*` events. Fleet mutations
+include the actor, principal where applicable, and manifest provenance.

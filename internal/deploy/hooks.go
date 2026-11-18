@@ -22,6 +22,7 @@ import (
 	"github.com/rvben/shinyhub/internal/appmetaspec"
 	"github.com/rvben/shinyhub/internal/autoscalespec"
 	"github.com/rvben/shinyhub/internal/config"
+	"github.com/rvben/shinyhub/internal/entitlementpolicy"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/pythontrace"
 	"github.com/rvben/shinyhub/internal/schedulespec"
@@ -292,6 +293,7 @@ type TracingSettings struct {
 
 // Manifest is the decoded shinyhub.toml.
 type Manifest struct {
+	Entitlements entitlementpolicy.Policy `toml:"entitlements" json:"-"`
 	// Sparse declarations preserve omitted live policy and manifest access rules.
 	// Fleet sets this when it materializes settings for a source without a manifest.
 	Sparse    bool            `toml:"sparse"`
@@ -320,6 +322,16 @@ const hookWaitDelay = 10 * time.Second
 // malformed manifest is fatal: deploys must not silently skip declared
 // hooks because the operator mistyped a field.
 func LoadManifest(bundleDir string) (*Manifest, error) {
+	return loadManifest(bundleDir, ParseManifest)
+}
+
+// LoadSourceManifest validates settings before their fleet policy is projected
+// out of the runtime bundle.
+func LoadSourceManifest(dir string) (*Manifest, error) {
+	return loadManifest(dir, ParseSourceManifest)
+}
+
+func loadManifest(bundleDir string, parse func([]byte) (*Manifest, error)) (*Manifest, error) {
 	path := filepath.Join(bundleDir, ManifestFilename)
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -328,17 +340,40 @@ func LoadManifest(bundleDir string) (*Manifest, error) {
 		}
 		return nil, fmt.Errorf("read %s: %w", ManifestFilename, err)
 	}
-	return ParseManifest(data)
+	return parse(data)
 }
 
 // ParseManifest decodes and validates shinyhub.toml content exactly as a
 // deploy does, so a caller holding the bytes (a preflight request, a test)
 // gets the same manifest and the same error text as LoadManifest.
 func ParseManifest(data []byte) (*Manifest, error) {
+	return parseManifest(data, false)
+}
+
+// ParseSourceManifest accepts policy declarations for fleet source tooling.
+func ParseSourceManifest(data []byte) (*Manifest, error) {
+	return parseManifest(data, true)
+}
+
+func parseManifest(data []byte, allowEntitlements bool) (*Manifest, error) {
 	var m Manifest
 	meta, err := toml.Decode(string(data), &m)
 	if err != nil {
 		return nil, fmt.Errorf("parse %s: %w", ManifestFilename, err)
+	}
+	if meta.IsDefined("entitlements") {
+		if !allowEntitlements {
+			return nil, fmt.Errorf("manifest entitlements require fleet apply")
+		}
+		if kind := meta.Type("entitlements"); (kind != "" && kind != "Hash") || m.Sparse {
+			return nil, fmt.Errorf("entitlements must be a table in a full manifest")
+		}
+		if m.Entitlements == nil {
+			m.Entitlements = entitlementpolicy.Policy{}
+		}
+		if err := m.Entitlements.Validate(); err != nil {
+			return nil, fmt.Errorf("manifest [entitlements]: %w", err)
+		}
 	}
 	if meta.IsDefined("app", "env") && meta.Type("app", "env") != "Hash" {
 		return nil, fmt.Errorf("app.env must be a table of strings")

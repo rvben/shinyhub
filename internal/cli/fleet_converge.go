@@ -69,7 +69,7 @@ func convergeDeclaredConfig(cfg *cliConfig, slug string, entry fleet.AppEntry, i
 	drift := fleet.ConfigDrift(entry, observed)
 	attempts := 0
 	if len(drift) > 0 {
-		attempts, err = applyConfigDriftWithRetry(cfg, slug, drift, fleet.EffectiveConfig(entry), ifD, ifMB, opt.runID, opt.retries)
+		attempts, err = applyConfigDriftWithRetry(cfg, slug, drift, fleet.EffectiveConfig(entry), ifD, ifMB, opt.runID, opt.retries, opt.expectedAppID)
 		if err != nil {
 			return attempts, err
 		}

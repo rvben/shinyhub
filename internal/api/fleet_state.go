@@ -205,6 +205,9 @@ func (s *Server) handleRecordAppFleetState(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
+	if checkAppPreconditions(w, r, app) {
+		return
+	}
 	runID := s.knownFleetRunID(r)
 	if runID == "" {
 		writeError(w, http.StatusUnprocessableEntity, "a registered fleet run id is required")

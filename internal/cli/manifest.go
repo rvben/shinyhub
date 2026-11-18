@@ -50,7 +50,7 @@ With no [dir] argument, the current directory is used.`,
 				return fmt.Errorf("validate %s: not a directory", dir)
 			}
 
-			m, err := deploy.LoadManifest(dir)
+			m, err := deploy.LoadSourceManifest(dir)
 			if err != nil {
 				return err
 			}

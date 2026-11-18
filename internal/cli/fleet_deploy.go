@@ -115,8 +115,10 @@ func (b *builtBundle) build(spec bundleBuildSpec) ([]byte, string, error) {
 // deployAppBundleCached is deployAppBundleFromSpecWithDowntime with the bundle
 // build memoized in bundle, which the caller shares across attempts.
 func deployAppBundleCached(cfg *cliConfig, slug string, spec bundleBuildSpec, bundle *builtBundle, visibility, project string, out io.Writer, runID string, timeout time.Duration, allowDowntime bool, preconditions ...*string) (promoted string, committed bool, deployRuns []deployRunRef, kind deployfail.Kind, err error) {
-	if err := ensureAppCoreWithAvailability(cfg, slug, visibility, project, spec.Availability, out, false, runID); err != nil {
-		return "", false, nil, ensureFailureKind(err), err
+	if spec.ExpectedAppID == 0 {
+		if err := ensureAppCoreWithAvailability(cfg, slug, visibility, project, spec.Availability, out, false, runID); err != nil {
+			return "", false, nil, ensureFailureKind(err), err
+		}
 	}
 	updateFleetProgress(out, "Building bundle", "", time.Time{}, false)
 	body, summary, err := bundle.build(spec)
@@ -139,8 +141,10 @@ func deployAppBundleCached(cfg *cliConfig, slug string, spec bundleBuildSpec, bu
 		req.Header.Set("X-ShinyHub-Allow-Downtime", "1")
 	}
 	decorateFleetRequest(req, runID)
-	preconditioned := len(preconditions) >= 2 && (preconditions[0] != nil || preconditions[1] != nil)
-	if preconditioned {
+	setExpectedAppID(req, spec.ExpectedAppID)
+	hasResourcePreconditions := len(preconditions) >= 2 && (preconditions[0] != nil || preconditions[1] != nil)
+	preconditioned := spec.ExpectedAppID != 0 || hasResourcePreconditions
+	if hasResourcePreconditions {
 		setPrecondition(req, preconditions[0], preconditions[1], preconditions[2:]...)
 	}
 	// Deploy can take several minutes on first run (uv downloads packages).

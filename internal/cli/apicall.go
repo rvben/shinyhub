@@ -20,7 +20,8 @@ type apiCall struct {
 	// Accept lists the failure statuses (>= 400) the caller interprets itself,
 	// such as a 404 that means "already absent". They come back as a result
 	// instead of an error.
-	Accept []int
+	Accept           []int
+	MaxResponseBytes int64 // 0 keeps the ordinary buffered response behavior
 }
 
 // apiResult is a response whose body has been read in full and closed.
@@ -52,7 +53,19 @@ func doAPI(cfg *cliConfig, c apiCall) (*apiResult, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	var reader io.Reader = resp.Body
+	if c.MaxResponseBytes > 0 {
+		reader = io.LimitReader(reader, c.MaxResponseBytes+1)
+	}
+	body, readErr := io.ReadAll(reader)
+	if c.MaxResponseBytes > 0 {
+		if readErr != nil {
+			return nil, fmt.Errorf("read %s response: %w", c.Op, readErr)
+		}
+		if int64(len(body)) > c.MaxResponseBytes {
+			return nil, fmt.Errorf("%s response exceeds %d bytes", c.Op, c.MaxResponseBytes)
+		}
+	}
 	if resp.StatusCode >= 400 && !slices.Contains(c.Accept, resp.StatusCode) {
 		return nil, httpError(cfg.Token, c.Op, resp, body)
 	}

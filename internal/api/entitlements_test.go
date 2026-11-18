@@ -134,3 +134,47 @@ func TestAppEntitlementsRespectCredentialScope(t *testing.T) {
 		}
 	}
 }
+
+func TestFleetEntitlementPolicyRespectsCredentialScope(t *testing.T) {
+	srv, store := newTestServer(t)
+	owner, _ := mkUser(t, store, "owner", "developer")
+	for _, slug := range []string{"inscope", "outscope"} {
+		if _, err := store.CreateApp(db.CreateAppParams{Slug: slug, Name: slug, OwnerID: owner}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.SetAppFleetOwner(mustAppID(t, store, slug), "fleet:policy"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	token := scopedDeployToken(t, srv, store, "developer", []string{"inscope"})
+	call := func(method, slug, suffix, body string, want int) []byte {
+		t.Helper()
+		w := doToken(t, srv, method, "/api/apps/"+slug+"/entitlement-policy"+suffix, token, []byte(body))
+		if w.Code != want {
+			t.Fatalf("%s %s: %d %s, want %d", method, slug, w.Code, w.Body.String(), want)
+		}
+		return w.Body.Bytes()
+	}
+	const desired = `"desired":{"power":{"groups":["Team"]}}`
+	const request = `{"owner":"fleet:policy",` + desired + `}`
+	body := call("POST", "inscope", "/preview", request, http.StatusOK)
+	call("POST", "outscope", "/preview", request, http.StatusNotFound)
+	var preview struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(body, &preview); err != nil || preview.Token == "" {
+		t.Fatalf("invalid preview: %s %v", body, err)
+	}
+	apply := `{"owner":"fleet:policy","token":"` + preview.Token + `",` + desired + `}`
+	call("PUT", "outscope", "", apply, http.StatusNotFound)
+	call("PUT", "inscope", "", apply, http.StatusNoContent)
+	call("POST", "outscope", "/relinquish", `{"owner":"fleet:policy"}`, http.StatusNotFound)
+	appID := mustAppID(t, store, "inscope")
+	if err := store.SetAppManagedBy("inscope", nil); err != nil {
+		t.Fatal(err)
+	}
+	call("POST", "inscope", "/relinquish", `{"owner":"fleet:policy"}`, http.StatusNoContent)
+	if grants, err := store.ListAppEntitlementGrants(appID, 0); err != nil || len(grants) != 1 || grants[0].ManagedBy != "manual" {
+		t.Fatalf("relinquishing orphaned policy lost the grant: %+v, %v", grants, err)
+	}
+}

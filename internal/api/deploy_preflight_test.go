@@ -99,6 +99,7 @@ func TestDeployPreflight_MatchesDeployRejection(t *testing.T) {
 	}{
 		{name: "producer schedule on a container tier", manifest: groupedProducerManifest, runtime: containerTier, wantHint: "local native tier"},
 		{name: "malformed manifest", manifest: "[app]\nreplicas = \"many\"\n", wantHint: "shinyhub.toml"},
+		{name: "fleet entitlement policy", manifest: "[entitlements]\n", wantHint: "require fleet apply"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, store, token := newManifestE2EServerCfg(t, tc.runtime)

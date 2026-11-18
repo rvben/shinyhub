@@ -1117,7 +1117,8 @@ type App struct {
 	// It includes ownership plus direct and group manager grants; database reads
 	// leave it false. Keeping it on list items lets role-adaptive Apps cards expose
 	// only actions the current caller can actually perform.
-	CanManage bool `json:"can_manage"`
+	CanManage                bool `json:"can_manage"`
+	ManagedEntitlementPolicy bool `json:"managed_entitlement_policy,omitempty"`
 	// ReplicaPlacement is the per-app replica placement as a JSON object
 	// {"tier": count}, or "" when no placement is set (all Replicas on the
 	// default tier). The Replicas column remains the authoritative total.
@@ -1394,17 +1395,26 @@ type CreateAppParams struct {
 // column DEFAULT 'default' (still present in the SQLite schema, see migration
 // 050) must never apply again.
 func (s *Store) CreateApp(p CreateAppParams) (bool, error) {
-	_, err := s.db.Exec(
-		`INSERT INTO apps (slug, name, project_slug, owner_id, access, availability) VALUES (?, ?, ?, ?, ?, COALESCE(NULLIF(?, ''), 'inherit'))`,
+	_, projectCreated, err := s.CreateAppWithID(p)
+	return projectCreated, err
+}
+
+// CreateAppWithID returns the inserted identity even if the slug is later reused.
+func (s *Store) CreateAppWithID(p CreateAppParams) (int64, bool, error) {
+	var id int64
+	err := s.db.QueryRow(
+		`INSERT INTO apps (slug, name, project_slug, owner_id, access, availability)
+		VALUES (?, ?, ?, ?, ?, COALESCE(NULLIF(?, ''), 'inherit')) RETURNING id`,
 		p.Slug, p.Name, p.ProjectSlug, p.OwnerID, p.Access, p.Availability,
-	)
+	).Scan(&id)
 	if err != nil {
 		if s.d.isUniqueViolation(err) {
-			return false, fmt.Errorf("create app: %w", ErrSlugTaken)
+			return 0, false, fmt.Errorf("create app: %w", ErrSlugTaken)
 		}
-		return false, fmt.Errorf("create app: %w", err)
+		return 0, false, fmt.Errorf("create app: %w", err)
 	}
-	return s.EnsureProject(p.ProjectSlug)
+	projectCreated, err := s.EnsureProject(p.ProjectSlug)
+	return id, projectCreated, err
 }
 
 func (s *Store) GetAppBySlug(slug string) (*App, error) {

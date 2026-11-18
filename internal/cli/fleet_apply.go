@@ -144,7 +144,7 @@ func runFleetApply(cmd *cobra.Command, f *fleetApplyFlags) error {
 	if f.capacityWait < 0 {
 		return &ExitCodeError{Code: 1, Kind: KindValidation, Err: fmt.Errorf("capacity-wait must be nonnegative")}
 	}
-	pf, err := fleetPreflight(f.file, errOut, "apply", f.waitForServer, f.environment)
+	pf, err := fleetPreflightMode(f.file, errOut, "apply", f.waitForServer, f.environment, !f.adopt)
 	if err != nil {
 		return err
 	}

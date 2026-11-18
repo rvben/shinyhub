@@ -5,12 +5,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/db"
 )
 
 const (
+	hdrIfAppID            = "X-Shinyhub-If-App-Id"
 	hdrIfContentDigest    = "X-Shinyhub-If-Content-Digest"
 	hdrIfManagedBy        = "X-Shinyhub-If-Managed-By"
 	hdrIfResourceRevision = "X-Shinyhub-If-Resource-Revision"
@@ -96,6 +98,10 @@ func appResourceRevision(app *db.App) string {
 // impose no condition (backward compatible). An If-Managed-By header present
 // with an empty value asserts the app is currently unmanaged (NULL).
 func checkAppPreconditions(w http.ResponseWriter, r *http.Request, app *db.App) (conflict bool) {
+	if want := r.Header.Get(hdrIfAppID); want != "" && strconv.FormatInt(app.ID, 10) != want {
+		writeError(w, http.StatusConflict, "precondition failed: app identity changed (re-run plan)")
+		return true
+	}
 	if want := r.Header.Get(hdrIfResourceRevision); want != "" {
 		if current := appResourceRevision(app); current != want {
 			writeError(w, http.StatusConflict,

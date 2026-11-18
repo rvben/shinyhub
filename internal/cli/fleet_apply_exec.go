@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,6 +46,7 @@ type convergeOpts struct {
 	fleetState               bool   // server persists per-app declaration/convergence state
 	fleetStateChangeTracking bool   // server distinguishes a no-op check from a desired-state change
 	redeployOutcome          bool   // server reports the outcome of each settings redeploy
+	expectedAppID            int64  // set for an app with an entitlement preview
 	recoveryRevision         string // fresh resource fence for a matching-bundle repair
 }
 
@@ -339,7 +341,7 @@ func fleetDeployRunLabel(slug, schedule string) string {
 // applyConfigDrift patches exactly the drifted fleet-declared keys. A
 // "visibility" drift goes to the access endpoint; the numeric keys go to
 // PATCH /api/apps/{slug}. Both carry the same precondition.
-func applyConfigDrift(cfg *cliConfig, slug string, drift []fleet.ConfigDriftItem, declared fleet.Config, ifD, ifMB *string, runID string) error {
+func applyConfigDrift(cfg *cliConfig, slug string, drift []fleet.ConfigDriftItem, declared fleet.Config, ifD, ifMB *string, runID string, expectedAppID ...int64) error {
 	body := map[string]any{}
 	for _, c := range drift {
 		if strings.HasPrefix(c.Key, "env.") {
@@ -347,7 +349,7 @@ func applyConfigDrift(cfg *cliConfig, slug string, drift []fleet.ConfigDriftItem
 		}
 		switch c.Key {
 		case "visibility":
-			if err := patchAppAccess(cfg, slug, c.Desired, ifD, ifMB, runID); err != nil {
+			if err := patchAppAccess(cfg, slug, c.Desired, ifD, ifMB, runID, expectedAppID...); err != nil {
 				return err
 			}
 		case "hibernate_timeout_minutes":
@@ -416,7 +418,7 @@ func applyConfigDrift(cfg *cliConfig, slug string, drift []fleet.ConfigDriftItem
 			}
 		}
 	}
-	if err := patchApp(cfg, slug, body, ifD, ifMB, runID); err != nil {
+	if err := patchApp(cfg, slug, body, ifD, ifMB, runID, expectedAppID...); err != nil {
 		return err
 	}
 	return nil
@@ -425,9 +427,9 @@ func applyConfigDrift(cfg *cliConfig, slug string, drift []fleet.ConfigDriftItem
 // applyConfigDriftWithRetry gives transient server failures on the config-only
 // path the same retry budget deploy-bearing actions already receive. 4xx
 // validation/precondition responses are deterministic and never retried.
-func applyConfigDriftWithRetry(cfg *cliConfig, slug string, drift []fleet.ConfigDriftItem, declared fleet.Config, ifD, ifMB *string, runID string, retries int) (int, error) {
+func applyConfigDriftWithRetry(cfg *cliConfig, slug string, drift []fleet.ConfigDriftItem, declared fleet.Config, ifD, ifMB *string, runID string, retries int, expectedAppID ...int64) (int, error) {
 	for attempt := 1; ; attempt++ {
-		err := applyConfigDrift(cfg, slug, drift, declared, ifD, ifMB, runID)
+		err := applyConfigDrift(cfg, slug, drift, declared, ifD, ifMB, runID, expectedAppID...)
 		if err == nil || attempt > retries || !retryableFleetPatch(err) {
 			return attempt, err
 		}
@@ -500,7 +502,7 @@ func releaseAdoptReservation(cfg *cliConfig, slug string, prior *string, marker 
 		return fmt.Errorf("ownership reservation cannot be safely released without server preconditions")
 	}
 	m := marker
-	return patchManagedBy(cfg, slug, prior, nil, &m, opt.runID)
+	return patchManagedBy(cfg, slug, prior, nil, &m, opt.runID, opt.expectedAppID)
 }
 
 // convergeApp reconciles one app. It is total over fleet.Action; an
@@ -513,32 +515,20 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 	out, finishProgress := beginFleetApp(out, d.Slug)
 	defer func() { finishProgress(result) }()
 	start := time.Now()
-	res := applyResult{slug: d.Slug, action: d.Action, mutation: mutationNone}
+	res := applyResult{slug: d.Slug, action: fleet.Action(fleetReportedAction(d)), mutation: mutationNone}
 	res.warnings = append(res.warnings, d.RecoveryWarnings...)
+	if d.EntitlementsRetained {
+		res.warnings = append(res.warnings, omittedEntitlementPolicyWarning)
+	}
 	if d.RecoveryReason != "" {
 		res.note = d.RecoveryReason + ": republishing target producers and redeploying consumers"
 	}
+	if d.Entitlements != nil {
+		opt.expectedAppID = d.Entitlements.AppID
+		spec.ExpectedAppID = opt.expectedAppID
+	}
 	stateAlreadyRecorded := false
 	declaredState := fleet.DeclaredState(entry)
-	done := func(s applyStatus) applyResult {
-		res.status, res.duration = s, time.Since(start)
-		switch s {
-		case statusCreated, statusUpdated, statusDeleted, statusAdopted:
-			res.mutation = mutationCommitted
-		}
-		if opt.fleetState && !stateAlreadyRecorded && s != statusDeleted && s != statusSkipped {
-			var stateChanged *bool
-			if opt.fleetStateChangeTracking {
-				changed := s != statusUnchanged
-				stateChanged = &changed
-			}
-			if err := recordAppFleetState(cfg, d.Slug, fleetConvergenceInSync, d.LocalDigest, declaredState, "", opt.runID, stateChanged); err != nil {
-				res.status = statusFailed
-				res.err = fmt.Errorf("record fleet convergence: %w", err)
-			}
-		}
-		return res
-	}
 	fail := func(err error, attempts int) applyResult {
 		res.attempts, res.err, res.duration = attempts, err, time.Since(start)
 		if isConflictError(err) {
@@ -546,8 +536,10 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 		} else {
 			res.status = statusFailed
 		}
-		if opt.fleetState && !stateAlreadyRecorded {
-			_ = recordAppFleetState(cfg, d.Slug, fleetConvergenceIncomplete, d.LocalDigest, declaredState, err.Error(), opt.runID, nil)
+		// A policy-bearing create may have lost the slug race. Record failure
+		// only after the create response has identified the app we inserted.
+		if opt.fleetState && !stateAlreadyRecorded && (d.Entitlements == nil || opt.expectedAppID != 0) {
+			_ = recordAppFleetState(cfg, d.Slug, fleetConvergenceIncomplete, d.LocalDigest, declaredState, err.Error(), opt.runID, nil, opt.expectedAppID)
 			stateAlreadyRecorded = true
 		}
 		return res
@@ -572,6 +564,48 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 		if res.status == statusFailed && !isDiskQuotaError(err) && finalFailureKind(res) != deployfail.Capacity {
 			if tail, lerr := fetchLogTail(cfg, d.Slug, logTailLines); lerr == nil {
 				res.logTail = tail
+			}
+		}
+		return res
+	}
+	var createdPolicyAppID int64
+	var promotedPolicyDigest string
+	done := func(s applyStatus) applyResult {
+		if d.Entitlements != nil && s != statusDeleted && s != statusSkipped {
+			err := applyFleetEntitlements(cfg, d.Slug, marker, opt.runID, spec.Entitlements, *d.Entitlements, createdPolicyAppID)
+			if err != nil {
+				res.failureKind = "entitlement_policy_failed"
+				if isEntitlementOutcomeUnknown(err) {
+					res.failureKind = "entitlement_policy_outcome_unknown"
+					if res.mutation == mutationNone {
+						res.mutation = mutationUnknown
+					}
+				}
+				if promotedPolicyDigest != "" {
+					err = fmt.Errorf("reconcile entitlements after deploying %s: %w", promotedPolicyDigest, err)
+				} else {
+					err = fmt.Errorf("reconcile entitlements: %w", err)
+				}
+				return fail(err, res.attempts)
+			}
+			if s == statusUnchanged && len(d.Entitlements.Changes) != 0 {
+				s = statusUpdated
+			}
+		}
+		res.status, res.duration = s, time.Since(start)
+		switch s {
+		case statusCreated, statusUpdated, statusDeleted, statusAdopted:
+			res.mutation = mutationCommitted
+		}
+		if opt.fleetState && !stateAlreadyRecorded && s != statusDeleted && s != statusSkipped {
+			var stateChanged *bool
+			if opt.fleetStateChangeTracking {
+				changed := s != statusUnchanged
+				stateChanged = &changed
+			}
+			if err := recordAppFleetState(cfg, d.Slug, fleetConvergenceInSync, d.LocalDigest, declaredState, "", opt.runID, stateChanged, opt.expectedAppID); err != nil {
+				res.status = statusFailed
+				res.err = fmt.Errorf("record fleet convergence: %w", err)
 			}
 		}
 		return res
@@ -776,10 +810,10 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 			}
 			ifMB = &cur
 		}
-		if err := patchManagedBy(cfg, d.Slug, &marker, ifD, ifMB, opt.runID); err != nil {
+		if err := patchManagedBy(cfg, d.Slug, &marker, ifD, ifMB, opt.runID, opt.expectedAppID); err != nil {
 			return fail(err, 1)
 		}
-		res.mutation = mutationUnknown
+		res.mutation = mutationPartial
 		// A conditional ownership PATCH is sufficient when source and every
 		// declared setting already match. The digest and owner preconditions make
 		// this atomic with respect to the preflight observation, so no release or
@@ -791,8 +825,6 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 			backlogOpt := opt
 			backlogOpt.verifyHealth = false
 			if err := checkRedeployBacklog(cfg, d.Slug, entry, obs, backlogOpt, &resultWarningWriter{Writer: out, result: &res}); err != nil {
-				// Ownership was committed; the pool is not on its settings.
-				res.mutation = mutationPartial
 				return fail(err, 1)
 			}
 			res.attempts = 1
@@ -876,6 +908,7 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 			return failDeploy(err, attempts, state)
 		}
 		res.mutation = mutationPartial
+		promotedPolicyDigest = promoted
 		if ffErr := resolveDeployRuns(cfg, d.Slug, deployRuns, opt, &res, out); ffErr != nil {
 			return fail(ffErr, attempts)
 		}
@@ -905,6 +938,21 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 		return done(statusDeleted)
 
 	case fleet.ActionCreate:
+		if d.Entitlements != nil {
+			created, err := createAppForDeploy(cfg, d.Slug, entry.Visibility, declaredProject(entry.Config), spec.Availability, true, opt.runID)
+			if err != nil {
+				var status *httpStatusError
+				if errors.As(err, &status) && status.Status == http.StatusConflict {
+					err = &conflictError{slug: d.Slug, msg: "app appeared after preflight; run fleet plan again"}
+				} else {
+					res.mutation = mutationUnknown
+				}
+				return fail(err, 1)
+			}
+			createdPolicyAppID = created.ID
+			opt.expectedAppID, spec.ExpectedAppID = created.ID, created.ID
+			res.mutation = mutationPartial
+		}
 		promoted, attempts, committed, deployRuns, failed, err := deployWithRetry(
 			cfg, d.Slug, spec, entry.Visibility, declaredProject(entry.Config), opt,
 			&resultWarningWriter{Writer: out, result: &res}, "", "",
@@ -913,12 +961,13 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 		res.attemptsDetail = failed
 		if err != nil {
 			state := mutationUnknown
-			if committed {
+			if committed || createdPolicyAppID != 0 {
 				state = mutationPartial
 			}
 			return failDeploy(err, attempts, state)
 		}
 		res.mutation = mutationPartial
+		promotedPolicyDigest = promoted
 		if ffErr := resolveDeployRuns(cfg, d.Slug, deployRuns, opt, &res, out); ffErr != nil {
 			return fail(ffErr, attempts)
 		}
@@ -934,7 +983,7 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 				ifD = &p
 			}
 		}
-		if err := patchManagedBy(cfg, d.Slug, &marker, ifD, ifM, opt.runID); err != nil {
+		if err := patchManagedBy(cfg, d.Slug, &marker, ifD, ifM, opt.runID, opt.expectedAppID); err != nil {
 			return fail(fmt.Errorf("deployed but ownership marker was not stamped: %w", err), attempts)
 		}
 		// Apply the manifest's declared [app.config] to the freshly created app.
@@ -970,6 +1019,7 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 			return failDeploy(err, attempts, state)
 		}
 		res.mutation = mutationPartial
+		promotedPolicyDigest = promoted
 		if ffErr := resolveDeployRuns(cfg, d.Slug, deployRuns, opt, &res, out); ffErr != nil {
 			return fail(ffErr, attempts)
 		}
@@ -987,7 +1037,7 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 	case fleet.ActionUpdateConfig:
 		res.mutation = mutationUnknown
 		ifD, ifM := precondPtrs(opt, d.ServerDigest, marker)
-		attempts, err := applyConfigDriftWithRetry(cfg, d.Slug, d.ConfigDrift, fleet.EffectiveConfig(entry), ifD, ifM, opt.runID, opt.retries)
+		attempts, err := applyConfigDriftWithRetry(cfg, d.Slug, d.ConfigDrift, fleet.EffectiveConfig(entry), ifD, ifM, opt.runID, opt.retries, opt.expectedAppID)
 		if err != nil {
 			return fail(err, attempts)
 		}
@@ -1024,6 +1074,7 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 			return failDeploy(err, attempts, state)
 		}
 		res.mutation = mutationPartial
+		promotedPolicyDigest = promoted
 		if ffErr := resolveDeployRuns(cfg, d.Slug, deployRuns, opt, &res, out); ffErr != nil {
 			return fail(ffErr, attempts)
 		}

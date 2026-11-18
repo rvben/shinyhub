@@ -132,19 +132,21 @@ func validateFleetManifest(file string, data []byte) (*fleet.Manifest, []string)
 		// parse its shinyhub.toml exactly as the server does at deploy time.
 		if ps.Kind == fleet.SourceLocal {
 			localSources[app.Slug] = ps.LocalPath
+			spec, _, err := resolveFleetEntitlements(bundleBuildSpec{Dir: ps.LocalPath}, nil)
+			if err != nil {
+				msgs = append(msgs, fmt.Sprintf("app %q: shinyhub.toml: %v", app.Slug, err))
+				continue
+			}
 			if len(m.Environments) == 0 && len(app.Config.Env) > 0 {
-				if _, _, err := resolveEnvironmentBundle(bundleBuildSpec{Dir: ps.LocalPath}, app.Config); err != nil {
+				if _, _, err := resolveEnvironmentBundle(spec, app.Config); err != nil {
 					msgs = append(msgs, fmt.Sprintf("app %q: %v", app.Slug, err))
 				}
 			}
 			for _, name := range m.EnvironmentNames() {
 				merged := app.Environments[name].Config.Merge(app.Config)
-				if _, _, err := resolveEnvironmentBundle(bundleBuildSpec{Dir: ps.LocalPath}, merged, app.Environments[name].Config); err != nil {
+				if _, _, err := resolveEnvironmentBundle(spec, merged, app.Environments[name].Config); err != nil {
 					msgs = append(msgs, fmt.Sprintf("app %q environment %q: %v", app.Slug, name, err))
 				}
-			}
-			if _, err := loadFleetSourceManifest(ps.LocalPath); err != nil {
-				msgs = append(msgs, fmt.Sprintf("app %q: shinyhub.toml: %v", app.Slug, err))
 			}
 		}
 	}

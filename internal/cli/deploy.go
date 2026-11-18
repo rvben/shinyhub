@@ -23,6 +23,7 @@ import (
 	"github.com/rvben/shinyhub/internal/db"
 	deploypkg "github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/deployevent"
+	"github.com/rvben/shinyhub/internal/entitlementpolicy"
 	slugpkg "github.com/rvben/shinyhub/internal/slug"
 	"github.com/spf13/cobra"
 )
@@ -737,6 +738,13 @@ func prepareDeploymentForFlags(dir string, f *deployFlags) (*bundlePreview, *dep
 
 func deploymentBundleSpec(dir string, f *deployFlags) (bundleBuildSpec, error) {
 	spec := bundleBuildSpec{Dir: dir}
+	manifest, err := loadFleetSourceManifest(dir)
+	if err != nil {
+		return spec, err
+	}
+	if manifest != nil && manifest.Entitlements != nil {
+		return spec, fmt.Errorf("manifest entitlements require fleet apply")
+	}
 	if f == nil || len(f.bundleInputs) == 0 {
 		return spec, nil
 	}
@@ -1215,6 +1223,11 @@ func ensureAppCoreWithAvailability(cfg *cliConfig, slug, visibility, project str
 		return httpError(cfg.Token, "check app "+slug, resp, checkBody)
 	}
 
+	_, err = createAppForDeploy(cfg, slug, visibility, project, availability, false, runIDs...)
+	return err
+}
+
+func createAppForDeploy(cfg *cliConfig, slug, visibility, project string, availability *string, requireID bool, runIDs ...string) (*db.App, error) {
 	createBody := map[string]string{"slug": slug, "name": slug}
 	if availability != nil {
 		createBody["availability"] = *availability
@@ -1231,12 +1244,12 @@ func ensureAppCoreWithAvailability(cfg *cliConfig, slug, visibility, project str
 	}
 	bodyBytes, err := json.Marshal(createBody)
 	if err != nil {
-		return fmt.Errorf("encode create body: %w", err)
+		return nil, fmt.Errorf("encode create body: %w", err)
 	}
 	createReq, err := http.NewRequest("POST", cfg.Host+"/api/apps",
 		bytes.NewReader(bodyBytes))
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+		return nil, fmt.Errorf("build request: %w", err)
 	}
 	createReq.Header.Set("Authorization", authHeader(cfg.Token))
 	createReq.Header.Set("Content-Type", "application/json")
@@ -1245,7 +1258,7 @@ func ensureAppCoreWithAvailability(cfg *cliConfig, slug, visibility, project str
 	}
 	cr, err := httpClient.Do(createReq)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer cr.Body.Close()
 	if cr.StatusCode != 201 {
@@ -1253,9 +1266,16 @@ func ensureAppCoreWithAvailability(cfg *cliConfig, slug, visibility, project str
 		// Surface the server's `{"error": "..."}` envelope so the user gets
 		// enough context to diagnose quota / permission / validation failures;
 		// a lapsed session is reported as a re-login hint instead.
-		return httpError(cfg.Token, "create app "+slug, cr, raw)
+		return nil, httpError(cfg.Token, "create app "+slug, cr, raw)
 	}
-	return nil
+	if requireID {
+		var created db.App
+		if err := json.NewDecoder(cr.Body).Decode(&created); err != nil || created.ID <= 0 || created.Slug != slug {
+			return nil, fmt.Errorf("create app %s: invalid app identity in response", slug)
+		}
+		return &created, nil
+	}
+	return nil, nil
 }
 
 // gitClone shallow-clones repoURL at the given branch into a temp directory
@@ -1326,10 +1346,12 @@ type bundleSkippedPaths struct {
 }
 
 type bundleBuildSpec struct {
-	Availability *string // initial fleet exposure, outside content/digest; existing apps use config PATCH
-	Manifest     []byte  // optional resolved fleet environment manifest
-	Dir          string
-	Inputs       []bundle.FileInputSnapshot
+	ExpectedAppID int64                    // identity fence for fleet uploads with an entitlement preview
+	Entitlements  entitlementpolicy.Policy // app policy sent separately from the bundle
+	Availability  *string                  // initial fleet exposure, outside content/digest; existing apps use config PATCH
+	Manifest      []byte                   // optional resolved fleet environment manifest
+	Dir           string
+	Inputs        []bundle.FileInputSnapshot
 }
 
 func zipDir(dir string) (*bytes.Buffer, string, error) {

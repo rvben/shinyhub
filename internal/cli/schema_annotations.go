@@ -460,6 +460,9 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	"apps entitlements define": {Mutating: mut, OutputFields: []fieldSpec{
 		{Name: "status", Type: "string"}, {Name: "slug", Type: "string"}, {Name: "entitlement", Type: "string"},
 	}},
+	"apps entitlements relinquish": {Mutating: mut, OutputFields: []fieldSpec{
+		{Name: "status", Type: "string"}, {Name: "slug", Type: "string"}, {Name: "fleet_id", Type: "string"},
+	}},
 	"apps entitlements delete": {Mutating: mut, OutputFields: []fieldSpec{
 		{Name: "status", Type: "string"}, {Name: "slug", Type: "string"}, {Name: "entitlement", Type: "string"},
 	}},
@@ -468,11 +471,11 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	"apps entitlements group-grant":  {Mutating: mut, OutputFields: entitlementMutationFields},
 	"apps entitlements group-revoke": {Mutating: mut, OutputFields: entitlementMutationFields},
 	"apps entitlements list": {Mutating: ro, OutputFields: []fieldSpec{
-		{Name: "name", Type: "string"}, {Name: "description", Type: "string"},
+		{Name: "name", Type: "string"}, {Name: "description", Type: "string"}, {Name: "managed_by", Type: "string"},
 	}, EnvelopeFields: entitlementListEnvelope},
 	"apps entitlements grants": {Mutating: ro, OutputFields: []fieldSpec{
 		{Name: "entitlement", Type: "string"}, {Name: "source", Type: "string"},
-		{Name: "user_id", Type: "integer"}, {Name: "username", Type: "string"}, {Name: "group", Type: "string"},
+		{Name: "user_id", Type: "integer"}, {Name: "username", Type: "string"}, {Name: "group", Type: "string"}, {Name: "managed_by", Type: "string"},
 	}, EnvelopeFields: entitlementListEnvelope},
 	"apps entitlements effective": {Mutating: ro, OutputFields: []fieldSpec{
 		{Name: "status", Type: "string"}, {Name: "slug", Type: "string"}, {Name: "user_id", Type: "integer"},
@@ -976,6 +979,8 @@ var schemaAnnotations = map[string]cmdAnnotation{
 
 	"fleet init": {Mutating: mut},
 	"fleet apply": {Mutating: mut, Cardinality: "bounded", OutputFields: []fieldSpec{
+		{Name: "entitlements", Type: "object", Desc: "per-app changes and unmanaged observations for the declared entitlement policy"},
+		{Name: "action", Type: "string", Desc: "per-app convergence action, including update(entitlements) for policy-only changes"},
 		{Name: "recovery_reason", Type: "string", Desc: "recover-failed when matching content requires corrective deployment to repair an unresolved deployment compatibility barrier"},
 		{Name: "failure_kind", Type: "string", Desc: "stable failed-app classification: deploy kinds plus producer_in_progress, warm_wait_timeout, warm_state_unavailable, warm_deploy_run_failed, warm_bundle_not_ready, warm_restart_failed, schedule_stale, schedule_producer_mismatch, schedule_manifest_mismatch, and schedule_state_unavailable"},
 		{Name: "attempt_details", Type: "array", Desc: "one entry per failed deploy attempt {attempt int, failure_kind string, error string}; present whenever any attempt failed, including a deploy that succeeded on retry"},
@@ -990,6 +995,8 @@ var schemaAnnotations = map[string]cmdAnnotation{
 	}, Notes: "Per-app results carry failure_kind and failed-attempt details. --wait-for-warm asks the server to reconcile each persisted deploy-trigger policy after every non-delete action, including unchanged apps, then waits for the exact obligation and fails closed when provenance is unavailable. --restart-after-warm cycles replicas only after this producer-level postcondition passes. --verify-schedules itself dispatches no run but is a postcondition of the mutating fleet apply command; use fleet verify for a wholly read-only audit. --verify-health extends serving-health checks to unchanged apps; intentionally stopped apps remain excluded. --concurrency bounds parallel deploys, and every changed app is health-waited within --health-timeout."},
 	"fleet validate": {Mutating: ro},
 	"fleet plan": {Mutating: ro, OutputFields: []fieldSpec{
+		{Name: "entitlements", Type: "object", Desc: "per-app changes and unmanaged observations for the declared entitlement policy"},
+		{Name: "action", Type: "string", Desc: "per-app convergence action, including update(entitlements) for policy-only changes"},
 		{Name: "recovery_reason", Type: "string", Desc: "recover-failed when matching content requires corrective deployment to repair an unresolved deployment compatibility barrier"},
 	}},
 	"fleet dev": {Mutating: ro, Streaming: true,

@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/rvben/shinyhub/internal/entitlementpolicy"
 	"github.com/rvben/shinyhub/internal/fleet"
 )
 
@@ -299,7 +300,7 @@ func canonicalFleetAction(action fleet.Action) planAction {
 	switch action {
 	case fleet.ActionCreate:
 		return planActionCreate
-	case fleet.ActionUpdateSource, fleet.ActionUpdateConfig, fleet.ActionUpdateSourceConfig:
+	case fleet.ActionUpdateSource, fleet.ActionUpdateConfig, fleet.ActionUpdateSourceConfig, fleet.ActionUpdateEntitlements:
 		return planActionUpdate
 	case fleet.ActionAdopt:
 		return planActionAdopt
@@ -325,7 +326,7 @@ func fleetProjectPlanResource(project fleet.ProjectDiff) planResource {
 }
 
 func fleetAppPlanResource(app fleet.AppDiff, fleetID string) planResource {
-	action := canonicalFleetAction(app.Action)
+	action := canonicalFleetAction(fleet.Action(fleetReportedAction(app)))
 	resource := planResource{Kind: "app", Name: app.Slug, Action: action, Changes: []planChange{}, Impacts: []planImpact{}, Notes: []string{}}
 
 	if (app.Action == fleet.ActionUpdateSource || app.Action == fleet.ActionUpdateSourceConfig) && app.RecoveryReason == "" {
@@ -375,8 +376,38 @@ func fleetAppPlanResource(app fleet.AppDiff, fleetID string) planResource {
 	if app.Action == fleet.ActionCreate {
 		resource.Notes = append(resource.Notes, "new")
 	}
-	if app.Action == fleet.ActionUnchanged {
+	if action == planActionUnchanged {
 		resource.Notes = append(resource.Notes, "unchanged")
+	}
+	if app.Entitlements != nil {
+		for _, change := range app.Entitlements.Changes {
+			field := "entitlement " + change.Name
+			if change.Group != "" {
+				field += " for group " + change.Group
+			}
+			item := planChange{Field: field, Action: planActionUpdate}
+			switch change.Action {
+			case entitlementpolicy.Define:
+				item.Current = value(planValueString, change.Previous)
+				item.Planned = value(planValueString, change.Description)
+			case entitlementpolicy.Grant:
+				item.Action, item.Planned = planActionCreate, value(planValueString, "grant")
+			case entitlementpolicy.Delete, entitlementpolicy.Revoke:
+				item.Action, item.Current = planActionDelete, value(planValueString, change.Action)
+			default:
+				item.Planned = value(planValueString, change.Action+" to "+change.Owner)
+			}
+			resource.Changes = append(resource.Changes, item)
+		}
+		for _, observation := range app.Entitlements.Unmanaged {
+			note := observation.Name + " (" + observation.Owner + ")"
+			if observation.Action == "direct_grants_retained" {
+				note += fmt.Sprintf(" retains %s", plural(observation.DirectCount, "direct user grant"))
+			} else if observation.Group != "" {
+				note += " for group " + observation.Group
+			}
+			resource.Notes = append(resource.Notes, "unmanaged entitlement: "+note)
+		}
 	}
 	if app.RecoveryReason != "" {
 		resource.Notes = append(resource.Notes, app.RecoveryReason+": republish target producers and redeploy consumers; may require --allow-downtime")

@@ -24,7 +24,9 @@ func entitlementError(w http.ResponseWriter, r *http.Request, err error) {
 		writeError(w, http.StatusNotFound, "app, entitlement, or user not found")
 	case errors.Is(err, db.ErrInvalidEntitlement):
 		writeError(w, http.StatusBadRequest, "use an entitlement name of 1–64 lowercase letters, digits, underscores or hyphens starting with a letter; description at most 512 bytes; specify exactly one valid user or group")
-	case errors.Is(err, db.ErrEntitlementLimit), errors.Is(err, db.ErrEntitlementInUse):
+	case errors.Is(err, db.ErrEntitlementPolicyValidation):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, db.ErrEntitlementLimit), errors.Is(err, db.ErrEntitlementInUse), errors.Is(err, db.ErrEntitlementOwnership), errors.Is(err, db.ErrEntitlementStale):
 		writeError(w, http.StatusConflict, err.Error())
 	default:
 		writeInternal(w, r, "app entitlement operation failed", err)

@@ -5,13 +5,16 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+
+	"github.com/rvben/shinyhub/internal/entitlementpolicy"
 )
 
 type Environment struct {
 	Host string `toml:"host"`
 }
 type AppEnvironment struct {
-	Config OverlayConfig `toml:"config"`
+	Config       OverlayConfig            `toml:"config"`
+	Entitlements entitlementpolicy.Policy `toml:"entitlements"`
 }
 
 // OverlayConfig deliberately exposes only sizing, lifecycle and environment variables.
@@ -151,6 +154,9 @@ func validateEnvironments(file string, m *Manifest) []Problem {
 		for _, name := range names {
 			if _, ok := m.Environments[name]; !ok {
 				probs = append(probs, Problem{File: file, Msg: fmt.Sprintf("app %q: undeclared environment %q", app.Slug, name)})
+			}
+			if err := app.Environments[name].Entitlements.Validate(); err != nil {
+				probs = append(probs, Problem{File: file, Msg: fmt.Sprintf("app %q environment %q entitlement policy: %v", app.Slug, name, err)})
 			}
 			merged := app.Environments[name].Config.Merge(app.Config)
 			probs = append(probs, validateConfig(file, fmt.Sprintf("app %q environment %q", app.Slug, name), &merged)...)

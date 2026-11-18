@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/rvben/shinyhub/internal/availability"
+	"github.com/rvben/shinyhub/internal/entitlementpolicy"
 )
 
 // Action is the reconcile verb for one app.
@@ -16,6 +17,7 @@ const (
 	ActionAdopt              Action = "adopt"
 	ActionUpdateSource       Action = "update(source)"
 	ActionUpdateConfig       Action = "update(config)"
+	ActionUpdateEntitlements Action = "update(entitlements)" // reporting only
 	ActionUpdateSourceConfig Action = "update(source+config)"
 	ActionUnchanged          Action = "unchanged"
 	ActionDelete             Action = "delete"
@@ -119,6 +121,8 @@ type UnmanagedConfigItem struct {
 
 // AppDiff is the planned action for one app.
 type AppDiff struct {
+	Entitlements         *entitlementpolicy.Preview
+	EntitlementsRetained bool
 	AvailabilityExposure *availability.Exposure
 	Slug                 string
 	Action               Action

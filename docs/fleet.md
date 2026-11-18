@@ -720,6 +720,29 @@ returns `0` (overview printed) or `3` (transport / auth error). `--json` and
 `-q/--quiet` behave as elsewhere. Use it for a quick ownership overview;
 use `plan` when you want the diff against a specific manifest.
 
+## App entitlement policy
+
+`fleet plan` and `fleet apply --dry-run` preview the app's `[entitlements]`
+policy, including ownership changes and grants that stay manual. Entitlement
+changes count toward `--detailed-exitcode`. `fleet apply` can change a policy
+without rebuilding the app and discards stale previews if the policy or app
+identity changed during convergence. Add `--adopt` to plan or dry-run to
+preview entitlement policy for apps the fleet must adopt first.
+
+Configure a different policy for an environment under
+`[app.environments.<env>.entitlements]` in the fleet manifest. This table
+replaces the entire source policy for that environment.
+
+```toml
+[app.environments.sbx.entitlements.power_user]
+groups = ["finance-test"]
+```
+
+An explicit empty environment table clears that fleet's entitlement policy for
+the selected environment. An absent override inherits the source table. See
+[managing entitlements with a fleet](entitlements.md#manage-entitlements-with-a-fleet)
+for adoption, revocation, and manual exceptions.
+
 ## Dashboard surface
 
 The dashboard reflects fleet ownership read-only. It is a status view, not a

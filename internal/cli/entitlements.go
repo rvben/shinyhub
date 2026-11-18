@@ -41,6 +41,25 @@ func newAppsEntitlementsCmd() *cobra.Command {
 			return runEntitlementMutation(cmd, http.MethodDelete, entitlementPath(args[0], args[1]), nil, "deleted", args)
 		}}
 	cmd.AddCommand(define, remove)
+	cmd.AddCommand(&cobra.Command{
+		Use: "relinquish <slug> <fleet-id>", Short: "Return a fleet's entitlement policy to manual management without changing effective grants",
+		Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
+			path := "/api/apps/" + url.PathEscape(args[0]) + "/entitlement-policy/relinquish"
+			cfg, err := loadConfig()
+			if err != nil {
+				return err
+			}
+			body, err := json.Marshal(fleetEntitlementRequest{Owner: "fleet:" + args[1]})
+			if err != nil {
+				return err
+			}
+			if _, err = doAPI(cfg, apiCall{Method: http.MethodPost, Path: path, Body: body, Op: "relinquish entitlement policy"}); err != nil {
+				return err
+			}
+			return renderAction(cmd, "relinquished", map[string]any{"slug": args[0], "fleet_id": args[1]},
+				fmt.Sprintf("%s: relinquished entitlement policy for fleet %s", args[0], args[1]))
+		},
+	})
 	for _, group := range []bool{false, true} {
 		for _, grant := range []bool{true, false} {
 			name, action, method := "revoke", "revoked", http.MethodDelete

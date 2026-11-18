@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/rvben/shinyhub/internal/availability"
+	"github.com/rvben/shinyhub/internal/entitlementpolicy"
 	"github.com/rvben/shinyhub/internal/fleet"
 	"github.com/spf13/cobra"
 )
@@ -81,7 +82,7 @@ func shortDigest(d string) string {
 // --detailed-exitcode exit code 2).
 func pending(diff []fleet.AppDiff, projects []fleet.ProjectDiff) bool {
 	for _, d := range diff {
-		if d.Action != fleet.ActionUnchanged {
+		if fleetReportedAction(d) != string(fleet.ActionUnchanged) {
 			return true
 		}
 	}
@@ -238,18 +239,19 @@ type jsonDigest struct {
 }
 
 type jsonApp struct {
-	AvailabilityExposure *availability.Exposure `json:"availability_exposure,omitempty"`
-	Slug                 string                 `json:"slug"`
-	Action               string                 `json:"action"`
-	RecoveryReason       string                 `json:"recovery_reason,omitempty"`
-	Owned                bool                   `json:"owned"`
-	Digest               jsonDigest             `json:"digest"`
-	ConfigDrift          []jsonDriftItem        `json:"config_drift"`
-	Unmanaged            []jsonUnmanagedItem    `json:"unmanaged"`
-	AdoptRequired        bool                   `json:"adopt_required"`
-	AdoptFrom            string                 `json:"adopt_from,omitempty"`
-	PruneEligible        bool                   `json:"prune_eligible"`
-	Warnings             []string               `json:"warnings,omitempty"`
+	Entitlements         *entitlementpolicy.Plan `json:"entitlements,omitempty"`
+	AvailabilityExposure *availability.Exposure  `json:"availability_exposure,omitempty"`
+	Slug                 string                  `json:"slug"`
+	Action               string                  `json:"action"`
+	RecoveryReason       string                  `json:"recovery_reason,omitempty"`
+	Owned                bool                    `json:"owned"`
+	Digest               jsonDigest              `json:"digest"`
+	ConfigDrift          []jsonDriftItem         `json:"config_drift"`
+	Unmanaged            []jsonUnmanagedItem     `json:"unmanaged"`
+	AdoptRequired        bool                    `json:"adopt_required"`
+	AdoptFrom            string                  `json:"adopt_from,omitempty"`
+	PruneEligible        bool                    `json:"prune_eligible"`
+	Warnings             []string                `json:"warnings,omitempty"`
 }
 
 type jsonProject struct {
@@ -349,7 +351,7 @@ func writeFleetPlanJSONWithFile(out interface{ Write([]byte) (int, error) }, m *
 			unmanaged = append(unmanaged, jsonUnmanagedItem{Key: u.Key, Server: u.Server, Default: u.Default})
 		}
 		apps = append(apps, jsonApp{
-			Slug: d.Slug, Action: string(d.Action), RecoveryReason: d.RecoveryReason, Owned: d.Owned,
+			Slug: d.Slug, Action: fleetReportedAction(d), Entitlements: fleetEntitlementPlan(d), RecoveryReason: d.RecoveryReason, Owned: d.Owned,
 			Digest:        jsonDigest{Local: d.LocalDigest, Server: d.ServerDigest},
 			ConfigDrift:   drift,
 			Unmanaged:     unmanaged,

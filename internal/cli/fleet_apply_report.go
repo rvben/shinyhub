@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/rvben/shinyhub/internal/deployfail"
+	"github.com/rvben/shinyhub/internal/entitlementpolicy"
 	"github.com/rvben/shinyhub/internal/fleet"
 )
 
@@ -651,6 +652,7 @@ func resultFailureKind(r applyResult) string {
 }
 
 type applyJSONApp struct {
+	Entitlements         *entitlementpolicy.Plan  `json:"entitlements,omitempty"`
 	Slug                 string                   `json:"slug"`
 	AppURL               string                   `json:"app_url"`
 	Action               string                   `json:"action"`
@@ -745,7 +747,7 @@ func writeFleetApplyJSONWithContext(out io.Writer, ctx applyReportContext, m *fl
 			unmanaged = append(unmanaged, jsonUnmanagedItem{Key: u.Key, Server: u.Server, Default: u.Default})
 		}
 		aj := applyJSONApp{
-			Slug: d.Slug, AppURL: host + "/app/" + d.Slug + "/", Action: string(d.Action), Owned: d.Owned,
+			Slug: d.Slug, AppURL: host + "/app/" + d.Slug + "/", Action: fleetReportedAction(d), Entitlements: fleetEntitlementPlan(d), Owned: d.Owned,
 			RecoveryReason: d.RecoveryReason,
 			Digest:         jsonDigest{Local: d.LocalDigest, Server: d.ServerDigest},
 			ConfigDrift:    drift,

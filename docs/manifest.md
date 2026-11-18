@@ -9,8 +9,14 @@ optional - bundles without one deploy exactly as before - but when present it
 is the canonical, declarative source of truth for the app's settings,
 post-deploy hooks, and scheduled jobs.
 
-Three sections are recognised: `[app]`, `[[hook]]`, and `[[schedule]]`. They
-are independent; any combination (including none) is valid.
+The manifest accepts `[app]`, `[[hook]]`, and `[[schedule]]` for runtime
+configuration, as well as `[access]` and `[tracing]` where applicable.
+Fleet sources can also declare `[entitlements]`, which
+[`fleet apply` reconciles separately](entitlements.md#manage-entitlements-with-a-fleet).
+Fleet removes that table from the uploaded manifest. The first addition or
+complete removal of the table may change the bundle digest once because of
+manifest serialization. Edits within an existing policy table, including
+clearing it by leaving an empty table, keep the runtime bundle digest stable.
 
 ```toml
 [app]

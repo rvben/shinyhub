@@ -145,6 +145,18 @@
       "path": "/api/apps/{slug}/entitlement-grants"
     },
     {
+      "method": "PUT",
+      "path": "/api/apps/{slug}/entitlement-policy"
+    },
+    {
+      "method": "POST",
+      "path": "/api/apps/{slug}/entitlement-policy/preview"
+    },
+    {
+      "method": "POST",
+      "path": "/api/apps/{slug}/entitlement-policy/relinquish"
+    },
+    {
       "method": "GET",
       "path": "/api/apps/{slug}/entitlements"
     },

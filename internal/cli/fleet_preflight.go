@@ -1,14 +1,17 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
+	policy "github.com/rvben/shinyhub/internal/entitlementpolicy"
 	"github.com/rvben/shinyhub/internal/fleet"
 )
 
@@ -42,6 +45,14 @@ type preflightResult struct {
 // (the EC2-churn case). On any error it removes temp clones itself and returns
 // a nil result; on success the caller owns cleanup via the returned closure.
 func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.Duration, environment ...string) (*preflightResult, error) {
+	explicit := ""
+	if len(environment) > 0 {
+		explicit = environment[0]
+	}
+	return fleetPreflightMode(file, errOut, cmdName, waitFor, explicit, true)
+}
+
+func fleetPreflightMode(file string, errOut io.Writer, cmdName string, waitFor time.Duration, explicit string, skipUnadopted bool) (*preflightResult, error) {
 	s := stylerFor(errOut)
 	var cleanups []func()
 	runCleanups := func() {
@@ -112,10 +123,7 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 		fmt.Fprintf(errOut, "  %s not authenticated: %v\n     run 'shinyhub connect <url>' or pass --config\n", s.failMark(), err)
 		return nil, &ExitCodeError{Code: 3, Err: err, Reported: true}
 	}
-	explicit := ""
-	if len(environment) > 0 {
-		explicit = environment[0]
-	}
+
 	if err := m.ResolveEnvironment(cfg.Host, explicit); err != nil {
 		return nil, &ExitCodeError{Code: 1, Kind: KindValidation, Err: err}
 	}
@@ -166,6 +174,16 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 			spec = bundleBuildSpec{Dir: dir}
 			bundles[app.Slug] = spec
 		}
+		spec, desired, err := resolveFleetEntitlements(spec, app.Environments[m.ResolvedEnvironment].Entitlements)
+		if err != nil {
+			resolveProblems = append(resolveProblems, fmt.Sprintf("app %q: %v", app.Slug, err))
+			continue
+		}
+		spec.Entitlements = desired
+		if desired != nil && !caps.FleetEntitlements {
+			resolveProblems = append(resolveProblems, fmt.Sprintf("app %q: server does not support fleet entitlement policies; upgrade the server", app.Slug))
+			continue
+		}
 		var resolvedManifest *deploy.Manifest
 		if m.ResolvedEnvironment != "" || len(app.Config.Env) > 0 || app.Config.Availability != nil {
 			var err error
@@ -188,10 +206,15 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 			continue
 		}
 		localDigests[app.Slug] = preview.Digest
-		bm, merr := loadFleetSourceManifest(dir)
-		if m.ResolvedEnvironment != "" || len(app.Config.Env) > 0 || app.Config.Availability != nil {
+		var bm *deploy.Manifest
+		var merr error
+		switch {
+		case resolvedManifest != nil:
 			bm = resolvedManifest
-			merr = nil
+		case spec.Manifest != nil:
+			bm, merr = deploy.ParseManifest(spec.Manifest)
+		default:
+			bm, merr = loadFleetSourceManifest(dir)
 		}
 		if merr != nil {
 			resolveProblems = append(resolveProblems, fmt.Sprintf("app %q: %v", app.Slug, merr))
@@ -233,10 +256,12 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 		return nil, &ExitCodeError{Code: 1, Err: fmt.Errorf("%d source problem(s)", len(resolveProblems)), Reported: true}
 	}
 
+	appsBySlug := make(map[string]db.App, len(apps))
 	observed := make([]fleet.ObservedApp, 0, len(apps))
 	observedBySlug := make(map[string]fleet.ObservedApp, len(apps))
 	for _, a := range apps {
 		oa := observedFromApp(a)
+		appsBySlug[a.Slug] = a
 		for _, entry := range m.Apps {
 			if entry.Slug == a.Slug {
 				var err error
@@ -264,6 +289,64 @@ func fleetPreflight(file string, errOut io.Writer, cmdName string, waitFor time.
 		observedBySlug[a.Slug] = oa
 	}
 	diff := fleet.Diff(m, localDigests, observed)
+	if caps.FleetEntitlements {
+		owner := "fleet:" + m.FleetID
+		for i := range diff {
+			d := &diff[i]
+			desired := bundles[d.Slug].Entitlements
+			if d.Action == fleet.ActionDelete {
+				continue
+			}
+			if skipUnadopted && d.Action == fleet.ActionAdopt {
+				if appsBySlug[d.Slug].ManagedEntitlementPolicy {
+					d.Warnings = append(d.Warnings, "relinquish the previous fleet's entitlement policy before adoption")
+				} else if desired != nil {
+					d.Warnings = append(d.Warnings, "entitlement policy preview requires --adopt")
+				}
+				continue
+			}
+			if desired == nil && d.AdoptFrom == "" {
+				if d.Owned && appsBySlug[d.Slug].ManagedEntitlementPolicy {
+					d.EntitlementsRetained = true
+					d.Warnings = append(d.Warnings, omittedEntitlementPolicyWarning)
+				}
+				continue
+			}
+			if desired == nil && !appsBySlug[d.Slug].ManagedEntitlementPolicy {
+				continue
+			}
+			if d.Action == fleet.ActionCreate {
+				plan, err := (policy.State{}).Preview(desired, owner)
+				if err != nil {
+					runCleanups()
+					return nil, &ExitCodeError{Code: 1, Kind: KindValidation, Err: err}
+				}
+				d.Entitlements = &policy.Preview{Plan: plan}
+				continue
+			}
+			preview, err := previewFleetEntitlements(cfg, d.Slug, owner, desired)
+			if err != nil {
+				runCleanups()
+				kind, code := classify(err)
+				var status *httpStatusError
+				if errors.As(err, &status) && (status.Status == http.StatusConflict || status.Status == http.StatusBadRequest) {
+					kind, code = KindValidation, 1
+				}
+				return nil, &ExitCodeError{Code: code, Kind: kind, Err: err}
+			}
+			if preview.AppID != appsBySlug[d.Slug].ID {
+				runCleanups()
+				return nil, &ExitCodeError{Code: 1, Kind: KindValidation, Err: fmt.Errorf("app %q was replaced during preflight; run fleet plan again", d.Slug)}
+			}
+			if preview.Retained {
+				d.EntitlementsRetained = true
+				d.Warnings = append(d.Warnings, omittedEntitlementPolicyWarning)
+			}
+			if desired != nil {
+				d.Entitlements = &preview
+			}
+		}
+	}
 	if caps.RedeployOutcome {
 		for i := range diff {
 			if o, ok := observedBySlug[diff[i].Slug]; ok {

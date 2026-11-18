@@ -47,6 +47,7 @@ type serverCapabilities struct {
 	AppAvailability           bool `json:"app_availability"`
 	BundleEnv                 bool `json:"bundle_env"`
 	RollingRestart            bool `json:"rolling_restart"`
+	FleetEntitlements         bool `json:"fleet_entitlements"`
 	ScheduleInputs            bool `json:"schedule_inputs"`
 	RuntimeCapabilities       bool `json:"runtime_capabilities"`
 	TrustedPublishing         bool `json:"trusted_publishing"`
@@ -93,6 +94,7 @@ func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 			AppAvailability:           true,
 			RollingRestart:            true,
 			ScheduleInputs:            true,
+			FleetEntitlements:         true,
 			RuntimeCapabilities:       true,
 			TrustedPublishing:         len(s.cfg.Auth.TrustedPublishers) > 0,
 			FleetPreconditions:        true,

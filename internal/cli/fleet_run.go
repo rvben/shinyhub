@@ -225,7 +225,7 @@ func updateFleetRun(cfg *cliConfig, runID, status string, exitCode *int, reason 
 // the prior successful baseline. stateChanged is sent only when the server
 // advertises fleet_state_change_tracking, keeping the current CLI compatible
 // with older servers whose strict request decoder rejects unknown fields.
-func recordAppFleetState(cfg *cliConfig, slug, status, digest string, declared []fleet.ConfigDriftItem, message, runID string, stateChanged *bool) error {
+func recordAppFleetState(cfg *cliConfig, slug, status, digest string, declared []fleet.ConfigDriftItem, message, runID string, stateChanged *bool, expectedAppID ...int64) error {
 	values := make([]map[string]string, 0, len(declared))
 	for _, item := range declared {
 		values = append(values, map[string]string{"key": item.Key, "desired": item.Desired})
@@ -246,6 +246,9 @@ func recordAppFleetState(cfg *cliConfig, slug, status, digest string, declared [
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if len(expectedAppID) != 0 {
+		setExpectedAppID(req, expectedAppID[0])
+	}
 	return sendFleetMutation(cfg, req, slug, nil, nil, runID)
 }
 

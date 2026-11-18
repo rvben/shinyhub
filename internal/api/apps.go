@@ -32,6 +32,7 @@ import (
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/deployevent"
 	"github.com/rvben/shinyhub/internal/deployfail"
+	"github.com/rvben/shinyhub/internal/entitlementpolicy"
 	"github.com/rvben/shinyhub/internal/fsx"
 	"github.com/rvben/shinyhub/internal/lifecycle"
 	"github.com/rvben/shinyhub/internal/process"
@@ -137,6 +138,11 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		writeInternal(w, r, "failed to load deployment repair state", err)
 		return
 	}
+	policyByApp, err := s.store.ManagedEntitlementPolicyForApps(appIDs)
+	if err != nil {
+		writeInternal(w, r, "failed to load entitlement policy ownership", err)
+		return
+	}
 	producerByApp, err := s.store.ProducerCompatibilityForApps(appIDs)
 	if err != nil {
 		writeInternal(w, r, "failed to load producer compatibility state", err)
@@ -159,6 +165,7 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		} else {
 			_, a.CanManage = managedSlugs[a.Slug]
 		}
+		a.ManagedEntitlementPolicy = a.CanManage && policyByApp[a.ID]
 		s.decorateAvailability(a)
 		replicas := s.liveReplicaView(a.Slug, replicasByApp[a.ID])
 		pool := s.elasticObservation(a.Slug)
@@ -451,6 +458,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		Access:       access,
 	}
 	var projectCreated bool
+	var createdAppID int64
 	var err error
 	if development != nil {
 		projectCreated, err = s.store.CreateDevelopmentApp(db.CreateDevelopmentAppParams{
@@ -459,7 +467,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 			DefaultReplicas: s.cfg.Runtime.DefaultReplicas,
 		})
 	} else {
-		projectCreated, err = s.store.CreateApp(appParams)
+		createdAppID, projectCreated, err = s.store.CreateAppWithID(appParams)
 	}
 	if err != nil {
 		if errors.Is(err, db.ErrSlugTaken) {
@@ -487,7 +495,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	// matches the default).
 	if development == nil && s.cfg.Runtime.DefaultReplicas > 1 {
 		created, err := s.store.GetAppBySlug(req.Slug)
-		if err == nil {
+		if err == nil && created.ID == createdAppID {
 			if err := s.store.UpdateAppReplicas(created.ID, s.cfg.Runtime.DefaultReplicas); err != nil {
 				reqLog(r).Error("set default replicas on create", "slug", req.Slug, "err", err)
 			}
@@ -497,6 +505,10 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	app, err := s.store.GetAppBySlug(req.Slug)
 	if err != nil {
 		writeInternal(w, r, "internal server error", err)
+		return
+	}
+	if createdAppID != 0 && app.ID != createdAppID {
+		writeError(w, http.StatusConflict, "app was replaced during creation")
 		return
 	}
 	s.logAuditEvent(r, db.AuditEventParams{
@@ -1575,7 +1587,17 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if setManagedBy {
-		if err := s.store.SetAppManagedBy(slug, newManagedBy); err != nil {
+		var err error
+		if newManagedBy != nil && entitlementpolicy.ValidOwner(*newManagedBy) {
+			err = s.store.SetAppFleetOwner(app.ID, *newManagedBy)
+		} else {
+			err = s.store.SetAppManagedBy(slug, newManagedBy)
+		}
+		if errors.Is(err, db.ErrEntitlementOwnership) {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		if err != nil {
 			if errors.Is(err, db.ErrNotFound) {
 				writeError(w, http.StatusNotFound, "not found")
 				return

@@ -16,9 +16,13 @@ import (
 // bytes feed the digest, rehearsal and upload; the source tree stays untouched.
 func resolveEnvironmentBundle(spec bundleBuildSpec, c fleet.Config, overlays ...fleet.OverlayConfig) (bundleBuildSpec, *deploy.Manifest, error) {
 	spec.Availability = c.Availability
-	data, err := fleetSourceManifestData(spec.Dir)
-	if err != nil && !os.IsNotExist(err) {
-		return spec, nil, err
+	data := spec.Manifest
+	if data == nil {
+		var err error
+		data, err = fleetSourceManifestData(spec.Dir)
+		if err != nil {
+			return spec, nil, err
+		}
 	}
 	// Validate the source before overlaying: an override must never hide malformed TOML.
 	if len(data) > 0 {
@@ -131,5 +135,5 @@ func loadFleetSourceManifest(dir string) (*deploy.Manifest, error) {
 	if err != nil || len(data) == 0 {
 		return nil, err
 	}
-	return deploy.ParseManifest(data)
+	return deploy.ParseSourceManifest(data)
 }

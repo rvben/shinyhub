@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 
 	"github.com/rvben/shinyhub/internal/fleet"
 )
@@ -57,7 +58,7 @@ func serverErrorMessage(body []byte, status string) string {
 // null managed_by / hibernate_timeout_minutes is the server's "clear it"
 // signal. An empty field set is a no-op success (callers can build a body
 // unconditionally and let this skip the call).
-func patchApp(cfg *cliConfig, slug string, fields map[string]any, ifDigest, ifManagedBy *string, runID string) error {
+func patchApp(cfg *cliConfig, slug string, fields map[string]any, ifDigest, ifManagedBy *string, runID string, expectedAppID ...int64) error {
 	if len(fields) == 0 {
 		return nil
 	}
@@ -70,14 +71,17 @@ func patchApp(cfg *cliConfig, slug string, fields map[string]any, ifDigest, ifMa
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if len(expectedAppID) != 0 {
+		setExpectedAppID(req, expectedAppID[0])
+	}
 	return sendFleetMutation(cfg, req, slug, ifDigest, ifManagedBy, runID)
 }
 
 // patchManagedBy stamps (value = &"fleet:<id>") or clears (value = nil) the
 // ownership marker. A nil value marshals to JSON null, which the server reads
 // as "unmanaged".
-func patchManagedBy(cfg *cliConfig, slug string, value *string, ifDigest, ifManagedBy *string, runID string) error {
-	return patchApp(cfg, slug, map[string]any{"managed_by": value}, ifDigest, ifManagedBy, runID)
+func patchManagedBy(cfg *cliConfig, slug string, value *string, ifDigest, ifManagedBy *string, runID string, expectedAppID ...int64) error {
+	return patchApp(cfg, slug, map[string]any{"managed_by": value}, ifDigest, ifManagedBy, runID, expectedAppID...)
 }
 
 // autoscalePatchBody renders a declared fleet autoscale block as the PATCH
@@ -94,13 +98,16 @@ func autoscalePatchBody(a *fleet.AutoscaleConfig) map[string]any {
 }
 
 // patchAppAccess issues PATCH /api/apps/{slug}/access {"access": ...}.
-func patchAppAccess(cfg *cliConfig, slug, access string, ifDigest, ifManagedBy *string, runID string) error {
+func patchAppAccess(cfg *cliConfig, slug, access string, ifDigest, ifManagedBy *string, runID string, expectedAppID ...int64) error {
 	b, _ := json.Marshal(map[string]string{"access": access})
 	req, err := http.NewRequest("PATCH", cfg.Host+"/api/apps/"+slug+"/access", bytes.NewReader(b))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if len(expectedAppID) != 0 {
+		setExpectedAppID(req, expectedAppID[0])
+	}
 	return sendFleetMutation(cfg, req, slug, ifDigest, ifManagedBy, runID)
 }
 
@@ -112,4 +119,10 @@ func deleteFleetApp(cfg *cliConfig, slug string, ifDigest, ifManagedBy *string, 
 		return err
 	}
 	return sendFleetMutation(cfg, req, slug, ifDigest, ifManagedBy, runID)
+}
+
+func setExpectedAppID(req *http.Request, id int64) {
+	if id != 0 {
+		req.Header.Set("X-Shinyhub-If-App-Id", strconv.FormatInt(id, 10))
+	}
 }

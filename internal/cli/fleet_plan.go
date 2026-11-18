@@ -26,6 +26,7 @@ func (e *protocolError) Error() string { return e.op + ": " + e.err.Error() }
 func (e *protocolError) Unwrap() error { return e.err }
 
 type fleetPlanFlags struct {
+	adopt            bool
 	environment      string
 	file             string
 	detailedExitcode bool
@@ -55,6 +56,7 @@ func newFleetPlanCmd() *cobra.Command {
 			return runFleetPlan(cmd, f)
 		},
 	}
+	cmd.Flags().BoolVar(&f.adopt, "adopt", false, "Preview entitlement policy for apps requiring adoption")
 	cmd.Flags().StringVar(&f.environment, "environment", "", "Select a declared environment for an unbound host")
 	cmd.Flags().StringVarP(&f.file, "file", "f", defaultFleetManifest, "Path to the fleet manifest")
 	cmd.Flags().BoolVar(&f.detailedExitcode, "detailed-exitcode", false, "Exit 2 when changes are pending, 0 when none")
@@ -77,7 +79,7 @@ func runFleetPlan(cmd *cobra.Command, f *fleetPlanFlags) error {
 		f.jsonOutput = true
 	}
 	f.file = resolveFleetManifest(cmd, f.file, cmd.ErrOrStderr())
-	pf, err := fleetPreflight(f.file, cmd.ErrOrStderr(), "plan", f.waitForServer, f.environment)
+	pf, err := fleetPreflightMode(f.file, cmd.ErrOrStderr(), "plan", f.waitForServer, f.environment, !f.adopt)
 	if err != nil {
 		return err
 	}
@@ -204,6 +206,7 @@ type serverCaps struct {
 	FleetStateChangeTracking  bool   `json:"fleet_state_change_tracking"`
 	FleetRunLifecycle         bool   `json:"fleet_run_lifecycle"`
 	RollingRestart            bool   `json:"rolling_restart"`
+	FleetEntitlements         bool   `json:"fleet_entitlements"`
 	ScheduleInputs            bool   `json:"schedule_inputs"`
 	ScheduleDeployConvergence bool   `json:"schedule_deploy_convergence"`
 	ScheduleRefreshStale      bool   `json:"schedule_refresh_stale"`
