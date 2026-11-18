@@ -260,6 +260,20 @@ body.sidebar-collapsed #app-shell { grid-template-columns: var(--sidebar-w-colla
   [data-auth="loading"] #boot-splash { animation: none; opacity: 0.85; }
 }
 
+#dashboard-load-recovery {
+  margin: auto;
+  width: min(26rem, calc(100% - 2rem));
+  padding: 1.5rem;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  color: var(--text);
+}
+#dashboard-load-recovery::backdrop { background: rgb(var(--inset-rgb) / 80%); }
+#dashboard-load-title { font-size: var(--fs-section); line-height: 1.25; }
+#dashboard-load-detail { margin-block: 0.5rem 1rem; color: var(--text-soft); }
+#dashboard-load-retry { min-height: 44px; }
+
 #sidebar {
   position: sticky;
   top: var(--shinyhub-environment-height, 0px);

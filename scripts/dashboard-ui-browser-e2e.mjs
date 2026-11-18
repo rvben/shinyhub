@@ -15,6 +15,8 @@ const require=createRequire(root+'/loadtest/render/driver/package.json');
 const {chromium}=require('playwright');
 const now=new Date().toISOString(), ago=new Date(Date.now()-3600000).toISOString(), mb=1048576;
 let role='admin', mode='ready', delayedPath='';
+const bootModule = '/static/views/app-detail.js';
+let bootFault;
 const apps=[{slug:'forecast',name:'Regional forecast',description:'Explore regional demand and capacity forecasts.',status:'running',project:'analytics',project_slug:'analytics',can_manage:true,access:'private',replicas:2,replicas_running:2,deploy_count:3,current_version:'3',last_deployment_status:'succeeded',last_deployed_at:ago,framework:'shiny',runtime:'python',entrypoint:'app.py',memory_limit_mb:1024,cpu_quota_percent:100,autoscale_enabled:true,autoscale_min_replicas:1,autoscale_max_replicas:4,max_sessions_per_replica:20}, {slug:'revenue',name:'Revenue explorer',description:'Track performance across markets.',status:'sleeping',can_manage:true,access:'private',deploy_count:1,project:'analytics',project_slug:'analytics'}, {slug:'reports',name:'Weekly reports and financial reconciliation',status:'crashed',can_manage:true,access:'private',deploy_count:2,last_deployment_status:'failed'}];
 const reps=[0,1].map(index=>({index,status:'running',desired_state:'running',metrics_available:true,cpu_percent:10+index*20,rss_bytes:(180+index*30)*mb,sessions:3+index,effective_memory_limit_mb:1024,effective_cpu_quota_percent:100,memory_limit_enforced:true,cpu_quota_enforced:true,resource_enforcement_known:true,pid:1000+index,run_id:'fixture-'+index}));
 const metrics={replicas:reps,status:'running',replicas_running:2,replicas_desired:2,cpu_cores:.4,cpu_capacity_cores:2,cpu_capacity_source:'quota',cpu_host_cores:8,cpu_saturation_available:true,sessions_cap:20,sessions_ceiling:40,generated_at:now};
@@ -28,9 +30,17 @@ const unknown=new Set();
 const server=createServer(async(req,res)=>{
 try{const path=new URL(req.url,'http://localhost').pathname;
 if(path===delayedPath) await new Promise(r=>setTimeout(r,700));
-let body,type='application/json',status=200;
+let body,type='application/json',status=200,cacheControl='no-store';
 if(path==='/announcements.js'){body=Buffer.from('');type='text/javascript';}
-else if(path.startsWith('/static/')){body=await readFile(resolve(root+'/internal/ui','.'+path));type=types[extname(path)]||'application/octet-stream';}
+else if(path.startsWith('/static/')){
+  type=types[extname(path)]||'application/octet-stream';
+  if(bootFault && path===bootModule){
+    cacheControl='public, max-age=31536000, immutable';
+    if(req.headers['sec-fetch-dest']==='empty' && req.headers['cache-control']==='no-cache') bootFault.refreshed=true;
+    if(!bootFault.refreshed) body=Buffer.from('export {};');
+  }
+  body ??= await readFile(resolve(root+'/internal/ui','.'+path));
+}
 else if(path==='/api/auth/me'){body={user:{...users[0],role},can_create_apps:role==='admin',can_manage_apps:role==='admin',can_read_audit:role==='admin',can_manage_announcements:role==='admin'};if(role==='guest'){status=401;body={error:'Sign in required'};}}
 else if(path==='/api/auth/logout'){role='guest';body={};}
 else if(path==='/api/auth/providers')body={providers:[]};
@@ -61,9 +71,12 @@ else if(path.startsWith('/api/') && path.endsWith('/schedules'))body=list([]);
 else if(path.startsWith('/api/') && path.endsWith('/traces'))body={traces:[],total:0};
 else if(path.startsWith('/api/') && path.endsWith('/logs'))body={entries:[],lines:[],next_cursor:'',has_more:false};
 else if(path.startsWith('/api/')){unknown.add(path);body={items:[],total:0,events:[],entries:[],invitations:[],announcements:[],has_more:false};}
-else {body=await readFile(root+'/internal/ui/static/index.html');type='text/html';}
+else {
+  body=await readFile(root+'/internal/ui/static/index.html');type='text/html';
+  if(bootFault) body=Buffer.from(body.toString().replace('</head>', `<link rel="modulepreload" href="${bootModule}"></head>`));
+}
 if(['error','denied'].includes(mode)&&['/api/tokens','/api/workers','/api/users','/api/audit','/api/projects'].includes(path)){status=mode==='denied'?403:503;body={error:mode==='denied'?'Access denied':'Temporarily unavailable'};}
-res.writeHead(status,{'content-type':type,'cache-control':'no-store'});res.end(Buffer.isBuffer(body)?body:JSON.stringify(body));
+res.writeHead(status,{'content-type':type,'cache-control':cacheControl});res.end(Buffer.isBuffer(body)?body:JSON.stringify(body));
 }catch(e){res.writeHead(500);res.end(e.message);}});
 await new Promise(r=>server.listen(0,'127.0.0.1',r));
 const origin=`http://127.0.0.1:${server.address().port}`;
@@ -71,6 +84,29 @@ const browser=await chromium.launch({headless:true,executablePath:process.env.SH
 const routes=[['overview','/'],['apps','/apps'],['project','/projects/analytics'],['identity','/identity'],['services','/identity','#identity-services-tab'],['workers','/workers'],['audit','/audit-log'],['tokens','/tokens'],['announcements','/announcements'],...['overview','usage','logs','traces','deployments','schedules','configuration','data','access'].map(t=>['app-'+t,'/apps/forecast'+(t==='overview'?'':'/'+t)]),['viewer','/apps'],['login','/login'],['profile','/','#identity-card'],['new-app','/apps','#new-app-button'],['new-token','/tokens','#new-token-button'],['deploy','/apps/forecast','#app-detail-deploy'],['schedule-editor','/apps/forecast/schedules','#schedules-add-btn'],['announcement-editor','/announcements','[data-new]'],['project-editor','/projects/analytics','#project-detail-edit'],['about','/','#about-button']];
 const results=[];
 try{
+for (const [theme, width] of [['light', 390], ['dark', 1440]]) {
+  role = 'guest';
+  bootFault = { refreshed: false };
+  const context = await browser.newContext({ viewport: { width, height: 800 } });
+  try {
+    await context.addInitScript(value => localStorage.setItem('shinyhub-theme', value), theme);
+    const page = await context.newPage();
+    await page.goto(`${origin}/login`, { waitUntil: 'domcontentloaded' });
+    const recovery = page.getByRole('dialog', { name: 'ShinyHub couldn’t load' });
+    const retry = recovery.getByRole('button', { name: 'Reload dashboard' });
+    await retry.waitFor({ timeout: 5_000 });
+    assert.equal(await retry.evaluate(button => button === document.activeElement), true);
+    if (out) await page.screenshot({ path: `${out}/boot-recovery-${theme}-${width}.png` });
+    await retry.press('Enter');
+    await page.locator('body[data-auth="out"] #login-view').waitFor();
+    assert.equal(await recovery.isHidden(), true);
+    assert.equal(bootFault.refreshed, true, 'Retry refreshed the cached dependency before navigating');
+  } finally {
+    await context.close();
+    bootFault = undefined;
+  }
+}
+console.log('Dashboard startup recovers from a cached module missing exports');
 for(const theme of ['light','dark']) for(const width of (shellOnly ? [1440,900,390] : [1440,390])){
  const context=await browser.newContext({viewport:{width,height:1000},userAgent:'shinyhub-ui-audit'});await context.addInitScript(t=>localStorage.setItem('shinyhub-theme',t),theme);
  const page=await context.newPage();let errors=[];page.on('pageerror',e=>errors.push(e.message));

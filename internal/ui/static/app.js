@@ -7270,5 +7270,6 @@ document.addEventListener('DOMContentLoaded', () => {
     if (e.target === e.currentTarget) closeScheduleForm();
   });
 
+  window.dispatchEvent(new Event('shinyhub:dashboard-started'));
   initialize();
 });

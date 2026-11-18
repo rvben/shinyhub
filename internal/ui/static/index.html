@@ -64,6 +64,59 @@
       })['catch'](function () {});
     })();
   </script>
+  <!-- Keep recovery in the shell so it can run when the dashboard module graph fails. -->
+  <script>
+    (function () {
+      var started = false;
+      var retrying = false;
+
+      function showRecovery() {
+        var dialog = document.getElementById('dashboard-load-recovery');
+        if (started || !dialog || dialog.open) return;
+        var button = document.getElementById('dashboard-load-retry');
+        dialog.addEventListener('cancel', function (event) { event.preventDefault(); });
+        button.addEventListener('click', reloadDashboard, { once: true });
+        dialog.showModal();
+      }
+
+      async function reloadDashboard() {
+        retrying = true;
+        document.getElementById('dashboard-load-retry').disabled = true;
+        document.getElementById('dashboard-load-detail').textContent = 'Fetching fresh dashboard files…';
+
+        // Replace cached boot files before navigation, including dependencies
+        // the server lists as module preloads. Only reload this origin's static files.
+        var links = document.querySelectorAll('link[rel="modulepreload"], link[rel="stylesheet"], link[rel="preload"][as="font"], script[src]');
+        var assets = new Set();
+        links.forEach(function (link) {
+          var url = new URL(link.href || link.src);
+          if (url.origin === location.origin && url.pathname.startsWith('/static/')) assets.add(url.href);
+        });
+        var controller = new AbortController();
+        var deadline = setTimeout(function () { controller.abort(); }, 10000);
+        await Promise.allSettled(Array.from(assets, async function (url) {
+          var response = await fetch(url, { cache: 'reload', signal: controller.signal });
+          await response.arrayBuffer();
+        }));
+        clearTimeout(deadline);
+        location.reload();
+      }
+
+      var timeout = setTimeout(showRecovery, 15000);
+      window.addEventListener('shinyhub:dashboard-started', function () {
+        started = true;
+        clearTimeout(timeout);
+        var dialog = document.getElementById('dashboard-load-recovery');
+        if (dialog.open && !retrying) dialog.close();
+      }, { once: true });
+
+      document.addEventListener('DOMContentLoaded', function () {
+        // A deferred module has executed by this point. Let its own
+        // DOMContentLoaded handler run before checking whether boot started.
+        setTimeout(showRecovery, 0);
+      }, { once: true });
+    })();
+  </script>
   <!-- Self-hosted webfonts: no third-party origin to resolve, connect to and
        wait on before first render. The latin Manrope face is preloaded because
        it sets nearly all dashboard text and is otherwise discovered only once
@@ -90,6 +143,12 @@
       <span class="sr-only">ShinyHub</span>
     </span>
   </div>
+
+  <dialog id="dashboard-load-recovery" aria-labelledby="dashboard-load-title" aria-describedby="dashboard-load-detail">
+    <h1 id="dashboard-load-title">ShinyHub couldn’t load</h1>
+    <p id="dashboard-load-detail" role="status">Reload the dashboard to fetch fresh files.</p>
+    <button id="dashboard-load-retry" class="btn-primary" type="button" autofocus>Reload dashboard</button>
+  </dialog>
 
   <header id="mobile-topbar">
     <button id="sidebar-toggle" type="button" class="icon-btn" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false">
