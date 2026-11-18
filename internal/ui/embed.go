@@ -35,9 +35,14 @@ var (
 	assetsETagVal  string
 )
 
+// Increment this revision when changes to asset serving require fresh browser
+// cache entries even if the embedded files have not changed.
+const staticAssetRevision = "shinyhub-static-v2\x00"
+
 func assetsETag() string {
 	assetsETagOnce.Do(func() {
 		h := sha256.New()
+		_, _ = io.WriteString(h, staticAssetRevision)
 		sub, err := fs.Sub(embedded, "static")
 		if err != nil {
 			return

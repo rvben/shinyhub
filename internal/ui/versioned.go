@@ -19,7 +19,8 @@ import (
 //
 // Every embedded asset is also reachable under /static/v/<version>/<path>,
 // where <version> is the per-build content hash of the whole static tree
-// (assetsETag). A versioned URL names exactly one build's bytes, so it is
+// and the asset serving revision (assetsETag). A versioned URL names exactly
+// one build's bytes, so it is
 // served with a one-year immutable cache policy: a returning visitor loads the
 // dashboard's ~90 modules, stylesheets and fonts from cache with no network
 // request at all, where the unversioned /static/ URLs cost one revalidation

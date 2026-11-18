@@ -100,6 +100,10 @@ jobs:
           WRANGLER_SEND_METRICS: "false"
         run: npm run test:runtime
 
+      - uses: ./.github/actions/setup-playwright
+        with:
+          node-version: "24"
+
       - name: Verify Cloudflare deployment credentials
         working-directory: deploy/cloudflare-demo
         env:
@@ -113,6 +117,7 @@ jobs:
           npx wrangler whoami --account "$CLOUDFLARE_ACCOUNT_ID"
 
       - name: Deploy the demo Worker and container
+        id: deploy-demo
         working-directory: deploy/cloudflare-demo
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -126,3 +131,7 @@ jobs:
         run: |
           expected_version=$(node -p "require('./package.json').version")
           SHINYHUB_DEMO_EXPECTED_VERSION="$expected_version" node ./scripts/demo-smoke-verified.mjs
+
+      - name: Verify the demo opens in Chromium
+        if: ${{ !cancelled() && steps.deploy-demo.outcome == 'success' }}
+        run: node ./scripts/demo-browser-smoke.mjs
