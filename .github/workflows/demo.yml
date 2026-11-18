@@ -19,17 +19,62 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  silence:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push')
     runs-on: ubuntu-latest
+    timeout-minutes: 3
+    environment:
+      name: public-demo-observability
+      deployment: false
+    outputs:
+      id: ${{ steps.rollout-silence.outputs.silence_id }}
+      expiry: ${{ steps.rollout-silence.outputs.silence_expiry }}
+      attempt: ${{ steps.rollout-silence.outputs.workflow_attempt }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          sparse-checkout: scripts/demo-alert-silence.mjs
+          sparse-checkout-cone-mode: false
+
+      - name: Silence demo Worker error notifications for the rollout
+        id: rollout-silence
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_DEMO_WORKER_ERRORS_POLICY_ID: ${{ vars.CLOUDFLARE_DEMO_WORKER_ERRORS_POLICY_ID }}
+          CLOUDFLARE_NOTIFICATIONS_API_TOKEN: ${{ secrets.CLOUDFLARE_NOTIFICATIONS_API_TOKEN }}
+        run: node ./scripts/demo-alert-silence.mjs start
+
+  deploy:
+    needs: silence
+    runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      verified-at: ${{ steps.verified.outputs.timestamp }}
     environment:
       name: public-demo
       url: https://demo.shinyhub.dev
     steps:
+      - name: Verify the silence will cover the deployment and cooldown
+        env:
+          SILENCE_EXPIRY: ${{ needs.silence.outputs.expiry }}
+          SILENCE_ATTEMPT: ${{ needs.silence.outputs.attempt }}
+        run: |
+          # Reserve the full 30-minute job timeout plus the 11-minute cooldown.
+          if [[ "$SILENCE_ATTEMPT" != "$GITHUB_RUN_ATTEMPT" || ! "$SILENCE_EXPIRY" =~ ^[0-9]{10}$ ]]; then
+            echo "::error::No valid deployment silence expiry. Rerun the entire workflow."
+            exit 1
+          fi
+          remaining=$((SILENCE_EXPIRY - $(date -u +%s)))
+          if (( remaining < 41 * 60 )); then
+            echo "::error::The demo runner started too late for its alert silence. Rerun the entire workflow."
+            exit 1
+          fi
+
       - name: Resolve deployment ref
         id: deployment-ref
         uses: actions/github-script@v9
@@ -129,6 +174,7 @@ jobs:
           echo "deployment_id=$deployment_id" >> "$GITHUB_OUTPUT"
 
       - name: Smoke-test the deployed release and server-side transports
+        id: transport-smoke
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
@@ -139,5 +185,42 @@ jobs:
           SHINYHUB_DEMO_EXPECTED_VERSION="$expected_version" node ./scripts/demo-smoke-verified.mjs
 
       - name: Verify the demo opens in Chromium
+        id: browser-smoke
         if: ${{ !cancelled() && steps.deploy-demo.outcome == 'success' }}
         run: node ./scripts/demo-browser-smoke.mjs
+
+      - name: Record successful verification time
+        id: verified
+        if: ${{ success() && steps.transport-smoke.outcome == 'success' && steps.browser-smoke.outcome == 'success' }}
+        run: echo "timestamp=$(date -u +%s)" >> "$GITHUB_OUTPUT"
+
+  restore-alerting:
+    needs: [silence, deploy]
+    if: ${{ always() && needs.silence.outputs.id != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    environment:
+      name: public-demo-observability
+      deployment: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          sparse-checkout: scripts/demo-alert-silence.mjs
+          sparse-checkout-cone-mode: false
+
+      - name: Finalize the rollout silence
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_DEMO_WORKER_ERRORS_POLICY_ID: ${{ vars.CLOUDFLARE_DEMO_WORKER_ERRORS_POLICY_ID }}
+          CLOUDFLARE_NOTIFICATIONS_API_TOKEN: ${{ secrets.CLOUDFLARE_NOTIFICATIONS_API_TOKEN }}
+          SHINYHUB_DEMO_SILENCE_ID: ${{ needs.silence.outputs.id }}
+          DEMO_VERIFIED: ${{ needs.deploy.result == 'success' && needs.deploy.outputs.verified-at != '' }}
+          SHINYHUB_DEMO_VERIFIED_AT: ${{ needs.deploy.outputs.verified-at }}
+        run: |
+          if [[ "$DEMO_VERIFIED" == 'true' ]]; then
+            node ./scripts/demo-alert-silence.mjs success
+          else
+            node ./scripts/demo-alert-silence.mjs failure
+          fi

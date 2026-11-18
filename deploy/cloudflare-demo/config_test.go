@@ -218,11 +218,38 @@ func TestCloudflareDemoDeploysAfterSuccessfulReleases(t *testing.T) {
 		`SHINYHUB_DEMO_EXPECTED_DEPLOYMENT: ${{ steps.deploy-demo.outputs.deployment_id }}`,
 		`SHINYHUB_DEMO_EXPECTED_VERSION`,
 		`node ./scripts/demo-smoke-verified.mjs`,
+		`node ./scripts/demo-alert-silence.mjs start`,
+		`ref: ${{ github.workflow_sha }}`,
+		`name: public-demo-observability`,
+		`needs: silence`,
+		`remaining < 41 * 60`,
+		`"$SILENCE_ATTEMPT" != "$GITHUB_RUN_ATTEMPT"`,
+		`needs: [silence, deploy]`,
+		`always() && needs.silence.outputs.id != ''`,
+		`DEMO_VERIFIED: ${{ needs.deploy.result == 'success' && needs.deploy.outputs.verified-at != '' }}`,
+		`steps.transport-smoke.outcome == 'success' && steps.browser-smoke.outcome == 'success'`,
+		`node ./scripts/demo-alert-silence.mjs success`,
+		`node ./scripts/demo-alert-silence.mjs failure`,
 		`run: npm run test:runtime`,
 	} {
 		if !strings.Contains(workflowSource, required) {
 			t.Errorf("demo deployment workflow is missing %q", required)
 		}
+	}
+	deployStart := strings.Index(workflowSource, "\n  deploy:\n")
+	restoreStart := strings.Index(workflowSource, "\n  restore-alerting:\n")
+	if deployStart < 0 || restoreStart <= deployStart {
+		t.Fatal("demo workflow must have separate deploy and restore-alerting jobs")
+	}
+	deployJob := workflowSource[deployStart:restoreStart]
+	if !strings.Contains(deployJob, "timeout-minutes: 30") {
+		t.Error("the deploy job timeout must fit within the Cloudflare silence budget")
+	}
+	if strings.Contains(deployJob, "CLOUDFLARE_NOTIFICATIONS_API_TOKEN") {
+		t.Error("the job running the selected release ref must never receive the Notifications Write credential")
+	}
+	if check, deploy := strings.Index(deployJob, "remaining < 41 * 60"), strings.Index(deployJob, "npm run deploy --"); check < 0 || deploy <= check {
+		t.Error("demo rollout must verify silence coverage before starting deployment")
 	}
 
 	dockerfile, err := os.ReadFile("Dockerfile")

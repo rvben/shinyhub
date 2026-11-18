@@ -268,6 +268,20 @@ in the log drilldown or the local diagnostic summary to group related records.
 Clearing means a subsequent query window was clear, not that recovery took ten
 minutes.
 
+The public demo workflow creates a temporary Cloudflare silence for **Worker
+errors** before starting the deployment job. Cloudflare retains the silenced
+events in Alert History. After both smoke checks pass, the workflow shortens the
+silence to 11 minutes after verification so the rollout records age out of the
+monitor's 10-minute window. It removes the silence after a failed or cancelled
+deployment. If cleanup cannot run, Cloudflare expires the silence automatically
+within 46 minutes of scheduling. The lifecycle monitor and GitHub smoke checks
+stay active throughout.
+
+If the deployment runner queues too long or you need to retry deployment, use
+**Re-run all jobs** to get a fresh silence. For a manual deploy outside GitHub
+Actions, use the Worker errors monitor's **Mute** action and include the same
+cooldown after verification.
+
 The Worker errors query excludes automatic `cf-worker-event` HTTP 503 summaries:
 sleeping and readiness polling deliberately return 503. Real upstream 503s remain
 covered by `demo_upstream_failed`; exception records with status 503 stay visible.
@@ -503,6 +517,15 @@ to the demo account and the `shinyhub.dev` zone. Store only the bare token
 value—not the `curl` verification command Cloudflare displays beside it. Keep
 these credentials at the environment level rather than repository-wide so only
 this deployment job can read them.
+
+Create a separate `public-demo-observability` environment and restrict its
+deployment branches to `main`. Set `CLOUDFLARE_ACCOUNT_ID` and
+`CLOUDFLARE_DEMO_WORKER_ERRORS_POLICY_ID` there using the demo account ID and
+the policy ID for **ShinyHub demo — Worker errors**. Add a Cloudflare token
+scoped to the demo account with **Notifications Write** as the
+`CLOUDFLARE_NOTIFICATIONS_API_TOKEN` environment secret. The alerting jobs run
+the script from the workflow revision, so the credential stays outside the job
+that runs the selected deployment ref.
 
 Rotate the token without creating a deployment gap: create the replacement,
 update the environment secret, manually dispatch **Demo deployment** against
