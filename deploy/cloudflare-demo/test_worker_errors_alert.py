@@ -1,4 +1,5 @@
 """Regression cases for the alert's distinction between summaries and errors."""
+from contextlib import closing
 import pathlib
 import sqlite3
 import unittest
@@ -64,6 +65,33 @@ class WorkerErrorsAlertTest(unittest.TestCase):
                            ("d39e08a123830e48534a95a0116442dd", "shinyhub-demo", kind, trace, request, record))
             self.assertEqual(db.execute(request_sql).fetchone()[0], 5)
             self.assertEqual(db.execute(lifecycle_sql).fetchone()[0], 2)
+
+    def test_platform_allocation_retry_does_not_hide_wake_failure_or_other_errors(self):
+        sql = pathlib.Path(__file__).with_name("worker-errors-alert.sql").read_text()
+        unavailable = "There is no container instance that can be provided to this Durable Object, try again later"
+        cases = [
+            ("platform RPC allocation attempt", "jsrpc", "error", unavailable, None, "cf-worker", 0),
+            ("exhausted SDK allocation", "jsrpc", "error",
+             "there is no container instance that can be provided to this durable object", None, "cf-worker", 1),
+            ("Durable Object structured startup failure", "jsrpc", "error", None, None, "cf-worker-log", 1),
+            ("failed visitor wake", "fetch", "error", None, 200, "cf-worker-log", 1),
+            ("allocation error with an HTTP failure", "jsrpc", "error", unavailable, 503, "cf-worker", 1),
+            ("allocation error from fetch", "fetch", "error", unavailable, None, "cf-worker", 1),
+            ("same message from an application log", "jsrpc", "error", unavailable, None, "cf-worker-log", 1),
+            ("missing invocation type", None, "error", unavailable, None, "cf-worker", 1),
+            ("missing log type", "jsrpc", "error", unavailable, None, None, 1),
+            ("same error at fatal level", "jsrpc", "fatal", unavailable, None, "cf-worker", 1),
+            ("different platform RPC exception", "jsrpc", "error", unavailable + "; storage failed", None, "cf-worker", 1),
+        ]
+        with closing(sqlite3.connect(":memory:")) as db:
+            db.execute("ATTACH DATABASE ':memory:' AS logs")
+            db.execute("CREATE TABLE logs.workersLogs(accountTag, scriptName, level, error, httpStatus, logType, invocationType)")
+            for label, invocation, level, error, status, log_type, expected in cases:
+                with self.subTest(label=label):
+                    db.execute("DELETE FROM logs.workersLogs")
+                    db.execute("INSERT INTO logs.workersLogs VALUES (?, 'shinyhub-demo', ?, ?, ?, ?, ?)",
+                               ("d39e08a123830e48534a95a0116442dd", level, error, status, log_type, invocation))
+                    self.assertEqual(db.execute(sql).fetchone()[0], expected)
 
     def test_lifecycle_alert_ignores_a_deployment_reset_but_no_other_alarm_failure(self):
         sql = pathlib.Path(__file__).with_name("worker-lifecycle-alert.sql").read_text()

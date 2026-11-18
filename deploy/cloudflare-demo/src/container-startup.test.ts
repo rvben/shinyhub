@@ -88,6 +88,48 @@ test("startup still fails if the fleet exceeds the extended deadline", async () 
   await assert.rejects(demo.startAndWaitForPorts(), /readiness timeout/);
 });
 
+test("failed allocation reports a distinct terminal signal during polling or before it", async (t) => {
+  const errors = t.mock.method(console, "error", () => {});
+  const { demo } = fixture();
+  delete demo.startContainerIfNotRunning;
+  demo.scheduleNextAlarm = async () => {};
+  demo.refreshOutboundInterception = async () => {};
+  demo.state.setRunning = async () => {};
+  demo.state.setStopped = async () => {};
+  const platformError = new Error("There is no container instance that can be provided to this Durable Object, try again later");
+  let attempts = 0;
+  let failBeforePolling = false;
+  demo.container = {
+    running: false,
+    start() {
+      attempts++;
+      if (failBeforePolling) throw platformError;
+    },
+    monitor: () => Promise.resolve(platformError),
+    getTcpPort: () => ({ fetch: async () => { throw platformError; } }),
+  };
+  await assert.rejects(demo.start(undefined, { retries: 2, waitInterval: 1 }), {
+    message: "there is no container instance that can be provided to this durable object",
+    cause: platformError,
+  });
+  assert.equal(attempts, 2);
+  assert.equal(errors.mock.callCount(), 0);
+  failBeforePolling = true;
+  await assert.rejects(demo.start(), error => error === platformError);
+  assert.equal(attempts, 3);
+  assert.equal(errors.mock.callCount(), 1);
+  assert.deepEqual(errors.mock.calls[0].arguments, [{
+    event: "demo_container_start_failed", reason: "allocation_unavailable",
+  }]);
+});
+
+test("other startup errors propagate unchanged", async () => {
+  const { demo } = fixture();
+  const otherError = new Error("A different startup failure");
+  demo.startContainerIfNotRunning = async () => { throw otherError; };
+  await assert.rejects(demo.start(), error => error === otherError);
+});
+
 test("real SDK port polling survives slow boots and reports genuinely stuck boots", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
   for (const readyAfterMS of [24_900, 60_000, Infinity]) {

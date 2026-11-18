@@ -126,19 +126,24 @@ test("wake logs distinguish cold starts from ongoing boots and keep request data
       assert.ok(completed.elapsed_ms >= 0);
     }
   }
-  const failed = fixture();
-  failed.setStart(async () => { throw new Error("private timeout details"); });
-  await failed.fetch(new Request(`https://${control}/__demo/start`, { method: "POST" }));
-  await Promise.all(failed.work);
-  const requested = logs.mock.calls.at(-1)!.arguments[0];
-  assert.equal(requested.fetch_site, "missing");
-  assert.equal(requested.browser_navigation, false);
-  const error = errors.mock.calls.at(-1)!.arguments[0];
-  assert.deepEqual(Object.keys(error).sort(), ["elapsed_ms", "event", "reason", "wake_id"]);
-  assert.equal(error.event, "demo_wake_failed");
-  assert.equal(error.wake_id, requested.wake_id);
-  assert.equal(error.reason, "timeout");
-  assert.equal(logs.mock.callCount(), 9);
+  for (const [message, reason] of [
+    ["private timeout details", "timeout"],
+    ["There is no container instance that can be provided to this Durable Object, try again later", "start_failed"],
+  ]) {
+    const failed = fixture();
+    failed.setStart(async () => { throw new Error(message); });
+    await failed.fetch(new Request(`https://${control}/__demo/start`, { method: "POST" }));
+    await Promise.all(failed.work);
+    const requested = logs.mock.calls.at(-1)!.arguments[0];
+    assert.equal(requested.fetch_site, "missing");
+    assert.equal(requested.browser_navigation, false);
+    const error = errors.mock.calls.at(-1)!.arguments[0];
+    assert.deepEqual(Object.keys(error).sort(), ["elapsed_ms", "event", "reason", "wake_id"]);
+    assert.equal(error.event, "demo_wake_failed");
+    assert.equal(error.wake_id, requested.wake_id);
+    assert.equal(error.reason, reason);
+  }
+  assert.equal(logs.mock.callCount(), 10);
 });
 
 test("edge rejections, cold probes, cross-site forms and warm visits emit no wake logs", async (t) => {

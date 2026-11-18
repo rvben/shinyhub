@@ -289,6 +289,14 @@ covered by `demo_upstream_failed`; exception records with status 503 stay visibl
 The exact SDK log for a container signalled to exit with code 143 during a new
 version rollout is excluded unless the record itself carries a 5xx status. Other
 errors from the same request still count independently.
+The Worker query also excludes Cloudflare's exact container allocation retry
+diagnostic when it comes from a platform JavaScript RPC record without an HTTP
+status. Deploy the Worker with `demo_container_start_failed` logging before
+applying this query. The Durable Object emits this event if a start fails with
+the raw platform message. That event, the SDK's terminal allocation error,
+and `demo_wake_failed` all count. HTTP failures and the raw message from other
+invocation or log types stay visible. Before rolling back to a Worker without
+`demo_container_start_failed` logging, restore the previous Worker errors query.
 Unknown invocation types/identifiers retain coverage.
 
 Every deployment resets the Durable Object under its running alarm, which

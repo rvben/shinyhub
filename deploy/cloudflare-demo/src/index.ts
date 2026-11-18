@@ -39,6 +39,20 @@ export class ShinyHubDemo extends Container {
     return super.onActivityExpired();
   }
 
+  override async start(...args: Parameters<Container["start"]>): Promise<void> {
+    try {
+      await super.start(...args);
+    } catch (error) {
+      // The alert filters the raw retry diagnostic. Record an exhausted start
+      // here in case the caller can no longer emit demo_wake_failed.
+      if (error instanceof Error
+        && error.message === "There is no container instance that can be provided to this Durable Object, try again later") {
+        console.error({ event: "demo_container_start_failed", reason: "allocation_unavailable" });
+      }
+      throw error;
+    }
+  }
+
   override async fetch(request: Request): Promise<Response> {
     if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") return super.fetch(request);
     if (!this.ctx.container!.running || (await this.getState()).status !== "healthy") {
