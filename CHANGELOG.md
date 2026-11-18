@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.25.2](https://github.com/rvben/shinyhub/compare/v0.25.1...v0.25.2) - 2026-11-18
+
+### Added
+
+- **fleet**: reconcile app entitlement policy ([8235cc9](https://github.com/rvben/shinyhub/commit/8235cc93f52d0269368c07601deff1a520b9097c))
+
+### Fixed
+
+- **demo**: filter expected container rollout alert ([a0c036e](https://github.com/rvben/shinyhub/commit/a0c036eca539a9a22eecfc6fae0be24e6dadcfe8))
+- **demo**: verify dashboard assets before caching ([360dbdf](https://github.com/rvben/shinyhub/commit/360dbdfebd7474426810e563c20b336cb463482a))
+- **ui**: recover when cached dashboard assets fail to load ([4bb1f7e](https://github.com/rvben/shinyhub/commit/4bb1f7e3540004318f035e3d269315a855bd9dfa))
+- **demo**: refresh cached dashboard assets and verify browser startup ([29f1a62](https://github.com/rvben/shinyhub/commit/29f1a62d02f14a040ddb58bfc9560bd3f61087de))
+
 ## [0.25.1](https://github.com/rvben/shinyhub/compare/v0.25.0...v0.25.1) - 2026-11-17
 
 ### Fixed
