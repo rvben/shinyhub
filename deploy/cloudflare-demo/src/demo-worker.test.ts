@@ -50,6 +50,43 @@ test("unknown hosts, robots and rejected app APIs never resolve a container", as
   assert.deepEqual(f.counts, { resolve: 0, state: 0, start: 0, fetch: 0 });
 });
 
+test("versioned dashboard assets are retried before immutable bytes reach the browser", async () => {
+  const f = fixture("healthy");
+  const path = `https://${control}/static/v/392b94900541a053/views/app-detail.js`;
+  const headers = { etag: '"2cf24dba5fb0a30e"', "cache-control": "public, max-age=31536000, immutable" };
+  f.setResponse(() => new Response(f.counts.fetch === 1 ? "" : "hello", { headers }));
+  const response = await f.fetch(new Request(path, { headers: { "accept-encoding": "gzip" } }));
+  assert.equal(await response.text(), "hello");
+  assert.equal(response.headers.get("cache-control"), headers["cache-control"]);
+  assert.equal(f.counts.fetch, 2);
+  assert.ok(f.requests.every(request => request.headers.get("accept-encoding") === "identity"));
+});
+
+test("a second mismatched asset body returns an uncached error", async (t) => {
+  const log = t.mock.method(console, "error", () => {});
+  const f = fixture("healthy");
+  const path = `https://${control}/static/v/392b94900541a053/views/app-detail.js`;
+  f.setResponse(() => new Response("export {};", { headers: { etag: '"2cf24dba5fb0a30e"' } }));
+  const response = await f.fetch(new Request(path));
+  assert.equal(response.status, 503);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.equal(f.counts.fetch, 2);
+  assert.deepEqual(log.mock.calls[0]?.arguments[0], { event: "demo_upstream_failed", operation: "dashboard_asset", status: 503 });
+});
+
+test("partial and revalidated dashboard assets preserve HTTP semantics", async () => {
+  const f = fixture("healthy");
+  const path = `https://${control}/static/v/392b94900541a053/views/app-detail.js`;
+  f.setResponse(() => new Response("hello", { status: 206 }));
+  const partial = await f.fetch(new Request(path, { headers: { range: "bytes=0-4" } }));
+  assert.equal(partial.status, 206);
+  assert.equal(await partial.text(), "hello");
+  f.setResponse(() => new Response(null, { status: 304 }));
+  const cached = await f.fetch(new Request(path, { headers: { "if-none-match": '"2cf24dba5fb0a30e"' } }));
+  assert.equal(cached.status, 304);
+  assert.equal(f.counts.fetch, 2);
+});
+
 test("wake logs distinguish cold starts from ongoing boots and keep request data bounded", async (t) => {
   const logs = t.mock.method(console, "info", () => {});
   const errors = t.mock.method(console, "error", () => {});

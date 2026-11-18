@@ -8,9 +8,8 @@ const demoURL = process.env.SHINYHUB_DEMO_URL || 'https://demo.shinyhub.dev/';
 const browser = await chromium.launch({ headless: true, executablePath: process.env.SHINYHUB_E2E_CHROMIUM || undefined });
 try {
   const page = await browser.newPage();
-  const errors = [];
-  page.on('pageerror', error => errors.push(error.message));
-  try {
+  const failed = new Promise((_, reject) => page.once('pageerror', reject));
+  await Promise.race([failed, (async () => {
     await page.goto(demoURL, { waitUntil: 'domcontentloaded' });
     await page.getByRole('button', { name: 'Continue as Demo Viewer', exact: true }).click({ timeout: 120_000 });
     await page.getByRole('button', { name: 'Account menu for Demo Viewer Viewer', exact: true }).waitFor();
@@ -19,10 +18,7 @@ try {
       return faces.some(face => face.status === 'loaded');
     });
     assert.ok(fontLoaded, 'The browser did not load the Manrope dashboard font');
-  } finally {
-    if (errors.length) console.error(errors.join('\n'));
-  }
-  assert.deepEqual(errors, [], 'The demo raised an uncaught browser error');
+  })()]);
   console.log('Chromium loaded the demo dashboard, viewer session, and dashboard font');
 } finally {
   await browser.close();

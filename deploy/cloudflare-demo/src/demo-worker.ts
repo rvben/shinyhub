@@ -47,9 +47,30 @@ const DEMO_VIEWER_PASSWORD = "explore-shinyhub-demo";
 // Automatic invocation logs label even intentional sleep/readiness 503s as
 // errors. The alert excludes those 503 summaries; report real upstream 5xxs
 // separately so an unavailable application still alerts. Keep request data out.
-function reportUpstreamFailure(response: Response, operation: "proxy" | "viewer_session"): void {
+function reportUpstreamFailure(response: Response, operation: "proxy" | "viewer_session" | "dashboard_asset"): void {
   if (response.status >= 500) {
     console.error({ event: "demo_upstream_failed", operation, status: response.status });
+  }
+}
+
+// The Go server's versioned asset ETag contains the first 16 hex digits of
+// the identity body's SHA-256. Verify before sending the immutable response:
+// an interrupted stream can otherwise reach the browser as a cacheable 200.
+async function verifyDashboardAsset(response: Response, signal: AbortSignal): Promise<Response> {
+  if (response.status !== 200) return response;
+  const expected = /^"([0-9a-f]{16})"$/.exec(response.headers.get("etag") ?? "")?.[1];
+  if (!expected || response.headers.has("content-encoding")) {
+    void response.body?.cancel().catch(() => {});
+    return unavailableResponse();
+  }
+  try {
+    const bytes = await response.arrayBuffer();
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes), 0, 8);
+    const actual = Array.from(digest, byte => byte.toString(16).padStart(2, "0")).join("");
+    return actual === expected ? new Response(bytes, response) : unavailableResponse();
+  } catch {
+    signal.throwIfAborted();
+    return unavailableResponse();
   }
 }
 
@@ -323,17 +344,24 @@ export function createDemoWorker<Env>(options: DemoWorkerOptions<Env>): Exported
 
       let upstream: Response;
       let proxyAttempt = 0;
+      const verifyAsset = url.hostname === controlHost && request.method === "GET"
+        && /^\/static\/v\/[0-9a-f]{16}\//.test(url.pathname) && !headers.has("range");
+      const operation = verifyAsset ? "dashboard_asset" : "proxy";
+      if (verifyAsset) headers.set("accept-encoding", "identity");
       try {
         upstream = await containerRequest(
           new Request(request, { headers, signal: request.signal }),
-          (attempt) => (proxyAttempt++ === 0 ? container : options.container(env)).fetch(attempt),
-          () => console.info({ event: "demo_request_recovered", operation: "proxy" }),
+          async (attempt) => {
+            const response = await (proxyAttempt++ === 0 ? container : options.container(env)).fetch(attempt);
+            return verifyAsset ? verifyDashboardAsset(response, attempt.signal) : response;
+          },
+          () => console.info({ event: "demo_request_recovered", operation }),
         );
       } catch (error) {
         lastHealthyAt = null;
         throw error;
       }
-      reportUpstreamFailure(upstream, "proxy");
+      reportUpstreamFailure(upstream, operation);
       if (upstream.status >= 500) lastHealthyAt = null;
 
       if (upstream.status === 101 && upstream.webSocket) {
