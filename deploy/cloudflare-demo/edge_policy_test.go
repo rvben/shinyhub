@@ -199,7 +199,7 @@ func TestDemoWorkerSpendsColdStartsOnVisitorsOnly(t *testing.T) {
 		}
 	}
 	wakeDefined := indexOf(t, smokeSource, "scripts/demo-smoke.sh", "\nwake() {")
-	wakeCalled := indexOf(t, smokeSource, "scripts/demo-smoke.sh", "\nwake\n")
+	wakeCalled := indexOf(t, smokeSource, "scripts/demo-smoke.sh", "\n  wake\n")
 	firstProbe := indexOf(t, smokeSource, "scripts/demo-smoke.sh", `check "$base_url/healthz"`)
 	if wakeCalled < wakeDefined {
 		t.Error("the smoke test calls wake before defining it")
@@ -215,7 +215,7 @@ func TestDemoWorkerSpendsColdStartsOnVisitorsOnly(t *testing.T) {
 	// started. Run in the other order it would still pass, having checked the
 	// warm login page instead of the page this gate was built to serve.
 	entryDefined := indexOf(t, smokeSource, "scripts/demo-smoke.sh", "\nentry() {")
-	entryCalled := indexOf(t, smokeSource, "scripts/demo-smoke.sh", "\nentry\n")
+	entryCalled := indexOf(t, smokeSource, "scripts/demo-smoke.sh", "\n  entry\n")
 	if entryCalled < entryDefined {
 		t.Error("the smoke test calls entry before defining it")
 	}

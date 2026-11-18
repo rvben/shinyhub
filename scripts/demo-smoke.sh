@@ -5,6 +5,17 @@ base_url=${SHINYHUB_DEMO_URL:-https://demo.shinyhub.dev}
 app_url=${SHINYHUB_DEMO_APP_URL:-https://apps.demo.shinyhub.dev}
 max_attempts=${SHINYHUB_DEMO_SMOKE_ATTEMPTS:-60}
 retry_delay=${SHINYHUB_DEMO_SMOKE_RETRY_DELAY:-5}
+expected_version=${SHINYHUB_DEMO_EXPECTED_VERSION:-}
+expected_deployment=${SHINYHUB_DEMO_EXPECTED_DEPLOYMENT:-}
+phase=${1:-all}
+case "$phase" in
+  all | wait-for-rollout | verify) ;;
+  *) echo 'usage: demo-smoke.sh [wait-for-rollout|verify]' >&2; exit 2 ;;
+esac
+if [ -n "$expected_deployment" ] && [ -z "$expected_version" ]; then
+  echo 'The expected demo deployment also requires an expected version' >&2
+  exit 2
+fi
 
 # Synthetic marker only: it links this run's HTTP requests to server telemetry.
 # Use a wrapper so new probes cannot accidentally omit the marker.
@@ -16,24 +27,12 @@ curl() {
   fi
 }
 
-# A container that drops back out of "healthy" once the initial wake has
-# already succeeded - a rollout swap onto a freshly deployed image, a crash, a
-# restart, anything that flips it back to asleep - cannot be polled back to
-# life by any bare status check: every path but the entry pages is refused
-# outright while the container is down (classifyColdRequest in
-# deploy/cloudflare-demo/src/edge-policy.ts only starts it for a browser
-# navigation or the start button's own POST), and a refusal never starts the
-# container the way a real visitor's navigation does. This sends the exact
-# request wake() already uses for the first start, so any later retry loop can
-# recover from a second one the same way, instead of spinning until it gives
-# up on a container a plain re-open would have fixed in under a minute. The
-# restarted container reports "running" rather than "healthy", and the Worker
-# forwards everything to a running one (gateUnconfirmed), so the next check is
-# what reaches it and marks it healthy.
+# A rollout can replace the container after the initial wake. Status probes
+# only report readiness. Use a browser-style navigation to wake the replacement
+# so the Worker can forward the next probe and confirm it is healthy.
 nudge() {
   curl --silent --show-error --output /dev/null \
     --connect-timeout 10 --max-time 30 \
-    --header 'X-ShinyHub-Demo-Smoke-Probe: wake' \
     --header 'Sec-Fetch-Dest: document' \
     --header 'Sec-Fetch-Mode: navigate' \
     --header 'Accept: text/html,application/xhtml+xml' \
@@ -43,26 +42,15 @@ nudge() {
 check() {
   url=$1
   shift
-  attempt=1
-  while [ "$attempt" -le "$max_attempts" ]; do
-    if code=$(curl --silent --show-error --output /dev/null \
-      --connect-timeout 10 --max-time 30 --write-out '%{http_code}' "$url"); then
-      for expected in "$@"; do
-        if [ "$code" = "$expected" ]; then
-          printf '%s -> %s\n' "$url" "$code"
-          return
-        fi
-      done
-    else
-      code=000
+  code=$(curl --silent --show-error --output /dev/null \
+    --connect-timeout 10 --max-time 30 --write-out '%{http_code}' "$url") || code=000
+  for expected in "$@"; do
+    if [ "$code" = "$expected" ]; then
+      printf '%s -> %s\n' "$url" "$code"
+      return
     fi
-    if [ "$attempt" -lt "$max_attempts" ]; then
-      nudge
-      sleep "$retry_delay"
-    fi
-    attempt=$((attempt + 1))
   done
-  echo "$url -> unexpected status $code after $max_attempts attempts" >&2
+  echo "$url -> unexpected status $code" >&2
   exit 1
 }
 
@@ -101,8 +89,6 @@ entry() {
   trap - EXIT
 }
 
-entry
-
 # The Worker spends a cold start only on a visitor opening the demo, so the
 # smoke test arrives the way a browser does. A bare probe is answered from the
 # edge while the container is asleep, by design. The navigation is repeated each
@@ -114,7 +100,6 @@ wake() {
     nudge
     if code=$(curl --silent --show-error --output /dev/null \
       --connect-timeout 10 --max-time 30 --write-out '%{http_code}' \
-      --header 'X-ShinyHub-Demo-Smoke-Probe: readiness' \
       "$base_url/__demo/ready"); then
       if [ "$code" = "204" ]; then
         printf '%s -> awake\n' "$base_url/"
@@ -130,7 +115,52 @@ wake() {
   exit 1
 }
 
-wake
+release_matches() {
+  server_info=$(curl --silent --show-error --fail --include --suppress-connect-headers \
+    --connect-timeout 10 --max-time 30 "$base_url/api/server-info") || return 1
+  case "$server_info" in
+    *'"version":"'"$expected_version"'"'*) ;;
+    *) return 1 ;;
+  esac
+  if [ -n "$expected_deployment" ]; then
+    # Compare only response headers. An old image can serve the right version.
+    printf '%s\n' "$server_info" | tr -d '\r' | sed '/^$/q' | \
+      grep -Fxi "x-shinyhub-demo-deployment: $expected_deployment" >/dev/null
+  fi
+}
+
+wait_for_rollout() (
+  # The rollout may replace a healthy old image. Only begin the functional
+  # checks once the requested release itself is serving.
+  SHINYHUB_DEMO_SMOKE_ID=
+  entry
+  wake
+  if [ -n "$expected_version" ]; then
+    attempt=1
+    until release_matches; do
+      if [ "$attempt" -ge "$max_attempts" ]; then
+        echo "$base_url/api/server-info -> expected version $expected_version${expected_deployment:+ and deployment $expected_deployment} after $max_attempts attempts" >&2
+        exit 1
+      fi
+      nudge
+      sleep "$retry_delay"
+      attempt=$((attempt + 1))
+    done
+  fi
+)
+
+if [ "$phase" != verify ]; then
+  wait_for_rollout
+  [ "$phase" != wait-for-rollout ] || exit 0
+fi
+
+if [ -n "$expected_version" ]; then
+  if ! release_matches; then
+    echo "$base_url/api/server-info -> expected version $expected_version${expected_deployment:+ and deployment $expected_deployment} during verification" >&2
+    exit 1
+  fi
+  printf '%s -> version %s%s\n' "$base_url/api/server-info" "$expected_version" "${expected_deployment:+, deployment $expected_deployment}"
+fi
 
 check "$base_url/healthz" 200
 check "$base_url/__demo/ready" 204
@@ -152,30 +182,6 @@ case "$start_code" in
     exit 1
     ;;
 esac
-
-if [ -n "${SHINYHUB_DEMO_EXPECTED_VERSION:-}" ]; then
-  attempt=1
-  server_info=
-  while [ "$attempt" -le "$max_attempts" ]; do
-    if server_info=$(curl --silent --show-error --fail \
-      --connect-timeout 10 --max-time 30 \
-      --header 'X-ShinyHub-Demo-Smoke-Probe: version' "$base_url/api/server-info"); then
-      case "$server_info" in
-        *'"version":"'"$SHINYHUB_DEMO_EXPECTED_VERSION"'"'*)
-          printf '%s -> version %s\n' "$base_url/api/server-info" "$SHINYHUB_DEMO_EXPECTED_VERSION"
-          break
-          ;;
-      esac
-    fi
-    if [ "$attempt" -eq "$max_attempts" ]; then
-      echo "$base_url/api/server-info -> expected version $SHINYHUB_DEMO_EXPECTED_VERSION after $max_attempts attempts, got $server_info" >&2
-      exit 1
-    fi
-    nudge
-    sleep "$retry_delay"
-    attempt=$((attempt + 1))
-  done
-fi
 
 login_html=$(curl --silent --show-error --fail "$base_url/login")
 case "$login_html" in

@@ -22,28 +22,14 @@ export const websocketPaths = [
   "/app/streamlit-demo/_stcore/stream",
 ];
 
-// Only these explicitly marked, retried GETs can recover from an interruption:
-// a cancellation, or a rollout replacing the container underneath them.
-const retryProbes = new Map([
-  ["wake", { path: "/", statuses: [200, 302, 303] }],
-  ["readiness", { path: "/__demo/ready", statuses: [204] }],
-  ["version", { path: "/api/server-info", statuses: [200] }],
-]);
-
-// The one error log a retry probe may carry: the platform replacing the
-// container with the newly deployed image while the probe is in flight. The
-// whole message must match, so no other container failure can ride along.
-const rolloutKill = /^Container error: (?:Error: )?Runtime signalled the container to exit due to a new version rollout: \d+$/;
-const isRolloutKill = log => log.level === "error" && Array.isArray(log.message)
-  && log.message.every(part => typeof part === "string") && rolloutKill.test(log.message.join(" "));
+const diagnosticPaths = new Set(["/", "/login", "/healthz", "/__demo/start", "/__demo/ready",
+  "/__demo/status", "/__demo/session", "/api/server-info", "/api/auth/me", ...websocketPaths]);
 
 // Consume only this smoke run's records. Never print/store raw tail payloads:
 // unrelated visitors' request headers can include session cookies.
 export function smokeInspector(id) {
   const closed = new Set();
   const connections = new Set();
-  const canceledProbes = new Map();
-  const confirmedProbes = new Map();
   let observed = false;
   let failure;
   return {
@@ -51,7 +37,6 @@ export function smokeInspector(id) {
       if (record.type === "tail-info" || (record.event?.type && record.event?.message)) { failure = "Tail stream reported incomplete telemetry"; return; }
       const request = record.event?.request;
       const headers = request?.headers ?? {};
-      const header = name => Object.entries(headers).find(([key]) => key.toLowerCase() === name)?.[1];
       const logMessages = (record.logs ?? []).flatMap(log => log.message ?? []).flatMap(message => {
         if (typeof message !== "string") return [message];
         try { return [JSON.parse(message)]; } catch { return []; }
@@ -64,22 +49,12 @@ export function smokeInspector(id) {
         || logMessages.some(message => message?.smoke_id === id);
       if (!correlated) return;
       observed = true;
+      const path = diagnosticPaths.has(url?.pathname) ? url.pathname : "<other>";
       // Cloudflare can mark a streamed HTTP invocation canceled after the
       // client has consumed its successful response. The smoke suite checks
       // that response separately; upgrades still require clean server closes.
       const completedHTTP = record.outcome === "canceled"
         && record.event?.response?.status >= 200 && record.event.response.status < 400;
-      const probeKind = header("x-shinyhub-demo-smoke-probe");
-      const probe = retryProbes.get(probeKind);
-      const markedProbe = probe !== undefined && probe.path === url?.pathname && request?.method === "GET"
-        && Number.isFinite(record.eventTimestamp);
-      const canceledProbe = markedProbe && record.outcome === "canceled" && !completedHTTP;
-      if (canceledProbe) {
-        canceledProbes.set(probeKind, Math.max(canceledProbes.get(probeKind) ?? -Infinity, record.eventTimestamp));
-      }
-      if (markedProbe && record.outcome === "ok" && probe.statuses.includes(record.event?.response?.status)) {
-        confirmedProbes.set(probeKind, Math.max(confirmedProbes.get(probeKind) ?? -Infinity, record.eventTimestamp));
-      }
       // A transparent upgrade can end with either disconnect outcome even when
       // its client and container relay both completed normal close handshakes.
       // It cannot pass check() until independent DO evidence covers every app.
@@ -87,23 +62,16 @@ export function smokeInspector(id) {
         && request?.method === "GET"
         && websocketPaths.includes(url?.pathname)
         && Object.entries(headers).some(([key, value]) => key.toLowerCase() === "upgrade" && value?.toLowerCase() === "websocket");
-      if ((record.exceptions?.length ?? 0) > 0 || (record.outcome && record.outcome !== "ok" && !completedHTTP && !disconnectedUpgrade && !canceledProbe)) {
+      if ((record.exceptions?.length ?? 0) > 0 || (record.outcome && record.outcome !== "ok" && !completedHTTP && !disconnectedUpgrade)) {
         // Do not expose URLs, headers, exception messages or unrelated logs.
-        const path = [...websocketPaths, ...Array.from(retryProbes.values(), p => p.path)].includes(url?.pathname)
-          ? url.pathname : "<other>";
         const outcome = /^[a-zA-Z]+$/.test(record.outcome ?? "") ? record.outcome : "unknown";
         failure = `Smoke request produced a server-side exception or unsuccessful invocation (path=${path}, outcome=${outcome}, exceptions=${record.exceptions?.length ?? 0})`;
       }
-      if (record.event?.response?.status >= 500 && record.event.response.status !== 503) {
-        failure = "Smoke request returned HTTP 5xx";
+      if (record.event?.response?.status >= 500) {
+        failure = `Smoke request returned HTTP 5xx (path=${path}, status=${record.event.response.status})`;
       }
       for (const log of record.logs ?? []) {
-        if (markedProbe && isRolloutKill(log)) {
-          // The probe reached a container that was then replaced, so its own
-          // response proves nothing about the new one. Like a cancellation,
-          // it counts as interrupted until a later probe of its kind succeeds.
-          canceledProbes.set(probeKind, Math.max(canceledProbes.get(probeKind) ?? -Infinity, record.eventTimestamp));
-        } else if (["error", "fatal"].includes(log.level)) failure = "Smoke request emitted a server-side error";
+        if (["error", "fatal"].includes(log.level)) failure ??= `Smoke request emitted a server-side error (path=${path}, level=${log.level})`;
         for (let message of log.message ?? []) {
           if (typeof message === "string") {
             try { message = JSON.parse(message); } catch { continue; }
@@ -119,11 +87,6 @@ export function smokeInspector(id) {
     },
     check() {
       if (failure) throw new Error(failure);
-      // Tail records can arrive out of order. A successful earlier request
-      // cannot clear a later cancellation, nor can another probe's response.
-      for (const [kind, timestamp] of canceledProbes) {
-        if ((confirmedProbes.get(kind) ?? -Infinity) <= timestamp) return false;
-      }
       return observed && websocketPaths.every(path => closed.has(path)) && connections.size >= websocketPaths.length;
     },
     get observed() { return observed; },
@@ -161,7 +124,15 @@ export async function verifiedSmoke(env = process.env) {
   process.once("SIGTERM", stop);
   process.once("SIGINT", stop);
   let session, socket, child, streamFailure, primaryFailure, cleanupFailure;
+  const runSmoke = (phase, marker) => new Promise((resolve, reject) => {
+    child = spawn(fileURLToPath(new URL("./demo-smoke.sh", import.meta.url)), [phase], {
+      env: { ...env, SHINYHUB_DEMO_SMOKE_ID: marker }, stdio: "inherit", signal: controller.signal,
+    });
+    child.once("error", reject);
+    child.once("exit", code => code === 0 ? resolve() : reject(new Error(`Demo smoke ${phase} exited with status ${code}`)));
+  });
   try {
+    await runSmoke("wait-for-rollout", "");
     session = await api(endpoint, "POST", { filters: [] });
     socket = new WebSocket(session.url, "trace-v1");
     let opened = false;
@@ -185,13 +156,7 @@ export async function verifiedSmoke(env = process.env) {
       headers: { "x-shinyhub-demo-smoke": id, "user-agent": "ShinyHub-Demo-Verification/1.0" },
       signal: AbortSignal.any([controller.signal, AbortSignal.timeout(10_000)]),
     }).then(r => r.arrayBuffer()), () => { check(); return inspector.observed; }, controller.signal);
-    await new Promise((resolve, reject) => {
-      child = spawn(fileURLToPath(new URL("./demo-smoke.sh", import.meta.url)), [], {
-        env: { ...env, SHINYHUB_DEMO_SMOKE_ID: id }, stdio: "inherit", signal: controller.signal,
-      });
-      child.once("error", reject);
-      child.once("exit", code => code === 0 ? resolve() : reject(new Error(`Demo smoke exited with status ${code}`)));
-    });
+    await runSmoke("verify", id);
     // Read only synthetic close records through the passive status probe.
     // This proves the inner relay completed, without another WebSocket proxy.
     await waitForTelemetry(() => fetch(status, {

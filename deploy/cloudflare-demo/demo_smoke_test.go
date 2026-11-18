@@ -26,13 +26,13 @@ func isNavigation(r *http.Request) bool {
 // a container that only becomes healthy in response to a browser-navigation
 // style request (matching classifyColdRequest's "wake" verdict), and every
 // other path refusing while unhealthy. It forces exactly one unhealthy
-// transition on the FIRST call to /api/server-info, after the script's own
+// transition during /api/server-info polling, after the script's own
 // wake() has already reported the container awake - the shape of a rollout
 // swapping the container out from under a smoke test that already passed its
 // earlier checks. Recovery requires a second navigation-style request; a bare
 // status re-check can never do it, matching classifyColdRequest's "refuse"
 // verdict for any path outside "/" and "/login".
-func newDemoEdgeMock(t *testing.T, version string) (*httptest.Server, *atomic.Int32) {
+func newDemoEdgeMock(t *testing.T, version, deployment string) (*httptest.Server, *atomic.Int32) {
 	t.Helper()
 
 	var healthy atomic.Bool
@@ -105,13 +105,15 @@ func newDemoEdgeMock(t *testing.T, version string) (*httptest.Server, *atomic.In
 		fmt.Fprint(w, `{"username":"demo-viewer","role":"viewer","display_name":"Demo Viewer"}`)
 	})
 
-	// The FIRST call always lands on a container the smoke test already
-	// proved awake in the checks above - this is the drop, not the initial
-	// cold start. Every call after that reads the current state, which only
-	// a fresh navigation-style request (nudge) can bring back: it restarts the
-	// container, and the Worker forwards the next call to the running one.
+	// The old deployment already serves the right version. The rollout then
+	// interrupts polling and a fresh navigation is required to wake the new one.
 	mux.HandleFunc("/api/server-info", func(w http.ResponseWriter, r *http.Request) {
-		if serverInfoCalls.Add(1) == 1 {
+		call := serverInfoCalls.Add(1)
+		marked := r.Header.Get("X-ShinyHub-Demo-Smoke") != ""
+		if marked != (call > 3) {
+			t.Errorf("version probe %d: correlated=%v, want correlation only during verification", call, marked)
+		}
+		if call == 2 {
 			healthy.Store(false)
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
@@ -121,6 +123,11 @@ func newDemoEdgeMock(t *testing.T, version string) (*httptest.Server, *atomic.In
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if call == 1 {
+			w.Header().Set("X-ShinyHub-Demo-Deployment", "old-deployment")
+		} else {
+			w.Header().Set("X-ShinyHub-Demo-Deployment", deployment)
+		}
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, `{"version":"%s","protocol_version":1}`, version)
 	})
@@ -147,20 +154,33 @@ func newDemoEdgeMock(t *testing.T, version string) (*httptest.Server, *atomic.In
 // without any help beyond what it already sends for the first wake.
 func TestDemoSmokeRecoversFromPostWakeUnhealthyWindow(t *testing.T) {
 	const version = "9.9.9-smoke-test"
-	server, navCount := newDemoEdgeMock(t, version)
+	const deployment = "new-deployment"
+	server, navCount := newDemoEdgeMock(t, version, deployment)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "sh", "../../scripts/demo-smoke.sh")
-	cmd.Env = append(cmd.Environ(),
-		"SHINYHUB_DEMO_URL="+server.URL,
-		"SHINYHUB_DEMO_APP_URL="+server.URL,
-		"SHINYHUB_DEMO_EXPECTED_VERSION="+version,
-		"SHINYHUB_DEMO_SMOKE_ATTEMPTS=5",
-		"SHINYHUB_DEMO_SMOKE_RETRY_DELAY=0",
-	)
-	output, err := cmd.CombinedOutput()
+	runPhase := func(phase string) ([]byte, error) {
+		cmd := exec.CommandContext(ctx, "sh", "../../scripts/demo-smoke.sh", phase)
+		cmd.Env = append(cmd.Environ(),
+			"SHINYHUB_DEMO_URL="+server.URL,
+			"SHINYHUB_DEMO_APP_URL="+server.URL,
+			"SHINYHUB_DEMO_EXPECTED_VERSION="+version,
+			"SHINYHUB_DEMO_EXPECTED_DEPLOYMENT="+deployment,
+			"SHINYHUB_DEMO_SMOKE_ATTEMPTS=5",
+			"SHINYHUB_DEMO_SMOKE_RETRY_DELAY=0",
+			"SHINYHUB_DEMO_SMOKE_ID=integration-smoke",
+		)
+		return cmd.CombinedOutput()
+	}
+	if output, err := runPhase("wait-for-rollout"); err != nil {
+		t.Fatalf("wait for rollout: %v\n%s", err, output)
+	}
+	navigations := navCount.Load()
+	if navigations != 3 {
+		t.Fatalf("expected 3 navigation-style requests (initial wake, same-version stale image, and recovery), got %d", navigations)
+	}
+	output, err := runPhase("verify")
 	t.Logf("demo-smoke.sh output:\n%s", output)
 	var exitErr *exec.ExitError
 	if err != nil && !errors.As(err, &exitErr) {
@@ -172,16 +192,32 @@ func TestDemoSmokeRecoversFromPostWakeUnhealthyWindow(t *testing.T) {
 	// final exit code.
 
 	got := string(output)
-	successLine := fmt.Sprintf("-> version %s", version)
-	failureLine := fmt.Sprintf("expected version %s after", version)
-
-	if strings.Contains(got, failureLine) {
-		t.Fatalf("demo-smoke.sh gave up waiting for version %s instead of recovering; output:\n%s", version, got)
-	}
+	successLine := fmt.Sprintf("-> version %s, deployment %s", version, deployment)
 	if !strings.Contains(got, successLine) {
 		t.Fatalf("demo-smoke.sh never reported %q; output:\n%s", successLine, got)
 	}
-	if n := navCount.Load(); n < 2 {
-		t.Fatalf("expected at least 2 navigation-style requests (initial wake + recovery nudge), got %d", n)
+	if n := navCount.Load(); n != navigations {
+		t.Fatalf("strict verification initiated %d additional wakes", n-navigations)
+	}
+}
+
+func TestDemoSmokeVerificationFailsOnUnexpectedUnavailable(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.URL.Path != "/healthz" || r.Header.Get("X-ShinyHub-Demo-Smoke") != "integration-smoke" {
+			t.Errorf("unexpected verification request %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(server.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sh", "../../scripts/demo-smoke.sh", "verify")
+	cmd.Env = append(cmd.Environ(), "SHINYHUB_DEMO_URL="+server.URL, "SHINYHUB_DEMO_EXPECTED_VERSION=",
+		"SHINYHUB_DEMO_EXPECTED_DEPLOYMENT=", "SHINYHUB_DEMO_SMOKE_ID=integration-smoke", "SHINYHUB_DEMO_SMOKE_RETRY_DELAY=0")
+	output, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "/healthz -> unexpected status 503") || calls.Load() != 1 {
+		t.Fatalf("expected one failed verification request, got %d requests, %v\n%s", calls.Load(), err, output)
 	}
 }

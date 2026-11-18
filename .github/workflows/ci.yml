@@ -371,7 +371,8 @@ jobs:
 
   test-browser-agent-charts:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # WebKit installs system packages from the Ubuntu mirror even on a cache hit.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -383,6 +384,7 @@ jobs:
           browser: ${{ matrix.browser }}
           root-dependencies: "true"
       - name: Verify charts, accessibility, host isolation and recovery
+        timeout-minutes: 5
         env:
           SHINYHUB_E2E_BROWSER: ${{ matrix.browser }}
           SHINYHUB_E2E_BROWSER_CHANNEL: chromium

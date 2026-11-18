@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -255,7 +256,9 @@ func TestFleetEntitlementsRejectOldServerBeforeMutation(t *testing.T) {
 }
 
 func TestFleetEntitlementsReportsLostApplyResponse(t *testing.T) {
-	_, requests := setupCLITestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
 		if r.Method != http.MethodPut || r.URL.Path != "/api/apps/demo/entitlement-policy" {
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL)
 			w.WriteHeader(http.StatusInternalServerError)
@@ -267,16 +270,14 @@ func TestFleetEntitlementsReportsLostApplyResponse(t *testing.T) {
 			return
 		}
 		conn.Close()
-	})
-	cfg, err := loadConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
+	}))
+	t.Cleanup(server.Close)
+	cfg := &cliConfig{Host: server.URL, Token: "shk_test"}
 	result := convergeAppFromSpec(cfg, fleet.AppDiff{Slug: "demo", Action: fleet.ActionUnchanged,
 		Entitlements: &policy.Preview{Token: "preview", AppID: 1}}, fleet.AppEntry{},
 		fleet.ObservedApp{}, bundleBuildSpec{Entitlements: policy.Policy{}}, convergeOpts{}, "fleet:test", io.Discard)
-	if result.failureKind != "entitlement_policy_outcome_unknown" || result.mutation != mutationUnknown || len(*requests) != 1 {
-		t.Fatalf("lost response: %v %v %d", result.failureKind, result.mutation, len(*requests))
+	if count := requests.Load(); result.failureKind != "entitlement_policy_outcome_unknown" || result.mutation != mutationUnknown || count != 1 {
+		t.Fatalf("lost response: %v %v %d", result.failureKind, result.mutation, count)
 	}
 }
 

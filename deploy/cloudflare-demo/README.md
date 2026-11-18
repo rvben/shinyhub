@@ -51,30 +51,23 @@ keep the object awake while their relay exists.
 The outer Worker passes upgrades through unchanged. A second terminating relay
 can turn a normal DO close into an abnormal cross-isolate disconnect.
 
-The WebSocket smoke checks require both a successful upgrade and a clean close.
-For deployments, `scripts/demo-smoke-verified.mjs` opens a temporary Cloudflare
-tail before the suite, repeats marked passive status requests until registration
-has propagated, and requires normal close evidence from both proxy ends for all
-three apps. A
-correlated exception, error log, failed invocation, missing evidence, or lost tail
-fails verification even if the client reported success. The live tail does not
-reliably include Durable Object platform exceptions: after deployment, also check
-persisted Cloudflare Workers Logs for the deployed version and marked smoke URLs.
-A passing client or tail check alone is insufficient.
-Successful streamed HTTP responses may have a `canceled` invocation outcome;
-these require the client HTTP checks to pass and never substitute for WebSocket
-close evidence. The smoke script marks its retryable wake, readiness, and version
-probes. A canceled probe without a completed response is tolerated only after
-telemetry confirms a later successful probe of the same kind. The same holds for
-a probe whose record carries the platform's "new version rollout" container
-error: a deployment replaces the container under whichever probe is in flight,
-so that probe counts as interrupted, including its own response, until a later
-one of its kind succeeds. Only that exact message, on a marked probe, is treated
-this way; every other exception and error log still fails the run. Event timestamps preserve this ordering even when
-tail records arrive late. Synthetic WebSocket clients send a correlation header because
-query values are redacted in tail events. Marked passive status probes publish
-the DO's bounded synthetic close records through the tail, so verification
-checks the actual container relay rather than relying on missing DO tail logs.
+`scripts/demo-smoke-verified.mjs` first wakes the demo and polls for the
+expected release. CI stamps each deploy with a fresh marker shared by the Worker
+and container image. The smoke script waits for both to serve that marker, even
+on a redeploy of the same ShinyHub version. It then opens a temporary Cloudflare
+tail and repeats marked passive status requests until registration has
+propagated. The marked smoke checks run once and recheck the deployment. A
+correlated exception, error log, failed invocation, HTTP 5xx, missing close
+evidence, or lost tail fails verification.
+
+Each WebSocket smoke check requires a successful upgrade and a clean close at
+both proxy ends. Successful streamed HTTP responses may have a `canceled`
+invocation outcome, so verification also checks the client HTTP responses.
+Synthetic WebSocket clients send a correlation header because Cloudflare
+redacts query values in tail events. Marked passive status probes publish the
+Durable Object's close records through the tail. For platform exceptions that
+the live tail can omit, check persisted Cloudflare Workers Logs for the
+deployed version and marked smoke URLs.
 Cloudflare may report `responseStreamDisconnected` or `canceled` for an otherwise successful
 transparent upgrade; this is accepted only for marked WebSocket paths, with
 normal close evidence from every actual container relay. Exceptions and error

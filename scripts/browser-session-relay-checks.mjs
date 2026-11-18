@@ -34,7 +34,11 @@ export async function checkSessionRelays({ context, page, original, appURL, host
   const probes = (async () => {
     while (probing) {
       try {
-        const response = await context.request.get(appURL, { timeout: 5000 });
+        // Exercise the inherited listener on each probe. A pooled HTTP/1.1
+        // connection still belongs to the old process after it stops accepting
+        // and can be closed while the client is reusing it. The live browser
+        // pages below independently exercise sessions across each handoff.
+        const response = await context.request.get(appURL, { headers: { Connection: 'close' }, timeout: 5000 });
         result.http_probes++;
         if (response.status() !== 200) failures.push(`page status ${response.status()}`);
         await response.dispose();

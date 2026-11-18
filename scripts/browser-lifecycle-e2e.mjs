@@ -240,10 +240,12 @@ try {
         return await command([binary, 'deploy', app, '--config', clientConfig, '--slug', slug, '--visibility', 'private', '--output', 'json', ...flags], 'deploy',
           { ...execution, env: { ...env, SHINYHUB_HOST: upstream, SHINYHUB_TOKEN: token } });
       } catch (error) {
-        // Admission legitimately refuses brief host pressure. Retry only that
-        // conflict, with a deadline; deliberate capacity-refusal checks never retry.
-        if (capacityMode || execution.expectedExit !== undefined || error.actual !== 5
-          || !error.stderr?.includes('working version preserved: CPU:') || Date.now() >= end) throw error;
+        // Immediate conflicts exit 5. A streamed deploy can report the same
+        // CPU refusal after upload as a deferred deployment with exit 1.
+        const cpuRefusal = (error.actual === 5 && error.stderr?.includes('working version preserved: CPU:'))
+          || (error.actual === 1 && error.stderr?.includes('deploy deferred: working version preserved: CPU:'));
+        if (capacityMode || execution.expectedExit !== undefined || !cpuRefusal || Date.now() >= end) throw error;
+        console.log('    host CPU pressure deferred deployment; retrying');
         await delay(500, undefined, { signal: abort.signal });
       }
     }

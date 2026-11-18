@@ -16,7 +16,7 @@ hook.deregister();
 const control = "staging.demo.shinyhub.dev";
 const apps = "apps.staging.demo.shinyhub.dev";
 
-function fixture(status = "stopped", passiveReadiness = false) {
+function fixture(status = "stopped", passiveReadiness = false, deploymentID?: string) {
   const counts = { resolve: 0, state: 0, start: 0, fetch: 0 };
   const requests: Request[] = [];
   const work: Promise<unknown>[] = [];
@@ -28,7 +28,7 @@ function fixture(status = "stopped", passiveReadiness = false) {
     async start() { counts.start++; await start(); },
     async fetch(request: Request) { counts.fetch++; requests.push(request); return response(); },
   };
-  const worker = createDemoWorker({ controlHost: control, appHost: apps, passiveReadiness,
+  const worker = createDemoWorker({ controlHost: control, appHost: apps, passiveReadiness, deploymentID: () => deploymentID,
     container() { counts.resolve++; return backend; } });
   const ctx = { waitUntil(p: Promise<unknown>) { work.push(p); } } as ExecutionContext;
   return { counts, requests, work,
@@ -48,6 +48,21 @@ test("unknown hosts, robots and rejected app APIs never resolve a container", as
     ["https://" + apps + "/api/auth/session", 404],
   ] as const) assert.equal((await f.fetch(new Request(url))).status, status);
   assert.deepEqual(f.counts, { resolve: 0, state: 0, start: 0, fetch: 0 });
+});
+
+test("server info confirms only a matching Worker and container deployment", async () => {
+  const f = fixture("healthy", false, "new-deployment");
+  const imageHeader = "x-shinyhub-demo-image";
+  const deploymentHeader = "x-shinyhub-demo-deployment";
+  for (const [marker, expected] of [["old-deployment", null], ["new-deployment", "new-deployment"]] as const) {
+    f.setResponse(() => Response.json({ version: "0.25.2" }, { headers: { [imageHeader]: marker, [deploymentHeader]: "unverified" } }));
+    const response = await f.fetch(new Request(`https://${control}/api/server-info`));
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get(deploymentHeader), expected);
+    assert.equal(response.headers.get(imageHeader), null);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.deepEqual(await response.json(), { version: "0.25.2" });
+  }
 });
 
 test("versioned dashboard assets are retried before immutable bytes reach the browser", async () => {

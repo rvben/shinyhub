@@ -37,6 +37,7 @@ export interface DemoWorkerOptions<Env> {
   controlHost: string;
   appHost: string;
   container(env: Env): DemoContainer;
+  deploymentID?(env: Env): string | undefined;
   // Native containers already verify HTTP health in getState().
   passiveReadiness?: boolean;
 }
@@ -374,6 +375,18 @@ export function createDemoWorker<Env>(options: DemoWorkerOptions<Env>): Exported
       responseHeaders.set("referrer-policy", "strict-origin-when-cross-origin");
       responseHeaders.set("permissions-policy", "camera=(), microphone=(), geolocation=()");
       responseHeaders.delete("server");
+      if (url.hostname === controlHost && url.pathname === "/api/server-info") {
+        // Only this Worker can attest that it reached the matching image.
+        // A Worker from before this check may forward the image header as-is.
+        const marker = options.deploymentID?.(env);
+        const imageMarker = responseHeaders.get("x-shinyhub-demo-image");
+        responseHeaders.delete("x-shinyhub-demo-image");
+        responseHeaders.delete("x-shinyhub-demo-deployment");
+        if (marker && upstream.status === 200 && imageMarker === marker) {
+          responseHeaders.set("x-shinyhub-demo-deployment", marker);
+        }
+        responseHeaders.set("cache-control", "no-store");
+      }
 
       const response = new Response(upstream.body, {
         status: upstream.status,

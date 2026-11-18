@@ -70,6 +70,8 @@ RUN chmod 0755 /usr/local/bin/cloudflare-demo-entrypoint \
     && useradd --system --uid 10001 --home-dir /data --shell /usr/sbin/nologin shinyhub \
     && chown -R shinyhub:shinyhub /data /opt/shinyhub-demo
 
+COPY deploy/cloudflare-demo/deployment.caddy /opt/shinyhub-demo/deployment.caddy
+
 USER shinyhub:shinyhub
 WORKDIR /opt/shinyhub-demo
 EXPOSE 8080

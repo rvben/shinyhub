@@ -8,6 +8,7 @@ import { DEMO_HOST, APP_HOST } from "./edge-policy.ts";
 
 interface Env {
   SHINYHUB_DEMO: DurableObjectNamespace<ShinyHubDemo>;
+  DEMO_DEPLOYMENT_ID?: string;
 }
 
 export class ShinyHubDemo extends Container {
@@ -95,4 +96,5 @@ export default createDemoWorker<Env>({
   controlHost: DEMO_HOST,
   appHost: APP_HOST,
   container: (env) => getContainer(env.SHINYHUB_DEMO, "public-demo"),
+  deploymentID: (env) => env.DEMO_DEPLOYMENT_ID,
 });

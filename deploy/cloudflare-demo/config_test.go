@@ -213,7 +213,9 @@ func TestCloudflareDemoDeploysAfterSuccessfulReleases(t *testing.T) {
 		`CLOUDFLARE_API_TOKEN must contain only the bare token value`,
 		`CLOUDFLARE_ACCOUNT_ID must be a 32-character lowercase hexadecimal account ID`,
 		`npx wrangler whoami --account "$CLOUDFLARE_ACCOUNT_ID"`,
-		`run: npm run deploy`,
+		`header /api/server-info X-ShinyHub-Demo-Image`,
+		`npm run deploy -- --var "DEMO_DEPLOYMENT_ID:$deployment_id"`,
+		`SHINYHUB_DEMO_EXPECTED_DEPLOYMENT: ${{ steps.deploy-demo.outputs.deployment_id }}`,
 		`SHINYHUB_DEMO_EXPECTED_VERSION`,
 		`node ./scripts/demo-smoke-verified.mjs`,
 		`run: npm run test:runtime`,
@@ -230,6 +232,7 @@ func TestCloudflareDemoDeploysAfterSuccessfulReleases(t *testing.T) {
 	dockerfileSource := string(dockerfile)
 	for _, required := range []string{
 		`COPY package.json ./`,
+		`COPY deploy/cloudflare-demo/deployment.caddy /opt/shinyhub-demo/deployment.caddy`,
 		`-X main.version=${VERSION}`,
 		`"shinyhub-bookmarks==0.5.2"`,
 		`COPY examples/bookmarking-demo/app.py /opt/shinyhub-demo/apps/bookmarking-demo/app.py`,
