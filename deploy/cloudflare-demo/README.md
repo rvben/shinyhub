@@ -270,12 +270,13 @@ minutes.
 
 The public demo workflow creates a temporary Cloudflare silence for **Worker
 errors** before starting the deployment job. Cloudflare retains the silenced
-events in Alert History. After both smoke checks pass, the workflow shortens the
-silence to 11 minutes after verification so the rollout records age out of the
-monitor's 10-minute window. It removes the silence after a failed or cancelled
-deployment. If cleanup cannot run, Cloudflare expires the silence automatically
-within 46 minutes of scheduling. The lifecycle monitor and GitHub smoke checks
-stay active throughout.
+events in Alert History. After both smoke checks pass, the final job waits
+until 11 minutes after verification, then removes the silence. This gives the
+rollout records time to age out of the monitor's 10-minute window. If deployment
+fails or is cancelled before verification, the final job removes the silence as
+soon as it runs. If cleanup is interrupted, including a cancellation during the
+cooldown, Cloudflare expires the silence automatically within 46 minutes of
+scheduling. The lifecycle monitor and GitHub smoke checks stay active throughout.
 
 If the deployment runner queues too long or you need to retry deployment, use
 **Re-run all jobs** to get a fresh silence. For a manual deploy outside GitHub

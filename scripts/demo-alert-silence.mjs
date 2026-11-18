@@ -105,37 +105,32 @@ export async function manageDemoSilence(action, env = process.env, { fetchAPI = 
 
   const path = `/silences/${id}`;
   const silence = await api(path, "GET", undefined, true);
-  const remove = action === "failure" || now() >= cooldownEnd;
   if (silence === null) {
-    if (remove) return {};
+    if (action === "failure" || now() >= cooldownEnd) return {};
     throw new Error("The deployment silence disappeared before the alert window cleared");
   }
   if (normalizedID(silence?.id) !== normalizedID(id) || normalizedID(silence.policy_id) !== policyID) {
     throw new Error("Cloudflare silence does not belong to the demo Worker errors monitor");
   }
-  if (remove) {
-    try { await api(path, "DELETE", undefined, true); }
-    catch (error) {
-      if (!await confirm(async () => await api(path, "GET", undefined, true) === null)) throw error;
-    }
-    return {};
+  if (action === "success" && now() < cooldownEnd) {
+    const currentEnd = Date.parse(silence.end_time);
+    if (!Number.isFinite(currentEnd)) throw new Error("Cloudflare returned an invalid silence expiry");
+    if (cooldownEnd > currentEnd) throw new Error("The deployment silence expires before the alert window clears");
+    // Keep the confirmed silence until the monitor's lookback clears.
+    await wait(cooldownEnd - now());
   }
-  const currentEnd = Date.parse(silence.end_time);
-  if (!Number.isFinite(currentEnd)) throw new Error("Cloudflare returned an invalid silence expiry");
-  const end = cooldownEnd;
-  if (end > currentEnd) throw new Error("The deployment silence expires before the alert window clears");
-  const endTime = new Date(end).toISOString();
-  if (end < currentEnd) {
-    let updateError;
-    try { await api("/silences", "PUT", [{ id, end_time: endTime }]); }
-    catch (error) { updateError = error; }
-    const shortened = await confirm(async () => {
-      const updated = await api(path);
-      return Date.parse(updated?.end_time) === end;
-    });
-    if (!shortened) throw updateError ?? new Error("Cloudflare did not confirm the shortened silence expiry");
+  let deleteError;
+  try { await api(path, "DELETE", undefined, true); }
+  catch (error) { deleteError = error; }
+  const removed = await confirm(async () => {
+    const current = await api(path, "GET", undefined, true);
+    return current === null || (normalizedID(current?.id) === normalizedID(id)
+      && normalizedID(current?.policy_id) === policyID && Date.parse(current.end_time) <= now());
+  });
+  if (!removed) {
+    throw deleteError ?? new Error("Cloudflare did not confirm the deployment silence was removed");
   }
-  return { endTime };
+  return {};
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

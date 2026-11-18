@@ -122,32 +122,35 @@ test("a wrong policy, missing token, or unconfirmed silence blocks the rollout",
   assert.equal(absent.calls.filter(call => call.method === "POST").length, 1);
 });
 
-test("success leaves an eleven-minute cooldown and verifies the new expiry", async () => {
+test("success waits until eleven minutes after verification and confirms removal", async () => {
+  let removed = false;
+  let deletedReads = 0;
   const silence = { ...window, id: silenceID };
-  const end = "2026-11-18T15:51:00.000Z";
-  let updateSent = false;
-  let updatedReads = 0;
-  const f = fixture(({ method, path, body }) => {
-    if (method === "PUT") {
-      assert.equal(path, "/silences");
-      assert.deepEqual(body, [{ id: silenceID, end_time: end }]);
-      updateSent = true;
+  const f = fixture(({ method, path }) => {
+    assert.equal(path, `/silences/${silenceID}`);
+    if (method === "DELETE") {
+      assert.deepEqual(f.waits, [9 * 60_000]);
+      removed = true;
       return undefined;
     }
-    assert.equal(path, `/silences/${silenceID}`);
-    return updateSent && ++updatedReads > 1 ? { ...silence, end_time: end } : silence;
+    assert.equal(method, "GET");
+    return removed && ++deletedReads > 1 ? new Response(null, { status: 404 }) : silence;
   }, time + 2 * 60_000);
-  assert.deepEqual(await f.run("success"), { endTime: end });
-  assert.deepEqual(f.waits, [1_000]);
+  assert.deepEqual(await f.run("success"), {});
+  assert.deepEqual(f.waits, [9 * 60_000, 1_000]);
+  assert.deepEqual(f.calls.map(call => call.method), ["GET", "DELETE", "GET", "GET"]);
 });
 
 test("failure removes only the owned policy silence and tolerates a concurrent expiry", async () => {
+  let expired = false;
   const f = fixture(({ method, path }) => {
     assert.equal(path, `/silences/${silenceID}`);
-    return method === "GET" ? { ...window, id: silenceID } : new Response(null, { status: 404 });
+    if (method === "DELETE") expired = true;
+    return expired ? new Response(null, { status: 404 }) : { ...window, id: silenceID };
   });
   await f.run("failure");
-  assert.deepEqual(f.calls.map(call => call.method), ["GET", "DELETE"]);
+  assert.deepEqual(f.calls.map(call => call.method), ["GET", "DELETE", "GET"]);
+  assert.deepEqual(f.waits, []);
 
   const wrong = fixture(() => ({ ...window, id: silenceID, policy_id: otherID }));
   await assert.rejects(wrong.run("failure"), /does not belong/);
@@ -163,9 +166,14 @@ test("success fails visibly if the silence vanished or expires too soon", async 
 });
 
 test("a finalizer arriving after cooldown removes the owned silence", async () => {
-  const f = fixture(({ method }) => method === "GET" ? { ...window, id: silenceID } : undefined, time + 12 * 60_000);
+  let removed = false;
+  const f = fixture(({ method }) => {
+    if (method === "DELETE") removed = true;
+    return removed ? new Response(null, { status: 404 }) : { ...window, id: silenceID };
+  }, time + 12 * 60_000);
   assert.deepEqual(await f.run("success"), {});
-  assert.deepEqual(f.calls.map(call => call.method), ["GET", "DELETE"]);
+  assert.deepEqual(f.calls.map(call => call.method), ["GET", "DELETE", "GET"]);
+  assert.deepEqual(f.waits, []);
 });
 
 test("a failed cleanup can confirm that Cloudflare applied a DELETE", async () => {
@@ -176,6 +184,19 @@ test("a failed cleanup can confirm that Cloudflare applied a DELETE", async () =
       throw new Error("socket interrupted");
     }
     return removed ? new Response(null, { status: 404 }) : { ...window, id: silenceID };
+  });
+  await f.run("failure");
+  assert.deepEqual(f.calls.map(call => call.method), ["GET", "DELETE", "GET"]);
+});
+
+test("cleanup accepts a retained silence record whose coverage has ended", async () => {
+  let removed = false;
+  const f = fixture(({ method }) => {
+    if (method === "DELETE") {
+      removed = true;
+      return undefined;
+    }
+    return { ...window, id: silenceID, end_time: removed ? new Date(time).toISOString() : window.end_time };
   });
   await f.run("failure");
   assert.deepEqual(f.calls.map(call => call.method), ["GET", "DELETE", "GET"]);
