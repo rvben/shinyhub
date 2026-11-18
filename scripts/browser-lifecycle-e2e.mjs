@@ -319,7 +319,7 @@ try {
     console.log('BROWSER RELOAD PRODUCER E2E PASS');
   } else if (relayMode) {
     await checkSessionRelays({ context, page, original, appURL, host, state, app, work,
-      binary, config, command, api, request, deploy, check, poll, output, assertDisconnected, sockets, viewerID: viewerRecord.id, viewer });
+      binary, config, command, api, request, deploy, check, poll, output, assertDisconnected, sockets, viewerID: viewerRecord.id, viewer, report });
     await checkBookmarkContinuity({ root, state, binary, clientConfig, host, token, env, command, context, check, poll, report });
     assert.deepEqual(report.browserErrors, [], 'no browser script errors');
     report.status = 'passed';

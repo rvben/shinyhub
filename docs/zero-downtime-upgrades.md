@@ -72,6 +72,17 @@ and the HTTPS probes also observed failures during stop/start.
 Setup failures never count as successful controls. CI and the release gate run
 this control too. Cleanup only stops the fixture's uniquely named units.
 
+`make test-browser-session-relays-e2e` runs the same-version native reload checks
+on macOS or Linux without systemd. It verifies the original WebSocket objects
+remain open without reconnecting beyond the fixture's drain deadline, a distinct
+successor session can recalculate, and closing all browser sessions reduces the
+CLI's retired-generation and session counts to zero without changing the active
+PID. Authenticated HTTP probes run throughout the handoffs and retirement.
+`make test-entra-oidc-browser` separately checks that an emulator-authenticated
+OIDC session survives an acknowledged reload and a full page navigation without
+another provider sign-in. These isolated tests do not validate production DNS,
+proxy routing, or Microsoft tenant policies.
+
 ## One-time setup
 
 1. Install the binary at `/usr/local/bin/shinyhub` (a real built binary; `go run`

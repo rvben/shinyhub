@@ -86,7 +86,10 @@ the runner rejects mismatched versions.
 It runs the real sign-in/account-menu logout screens, checks Secure/HttpOnly/
 SameSite cookie attributes, exercises RP and cross-site iframe logout, verifies
 role demotion/refusal and session revocation, and checks local recovery during a
-provider outage. Chromium bypasses certificate errors only for the disposable
+provider outage. An acknowledged same-version reload must preserve the logged-in
+user, authorization, session ID and original login time. A full page reload must
+then work on the successor without another provider sign-in; ordinary JWT renewal
+is allowed. Chromium bypasses certificate errors only for the disposable
 certificate's public key. Python and Go verify its chain and hostname using
 that certificate as a private CA. No machine trust
 store or production configuration changes. As with the HTTP test, output is

@@ -576,6 +576,76 @@ def run(output):
                     "JavaScript cannot read the session cookie",
                     "shiny_session=" not in alice.evaluate("document.cookie"),
                 )
+                before_reload = me(alice)
+
+                def session_identity(page):
+                    cookie = next(
+                        (c for c in page.context.cookies(hub)
+                         if c["name"] == "shiny_session"), None
+                    )
+                    if cookie is None:
+                        raise CheckFailure("OIDC session cookie remains present")
+                    payload = cookie["value"].split(".")[1]
+                    claims = json.loads(base64.urlsafe_b64decode(
+                        payload + "=" * (-len(payload) % 4)
+                    ))
+                    # Renewal may replace the JWT, but must preserve its login
+                    # identity and absolute-session clock across the handoff.
+                    identity = {key: claims.get(key) for key in ("sub", "jti", "auth_time")}
+                    if not all(identity.values()):
+                        raise CheckFailure("OIDC session has a stable login identity")
+                    return identity
+
+                original_identity = session_identity(alice)
+                previous_pid = int((output / "hub.pid").read_text())
+                handoff = json.loads(
+                    fixture.command(
+                        [str(hub_binary), "reload", "--config", str(config),
+                         "--output", "json"],
+                        cwd=output, env=hub_env, log=output / "reload.log",
+                        capture=True,
+                    )
+                )
+                check(
+                    "Acknowledged reload publishes a distinct successor",
+                    handoff["previous_pid"] == previous_pid
+                    and handoff["pid"] != previous_pid
+                    and int((output / "hub.pid").read_text()) == handoff["pid"],
+                )
+                provenance["reload"] = {
+                    "previous_pid": previous_pid, "pid": handoff["pid"]
+                }
+                check(
+                    "Successor remains in the fixture cleanup process group",
+                    os.getpgid(handoff["pid"]) == hub_process.pid,
+                )
+                deadline = time.monotonic() + 30
+                while hub_process.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.1)
+                check(
+                    "Predecessor exits before successor authorization checks",
+                    hub_process.poll() == 0,
+                )
+                after_reload = me(alice)
+                check(
+                    "Existing OIDC browser session stays authorized after reload",
+                    after_reload["status"] == 200
+                    and after_reload["body"]["user"] == before_reload["body"]["user"]
+                    and session_identity(alice) == original_identity
+                    and alice.evaluate(
+                        "async () => (await fetch('/api/users')).status"
+                    ) == 200,
+                )
+                # A full navigation exercises the successor's cookie validation;
+                # no new provider login or manually injected cookie is allowed.
+                alice.reload()
+                expect(alice.locator("#identity-card")).to_be_visible()
+                check(
+                    "Successor accepts the existing OIDC cookie without provider sign-in",
+                    alice.url == hub + "/identity"
+                    and me(alice)["body"]["user"] == before_reload["body"]["user"]
+                    and session_identity(alice) == original_identity,
+                )
                 independent = new_page()
                 login(independent)
                 check(
@@ -752,6 +822,16 @@ def run(output):
                 and fixture.digest(provider_binary)
                 == provenance["provider_binary_sha256"],
             )
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            try:
+                os.kill(provenance["reload"]["pid"], 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        else:
+            raise CheckFailure("Fixture cleanup stops the reload successor")
+        check("Fixture cleanup stops the reload successor", True)
         report = provenance | {
             "fixture_harness_sha256": provenance["harness_sha256"],
             "status": "passed",
