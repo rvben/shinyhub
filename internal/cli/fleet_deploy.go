@@ -195,7 +195,11 @@ func deployAppBundleCached(cfg *cliConfig, slug string, spec bundleBuildSpec, bu
 		// whether or not this deploy carried an If-Match, and the remedy is
 		// identical either way.
 		if resp.StatusCode == http.StatusConflict && resp.Header.Get(conflictHeader) == conflictHandoffDeferred {
-			return "", false, nil, deployfail.DowntimeRequired, &httpStatusError{
+			kind := deployfail.DowntimeRequired
+			if resp.Header.Get(conflictRemedyHeader) == conflictRemedyWait {
+				kind = deployfail.GenerationRetiring
+			}
+			return "", false, nil, kind, &httpStatusError{
 				Status: resp.StatusCode,
 				msg:    fmt.Sprintf("deploy %s deferred: %s", slug, serverErrorMessage(rb, resp.Status)),
 			}

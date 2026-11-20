@@ -409,6 +409,10 @@ func (s *Server) generationDrainTimeoutSeconds() int {
 	return int((s.generationDrainTimeout() + time.Second - 1) / time.Second)
 }
 
+// errGenerationWaitExpired means an earlier version was still retiring when the
+// deploy stopped waiting for it. A later retry is the remedy.
+var errGenerationWaitExpired = errors.New("previous generation drain or process cleanup did not finish within the wait deadline")
+
 // Wait for the existing retirement owner; never force a second drain or discard
 // an unconfirmed process ledger merely to make the next deployment fit.
 func (s *Server) waitForPreviousGeneration(ctx context.Context, app *db.App, previousID int64, elastic bool) error {
@@ -432,7 +436,7 @@ func (s *Server) waitForPreviousGeneration(ctx context.Context, app *db.App, pre
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-timer.C:
-			return errors.New("previous generation drain or process cleanup did not finish within the wait deadline")
+			return errGenerationWaitExpired
 		case <-ticker.C:
 		}
 	}

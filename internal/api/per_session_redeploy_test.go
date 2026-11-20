@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -147,6 +148,9 @@ func TestDeploy_PerSessionRedeployKeepsALiveWorkerItDoesNotOwn(t *testing.T) {
 	if refused.Code != http.StatusConflict {
 		t.Fatalf("redeploy over a live worker the manager does not own: %d %s, want it refused", refused.Code, refused.Body.String())
 	}
+	if got := refused.Header().Get("X-ShinyHub-Conflict-Remedy"); got != "wait" {
+		t.Fatalf("X-ShinyHub-Conflict-Remedy = %q, want the refusal marked as one a later retry clears", got)
+	}
 	if now, err := store.GetServingDeployment(app.ID); err != nil || now.ID != serving.ID {
 		t.Fatalf("serving deployment after the refusal = %+v err=%v, want it unchanged", now, err)
 	}
@@ -162,6 +166,61 @@ func TestDeploy_PerSessionRedeployKeepsALiveWorkerItDoesNotOwn(t *testing.T) {
 	<-exited
 	if rec := redeploy("print('v3')", 15*time.Second); rec.Code != http.StatusOK {
 		t.Fatalf("redeploy once the worker is gone: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// The wait for an earlier version reads the worker ledger. A ledger that cannot
+// be read is a server fault, not a version still retiring, so it must not be
+// answered as a refusal that a later retry clears.
+func TestDeploy_LedgerFailureDuringTheWaitIsNotReportedAsRetiring(t *testing.T) {
+	srv, store, token, manager, _, _ := buildManifestE2EServer(t, config.RuntimeConfig{})
+	defer srv.Close()
+	app := createGenerationTestApp(t, store, "per-session-ledger", 2, 16)
+	if rec := deployIsolationManifest(t, srv, token, app.Slug, "per_session", "print('v1')"); rec.Code != http.StatusOK {
+		t.Fatalf("first deploy: %d %s", rec.Code, rec.Body.String())
+	}
+	serving, err := store.GetServingDeployment(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A live native process the manager does not own keeps the deploy waiting.
+	manager.RegisterRuntime("host", process.NewNativeRuntime())
+	orphan := exec.Command("sleep", "60")
+	if err := orphan.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = orphan.Process.Kill(); _ = orphan.Wait() })
+	pid := orphan.Process.Pid
+	if err := store.UpsertDeploymentReplica(db.UpsertDeploymentReplicaParams{
+		AppID: app.ID, DeploymentID: serving.ID, Index: 7, PID: &pid, Status: "running",
+		Provider: "native", Tier: "host",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	body, contentType := buildMultiFileBundleUpload(t, map[string]string{"app.py": "print('v2')", "shinyhub.toml": crossIsolationManifest("per_session")})
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	req := httptest.NewRequest(http.MethodPost, "/api/apps/"+app.Slug+"/deploy", body).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("X-ShinyHub-Allow-Downtime", "1")
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() { srv.Router().ServeHTTP(rec, req); close(done) }()
+	select {
+	case <-done:
+		t.Fatalf("deploy did not wait for the unowned worker: %d %s", rec.Code, rec.Body.String())
+	case <-time.After(2 * time.Second):
+	}
+	_ = store.Close()
+	<-done
+
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "inspect generation cleanup") {
+		t.Fatalf("deploy after the ledger failed: %d %s, want the wait's own internal error", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-ShinyHub-Conflict-Remedy"); got != "" {
+		t.Fatalf("X-ShinyHub-Conflict-Remedy = %q, want none on a server fault", got)
 	}
 }
 

@@ -279,6 +279,25 @@ func retryableDeployFailure(kind deployfail.Kind) bool {
 	}
 }
 
+// preservedRefusal reports whether a deploy failure kind is a server refusal
+// that left the working version serving and changed nothing.
+func preservedRefusal(kind deployfail.Kind) bool {
+	return kind == deployfail.DowntimeRequired || kind == deployfail.GenerationRetiring
+}
+
+// everyAttemptPreserved reports whether every upload of a deploy was answered by
+// a refusal that left the working version serving. A single attempt whose
+// response was lost may have promoted the bundle, so one such attempt among
+// them means the outcome has to be read back instead.
+func everyAttemptPreserved(failed []attemptOutcome) bool {
+	for _, attempt := range failed {
+		if !preservedRefusal(attempt.Kind) {
+			return false
+		}
+	}
+	return len(failed) > 0
+}
+
 // resolveDeployRuns records the per-schedule deploy-triggered run outcomes on res and,
 // when --wait-for-warm or --restart-after-warm is set, polls each run to
 // completion. Without either it only records that the runs were triggered.
@@ -754,7 +773,7 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 		return finish(status, attempts), true
 	}
 	recoveryFailureMutation := func(err error) applyMutationState {
-		if isConflictError(err) || onlyCapacityFailures(res.attemptsDetail) || (len(res.attemptsDetail) > 0 && res.attemptsDetail[len(res.attemptsDetail)-1].Kind == deployfail.DowntimeRequired) {
+		if isConflictError(err) || onlyCapacityFailures(res.attemptsDetail) || (len(res.attemptsDetail) > 0 && preservedRefusal(res.attemptsDetail[len(res.attemptsDetail)-1].Kind)) {
 			return mutationNone
 		}
 		state, readErr := readFleetRecoverySnapshot(cfg, d.Slug, opt.healthTimeout)
@@ -872,7 +891,7 @@ func convergeAppFromSpec(cfg *cliConfig, d fleet.AppDiff, entry fleet.AppEntry, 
 			}
 			// A refused conditional upload cannot have promoted our bundle.
 			// Another actor's release must not be credited to this adoption.
-			if recoveryBefore != nil && (isConflictError(err) || len(failed) > 0 && failed[len(failed)-1].Kind == deployfail.DowntimeRequired) {
+			if (recoveryBefore != nil && (isConflictError(err) || len(failed) > 0 && preservedRefusal(failed[len(failed)-1].Kind))) || everyAttemptPreserved(failed) {
 				state := mutationNone
 				if releaseErr := releaseAdoptReservation(cfg, d.Slug, obs.ManagedBy, marker, opt); releaseErr != nil {
 					state = mutationUnknown

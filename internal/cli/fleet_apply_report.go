@@ -365,7 +365,7 @@ func applyRecoveryFor(ctx applyReportContext, results []applyResult) applyRecove
 
 	safe := true
 	for _, r := range results {
-		if r.status != statusFailed || !r.deployFailed || !(retryableDeployFailure(finalFailureKind(r)) || finalFailureKind(r) == deployfail.Capacity) {
+		if r.status != statusFailed || !r.deployFailed || !(retryableDeployFailure(finalFailureKind(r)) || finalFailureKind(r) == deployfail.Capacity || isRetiringWait(r)) {
 			if r.status == statusFailed {
 				safe = false
 			}
@@ -410,6 +410,19 @@ func isDowntimeDeferral(r applyResult) bool {
 	return resultFailureKind(r) == string(deployfail.DowntimeRequired)
 }
 
+// isRetiringWait reports whether the server declined a deploy because an
+// earlier version of the app is still retiring and the refusal left nothing
+// changed. Re-running the same command later is then the whole remedy; a
+// refusal followed by a failed rollback of this run's own changes is not one,
+// and neither is a refusal reached by retrying an upload whose first response
+// was lost, because that upload may have promoted the bundle.
+func isRetiringWait(r applyResult) bool {
+	if resultFailureKind(r) != string(deployfail.GenerationRetiring) || resultMutationState(r) != mutationNone {
+		return false
+	}
+	return len(r.attemptsDetail) == 0 || everyAttemptPreserved(r.attemptsDetail)
+}
+
 // applyRecoveryGuidance maps the failure kinds apply refuses to clear by itself
 // onto the exact next action each one needs, and reports how many failed apps
 // are wholly explained by that guidance. Both gates are deliberate refusals
@@ -422,6 +435,7 @@ func isDowntimeDeferral(r applyResult) bool {
 // is the operator's, the same reason a recovery command never carries --yes.
 func applyRecoveryGuidance(results []applyResult) (commands, notes []string, fullyGuided int) {
 	deferred := []string{}
+	retiring := []string{}
 	stale := []string{}
 	for _, r := range results {
 		if r.status != statusFailed {
@@ -450,6 +464,10 @@ func applyRecoveryGuidance(results []applyResult) (commands, notes []string, ful
 			deferred = append(deferred, r.slug)
 			addressed = true
 		}
+		if isRetiringWait(r) {
+			retiring = append(retiring, r.slug)
+			addressed = true
+		}
 		for _, gate := range r.freshnessGate {
 			if !producerRunClears(gate.State) {
 				unresolved = true
@@ -467,6 +485,11 @@ func applyRecoveryGuidance(results []applyResult) (commands, notes []string, ful
 		notes = append(notes, fmt.Sprintf(
 			"The update was blocked for %s to preserve the working version: this deployment requires stopping the old version before starting its replacement. Other apps can still deploy; incomplete fleet convergence causes a nonzero exit code. Each refusal names what blocks it. One that passes on its own (the app is in use, a schedule writer is running, a previous version is still draining) clears with a later retry of the same command; if an interruption is acceptable, adding --allow-downtime to the apply command below covers the refusals that ask for it.",
 			strings.Join(deferred, ", ")))
+	}
+	if len(retiring) > 0 {
+		notes = append(notes, fmt.Sprintf(
+			"The update was not started for %s because an earlier version is still retiring. Nothing was changed and the working version keeps serving. Re-run the apply command below once it has gone; --allow-downtime does not shorten the wait. If the same refusal still returns after the app's drain deadline has passed, check the server log for the earlier version's cleanup before intervening.",
+			strings.Join(retiring, ", ")))
 	}
 	if len(stale) > 0 {
 		notes = append(notes, fmt.Sprintf(

@@ -277,6 +277,11 @@ const (
 	// version live because parallel generation handoff does not support this
 	// app's shape. Nothing changed under the caller.
 	conflictHandoffDeferred = "generation-handoff-deferred"
+	// conflictRemedyHeader narrows a deferral to its remedy. conflictRemedyWait
+	// means an earlier version is still retiring: the same command succeeds
+	// later and consent to downtime changes nothing.
+	conflictRemedyHeader = "X-ShinyHub-Conflict-Remedy"
+	conflictRemedyWait   = "wait"
 )
 
 // conflictError marks an app action aborted by a server precondition 409.

@@ -32,6 +32,13 @@ const (
 	// named blocker or with --allow-downtime, never a state race to re-plan.
 	DowntimeRequired Kind = "downtime_required"
 
+	// GenerationRetiring is the server's refusal to deploy while an earlier
+	// version of the app is still draining its sessions or stopping its
+	// processes. The working version is preserved, nothing changed under the
+	// caller, and consent to downtime does not shorten the wait: the same
+	// command succeeds once the earlier version is gone.
+	GenerationRetiring Kind = "generation_retiring"
+
 	// Client-emitted kinds (set by the CLI for its own error shapes).
 	ZipError       Kind = "zip_error"       // CLI failed to package the local dir
 	TransportError Kind = "transport_error" // the request never reached the server
@@ -44,7 +51,7 @@ const (
 func (k Kind) Valid() bool {
 	switch k {
 	case RuntimeMissing, BuildFailed, InterpreterUnavailable, HookFailed, BundleInvalid,
-		ReadinessTimeout, Crashed, ServerError, Capacity, DowntimeRequired, ZipError, TransportError, Unknown:
+		ReadinessTimeout, Crashed, ServerError, Capacity, DowntimeRequired, GenerationRetiring, ZipError, TransportError, Unknown:
 		return true
 	}
 	return false

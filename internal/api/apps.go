@@ -64,6 +64,15 @@ func (s *Server) deferStopFirst(w http.ResponseWriter, deploymentID int64, reaso
 	writeError(w, http.StatusConflict, "working version preserved: "+reason+"; "+consent)
 }
 
+// markGenerationRetiring labels a 409 as a wait on an earlier version of the
+// app. The deferral marker keeps clients from reading it as a revision race;
+// the remedy header says that retrying later, not consent to downtime, is what
+// clears it.
+func markGenerationRetiring(w http.ResponseWriter) {
+	w.Header().Set("X-ShinyHub-Conflict", "generation-handoff-deferred")
+	w.Header().Set("X-ShinyHub-Conflict-Remedy", "wait")
+}
+
 // idleStopFirstQuiet is how long an app must have gone without a request
 // before a stop-first deploy treats it as unused. It covers a visitor who has
 // loaded the page and has not opened a WebSocket yet.
@@ -2662,6 +2671,11 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				if err := s.waitForPreviousGeneration(r.Context(), app, active.DeploymentID, elastic); err != nil {
+					if !errors.Is(err, errGenerationWaitExpired) && r.Context().Err() == nil {
+						writeInternal(w, r, "inspect generation cleanup", err)
+						return
+					}
+					markGenerationRetiring(w)
 					writeError(w, http.StatusConflict, "working version preserved: "+err.Error())
 					return
 				}
@@ -3099,7 +3113,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		// Nothing changed under the caller and a later retry succeeds, so this
 		// carries the deferral marker: without it a client reads the 409 as a
 		// revision race and tells the operator to re-plan.
-		w.Header().Set("X-ShinyHub-Conflict", "generation-handoff-deferred")
+		markGenerationRetiring(w)
 		writeError(w, http.StatusConflict, "working versions preserved: a stop-first deploy must wait for all previous generations to retire")
 		return
 	}
