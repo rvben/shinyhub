@@ -123,9 +123,14 @@ to list, preview, promote or delete drafts. Preview data and credentials are
 independent; hooks, schedules and access-group declarations are not yet supported.
 
 Availability: redeploys keep a supported live app serving while the candidate
-starts. If the server cannot safely hand off, it returns 409 and preserves the
-working version. Pass --allow-downtime only when an intentional stop-first
-deployment is acceptable; active sessions will be disconnected.
+starts. If the server cannot safely hand off and a session is connected, it
+returns 409 and preserves the working version; with no session connected it
+deploys stop-first, because nobody is interrupted. A refusal that is not about
+sessions (capacity, shared data that is not known to be safe, a previous
+version not confirmed stopped, a clustered server) is returned whether or not
+the app is in use, and the 409 names it. Pass --allow-downtime only when an
+intentional stop-first deployment is acceptable; active sessions will be
+disconnected.
 
 Manifest: if the bundle contains a shinyhub.toml at its root, ShinyHub applies
 it on deploy - [app] scaling/hibernate overrides, [[hook]] post-deploy commands,

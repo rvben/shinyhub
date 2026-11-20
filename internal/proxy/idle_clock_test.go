@@ -223,3 +223,55 @@ func TestIdleClock_RelayedSessionClosureStartsIdleWindow(t *testing.T) {
 		t.Fatal("closed relay prevented eventual hibernation")
 	}
 }
+
+// A relayed connection closes in the retiring process, so this proxy records
+// no close for it. The quiet window a stop-first deploy honors must start when
+// the lease view sees the connection end, with nothing having watched it open.
+func TestDeregisterIfIdle_RelayedSessionClosureStartsQuietWindow(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := upgrade.NewRelayLease(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+	backend := upgrade.RelayBackend{Slug: "app", DeploymentID: 7, Index: 0, TargetURL: "http://localhost:1234", Sessions: 1}
+	if err := lease.Publish([]upgrade.RelayBackend{backend}); err != nil {
+		t.Fatal(err)
+	}
+	leases := &upgrade.RelayLeases{Dir: dir}
+	leases.Refresh()
+	p := New()
+	p.SetRelayLeases(leases)
+	p.SetPoolSize("app", 1)
+	if err := p.RegisterReplica("app", 0, backend.TargetURL, nil, 7); err != nil {
+		t.Fatal(err)
+	}
+	p.SetPoolSize("other", 1)
+	if err := p.RegisterReplica("other", 0, "http://localhost:1235", nil, 8); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Publish(nil); err != nil {
+		t.Fatal(err)
+	}
+	leases.Refresh()
+	want := "the previous server process released its last connection in the last 1h0m0s"
+	if reason := p.DeregisterIfIdle("app", time.Hour); reason != want {
+		t.Fatalf("deregister right after the relayed session closed = %q, want %q", reason, want)
+	}
+	if !p.PoolHasAny("app") {
+		t.Fatal("refused deregister still dropped the route")
+	}
+	if reason := p.DeregisterIfIdle("other", time.Hour); reason != "" {
+		t.Fatalf("an app that had no relayed session was held back: %s", reason)
+	}
+	leases.Refresh()
+	if reason := p.DeregisterIfIdle("app", time.Hour); reason != want {
+		t.Fatalf("a later refresh forgot the release: %q", reason)
+	}
+	if reason := p.DeregisterIfIdle("app", time.Nanosecond); reason != "" {
+		t.Fatalf("pool was not removed once the quiet window had passed: %s", reason)
+	}
+}

@@ -369,11 +369,15 @@ func TestDeploy_NonNativeProviderUsesExplicitStopFirstFallback(t *testing.T) {
 	srv, store, token, _, _, runtime := buildManifestE2EServer(t, config.RuntimeConfig{})
 	defer srv.Close()
 	runtime.provider = "docker"
+	armAppSessionHold(runtime)
 	app := createGenerationTestApp(t, store, "handoff-provider", 1, 16)
 	if rec := deployBareGeneration(t, srv, token, app.Slug, "print('v1')", false); rec.Code != http.StatusOK {
 		t.Fatalf("first deploy: %d %s", rec.Code, rec.Body.String())
 	}
 	before, _ := store.GetActiveDeploymentGeneration(app.ID)
+	// The default refuses only while a session would be disconnected.
+	release := holdAppSession(t, srv, runtime, app.Slug)
+	defer release()
 	if rec := deployBareGeneration(t, srv, token, app.Slug, "print('v2')", false); rec.Code != http.StatusConflict {
 		t.Fatalf("non-native default = %d, want 409: %s", rec.Code, rec.Body.String())
 	}
@@ -381,6 +385,7 @@ func TestDeploy_NonNativeProviderUsesExplicitStopFirstFallback(t *testing.T) {
 	if unchanged.DeploymentID != before.DeploymentID {
 		t.Fatal("default non-native refusal changed the active pointer")
 	}
+	release()
 	if rec := deployBareGeneration(t, srv, token, app.Slug, "print('v3')", true); rec.Code != http.StatusOK {
 		t.Fatalf("explicit stop-first fallback = %d, want 200: %s", rec.Code, rec.Body.String())
 	}
@@ -644,6 +649,12 @@ func TestDeploy_InactiveServingGenerationCannotStopRetainedSessions(t *testing.T
 		}
 		if !strings.Contains(rec.Body.String(), "must wait for all previous generations to retire") {
 			t.Fatalf("wrong refusal: %s", rec.Body.String())
+		}
+		if got := rec.Header().Get("X-ShinyHub-Conflict"); got != "generation-handoff-deferred" {
+			t.Fatalf("X-ShinyHub-Conflict = %q: a wait for a draining generation must not read as a revision conflict", got)
+		}
+		if strings.Contains(rec.Body.String(), "--allow-downtime") {
+			t.Fatalf("refusal offers a flag that cannot replace a draining generation: %s", rec.Body.String())
 		}
 		if !srv.proxy.IsGenerationDraining(app.Slug, first.ID) {
 			t.Fatal("retained generation erased")

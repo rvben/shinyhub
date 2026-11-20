@@ -208,7 +208,8 @@ admission still applies). Scheduled rolls use one surge worker. Code handoffs
 require a complete healthy candidate pool: a positive ceiling smaller than that
 pool refuses the update without partially replacing it. Normal parallel updates
 have zero planned unavailable workers. `--allow-downtime` authorizes stop-first
-replacement explicitly. A one-core node can admit fractional requests when the
+replacement explicitly; an app with no connected session needs no authorization
+(see [Redeploy without interrupting the current version](cli.md#redeploy-without-interrupting-the-current-version)). A one-core node can admit fractional requests when the
 serving and replacement requests, reserve, memory and pressure checks all fit.
 
 Linux detection resolves process membership and controller mounts, including
@@ -260,7 +261,9 @@ target policy; each generation retains its own recorded isolation. Metadata,
 resource limits, worker policy, and schedule declarations
 can be staged and published with the replacement when no producer needs to run.
 Hooks, deploy-time shared producers, other isolation modes, and unsupported placement
-still require stop-first deployment. The refusal names the reason. A consecutive
+still require stop-first deployment. While a session is connected the deploy is
+refused and the refusal names the reason; with none connected it proceeds
+stop-first on its own and reports the same reason as `stop_first_reason`. A consecutive
 compatible deploy can publish another generation while earlier sessions drain.
 Each outgoing generation retains its original retirement deadline; a later
 deploy does not extend it. Candidate admission uses the host's remaining memory,

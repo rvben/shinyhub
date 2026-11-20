@@ -48,6 +48,27 @@ import (
 // constraint mid-PATCH after sibling fields were already committed.
 const maxStoredReplicas = 1000
 
+// deferStopFirst refuses a deploy that would have to stop the working version
+// first, records the refusal on the deployment, and tells the caller what
+// permits it. inUse names the sessions that are the only thing in the way; it
+// is empty when the refusal does not depend on who is connected, and then
+// waiting for the app to fall idle is not offered as a remedy.
+func (s *Server) deferStopFirst(w http.ResponseWriter, deploymentID int64, reason, inUse string) {
+	consent := "retry the CLI command with --allow-downtime (or send X-ShinyHub-Allow-Downtime: 1 via the API) to permit a stop-first deployment"
+	if inUse != "" {
+		reason += "; the app is in use (" + inUse + ")"
+		consent = "retry when it is not in use, or " + consent
+	}
+	_ = s.store.FailDeploymentWithReason(deploymentID, "no-downtime deployment deferred: "+reason)
+	w.Header().Set("X-ShinyHub-Conflict", "generation-handoff-deferred")
+	writeError(w, http.StatusConflict, "working version preserved: "+reason+"; "+consent)
+}
+
+// idleStopFirstQuiet is how long an app must have gone without a request
+// before a stop-first deploy treats it as unused. It covers a visitor who has
+// loaded the page and has not opened a WebSocket yet.
+const idleStopFirstQuiet = 5 * time.Second
+
 func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 	u := auth.UserFromContext(r.Context())
 	if u == nil {
@@ -2926,6 +2947,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	groupedHandoff := targetIsolation == "grouped"
 	generationHandoff := liveUpgrade
 	unsupportedReason := ""
+	cleanupPending := false
 	if liveUpgrade {
 		switch {
 		case s.clustered:
@@ -2934,6 +2956,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			unsupportedReason = "parallel generation handoff is unavailable"
 		case s.hasUnownedGenerationRows(slug, durableGenerationRows, prevActive.ID, previousGrouped):
 			unsupportedReason = "a previous generation still has pending process cleanup"
+			cleanupPending = true
 		case producerBarrierEntered || prestartPlan.deploymentRepairRequired || len(prestartPlan.producers) > 0:
 			unsupportedReason = prestartPlan.downtimeReason(manifest, slug)
 		case !supportedHandoffIsolation(currentIsolation) || !supportedHandoffIsolation(targetIsolation):
@@ -2962,6 +2985,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var capacityBlock *activation.CapacityError
+	capacityRefused := false
 	var releaseGenerationLaunch func()
 	if generationHandoff && unsupportedReason == "" {
 		// Hold the host-wide launch reservation from the final capacity sample
@@ -2980,6 +3004,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		}
 		if capacityErr := s.generationHandoffCapacityCheck(&projected); capacityErr != nil {
 			unsupportedReason = capacityErr.Error()
+			capacityRefused = true
 			errors.As(capacityErr, &capacityBlock)
 		}
 	}
@@ -2994,7 +3019,56 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		releaseGenerationLaunch()
 	}
 	allowDowntime := r.Header.Get("X-ShinyHub-Allow-Downtime") == "1"
-	if liveUpgrade && !generationHandoff && !allowDowntime {
+	// Consent to downtime protects connected sessions. An app nobody is
+	// connected to has none to lose, so its stop-first deploy needs no consent.
+	// Refusals that protect something other than sessions stay in force: a
+	// capacity refusal is the host declining the update and has its own wait
+	// and retry state; an open producer barrier, a pending producer repair, or a
+	// running or unrepaired schedule writer means shared data is not known to
+	// be safe to publish; and another cluster node may hold sessions this proxy
+	// cannot see. A previous generation whose processes are not confirmed
+	// stopped has cleanup that an idle routing table says nothing about. An
+	// app marked stopped that still has a live process is an inconsistent
+	// state and keeps the explicit decision.
+	idleStopFirst := liveUpgrade && !generationHandoff && !allowDowntime &&
+		!s.clustered && !capacityRefused && !cleanupPending && app.Status != "stopped" &&
+		!producerBarrierEntered && !prestartPlan.deploymentRepairRequired &&
+		s.proxy != nil
+	// inUse is why consent is still needed when sessions are the only thing
+	// in the way. It stays empty when another refusal applies, so the caller
+	// is never told that waiting for visitors to leave would be enough.
+	inUse := ""
+	// predecessorRetiring is set when the ledger still lists a previous version
+	// that had a retirement owner when it was read. That version can lose its
+	// route before the draining check below while its process is still being
+	// stopped, so its ledger rows count as a version still retiring. It clears
+	// by itself: it is answered as a wait whether or not the caller consented
+	// to downtime, and never as a request for consent.
+	predecessorRetiring := liveUpgrade && !generationHandoff && !cleanupPending && s.proxy != nil &&
+		hasBlockingGenerationRows(durableGenerationRows, prevActive.ID, previousGrouped)
+	if predecessorRetiring {
+		idleStopFirst = false
+	}
+	if idleStopFirst {
+		// An unreadable answer is treated as uncertain data. This is settled
+		// before sessions are counted, so uncertain data is never reported as
+		// an app that only needs its visitors to leave.
+		uncertain, err := s.store.AppDataCompatibilityQuarantined(app.ID)
+		idleStopFirst = err == nil && !uncertain
+		switch {
+		case err != nil:
+			unsupportedReason += "; the state of this app's schedule writers could not be read, so its shared data is not known to be safe"
+		case uncertain:
+			unsupportedReason += "; a schedule writer for this app is running or was left unrepaired, so its shared data is not known to be safe"
+		}
+	}
+	if idleStopFirst {
+		inUse = s.proxy.PoolInUse(slug, idleStopFirstQuiet)
+		idleStopFirst = inUse == ""
+	}
+	mustDrain := predecessorRetiring ||
+		!generationHandoff && s.proxy != nil && (s.proxy.HasDrainingGeneration(slug) || s.proxy.HasRelaySessions(slug, 0))
+	if liveUpgrade && !generationHandoff && !allowDowntime && !idleStopFirst {
 		if s.metrics != nil {
 			s.metrics.RecordGenerationHandoff("deferred")
 		}
@@ -3007,17 +3081,23 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			writeCapacityConflict(w, capacityBlock)
 			return
 		}
-		_ = s.store.FailDeploymentWithReason(pendingDep.ID, "no-downtime deployment deferred: "+unsupportedReason)
-		w.Header().Set("X-ShinyHub-Conflict", "generation-handoff-deferred")
-		writeError(w, http.StatusConflict, "working version preserved: "+unsupportedReason+"; retry the CLI command with --allow-downtime (or send X-ShinyHub-Allow-Downtime: 1 via the API) to permit a stop-first deployment")
-		return
+		// Consent cannot replace a version that is still draining, so that
+		// case is answered as a wait and never as a request for the flag.
+		if !mustDrain {
+			s.deferStopFirst(w, pendingDep.ID, unsupportedReason, inUse)
+			return
+		}
 	}
-	if !generationHandoff && s.proxy != nil && (s.proxy.HasDrainingGeneration(slug) || s.proxy.HasRelaySessions(slug, 0)) {
+	if mustDrain {
 		_ = s.store.FailDeploymentWithReason(pendingDep.ID, "stop-first deploy cannot replace independently draining generations")
+		// Nothing changed under the caller and a later retry succeeds, so this
+		// carries the deferral marker: without it a client reads the 409 as a
+		// revision race and tells the operator to re-plan.
+		w.Header().Set("X-ShinyHub-Conflict", "generation-handoff-deferred")
 		writeError(w, http.StatusConflict, "working versions preserved: a stop-first deploy must wait for all previous generations to retire")
 		return
 	}
-	if liveUpgrade && !generationHandoff {
+	if liveUpgrade && !generationHandoff && !idleStopFirst {
 		if s.metrics != nil {
 			s.metrics.RecordGenerationHandoff("explicit_downtime")
 		}
@@ -3067,7 +3147,25 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if !generationHandoff && s.proxy != nil {
+	if idleStopFirst {
+		// The idle sample above is advisory. Removing the route only if the pool
+		// is still idle makes the decision atomic with the first runtime
+		// mutation: a session that connected in between keeps its backend.
+		if s.beforeIdleDeregister != nil {
+			s.beforeIdleDeregister(slug)
+		}
+		if inUse := s.proxy.DeregisterIfIdle(slug, idleStopFirstQuiet); inUse != "" {
+			if s.metrics != nil {
+				s.metrics.RecordGenerationHandoff("deferred")
+			}
+			s.deferStopFirst(w, pendingDep.ID, unsupportedReason, inUse+", seen while the deployment was being admitted")
+			return
+		}
+		if s.metrics != nil {
+			s.metrics.RecordGenerationHandoff("idle_stop_first")
+		}
+		slog.Info("deploy: stop-first deployment of an app with no connected session", "slug", slug, "reason", unsupportedReason)
+	} else if !generationHandoff && s.proxy != nil {
 		s.proxy.Deregister(slug)
 	}
 	// Deregister removes all proxy-local generation metadata. Install the
@@ -3169,7 +3267,11 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	deployDefaultMem, deployDefaultCPU := s.cfg.Runtime.DefaultResourcesForApp(app)
 	deployResponse := newDeployResponder(w, r)
 	if liveUpgrade && !generationHandoff {
-		deployResponse.event(deployevent.Phase("handoff", deployevent.StatusWarning, "Stop-first deployment: "+unsupportedReason))
+		if idleStopFirst {
+			deployResponse.event(deployevent.Phase("handoff", deployevent.StatusCompleted, "Stop-first deployment, no session was connected: "+unsupportedReason))
+		} else {
+			deployResponse.event(deployevent.Phase("handoff", deployevent.StatusWarning, "Stop-first deployment: "+unsupportedReason))
+		}
 	}
 	if generationHandoff {
 		deployResponse.event(deployevent.Phase("handoff", deployevent.StatusStarted, "Preparing the new version while the current version stays available"))
@@ -3938,7 +4040,10 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		Warning             string                      `json:"warning,omitempty"`
 		Handoff             bool                        `json:"handoff,omitempty"`
 		StopFirstReason     string                      `json:"stop_first_reason,omitempty"`
-		DrainTimeoutSeconds int                         `json:"drain_timeout_seconds,omitempty"`
+		// StopFirstIdle reports that the stop-first deploy needed no downtime
+		// consent because no session was connected when the app was stopped.
+		StopFirstIdle       bool `json:"stop_first_idle,omitempty"`
+		DrainTimeoutSeconds int  `json:"drain_timeout_seconds,omitempty"`
 	}{
 		App:                 updatedApp,
 		HooksSkipped:        result.HooksSkipped,
@@ -3950,6 +4055,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		Warning:             deployWarning,
 		Handoff:             generationHandoff,
 		StopFirstReason:     unsupportedReason,
+		StopFirstIdle:       idleStopFirst,
 	}
 	if generationHandoff {
 		resp.DrainTimeoutSeconds = s.generationDrainTimeoutSeconds()

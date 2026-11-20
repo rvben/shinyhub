@@ -465,7 +465,7 @@ func applyRecoveryGuidance(results []applyResult) (commands, notes []string, ful
 	}
 	if len(deferred) > 0 {
 		notes = append(notes, fmt.Sprintf(
-			"The update was blocked for %s to preserve the working version: this deployment requires stopping the old version before starting its replacement. Other apps can still deploy; incomplete fleet convergence causes a nonzero exit code. If an interruption is acceptable, add --allow-downtime to the apply command below. Without that flag, retrying will be blocked again while downtime is required.",
+			"The update was blocked for %s to preserve the working version: this deployment requires stopping the old version before starting its replacement. Other apps can still deploy; incomplete fleet convergence causes a nonzero exit code. Each refusal names what blocks it. One that passes on its own (the app is in use, a schedule writer is running, a previous version is still draining) clears with a later retry of the same command; if an interruption is acceptable, adding --allow-downtime to the apply command below covers the refusals that ask for it.",
 			strings.Join(deferred, ", ")))
 	}
 	if len(stale) > 0 {
@@ -574,7 +574,7 @@ func renderApplyReportWithContext(out io.Writer, ctx applyReportContext, o apply
 			case resultFailureKind(r) == string(deployfail.Capacity):
 				fmt.Fprintln(out, "    working version preserved; retry when CPU pressure clears, or adjust the worker budget if allocated capacity is exhausted")
 			case isDowntimeDeferral(r):
-				fmt.Fprintf(out, "    %s\n", s.dim("working version still serving; re-run with --allow-downtime to accept a stop-first deployment"))
+				fmt.Fprintf(out, "    %s\n", s.dim("working version still serving; the reason above names the blocker and says whether a later retry or --allow-downtime clears it"))
 			case len(r.scheduleRefreshes) > 0:
 				fmt.Fprintf(out, "    %s\n", s.dim(fmt.Sprintf("-> shinyhub schedule status %s", r.slug)))
 			case len(r.scheduleLogs) == 0 && len(r.warmGate) == 0 && len(r.freshnessGate) == 0:

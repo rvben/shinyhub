@@ -570,6 +570,11 @@ type Proxy struct {
 	seenMu     sync.RWMutex
 	lastSeen   map[string]time.Time
 	lastClosed map[string]time.Time
+	// openConns counts the requests and WebSockets in flight per slug. It is
+	// kept apart from the per-backend counters because a backend entry is
+	// replaced when its replica registers again, and a connection opened
+	// through the replaced entry is still a visitor of the app.
+	openConns map[string]int64
 	// wsReady tracks slugs for which at least one upstream has completed a
 	// WebSocket handshake (HTTP 101) since the last deregister/hibernate.
 	// Surfaced via GET /app/<slug>/.shinyhub/ready so deploy scripts can
@@ -719,6 +724,7 @@ func New() *Proxy {
 		slotSeq:              make(map[string]int),
 		lastSeen:             make(map[string]time.Time),
 		lastClosed:           make(map[string]time.Time),
+		openConns:            make(map[string]int64),
 		wsReady:              make(map[string]struct{}),
 		firstFailedWSAt:      make(map[string]time.Time),
 		wsWarned:             make(map[string]struct{}),
@@ -1723,6 +1729,25 @@ func (p *Proxy) LastSeen(slug string) time.Time {
 func (p *Proxy) recordRequestClosed(slug string) {
 	p.seenMu.Lock()
 	p.lastClosed[slug] = time.Now()
+	p.seenMu.Unlock()
+}
+
+// connOpened counts a connection routed to slug. The caller holds p.mu, so the
+// count cannot rise between an idle check and the removal of the route.
+func (p *Proxy) connOpened(slug string) {
+	p.seenMu.Lock()
+	p.openConns[slug]++
+	p.seenMu.Unlock()
+}
+
+// connClosed ends a connection counted by connOpened.
+func (p *Proxy) connClosed(slug string) {
+	p.seenMu.Lock()
+	if n := p.openConns[slug] - 1; n > 0 {
+		p.openConns[slug] = n
+	} else {
+		delete(p.openConns, slug)
+	}
 	p.seenMu.Unlock()
 }
 
@@ -2935,6 +2960,13 @@ func (p *Proxy) dropElasticStateLocked(slug string, pool *backendPool) {
 // redeploy. Multiplex pools retain the previous behaviour (no callbacks).
 func (p *Proxy) Deregister(slug string) {
 	p.mu.Lock()
+	p.deregisterLocked(slug)
+	p.mu.Unlock()
+	p.clearWSReady(slug)
+}
+
+// deregisterLocked removes slug's pool. The caller holds p.mu for writing.
+func (p *Proxy) deregisterLocked(slug string) {
 	if p.poolEpoch == nil {
 		p.poolEpoch = make(map[string]uint64)
 	}
@@ -2951,8 +2983,120 @@ func (p *Proxy) Deregister(slug string) {
 		}
 	}
 	delete(p.pools, slug)
+}
+
+// PoolInUse reports why removing slug's pool right now would disconnect
+// someone, or "" when it would not. An app is in use while a request or
+// WebSocket is in flight on any backend, a client is bound to an elastic
+// worker, a generation is draining or being prepared, a retiring server process
+// still holds connections, or a request started or finished within quiet. The
+// quiet window covers a visitor who has loaded the page and has not opened a
+// WebSocket yet. An unregistered slug with no recent request is not in use.
+// The answer is a sample; a caller that acts on it must use DeregisterIfIdle
+// to close the window before it mutates.
+func (p *Proxy) PoolInUse(slug string, quiet time.Duration) string {
+	if reason := p.heldOutsidePool(slug); reason != "" {
+		return reason
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.poolInUseLocked(slug, quiet)
+}
+
+// PoolIdle reports whether PoolInUse finds nobody to disconnect.
+func (p *Proxy) PoolIdle(slug string, quiet time.Duration) bool {
+	return p.PoolInUse(slug, quiet) == ""
+}
+
+// DeregisterIfIdle removes slug's pool only when PoolInUse finds nobody to
+// disconnect. It returns "" when the pool was removed and the reason the app
+// is in use otherwise. The check and the removal share one write-lock hold,
+// and admission counts a request against its backend while holding the read
+// lock, so a request either is counted here and keeps the pool, or finds no
+// pool. When a reason is returned the routing table is untouched.
+func (p *Proxy) DeregisterIfIdle(slug string, quiet time.Duration) (inUse string) {
+	if reason := p.heldOutsidePool(slug); reason != "" {
+		return reason
+	}
+	p.mu.Lock()
+	if reason := p.poolInUseLocked(slug, quiet); reason != "" {
+		p.mu.Unlock()
+		return reason
+	}
+	p.deregisterLocked(slug)
 	p.mu.Unlock()
 	p.clearWSReady(slug)
+	return ""
+}
+
+// heldOutsidePool names a holder of slug's sessions that the routing table
+// does not show: a server process that is being replaced and still serves the
+// connections it accepted.
+func (p *Proxy) heldOutsidePool(slug string) string {
+	if p.RetiringParentAlive() || p.HasRelaySessions(slug, 0) {
+		return "the previous server process still holds connections"
+	}
+	return ""
+}
+
+// poolInUseLocked is PoolInUse's check over the routing table. Fixed replicas
+// live in the replicas slice and elastic workers in the workers map, so both
+// are scanned. A client bound to an elastic worker holds its slot through the
+// reconnect grace window and while the worker boots, with no connection open,
+// so a bound client counts as a session. Open connections are reported ahead
+// of the quiet window because every open connection is also a recent request,
+// and the count is the more useful answer. The caller holds p.mu.
+func (p *Proxy) poolInUseLocked(slug string, quiet time.Duration) string {
+	// The per-slug count, not the sum over the pool's current backends: a
+	// connection opened before its replica registered again is not in that sum.
+	p.seenMu.RLock()
+	conns := p.openConns[slug]
+	p.seenMu.RUnlock()
+	switch {
+	case conns == 1:
+		return "1 open connection"
+	case conns > 1:
+		return fmt.Sprintf("%d open connections", conns)
+	}
+	if pool := p.pools[slug]; pool != nil {
+		bound := len(p.clients[slug])
+		assigned := 0
+		for _, worker := range pool.workers {
+			if worker != nil {
+				assigned += worker.assignedClients
+			}
+		}
+		if assigned > bound {
+			bound = assigned
+		}
+		switch {
+		case bound == 1:
+			return "1 visitor holds a worker"
+		case bound > 1:
+			return fmt.Sprintf("%d visitors hold a worker", bound)
+		case len(pool.drainingGenerations) > 0:
+			return "a previous version is still draining"
+		case len(pool.candidates) > 0:
+			return "another version is being prepared"
+		}
+	} else if len(p.clients[slug]) > 0 {
+		return "a visitor holds a worker"
+	}
+	if quiet > 0 {
+		since := time.Now().Add(-quiet)
+		p.seenMu.RLock()
+		recent := p.lastSeen[slug].After(since) || p.lastClosed[slug].After(since)
+		p.seenMu.RUnlock()
+		if recent {
+			return fmt.Sprintf("a request reached it in the last %s", quiet)
+		}
+		// A connection relayed by the previous server process closes there, so
+		// the lease view is the only place its end is visible.
+		if p.relayLeases != nil && p.relayLeases.ReleasedAt(slug).After(since) {
+			return fmt.Sprintf("the previous server process released its last connection in the last %s", quiet)
+		}
+	}
+	return ""
 }
 
 // RegisteredSlugs returns the set of slugs that currently have a pool entry.
@@ -3671,6 +3815,7 @@ routeLookup:
 				// pre-scaling code acquired here. assignedClients is unchanged (the
 				// client is already counted), so no map mutation is needed.
 				wkr.activeConns.Add(1)
+				p.connOpened(slug)
 				replicaIndex = wkr.slotID
 				depID = wkr.deploymentID
 				deploymentID = depID
@@ -3723,6 +3868,7 @@ routeLookup:
 					}
 				}
 				wkr.activeConns.Add(1)
+				p.connOpened(slug)
 				replicaIndex = wkr.slotID
 				depID = wkr.deploymentID
 				deploymentID = depID
@@ -3739,6 +3885,7 @@ routeLookup:
 				http.SetCookie(rec, p.routingCookie(r, slug, p.stickyCookieValue(slug, d.slotID, depID)))
 			}
 			defer wkr.activeConns.Add(-1)
+			defer p.connClosed(slug)
 			defer p.clientConnClosed(slug, cid, routedClientSlot)
 			routedAppID = wkr.ownerAppID
 			if rejectSupportBackendMismatch(rec, r, slug, routedAppID) {
@@ -3888,8 +4035,10 @@ routeLookup:
 		http.SetCookie(rec, p.routingCookie(r, slug, p.stickyCookieValue(slug, picked.index, picked.deploymentID)))
 	}
 	newConns := picked.activeConns.Add(1)
+	p.connOpened(slug)
 	p.mu.RUnlock()
 	defer picked.activeConns.Add(-1)
+	defer p.connClosed(slug)
 
 	// When this slug's local active count rises from 0 to 1, signal the session
 	// reporter for an immediate DB flush so other instances see the new session

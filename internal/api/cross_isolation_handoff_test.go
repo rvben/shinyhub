@@ -224,14 +224,21 @@ func TestDeploy_CrossIsolationAdmissionPreservesAuthority(t *testing.T) {
 				continue
 			}
 			t.Run(from+"/"+refusal, func(t *testing.T) {
-				srv, store, token, _, _, _ := buildManifestE2EServer(t, config.RuntimeConfig{})
+				srv, store, token, manager, _, runtime := buildManifestE2EServer(t, config.RuntimeConfig{})
 				defer srv.Close()
+				armAppSessionHold(runtime)
 				zero := 0
 				srv.cfg.Server.MinAvailableMemoryMB = &zero
 				srv.SetAvailableMemoryForTest(func() (int, error) { return 1024, nil })
 				app := createGenerationTestApp(t, store, "cross-refusal", 2, 16)
 				if r := deployIsolationManifest(t, srv, token, app.Slug, from, "print('v1')"); r.Code != http.StatusOK {
 					t.Fatalf("first deploy: %d %s", r.Code, r.Body.String())
+				}
+				// A refusal protects a connected session; an app with none deploys stop-first.
+				if from == "grouped" {
+					defer holdElasticAppSession(t, srv, store, manager, runtime, app.Slug)()
+				} else {
+					defer holdAppSession(t, srv, runtime, app.Slug)()
 				}
 				old, _ := store.GetServingDeployment(app.ID)
 				manifest := crossIsolationManifest(to)

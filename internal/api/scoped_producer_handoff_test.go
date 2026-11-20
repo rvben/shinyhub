@@ -10,7 +10,7 @@ import (
 func TestScopedProducerSkipsUIChangeAndRefusesChangedInput(t *testing.T) {
 	srv, store, token, rt := newManifestE2EServerWithJobs(t)
 	defer srv.Close()
-	rt.serveTraffic = true
+	armAppSessionHold(rt)
 	srv.cfg.Server.DrainTimeout = 20 * time.Millisecond
 	srv.SetAvailableMemoryForTest(func() (int, error) { return 4096, nil })
 	app := createGenerationTestApp(t, store, "scoped-producer", 1, 16)
@@ -48,6 +48,8 @@ inputs=["helpers/**"]
 	if err := srv.waitForPreviousGeneration(t.Context(), app, active.DeploymentID, false); err != nil {
 		t.Fatal(err)
 	}
+	// The changed input is refused while a session would be disconnected.
+	defer holdAppSession(t, srv, rt, app.Slug)()
 	if rec := upload("print('v3')", "v2"); rec.Code != 409 || !strings.Contains(rec.Body.String(), "shared producer state") {
 		t.Fatalf("input change: %d %s", rec.Code, rec.Body.String())
 	}

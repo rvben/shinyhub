@@ -185,8 +185,9 @@ max_workers = 2
 func TestDeploy_GroupedHandoffAdmissionPreservesAuthority(t *testing.T) {
 	for _, reason := range []string{"capacity", "provider", "unknown-memory"} {
 		t.Run(reason, func(t *testing.T) {
-			srv, store, token, _, _, _ := buildManifestE2EServer(t, config.RuntimeConfig{})
+			srv, store, token, mgr, _, runtime := buildManifestE2EServer(t, config.RuntimeConfig{})
 			defer srv.Close()
+			armAppSessionHold(runtime)
 			app := createGenerationTestApp(t, store, "grouped-admission", 1, 16)
 			if _, err := store.DB().Exec("UPDATE apps SET worker_isolation='grouped', worker_grouped_size=4, worker_max_workers=2 WHERE id=?", app.ID); err != nil {
 				t.Fatal(err)
@@ -195,6 +196,11 @@ func TestDeploy_GroupedHandoffAdmissionPreservesAuthority(t *testing.T) {
 				t.Fatalf("first deploy: %s", rec.Body.String())
 			}
 			old, _ := store.GetActiveDeploymentGeneration(app.ID)
+			// A provider refusal protects a connected session; capacity refusals
+			// hold with nobody connected.
+			if reason == "provider" {
+				defer holdElasticAppSession(t, srv, store, mgr, runtime, app.Slug)()
+			}
 			switch reason {
 			case "capacity":
 				srv.SetAvailableMemoryForTest(func() (int, error) { return 0, nil })

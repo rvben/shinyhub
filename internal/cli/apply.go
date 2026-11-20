@@ -26,9 +26,12 @@ Apply validates the artifact's format, integrity, embedded bundle digest,
 expiry, and target before making a request. It uploads the exact bundle stored
 in the plan and asks the server to atomically compare the resource revision
 observed during planning before changing the app. It never reads or rebuilds
-the original working directory. By default a working app is preserved when the
-server cannot perform a safe handoff; --allow-downtime explicitly permits the
-stop-first fallback and disconnects active sessions.`,
+the original working directory. By default a working app with connected
+sessions is preserved when the server cannot perform a safe handoff;
+--allow-downtime explicitly permits the stop-first fallback and disconnects
+active sessions. An app with no connected session deploys stop-first without
+it, unless the server refuses for a reason that is not about sessions; the
+refusal names that reason.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runApply(cmd, args[0], allowDowntime)
