@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.25.3](https://github.com/rvben/shinyhub/compare/v0.25.2...v0.25.3) - 2026-11-20
+
+### Fixed
+
+- **deploy**: deploy stop-first without consent when no session is connected ([9ee7564](https://github.com/rvben/shinyhub/commit/9ee7564d324dae616cf5945b1708f59e86cb5c40))
+- **demo**: distinguish allocation retries from startup failures ([7a1a44a](https://github.com/rvben/shinyhub/commit/7a1a44a93526d2e6cee7e4ee5f73c590301501a0))
+- **demo**: remove the rollout silence after cooldown ([d744a25](https://github.com/rvben/shinyhub/commit/d744a2503e01a72ac5b6a741da230ef5f49c9e53))
+- **ci**: stabilize tests and demo rollout verification ([a7a43b0](https://github.com/rvben/shinyhub/commit/a7a43b0041e66ecbe61bb9ed91258c5a7c0e7bd9))
+
 ## [0.25.2](https://github.com/rvben/shinyhub/compare/v0.25.1...v0.25.2) - 2026-11-18
 
 ### Added
