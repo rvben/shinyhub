@@ -5,7 +5,7 @@ import "testing"
 func TestKindValid(t *testing.T) {
 	valid := []Kind{
 		RuntimeMissing, BuildFailed, BundleInvalid, ReadinessTimeout,
-		Crashed, ServerError, DowntimeRequired, ZipError, TransportError, Unknown,
+		Crashed, ServerError, DowntimeRequired, GenerationRetiring, ZipError, TransportError, Unknown,
 	}
 	for _, k := range valid {
 		if !k.Valid() {
@@ -22,16 +22,17 @@ func TestKindValid(t *testing.T) {
 func TestKindStringValues(t *testing.T) {
 	// The string values are the public schema contract; pin them.
 	cases := map[Kind]string{
-		RuntimeMissing:   "runtime_missing",
-		BuildFailed:      "build_failed",
-		BundleInvalid:    "bundle_invalid",
-		ReadinessTimeout: "readiness_timeout",
-		Crashed:          "crashed",
-		ServerError:      "server_error",
-		DowntimeRequired: "downtime_required",
-		ZipError:         "zip_error",
-		TransportError:   "transport_error",
-		Unknown:          "unknown",
+		RuntimeMissing:     "runtime_missing",
+		BuildFailed:        "build_failed",
+		BundleInvalid:      "bundle_invalid",
+		ReadinessTimeout:   "readiness_timeout",
+		Crashed:            "crashed",
+		ServerError:        "server_error",
+		DowntimeRequired:   "downtime_required",
+		GenerationRetiring: "generation_retiring",
+		ZipError:           "zip_error",
+		TransportError:     "transport_error",
+		Unknown:            "unknown",
 	}
 	for k, want := range cases {
 		if string(k) != want {

@@ -41,27 +41,96 @@ func (s *Server) stopGenerationForCleanup(slug string, deploymentID int64) (resu
 		if row.DeploymentID != deploymentID {
 			continue
 		}
-		if row.Provider != "" && row.Provider != "native" {
-			return fmt.Errorf("cannot confirm generation provider %q stopped", row.Provider)
-		}
-		if row.PID != nil && *row.PID > 0 {
-			if row.ProcessStartIdentity > 0 {
-				started, err := process.NativeProcessStartIdentity(*row.PID)
-				if err == nil && started != row.ProcessStartIdentity {
-					continue
-				}
-			}
-			if !errors.Is(syscall.Kill(*row.PID, 0), syscall.ESRCH) || !errors.Is(syscall.Kill(-*row.PID, 0), syscall.ESRCH) {
-				return fmt.Errorf("generation worker %d termination is unconfirmed", row.Index)
-			}
+		if err := confirmGenerationRowStopped(row); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-func hasBlockingGenerationRows(rows []*db.DeploymentReplica, activeID int64, grouped bool) bool {
+// confirmGenerationRowStopped reports whether the worker a ledger row names is
+// gone. A recorded PID that now belongs to a different process incarnation
+// counts as gone; a provider this server cannot probe never does.
+func confirmGenerationRowStopped(row *db.DeploymentReplica) error {
+	if row.Provider != "" && row.Provider != "native" {
+		return fmt.Errorf("cannot confirm generation provider %q stopped", row.Provider)
+	}
+	if row.PID == nil || *row.PID <= 0 {
+		return nil
+	}
+	if row.ProcessStartIdentity > 0 {
+		started, err := process.NativeProcessStartIdentity(*row.PID)
+		if err == nil && started != row.ProcessStartIdentity {
+			return nil
+		}
+	}
+	if !errors.Is(syscall.Kill(*row.PID, 0), syscall.ESRCH) || !errors.Is(syscall.Kill(-*row.PID, 0), syscall.ESRCH) {
+		return fmt.Errorf("generation worker %d termination is unconfirmed", row.Index)
+	}
+	return nil
+}
+
+// workerStopProber is a runtime tier that can say whether a worker it started,
+// named by its recorded identity, is confirmed to hold no process.
+type workerStopProber interface {
+	WorkerStopped(ctx context.Context, workerID string) (bool, error)
+}
+
+// workerProbeTimeout bounds one question to a tier about one worker, so a tier
+// that does not answer cannot hold a deploy past its own deadline.
+const workerProbeTimeout = 5 * time.Second
+
+// orphanedServingRows reports whether the serving deployment of an elastic app
+// has a ledger row for a worker the manager does not run and that its tier
+// cannot confirm gone. That is a worker left behind by an earlier server process;
+// the watcher still owes its stop, and a deploy that cleared the row would
+// forget a live process.
+func (s *Server) orphanedServingRows(ctx context.Context, slug string, rows []*db.DeploymentReplica, activeID int64, elastic bool) bool {
+	if !elastic || s.manager == nil {
+		return false
+	}
+	owned := make(map[int]struct{})
+	for _, worker := range s.manager.AllGenerationsForSlug(slug) {
+		if worker != nil && (worker.DeploymentID == activeID || worker.DeploymentID == 0) && worker.Status != process.StatusStopped && worker.Status != process.StatusCrashed {
+			owned[worker.Index] = struct{}{}
+		}
+	}
 	for _, row := range rows {
-		if !grouped || row.DeploymentID != activeID {
+		if row.DeploymentID != activeID {
+			continue
+		}
+		if _, ok := owned[row.Index]; ok {
+			continue
+		}
+		// A row is evidence of a live worker only where the worker can be
+		// asked for. A local native process is probed by PID. A tier that
+		// answers for its workers by identity keeps a stopped worker's row
+		// until the next startup, so the row alone proves nothing and the
+		// tier is asked. Any other tier recovers its workers from the
+		// runtime's own inventory and is not fenced here.
+		switch tier := s.manager.RuntimeForTier(row.Tier).(type) {
+		case *process.NativeRuntime:
+			if confirmGenerationRowStopped(row) != nil {
+				return true
+			}
+		case workerStopProber:
+			if row.WorkerID == "" {
+				return true
+			}
+			probe, cancel := context.WithTimeout(ctx, workerProbeTimeout)
+			stopped, err := tier.WorkerStopped(probe, row.WorkerID)
+			cancel()
+			if err != nil || !stopped {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasBlockingGenerationRows(rows []*db.DeploymentReplica, activeID int64, elastic bool) bool {
+	for _, row := range rows {
+		if !elastic || row.DeploymentID != activeID {
 			return true
 		}
 	}
@@ -70,9 +139,9 @@ func hasBlockingGenerationRows(rows []*db.DeploymentReplica, activeID int64, gro
 
 // Known routing generations already have their own retirement owner and deadline.
 // Unpublished candidates and unconfirmed physical cleanup still fence new launches.
-func (s *Server) hasUnownedGenerationRows(slug string, rows []*db.DeploymentReplica, activeID int64, grouped bool) bool {
+func (s *Server) hasUnownedGenerationRows(ctx context.Context, slug string, rows []*db.DeploymentReplica, activeID int64, elastic bool) bool {
 	for _, row := range rows {
-		if grouped && row.DeploymentID == activeID {
+		if elastic && row.DeploymentID == activeID {
 			continue
 		}
 		if s.proxy != nil && s.proxy.IsGenerationDraining(slug, row.DeploymentID) {
@@ -80,7 +149,7 @@ func (s *Server) hasUnownedGenerationRows(slug string, rows []*db.DeploymentRepl
 		}
 		return true
 	}
-	return false
+	return s.orphanedServingRows(ctx, slug, rows, activeID, elastic)
 }
 
 func (s *Server) groupedHandoffRuntimeReason(app *db.App) string {
@@ -340,9 +409,13 @@ func (s *Server) generationDrainTimeoutSeconds() int {
 	return int((s.generationDrainTimeout() + time.Second - 1) / time.Second)
 }
 
+// errGenerationWaitExpired means an earlier version was still retiring when the
+// deploy stopped waiting for it. A later retry is the remedy.
+var errGenerationWaitExpired = errors.New("previous generation drain or process cleanup did not finish within the wait deadline")
+
 // Wait for the existing retirement owner; never force a second drain or discard
 // an unconfirmed process ledger merely to make the next deployment fit.
-func (s *Server) waitForPreviousGeneration(ctx context.Context, app *db.App, previousID int64, grouped bool) error {
+func (s *Server) waitForPreviousGeneration(ctx context.Context, app *db.App, previousID int64, elastic bool) error {
 	if s.proxy == nil {
 		return nil
 	}
@@ -355,14 +428,15 @@ func (s *Server) waitForPreviousGeneration(ctx context.Context, app *db.App, pre
 		if err != nil {
 			return fmt.Errorf("inspect previous generation cleanup: %w", err)
 		}
-		if !s.proxy.HasDrainingGeneration(app.Slug) && !hasBlockingGenerationRows(rows, previousID, grouped) {
+		if !s.proxy.HasDrainingGeneration(app.Slug) && !hasBlockingGenerationRows(rows, previousID, elastic) &&
+			!s.orphanedServingRows(ctx, app.Slug, rows, previousID, elastic) {
 			return nil
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-timer.C:
-			return errors.New("previous generation drain or process cleanup did not finish within the wait deadline")
+			return errGenerationWaitExpired
 		case <-ticker.C:
 		}
 	}

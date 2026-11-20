@@ -400,6 +400,16 @@ func (r *SystemdRuntime) InspectPID(unit string) (int, error) {
 	}
 	return state.PID, err
 }
+
+// WorkerStopped reports whether the unit is confirmed to hold no process. An
+// error means the broker could not answer, which confirms nothing.
+func (r *SystemdRuntime) WorkerStopped(ctx context.Context, unit string) (bool, error) {
+	state, err := r.state(ctx, RunHandle{ContainerID: unit})
+	if err != nil {
+		return false, err
+	}
+	return !state.Active && !state.Populated, nil
+}
 func (r *SystemdRuntime) RemoveContainer(unit string) error {
 	_, err := r.client.Call(context.Background(), nativebroker.Request{Op: "stop", Unit: unit}, nil)
 	if err == nil {

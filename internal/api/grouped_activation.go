@@ -107,7 +107,7 @@ func (s *Server) rollGroupedActivation(ctx context.Context, app *db.App, current
 			blockingRows = append(blockingRows, row)
 		}
 	}
-	if s.hasUnownedGenerationRows(app.Slug, blockingRows, current.ID, true) {
+	if s.hasUnownedGenerationRows(context.Background(), app.Slug, blockingRows, current.ID, true) {
 		return &activation.RetryableError{Reason: "previous grouped generation cleanup is unconfirmed", RetryAfter: 5 * time.Second}
 	}
 	projected := *app

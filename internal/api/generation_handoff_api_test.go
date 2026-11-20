@@ -653,6 +653,9 @@ func TestDeploy_InactiveServingGenerationCannotStopRetainedSessions(t *testing.T
 		if got := rec.Header().Get("X-ShinyHub-Conflict"); got != "generation-handoff-deferred" {
 			t.Fatalf("X-ShinyHub-Conflict = %q: a wait for a draining generation must not read as a revision conflict", got)
 		}
+		if got := rec.Header().Get("X-ShinyHub-Conflict-Remedy"); got != "wait" {
+			t.Fatalf("X-ShinyHub-Conflict-Remedy = %q: a wait for a draining generation must say that retrying later clears it", got)
+		}
 		if strings.Contains(rec.Body.String(), "--allow-downtime") {
 			t.Fatalf("refusal offers a flag that cannot replace a draining generation: %s", rec.Body.String())
 		}

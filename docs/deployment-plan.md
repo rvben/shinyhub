@@ -151,6 +151,17 @@ producers itself; the recovery lists the `shinyhub schedule run <slug>
 <schedule>` commands to run first, and only for schedules that are plainly
 overdue rather than already refreshing.
 
+A `generation_retiring` failure is a `resume` case: the server did not start
+the deploy because an earlier version of the app is still draining its sessions
+or stopping its processes. Nothing changed, the working version keeps serving,
+and `safe_to_retry` is `true`. Re-run apply once the earlier version has gone;
+`--allow-downtime` does not shorten the wait. A refusal that still returns
+after the app's drain deadline has passed is worth a look at the server log
+for the earlier version's cleanup before intervening. The server marks this
+refusal with `X-ShinyHub-Conflict-Remedy: wait` beside `X-ShinyHub-Conflict:
+generation-handoff-deferred`. A server that predates the remedy header reports
+the same refusal as `downtime_required`.
+
 ### Capacity during live updates
 
 A live code update admits the complete replacement pool alongside the current
