@@ -71,6 +71,9 @@ func TestDeployRefusalDoesNotInheritScheduleWriterFence(t *testing.T) {
 				if rec.Code != http.StatusConflict {
 					t.Fatalf("refusal: %d %s", rec.Code, rec.Body.String())
 				}
+				if !strings.Contains(rec.Body.String(), "its shared data is not known to be safe") || strings.Contains(rec.Body.String(), "in use") {
+					t.Fatalf("refusal does not name the schedule writer as the obstacle: %s", rec.Body.String())
+				}
 				deps, err := store.ListDeploymentsBySlug(app.Slug)
 				if err != nil || len(deps) != attempt+2 {
 					t.Fatalf("history: %+v %v", deps, err)

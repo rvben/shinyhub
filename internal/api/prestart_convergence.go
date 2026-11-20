@@ -379,7 +379,7 @@ func (s *Server) removePrestartPlaceholders(plan *prestartSchedulePlan) {
 // downtimeReason names the retained producers so an omitted manifest declaration
 // cannot silently force every subsequent code-only deploy into stop-first mode.
 func (plan *prestartSchedulePlan) downtimeReason(manifest *deploy.Manifest, slug string) string {
-	reason := "this deployment changes shared producer state and requires an explicit stop-first deploy"
+	reason := "this deployment changes shared producer state, which a parallel handoff cannot carry over"
 	declared := map[string]bool{}
 	if manifest != nil {
 		for _, spec := range manifest.Schedules {

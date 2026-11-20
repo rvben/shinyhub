@@ -102,7 +102,9 @@ schedules publish atomically with serving authority after readiness. Pool caps
 and render pacing then reconcile for the whole app, including draining sessions.
 Hooks, isolation or worker-layout changes, access-policy changes, compatibility
 repair, and a producer required during this deploy remain stop-first. Errors name
-the fields or condition requiring `--allow-downtime`.
+the fields or condition requiring `--allow-downtime`. The flag is needed only
+while a session is connected: an app nobody has open deploys stop-first without
+it.
 
 A satisfied `first_deploy` bootstrap permits handoff. `bundle_change` can use
 schedule `inputs` to restrict invalidation to declared producer files and the

@@ -23,6 +23,7 @@ var (
 		"success",
 		"deferred",
 		"explicit_downtime",
+		"idle_stop_first",
 		"candidate_failure",
 		"cutover_repair",
 		"forced_retirement",

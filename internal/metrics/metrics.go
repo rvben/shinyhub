@@ -127,7 +127,7 @@ func New(version string) *Registry {
 	reg.MustRegister(deploys)
 	generationHandoffs := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "shinyhub_generation_handoffs_total",
-		Help: "Version handoff events by bounded outcome (success, deferred, explicit_downtime, candidate_failure, cutover_repair, forced_retirement, or cleanup_deferred).",
+		Help: "Version handoff events by bounded outcome (success, deferred, explicit_downtime, idle_stop_first, candidate_failure, cutover_repair, forced_retirement, or cleanup_deferred).",
 	}, []string{"outcome"})
 	generationDraining := prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "shinyhub_generation_draining",

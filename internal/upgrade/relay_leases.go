@@ -175,7 +175,16 @@ type RelayLeases struct {
 type relayView struct {
 	backends []RelayBackend
 	unknown  bool
+	// released maps a slug to when its relayed sessions were last seen to
+	// reach zero; unknownCleared is when unverified leases last resolved,
+	// which releases every slug at once.
+	released       map[string]time.Time
+	unknownCleared time.Time
 }
+
+// relayReleaseRetention bounds how long a release is remembered. It only has
+// to outlast the short windows callers measure against it.
+const relayReleaseRetention = time.Minute
 
 // Unknown reports whether the watched view has unverified live leases.
 func (r *RelayLeases) Unknown() bool {
@@ -192,7 +201,48 @@ func (r *RelayLeases) Refresh() {
 	r.refreshMu.Lock()
 	defer r.refreshMu.Unlock()
 	backends, _, unknown := r.Snapshot()
-	r.view.Store(&relayView{backends: backends, unknown: unknown})
+	next := &relayView{backends: backends, unknown: unknown}
+	if prev := r.view.Load(); prev != nil {
+		now := time.Now()
+		next.unknownCleared = prev.unknownCleared
+		if prev.unknown && !unknown {
+			next.unknownCleared = now
+		}
+		held := make(map[string]bool, len(backends))
+		for _, backend := range backends {
+			if backend.Sessions > 0 {
+				held[backend.Slug] = true
+			}
+		}
+		next.released = make(map[string]time.Time)
+		for slug, at := range prev.released {
+			if !held[slug] && now.Sub(at) < relayReleaseRetention {
+				next.released[slug] = at
+			}
+		}
+		for _, backend := range prev.backends {
+			if backend.Sessions > 0 && !held[backend.Slug] {
+				next.released[backend.Slug] = now
+			}
+		}
+	}
+	r.view.Store(next)
+}
+
+// ReleasedAt reports when slug's relayed sessions were last observed to end,
+// or the zero time when no recent release is known. A relayed connection
+// closes in another process, so this observation is the only close a caller
+// in this process can see. It is tracked across Refresh calls only.
+func (r *RelayLeases) ReleasedAt(slug string) time.Time {
+	view := r.view.Load()
+	if view == nil {
+		return time.Time{}
+	}
+	at := view.released[slug]
+	if view.unknownCleared.After(at) {
+		at = view.unknownCleared
+	}
+	return at
 }
 
 // Watch keeps filesystem scans and orphan collection off the request path.

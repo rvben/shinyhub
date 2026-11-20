@@ -152,11 +152,34 @@ shinyhub apply release.plan --allow-downtime
 shinyhub fleet apply fleet.yaml --allow-downtime
 ```
 
+The flag is consent to disconnect people. An app counts as in use while a
+request or WebSocket is open, while a client holds a worker of a `grouped` or
+`per_session` app, and for five seconds after its last request. An app that is
+not in use has nobody to disconnect, so its stop-first deployment proceeds without the flag and
+the response carries `stop_first_idle: true` beside `stop_first_reason`. The
+check and the removal of the old version from the routing table are one atomic
+step: a session that connects while the deployment is being admitted turns it
+back into a refusal with the working version still serving. A refusal that
+sessions alone cause says so and names them, for example `the app is in use
+(2 open connections)` or `(a request reached it in the last 5s)`, and a retry
+without the flag proceeds once the app is no longer in use. Four refusals do
+not depend on sessions and hold for an idle app too: insufficient capacity
+(retry instead), shared data that is not known to be safe (an open producer
+barrier, a pending producer repair, or a running or unrepaired schedule writer,
+which the refusal names), a previous version whose processes are not yet
+confirmed stopped, and any deployment on a multi-node cluster, where another
+node may hold sessions this one cannot see. A previous version that is still
+draining is answered as a wait, with or without the flag: a stop-first
+deployment cannot replace it until it has retired.
+
 `--allow-downtime` permits the stop-first fallback when handoff is unavailable;
 it still uses handoff when safe. The fallback disconnects active sessions. Omit
-the flag in CI when preserving availability is required: insufficient capacity
-or another handoff refusal then fails the deploy with the working version still
-serving. `fleet apply` defaults to this behavior too.
+the flag in CI when connected sessions must not be interrupted: insufficient
+capacity or another handoff refusal then fails the deploy with the working
+version still serving. `fleet apply` defaults to this behavior too. Omitting the
+flag protects sessions, not continuous availability: an app that is not in use
+still deploys stop-first, so a visitor arriving during that startup sees the
+loading page until the new version is ready.
 
 After an interrupted cleanup, ShinyHub retains the old process
 identity for startup recovery and defers another handoff until cleanup is

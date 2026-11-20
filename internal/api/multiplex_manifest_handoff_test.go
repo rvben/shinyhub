@@ -31,7 +31,7 @@ cmd = "true"
 deploy_trigger = "first_deploy"
 on_success = "roll"
 `
-	const manifestRefusal = "manifest whose configuration must be reconciled"
+	const manifestRefusal = "manifest whose configuration cannot be reconciled"
 	const producerRefusal = "changes shared producer state"
 	for _, tc := range []struct {
 		name          string
@@ -63,7 +63,7 @@ on_success = "roll"
 		t.Run(tc.name, func(t *testing.T) {
 			srv, store, token, runtime := newManifestE2EServerWithJobs(t)
 			defer srv.Close()
-			runtime.serveTraffic = true
+			armAppSessionHold(runtime)
 			zeroFloor := 0
 			srv.cfg.Server.MinAvailableMemoryMB = &zeroFloor
 			// Admit exactly the complete 16-replica candidate pool.
@@ -186,6 +186,11 @@ on_success = "roll"
 			runtime.mu.Lock()
 			beforeProducers := len(runtime.producerCommands)
 			runtime.mu.Unlock()
+			if tc.status == http.StatusConflict && tc.name != "capacity" {
+				// A refusal protects a connected session; an app with none deploys
+				// stop-first. A capacity refusal holds with nobody connected.
+				defer holdAppSession(t, srv, runtime, app.Slug)()
+			}
 			rec := upload("print('app') # v2", manifest, tc.allowDowntime)
 			if tc.name == "omitted-producer" {
 				schedule, err := store.GetScheduleByName(app.ID, "refresh")

@@ -281,7 +281,7 @@ alert; the retry and overflow results are useful early warnings.
 | `shinyhub_apps_crashed` | gauge | - | Apps in the crashed state: they exhausted their restart budget and serve nothing. The primary fleet alert target. |
 | `shinyhub_fleet_collector_up` | gauge | - | 1 when the scrape-time fleet count query succeeded, 0 when it failed. On 0 the three fleet gauges above are absent for that scrape rather than reading as zero. |
 | `shinyhub_deploys_total` | counter | `result` | Deployments by outcome (`success` / `failure`). Alert on a rising failure rate. |
-| `shinyhub_generation_handoffs_total` | counter | `outcome` | Generation handoff events from a closed vocabulary: `success`, `deferred`, `explicit_downtime`, `candidate_failure`, `cutover_repair`, `forced_retirement`, or `cleanup_deferred`. |
+| `shinyhub_generation_handoffs_total` | counter | `outcome` | Generation handoff events from a closed vocabulary: `success`, `deferred`, `explicit_downtime`, `idle_stop_first`, `candidate_failure`, `cutover_repair`, `forced_retirement`, or `cleanup_deferred`. |
 | `shinyhub_generation_draining` | gauge | - | Old generations currently draining on this control-plane process. |
 | `shinyhub_generation_draining_sessions` | gauge | - | Open HTTP streams and WebSockets still attached to draining generations on this control-plane process. |
 | `shinyhub_generation_drain_duration_seconds` | histogram | - | Time from cutover until the old route retired or cleanup was deferred. |

@@ -255,7 +255,7 @@ func (s *Server) manifestHandoffSafe(app *db.App, previous *db.Deployment, manif
 }
 
 func (s *Server) manifestHandoffReason(app *db.App, previous *db.Deployment, manifest *deploy.Manifest) string {
-	return "manifest whose configuration must be reconciled by an explicit stop-first deploy: " + strings.Join(s.manifestHandoffReasons(app, previous, manifest), "; ")
+	return "manifest whose configuration cannot be reconciled during a parallel handoff: " + strings.Join(s.manifestHandoffReasons(app, previous, manifest), "; ")
 }
 
 // projectHandoffApp overlays only fields admitted above, without publishing

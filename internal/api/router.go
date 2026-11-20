@@ -147,9 +147,12 @@ type Server struct {
 	// in-memory publication phases.
 	promoteDeployment       func(int64) error
 	activateProxyGeneration func(string, int64) (int64, error)
-	availableMemoryMB       func() (int, error)
-	availableCPUCores       func() (float64, error)
-	cpuQuotaReader          *admission.CgroupReader
+	// beforeIdleDeregister runs after a stop-first deploy was admitted because
+	// the app was not in use and before the route is removed; nil in production.
+	beforeIdleDeregister func(slug string)
+	availableMemoryMB    func() (int, error)
+	availableCPUCores    func() (float64, error)
+	cpuQuotaReader       *admission.CgroupReader
 	// deployReplica boots a single replica at one index, used by the autoscale
 	// scale-up primitive to grow a pool by one without cycling the whole pool.
 	// Defaults to deploy.RunReplica; overridable in tests.
@@ -782,6 +785,14 @@ func (s *Server) SetGenerationCutoverForTest(
 	if activateProxy != nil {
 		s.activateProxyGeneration = activateProxy
 	}
+}
+
+// SetBeforeIdleDeregisterForTest installs a hook that runs between a stop-first
+// deploy being admitted for an app that is not in use and the removal of its
+// route, so a test can connect a session inside that window. It must be called
+// before the server handles requests.
+func (s *Server) SetBeforeIdleDeregisterForTest(fn func(slug string)) {
+	s.beforeIdleDeregister = fn
 }
 
 // SetAvailableMemoryForTest replaces host memory sampling for deterministic

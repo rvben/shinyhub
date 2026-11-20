@@ -180,7 +180,8 @@ requiring repair, including disabled schedules, and running data producers;
 `plan` warns about quarantine and names the required producer reruns.
 
 Manifest schedule reconciliation retains schedules omitted from `shinyhub.toml`.
-If a retained producer forces a stop-first deploy, the refusal names it, says it
+If a retained producer forces a stop-first deploy while a session is connected,
+the refusal names it, says it
 is absent from the manifest, and provides `shinyhub schedule rm APP SCHEDULE`.
 Remove it explicitly when it is no longer intended to run.
 

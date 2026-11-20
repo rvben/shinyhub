@@ -28,8 +28,8 @@ const (
 	// parallel generation handoff does not support the app's current shape
 	// (non-multiplex isolation, a draining generation, a config-bearing
 	// manifest). The working version is preserved and nothing changed under the
-	// caller, so this is a precondition the operator clears with
-	// --allow-downtime, never a state race to re-plan.
+	// caller, so this is a precondition the operator clears by waiting for the
+	// named blocker or with --allow-downtime, never a state race to re-plan.
 	DowntimeRequired Kind = "downtime_required"
 
 	// Client-emitted kinds (set by the CLI for its own error shapes).
