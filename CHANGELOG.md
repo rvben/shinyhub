@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.25.4](https://github.com/rvben/shinyhub/compare/v0.25.3...v0.25.4) - 2026-11-20
+
+### Fixed
+
+- **fleet**: report a deploy waiting on a retiring version as safe to retry ([bf87a57](https://github.com/rvben/shinyhub/commit/bf87a57663ca7339b19c6025bff345ac960361cb))
+- **deploy**: redeploy a per-session app that has a running worker ([7781091](https://github.com/rvben/shinyhub/commit/7781091246e8a4af6955c3205bef92a3f46099dc))
+
 ## [0.25.3](https://github.com/rvben/shinyhub/compare/v0.25.2...v0.25.3) - 2026-11-20
 
 ### Fixed
