@@ -2644,7 +2644,10 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		if active, err := s.store.GetActiveDeploymentGeneration(app.ID); err == nil {
 			rows, err := s.store.ListDeploymentReplicas(app.ID)
 			mode, policyErr := s.servingIsolation(app)
-			grouped := mode == "grouped"
+			// Elastic workers of the serving deployment are recorded in the
+			// ledger while they run, so only rows of other deployments are
+			// cleanup still owed.
+			elastic := mode == "grouped" || mode == "per_session"
 			if policyErr != nil {
 				writeInternal(w, r, "inspect serving policy", policyErr)
 				return
@@ -2653,12 +2656,12 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 				writeInternal(w, r, "inspect generation cleanup", err)
 				return
 			}
-			if s.hasUnownedGenerationRows(slug, rows, active.DeploymentID, grouped) {
+			if s.hasUnownedGenerationRows(r.Context(), slug, rows, active.DeploymentID, elastic) {
 				if pending, err := s.store.HasPendingDeployment(app.ID); err != nil || pending {
 					writeError(w, http.StatusConflict, "another deployment is pending; working version preserved")
 					return
 				}
-				if err := s.waitForPreviousGeneration(r.Context(), app, active.DeploymentID, grouped); err != nil {
+				if err := s.waitForPreviousGeneration(r.Context(), app, active.DeploymentID, elastic); err != nil {
 					writeError(w, http.StatusConflict, "working version preserved: "+err.Error())
 					return
 				}
@@ -2944,6 +2947,9 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	liveUpgrade := prevActive != nil && !keepDown &&
 		(activeProcessPresent || activeRoutePresent || durableServingState || s.clustered)
 	previousGrouped := currentIsolation == "grouped"
+	// Elastic workers of the serving deployment keep ledger rows while they
+	// run; those rows are not cleanup owed by an earlier version.
+	previousElastic := previousGrouped || currentIsolation == "per_session"
 	groupedHandoff := targetIsolation == "grouped"
 	generationHandoff := liveUpgrade
 	unsupportedReason := ""
@@ -2954,7 +2960,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			unsupportedReason = "parallel generation handoff is not yet supported in clustered mode"
 		case s.proxy == nil || s.manager == nil:
 			unsupportedReason = "parallel generation handoff is unavailable"
-		case s.hasUnownedGenerationRows(slug, durableGenerationRows, prevActive.ID, previousGrouped):
+		case s.hasUnownedGenerationRows(r.Context(), slug, durableGenerationRows, prevActive.ID, previousElastic):
 			unsupportedReason = "a previous generation still has pending process cleanup"
 			cleanupPending = true
 		case producerBarrierEntered || prestartPlan.deploymentRepairRequired || len(prestartPlan.producers) > 0:
@@ -3045,7 +3051,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// by itself: it is answered as a wait whether or not the caller consented
 	// to downtime, and never as a request for consent.
 	predecessorRetiring := liveUpgrade && !generationHandoff && !cleanupPending && s.proxy != nil &&
-		hasBlockingGenerationRows(durableGenerationRows, prevActive.ID, previousGrouped)
+		hasBlockingGenerationRows(durableGenerationRows, prevActive.ID, previousElastic)
 	if predecessorRetiring {
 		idleStopFirst = false
 	}
