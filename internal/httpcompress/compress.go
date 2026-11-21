@@ -26,7 +26,7 @@ import (
 const MinSize = 1024
 
 var gzipWriters = sync.Pool{New: func() any {
-	w, _ := gzip.NewWriterLevel(nil, gzip.DefaultCompression)
+	w, _ := gzip.NewWriterLevel(nil, 4)
 	return w
 }}
 
