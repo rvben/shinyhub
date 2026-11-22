@@ -11,6 +11,7 @@ import (
 	"github.com/rvben/shinyhub/internal/access"
 	"github.com/rvben/shinyhub/internal/announcementui"
 	"github.com/rvben/shinyhub/internal/api"
+	"github.com/rvben/shinyhub/internal/appnav"
 	"github.com/rvben/shinyhub/internal/auth"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
@@ -123,6 +124,7 @@ func buildHTTPHandler(d httpHandlerDeps) (http.Handler, error) {
 	// feature is absent rather than merely unused: nothing under /app/ answers
 	// differently than it did before the switcher existed.
 	if cfg.Server.AppNavEnabled() {
+		mux.HandleFunc("GET "+appnav.AssetRoute, appnav.ServeAsset)
 		mux.HandleFunc("GET /app/{slug}/.shinyhub/nav.json", func(w http.ResponseWriter, r *http.Request) {
 			if u := access.ResolveOptionalUser(r, cfg.Auth.Secret, store.IsTokenRevoked, appUserLookup); u != nil {
 				r = r.WithContext(auth.WithUser(r.Context(), u))

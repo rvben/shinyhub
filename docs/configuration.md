@@ -629,8 +629,12 @@ On by default. What it does, and what it deliberately does not do:
   relaxing the policy.
 
 Set it to `false` to leave application pages without it. Off is absent rather
-than idle: no page is rewritten, and the endpoint the switcher reads its list
-from is not served at all.
+than idle: no page is rewritten, and the switcher's endpoints are disabled.
+
+When the switcher is enabled, `/app/.shinyhub/nav/<sha256>.js` serves the
+embedded switcher JavaScript, where `<sha256>` is the hex digest of the script.
+App pages continue to embed the script so visitors can use the switcher while
+upgrading or rolling back between servers with different asset support.
 
 ## Response compression
 

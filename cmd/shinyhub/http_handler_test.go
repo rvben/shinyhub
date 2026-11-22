@@ -1,13 +1,21 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/rvben/shinyhub/internal/api"
+	"github.com/rvben/shinyhub/internal/appnav"
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/dbtest"
@@ -147,6 +155,56 @@ func TestHTTPHandlerRegistersAppNavOnlyWhenEnabled(t *testing.T) {
 		if _, ok := payload["apps"]; ok {
 			t.Fatalf("nav.json with the switcher off still serves the switcher payload: %s", string(rec.Body))
 		}
+	}
+}
+
+func TestHTTPHandlerServesContentAddressedAppSwitcher(t *testing.T) {
+	const origin = "https://apps.example.test"
+	const prefix = "/app/.shinyhub/nav/"
+	path := prefix + fmt.Sprintf("%x.js", sha256.Sum256([]byte(appnav.Script)))
+	configure := func(c *config.Config) {
+		c.Server.BaseURL = "https://control.example.test"
+		c.Server.AppOrigin = origin
+	}
+	h := newTestHTTPHandler(t, configure)
+
+	rec := h.get(t, origin+path, map[string]string{"Accept-Encoding": "gzip"})
+	if rec.Code != http.StatusOK || rec.Header.Get("Content-Type") != "text/javascript; charset=utf-8" ||
+		rec.Header.Get("Content-Encoding") != "gzip" || rec.Header.Get("Cross-Origin-Resource-Policy") != "same-origin" ||
+		rec.Header.Get("X-Content-Type-Options") != "nosniff" ||
+		rec.Header.Get("Cache-Control") != "private, max-age=31536000, immutable" {
+		t.Fatalf("app switcher asset: status %d, headers %v", rec.Code, rec.Header)
+	}
+	reader, err := gzip.NewReader(bytes.NewReader(rec.Body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	body, err := io.ReadAll(reader)
+	if err != nil || string(body) != appnav.Script {
+		t.Fatalf("app switcher bytes differ from the inline script: %v", err)
+	}
+
+	head := httptest.NewRecorder()
+	h.handler.ServeHTTP(head, httptest.NewRequest(http.MethodHead, origin+path, nil))
+	if head.Code != http.StatusOK || head.Body.Len() != 0 ||
+		head.Header().Get("Content-Length") != fmt.Sprint(len(appnav.Script)) {
+		t.Fatalf("asset HEAD: status %d, bytes %d, headers %v", head.Code, head.Body.Len(), head.Header())
+	}
+
+	rec = h.get(t, origin+prefix+strings.Repeat("0", 64)+".js", nil)
+	if rec.Code != http.StatusNotFound || rec.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("unknown asset: status %d, headers %v", rec.Code, rec.Header)
+	}
+	disabled := newTestHTTPHandler(t, func(c *config.Config) {
+		configure(c)
+		off := false
+		c.Server.AppNav = &off
+	})
+	disabled.prx.SetSlugExists(proxySlugExists(disabled.store, slog.Default()))
+	rec = disabled.get(t, origin+path, nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("asset with switcher disabled: status %d", rec.Code)
 	}
 }
 
