@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.25.5](https://github.com/rvben/shinyhub/compare/v0.25.4...v0.25.5) - 2026-11-23
+
+### Fixed
+
+- **server**: reduce response compression CPU ([9f4f33e](https://github.com/rvben/shinyhub/commit/9f4f33edd85591fdf6f3a2abd4d316653663ec8d))
+
+### Performance
+
+- **appnav**: serve the switcher at a content-addressed URL ([925fbe0](https://github.com/rvben/shinyhub/commit/925fbe02425ed13cf2b515ca55b017be29da408f))
+
 ## [0.25.4](https://github.com/rvben/shinyhub/compare/v0.25.3...v0.25.4) - 2026-11-20
 
 ### Fixed
