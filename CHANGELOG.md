@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.25.6](https://github.com/rvben/shinyhub/compare/v0.25.5...v0.25.6) - 2026-11-23
+
+### Fixed
+
+- **appnav**: prepare the switcher asset for cached delivery ([f09d183](https://github.com/rvben/shinyhub/commit/f09d183655bea826126985040d8be774ef52f34e))
+
 ## [0.25.5](https://github.com/rvben/shinyhub/compare/v0.25.4...v0.25.5) - 2026-11-23
 
 ### Fixed
