@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.25.7](https://github.com/rvben/shinyhub/compare/v0.25.6...v0.25.7) - 2026-11-23
+
+### Fixed
+
+- **appnav**: cache the switcher on eligible app pages ([635799b](https://github.com/rvben/shinyhub/commit/635799b3be75d0ff616dafb35c2d11fcc9f8baf7))
+
 ## [0.25.6](https://github.com/rvben/shinyhub/compare/v0.25.5...v0.25.6) - 2026-11-23
 
 ### Fixed
