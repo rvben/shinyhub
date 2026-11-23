@@ -100,6 +100,9 @@ type ProcessInfo struct {
 	WorkerID     string
 	AppVersion   string
 	DeploymentID int64
+	// PythonInstrumentationMissing is set when an inferred Python command
+	// starts without auto-instrumentation. Adopted processes have no launch evidence.
+	PythonInstrumentationMissing bool
 	// LogRunID identifies this concrete execution. Replica Index identifies a
 	// reusable pool slot; LogRunID changes on every cold start.
 	LogRunID string
@@ -219,13 +222,14 @@ type StartParams struct {
 	// AppCachePath is the host path of this activation's result cache
 	// namespace, and AppCacheMaxMB its size bound. An empty path leaves the
 	// cache unwired: the app sees no SHINYHUB_CACHE_DIR and caches in memory.
-	AppCachePath    string
-	AppCacheMaxMB   int
-	MemoryLimitMB   int           // 0 = no limit
-	CPUQuotaPercent int           // 0 = no limit; 100 = 1 full core
-	SharedMounts    []SharedMount // resolved by caller before Start/RunOnce
-	AppVersion      string        // app version stamped onto labels/metadata
-	DeploymentID    int64         // owning deployment; 0 when unknown
+	AppCachePath                 string
+	AppCacheMaxMB                int
+	MemoryLimitMB                int           // 0 = no limit
+	CPUQuotaPercent              int           // 0 = no limit; 100 = 1 full core
+	SharedMounts                 []SharedMount // resolved by caller before Start/RunOnce
+	AppVersion                   string        // app version stamped onto labels/metadata
+	DeploymentID                 int64         // owning deployment; 0 when unknown
+	PythonInstrumentationMissing bool
 	// GenerationScoped starts this replica beside the currently active pool.
 	// Its deployment ID becomes part of the manager's internal pool identity,
 	// while Slug remains the public app identity passed to the runtime.
@@ -1192,19 +1196,20 @@ func (m *Manager) launchReserved(p StartParams, ps *pendingStart) (*ProcessInfo,
 	}
 
 	info := &ProcessInfo{
-		Slug:         p.Slug,
-		AppID:        p.AppID,
-		Index:        p.Index,
-		PID:          handle.PID,
-		Port:         p.Port,
-		Status:       StatusRunning,
-		Tier:         tier,
-		Provider:     ep.Provider,
-		EndpointURL:  ep.URL,
-		WorkerID:     ep.WorkerID,
-		AppVersion:   p.AppVersion,
-		DeploymentID: p.DeploymentID,
-		LogRunID:     run.RunID,
+		Slug:                         p.Slug,
+		AppID:                        p.AppID,
+		Index:                        p.Index,
+		PID:                          handle.PID,
+		Port:                         p.Port,
+		Status:                       StatusRunning,
+		Tier:                         tier,
+		Provider:                     ep.Provider,
+		EndpointURL:                  ep.URL,
+		WorkerID:                     ep.WorkerID,
+		AppVersion:                   p.AppVersion,
+		DeploymentID:                 p.DeploymentID,
+		LogRunID:                     run.RunID,
+		PythonInstrumentationMissing: p.PythonInstrumentationMissing,
 	}
 	done := make(chan struct{})
 	e := &entry{

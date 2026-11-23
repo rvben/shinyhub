@@ -1536,10 +1536,10 @@ func TestRun_AutoInstrumentResolution(t *testing.T) {
 			defer restoreSync()
 
 			var mu sync.Mutex
-			var overlays [][]string
-			restoreCmd := deploy.SetBuildCommandForTest(func(_ string, _, _ int, _ string, overlay []string, _ bool) []string {
+			var instrumentedAttempts []bool
+			restoreCmd := deploy.SetBuildCommandForTest(func(_ []string, _ int, _ string, instrumented bool) []string {
 				mu.Lock()
-				overlays = append(overlays, overlay)
+				instrumentedAttempts = append(instrumentedAttempts, instrumented)
 				mu.Unlock()
 				return []string{"sleep", "30"}
 			})
@@ -1558,10 +1558,14 @@ func TestRun_AutoInstrumentResolution(t *testing.T) {
 			if err != nil {
 				t.Fatalf("run: %v", err)
 			}
+			info, running := mgr.GetReplica("auto-res", 0)
+			if !running || info.PythonInstrumentationMissing != !tc.want {
+				t.Fatalf("replica launch instrumentation record = %+v, running %v, want missing %v", info, running, !tc.want)
+			}
 			mu.Lock()
 			defer mu.Unlock()
-			if len(overlays) != 1 || (len(overlays[0]) > 0) != tc.want {
-				t.Errorf("builder calls = %v, want one call with non-empty overlay = %v", overlays, tc.want)
+			if len(instrumentedAttempts) != 1 || (instrumentedAttempts[0]) != tc.want {
+				t.Errorf("builder calls = %v, want one call with non-empty overlay = %v", instrumentedAttempts, tc.want)
 			}
 		})
 	}
@@ -1570,26 +1574,46 @@ func TestRun_AutoInstrumentResolution(t *testing.T) {
 // A custom Params.Command bypasses command inference entirely; the wrapper
 // must never be applied to user-supplied commands.
 func TestRun_AutoInstrumentSkipsCustomCommand(t *testing.T) {
-	bundle := t.TempDir()
-	restoreCmd := deploy.SetBuildCommandForTest(func(string, int, int, string, []string, bool) []string {
-		t.Error("buildCommand must not be called for a custom Command")
-		return nil
-	})
-	defer restoreCmd()
+	for _, tc := range []struct {
+		name, manifest string
+		command        []string
+	}{
+		{name: "API command", command: []string{"sleep", "30"}},
+		{name: "manifest command", manifest: "[app]\ncommand = ['sleep', '30']\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bundle := t.TempDir()
+			if err := os.WriteFile(filepath.Join(bundle, "app.py"), []byte("# Python app"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if tc.manifest != "" {
+				if err := os.WriteFile(filepath.Join(bundle, deploy.ManifestFilename), []byte(tc.manifest), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			restoreCmd := deploy.SetBuildCommandForTest(func([]string, int, string, bool) []string {
+				t.Error("inferred builder called for a custom command")
+				return nil
+			})
+			defer restoreCmd()
 
-	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
-	mgr.SetAutoInstrumentAppsDefault(true)
-	defer mgr.Stop("auto-custom")
-	prx := proxy.New()
+			mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+			mgr.SetAutoInstrumentAppsDefault(true)
+			defer mgr.Stop("auto-custom")
 
-	_, err := deploy.Run(deploy.Params{
-		Slug: "auto-custom", BundleDir: bundle,
-		Command: []string{"sleep", "30"},
-		Manager: mgr, Proxy: prx,
-		HealthCheck: func(string, time.Duration, http.RoundTripper) error { return nil },
-	})
-	if err != nil {
-		t.Fatalf("run: %v", err)
+			_, err := deploy.Run(deploy.Params{
+				Slug: "auto-custom", BundleDir: bundle, Command: tc.command,
+				Manager: mgr, Proxy: proxy.New(),
+				HealthCheck: func(string, time.Duration, http.RoundTripper) error { return nil },
+			})
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			info, running := mgr.GetReplica("auto-custom", 0)
+			if !running || info.PythonInstrumentationMissing {
+				t.Fatalf("custom command incorrectly flagged for instrumentation restart: %+v", info)
+			}
+		})
 	}
 }
 
@@ -1770,58 +1794,84 @@ func TestRun_ManifestCommand_EachReplicaGetsOwnPort(t *testing.T) {
 // observability regression, not an outage: the replica must come up
 // uninstrumented after the instrumented attempt fails.
 func TestRun_InstrumentedFailureFallsBackUninstrumented(t *testing.T) {
-	bundle := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bundle, "app.py"), []byte("# app"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	restoreSync := deploy.SetSyncHooksForTest(func(context.Context, string, []string) error { return nil }, func(context.Context, string, []string) error { return nil })
-	defer restoreSync()
+	for _, tc := range []struct {
+		name, manifest string
+		fleetDefault   bool
+		prepared       bool
+	}{
+		{name: "fleet default", fleetDefault: true},
+		{name: "manifest opt in", manifest: "[tracing]\nauto = true\n"},
+		{name: "prepared deployment without overlay", fleetDefault: true, prepared: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bundle := t.TempDir()
+			files := map[string]string{"app.py": "# app"}
+			if tc.manifest != "" {
+				files["shinyhub.toml"] = tc.manifest
+			}
+			if tc.prepared {
+				files["pyproject.toml"] = "[project]\nname='fallback-test'\nversion='0.1.0'\n"
+				files["uv.lock"] = "version = 1\n"
+				files[".venv/bin/python"] = "#!/bin/sh\n"
+				if err := os.MkdirAll(filepath.Join(bundle, ".venv", "bin"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for path, body := range files {
+				if err := os.WriteFile(filepath.Join(bundle, path), []byte(body), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			restoreSync := deploy.SetSyncHooksForTest(
+				func(context.Context, string, []string) error { return nil },
+				func(context.Context, string, []string) error { return nil },
+			)
+			defer restoreSync()
 
-	var mu sync.Mutex
-	var overlays [][]string
-	restoreCmd := deploy.SetBuildCommandForTest(func(_ string, _, _ int, _ string, overlay []string, _ bool) []string {
-		mu.Lock()
-		overlays = append(overlays, overlay)
-		mu.Unlock()
-		return []string{"sleep", "30"}
-	})
-	defer restoreCmd()
+			var mu sync.Mutex
+			var instrumentedAttempts []bool
+			restoreCmd := deploy.SetBuildCommandForTest(func(_ []string, _ int, _ string, instrumented bool) []string {
+				mu.Lock()
+				instrumentedAttempts = append(instrumentedAttempts, instrumented)
+				mu.Unlock()
+				return []string{"sleep", "30"}
+			})
+			defer restoreCmd()
 
-	// The instrumented attempt fails its health check; the fallback passes.
-	var calls atomic.Int32
-	hc := func(string, time.Duration, http.RoundTripper) error {
-		if calls.Add(1) == 1 {
-			return fmt.Errorf("simulated instrumented-launch failure")
-		}
-		return nil
-	}
+			var calls atomic.Int32
+			hc := func(string, time.Duration, http.RoundTripper) error {
+				if calls.Add(1) == 1 {
+					return fmt.Errorf("simulated launch failure")
+				}
+				return nil
+			}
 
-	mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
-	mgr.SetAutoInstrumentAppsDefault(true)
-	defer mgr.Stop("auto-fallback")
-	prx := proxy.New()
-
-	result, err := deploy.Run(deploy.Params{
-		Slug: "auto-fallback", BundleDir: bundle,
-		Manager: mgr, Proxy: prx,
-		HealthCheck: hc,
-	})
-	if err != nil {
-		t.Fatalf("run should succeed via uninstrumented fallback: %v", err)
-	}
-	if len(result.Replicas) != 1 {
-		t.Fatalf("want 1 replica, got %d", len(result.Replicas))
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(overlays) != 2 {
-		t.Fatalf("builder calls = %v, want 2 (instrumented then fallback)", overlays)
-	}
-	if len(overlays[0]) == 0 {
-		t.Errorf("first attempt overlay should be non-empty (instrumented), got %v", overlays[0])
-	}
-	if len(overlays[1]) != 0 {
-		t.Errorf("fallback attempt overlay should be empty (uninstrumented), got %v", overlays[1])
+			mgr := process.NewManager(t.TempDir(), process.NewNativeRuntime())
+			mgr.SetAutoInstrumentAppsDefault(tc.fleetDefault)
+			defer mgr.Stop("auto-fallback")
+			preparation := deploy.PrepareRequired
+			if tc.prepared {
+				preparation = deploy.PrepareSkip
+			}
+			result, err := deploy.Run(deploy.Params{
+				Slug: "auto-fallback", BundleDir: bundle,
+				Manager: mgr, Proxy: proxy.New(), HealthCheck: hc, Preparation: preparation,
+			})
+			mu.Lock()
+			defer mu.Unlock()
+			if tc.prepared {
+				if err == nil || len(instrumentedAttempts) != 1 || instrumentedAttempts[0] {
+					t.Fatalf("untraced launch must fail without retry, got overlays %v and error %v", instrumentedAttempts, err)
+				}
+				return
+			}
+			if err != nil || len(result.Replicas) != 1 {
+				t.Fatalf("run should succeed via uninstrumented fallback: result %v, error %v", result, err)
+			}
+			if len(instrumentedAttempts) != 2 || !instrumentedAttempts[0] || instrumentedAttempts[1] {
+				t.Fatalf("expected an instrumented attempt followed by an uninstrumented fallback, got %v", instrumentedAttempts)
+			}
+		})
 	}
 }
 
@@ -1878,7 +1928,7 @@ func TestRun_LaunchCancelledByStopIsNotRetriedUninstrumented(t *testing.T) {
 	}
 	restoreSync := deploy.SetSyncHooksForTest(func(context.Context, string, []string) error { return nil }, func(context.Context, string, []string) error { return nil })
 	defer restoreSync()
-	restoreCmd := deploy.SetBuildCommandForTest(func(_ string, _, _ int, _ string, _ []string, _ bool) []string {
+	restoreCmd := deploy.SetBuildCommandForTest(func([]string, int, string, bool) []string {
 		return []string{"sleep", "30"}
 	})
 	defer restoreCmd()

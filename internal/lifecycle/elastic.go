@@ -439,20 +439,21 @@ func (s *ElasticSpawner) startAndCheck(app *db.App, dep *db.Deployment, slug str
 	// Start the worker process. slotID is the replica index so the cgroup is
 	// named app-<slug>-<slotID> and the Manager's entry is keyed by it.
 	info, err := s.Manager.Start(process.StartParams{
-		GuardUntilAcknowledged: guarded,
-		Slug:                   slug,
-		AppID:                  app.ID,
-		Index:                  slotID,
-		Tier:                   tier,
-		Dir:                    dep.BundleDir,
-		Command:                plan.Command,
-		Port:                   port,
-		Env:                    plan.Env, // launch-coupled only (PORT, the renv policy) - per-app env added by Manager's envResolver
-		MemoryLimitMB:          memMB,
-		CPUQuotaPercent:        cpuPct,
-		AppVersion:             dep.Version,
-		DeploymentID:           dep.ID,
-		ContentDigest:          dep.ContentDigest,
+		GuardUntilAcknowledged:       guarded,
+		Slug:                         slug,
+		AppID:                        app.ID,
+		Index:                        slotID,
+		Tier:                         tier,
+		Dir:                          dep.BundleDir,
+		Command:                      plan.Command,
+		Port:                         port,
+		Env:                          plan.Env, // launch-coupled only (PORT, the renv policy) - per-app env added by Manager's envResolver
+		MemoryLimitMB:                memMB,
+		CPUQuotaPercent:              cpuPct,
+		AppVersion:                   dep.Version,
+		DeploymentID:                 dep.ID,
+		ContentDigest:                dep.ContentDigest,
+		PythonInstrumentationMissing: plan.AppType == "python" && !plan.Instrumented,
 	})
 	if err != nil {
 		slog.Warn("elastic spawn: start process", "slug", slug, "slotID", slotID, "err", err)

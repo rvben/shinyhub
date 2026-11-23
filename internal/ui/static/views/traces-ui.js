@@ -192,7 +192,7 @@ export function makeTraceDetails(doc, span, linkTpl, { onClose, onFeedback = () 
   return section;
 }
 
-export function createTracesViewer({ panel, app, api, onUnauthorized = () => {}, refreshEveryMs = 5000 }) {
+export function createTracesViewer({ panel, app, api, onUnauthorized = () => {}, refreshEveryMs = 5000, canPrepareInstrumentation = false }) {
   const doc = panel.ownerDocument;
   const win = doc.defaultView;
   const candidate = new URLSearchParams(win.location.search).get('development_session_id') || '';
@@ -203,6 +203,10 @@ export function createTracesViewer({ panel, app, api, onUnauthorized = () => {},
       <div id="traces-session" class="observability-scope" role="status" hidden>
         <span>Showing traces from one remote development session.</span>
         <a data-nav>Show all traces</a>
+      </div>
+      <div id="traces-instrumentation" class="observability-scope" hidden>
+        <span role="status"></span>
+        <button type="button" class="btn-row" hidden>Prepare instrumentation</button>
       </div>
       <div class="traces-filters" aria-label="Trace controls">
         <label class="trace-search-field"><span>Search requests</span><input id="traces-search" type="search" placeholder="Search path, ID or error" aria-describedby="traces-summary" autocomplete="off"></label>
@@ -242,6 +246,8 @@ export function createTracesViewer({ panel, app, api, onUnauthorized = () => {},
   const tbody = query('#traces-tbody');
   const detailSlot = query('#traces-detail-slot');
   const feedback = query('#traces-feedback');
+  const instrumentation = query('#traces-instrumentation');
+  const prepareInstrumentation = instrumentation.querySelector('button');
   if (session) {
     query('#traces-session').hidden = false;
     query('#traces-session a').href = `/apps/${encodeURIComponent(app.slug)}/traces`;
@@ -260,6 +266,26 @@ export function createTracesViewer({ panel, app, api, onUnauthorized = () => {},
   let inspected = null;
   let detailSection = null;
   let renderedSignature = '';
+  let instrumentationState = '';
+  let replicasWithoutInstrumentation = 0;
+  let instrumentationError = '';
+  let preparationController = null;
+  let preparationRevision = 0;
+
+  function paintInstrumentation() {
+    const message = {
+      ready: 'Python instrumentation is ready for new starts and scheduled runs.',
+      not_prepared: 'Python instrumentation needs preparation for this deployment.',
+      preparing: 'Preparing Python instrumentation…',
+      unavailable: 'Python instrumentation readiness could not be checked.',
+    }[preparationController ? 'preparing' : instrumentationState];
+    instrumentation.hidden = !message;
+    const restart = instrumentationState === 'ready' && replicasWithoutInstrumentation > 0
+      ? ` ${replicasWithoutInstrumentation} running or suspended ${replicasWithoutInstrumentation === 1 ? 'replica' : 'replicas'} started without it. Restart to apply.` : '';
+    instrumentation.querySelector('span').textContent = instrumentationError || (message ? message + restart : '');
+    prepareInstrumentation.hidden = !canPrepareInstrumentation || instrumentationState !== 'not_prepared';
+    prepareInstrumentation.disabled = !!preparationController;
+  }
 
   function showFeedback(message) {
     if (destroyed) return;
@@ -378,6 +404,7 @@ export function createTracesViewer({ panel, app, api, onUnauthorized = () => {},
     if (destroyed || inFlight || paused && !manual) return;
     inFlight = true;
     const ticket = ++generation;
+    const observedPreparation = preparationRevision;
     controller = new win.AbortController();
     paintStatus();
     try {
@@ -390,6 +417,12 @@ export function createTracesViewer({ panel, app, api, onUnauthorized = () => {},
       if (destroyed || ticket !== generation) return;
       if (!body || typeof body.enabled !== 'boolean' || !Array.isArray(body.spans)) throw new Error('invalid');
       enabled = body.enabled;
+      if (observedPreparation === preparationRevision) {
+        instrumentationState = typeof body.python_instrumentation === 'string' ? body.python_instrumentation : '';
+        replicasWithoutInstrumentation = body.python_replicas_without_instrumentation || 0;
+        if (instrumentationState !== 'not_prepared') instrumentationError = '';
+        paintInstrumentation();
+      }
       records = body.spans.filter(span => span && typeof span === 'object' && !Array.isArray(span));
       linkTemplate = typeof body.trace_link_template === 'string' ? body.trace_link_template : '';
       lastLoaded = new Date();
@@ -430,6 +463,28 @@ export function createTracesViewer({ panel, app, api, onUnauthorized = () => {},
   });
   refresh.addEventListener('click', () => { feedback.hidden = true; load({ manual: true }); });
   retry.addEventListener('click', () => load({ manual: true }));
+  prepareInstrumentation.addEventListener('click', async () => {
+    if (preparationController || instrumentationState !== 'not_prepared') return;
+    preparationController = new win.AbortController();
+    instrumentationError = '';
+    paintInstrumentation();
+    try {
+      const response = await api(`/api/apps/${encodeURIComponent(app.slug)}/traces/instrumentation`, {
+        method: 'POST', signal: preparationController.signal,
+      });
+      if (destroyed) return;
+      if (response.status === 401) { onUnauthorized(); return; }
+      if (!response.ok) throw new Error();
+      preparationRevision++;
+      instrumentationState = 'ready';
+      load({ manual: true });
+    } catch {
+      if (!destroyed) instrumentationError = 'Could not prepare Python instrumentation. Check the server logs and retry.';
+    } finally {
+      preparationController = null;
+      if (!destroyed) paintInstrumentation();
+    }
+  });
   const stopPoll = startVisiblePoll(doc, refreshEveryMs, load);
   // The relative-time label only matters while the tab is visible; the poll
   // disarms in the background and repaints once on return.
@@ -439,6 +494,7 @@ export function createTracesViewer({ panel, app, api, onUnauthorized = () => {},
     destroyed = true;
     generation++;
     controller?.abort();
+    preparationController?.abort();
     stopPoll();
     stopStatusTick();
   };

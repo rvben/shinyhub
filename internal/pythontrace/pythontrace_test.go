@@ -65,3 +65,45 @@ func TestWrapLeavesUnsupportedCommandsUntouched(t *testing.T) {
 		t.Fatal("disabled instrumentation changed argv")
 	}
 }
+
+func TestWrapPreparedPreservesUVCommandContracts(t *testing.T) {
+	projectPrefix := []string{"uv", "run", "--frozen", "--no-sync"}
+	instrumenter := []string{"/overlay/bin/python"}
+	for _, tc := range []struct {
+		name   string
+		argv   []string
+		prefix []string
+	}{
+		{"bare", []string{"python3", "job.py"}, []string{"uv", "run", "--frozen", "--no-sync", "--offline"}},
+		{"absolute uv", []string{"/opt/bin/uv", "run", "--no-cache", "--no-index", "--no-python-downloads", "--", "python", "job.py"},
+			[]string{"/opt/bin/uv", "run", "--frozen", "--no-sync", "--offline", "--no-cache", "--no-index", "--no-python-downloads"}},
+		{"locked no sync", []string{"uv", "run", "--locked", "--no-sync", "python", "job.py"},
+			[]string{"uv", "run", "--no-sync", "--offline", "--locked"}},
+		{"lock validation", []string{"uv", "run", "--locked", "python", "job.py"}, nil},
+		{"conflicting flags", []string{"uv", "run", "--locked", "--no-sync", "--frozen", "python", "job.py"}, nil},
+		{"custom dependencies", []string{"uv", "run", "--with", "duckdb", "python", "job.py"}, nil},
+		{"custom groups", []string{"uv", "run", "--no-dev", "python", "job.py"}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, instrumented, eligible := WrapPrepared(tc.argv, projectPrefix, instrumenter)
+			if tc.prefix == nil {
+				if instrumented || eligible || !slices.Equal(got, tc.argv) {
+					t.Fatalf("command changed: %q", got)
+				}
+				return
+			}
+			want := append(slices.Clone(tc.prefix), "--", instrumenter[0], "-c", Bootstrap, "job-script", "job.py")
+			if !instrumented || !eligible || !slices.Equal(got, want) {
+				t.Fatalf("unexpected instrumented command: %q", got)
+			}
+			fallback, instrumented, eligible := WrapPrepared(tc.argv, projectPrefix, nil)
+			wantFallback := tc.argv
+			if tc.name == "bare" {
+				wantFallback = append(append(slices.Clone(tc.prefix), "--"), tc.argv...)
+			}
+			if instrumented || !eligible || !slices.Equal(fallback, wantFallback) {
+				t.Fatalf("unexpected fallback command: %q", fallback)
+			}
+		})
+	}
+}

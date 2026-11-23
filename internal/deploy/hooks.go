@@ -835,19 +835,3 @@ func killProcessGroup(pid int) error {
 	}
 	return nil
 }
-
-// InstrumentPythonCommand shares the fleet/manifest decision and package overlay
-// with app launches. Unsupported commands retain their exact argv. Unlike an app
-// boot, a one-shot command is never retried after an instrumentation failure.
-func InstrumentPythonCommand(bundleDir string, argv []string, auto bool, extra []string, hostDeps bool) ([]string, bool, error) {
-	manifest, err := LoadManifest(bundleDir)
-	if err != nil {
-		return nil, false, err
-	}
-	if manifest != nil && manifest.Tracing.Auto != nil {
-		auto = *manifest.Tracing.Auto
-	}
-	overlay := instrumentOverlay(auto, extra)
-	command, instrumented := pythontrace.Wrap(argv, overlay, pythonEnvironmentPrefix(bundleDir, overlay, hostDeps))
-	return command, instrumented, nil
-}

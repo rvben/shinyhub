@@ -201,8 +201,8 @@ The override travels with the bundle: it is re-read at every boot (deploy,
 crash restart, hibernation wake) and applies per deployed version, including
 rollbacks.
 
-ShinyHub already injects the `OTEL_*` env vars and propagates `traceparent`;
-auto-instrumentation adds the remaining two pieces. The app is launched as
+ShinyHub injects the `OTEL_*` env vars and propagates `traceparent`.
+When dependencies are resolved at launch, the instrumentation command is
 
 ```
 uv run [--with-requirements requirements.txt] \
@@ -219,11 +219,27 @@ The bootstrap executes `shiny` as a module under the overlay's
 interpreter; the app's own `shiny` console script would run under its own
 environment's interpreter, which cannot see the overlay packages.
 
-uv's `--with` overlay resolves these packages alongside the app's own
-dependencies without modifying its venv or lockfile; turn the flag off and
-the overlay is gone. `tracing.auto_instrument_extra_packages` (a fleet-wide
-setting) is layered in after the built-in set for instrumentors the built-in
-list doesn't cover, such as `opentelemetry-instrumentation-botocore`.
+On native hosts that prepare the app's Python project, ShinyHub installs a
+separate instrumentation environment during deployment. It uses the app's
+Python and respects the versions already installed by the app. Replica
+starts and compatible schedules reuse the environment offline, even with an
+empty uv cache. The app's installed packages and lockfile stay intact.
+Deployments without a host-prepared Python project use the launch-time overlay.
+
+`tracing.auto_instrument_extra_packages` (a fleet-wide setting) adds
+instrumentors such as `opentelemetry-instrumentation-botocore`. At startup,
+ShinyHub prepares missing environments for current deployments in the
+background. This covers upgrades, enabling auto-instrumentation, and changes
+to the extra package list. If preparation fails or a rollback target lacks a
+matching environment, the Traces tab lets app managers prepare it without a
+redeploy. While the environment is unavailable, supported native starts and
+schedules run without auto-instrumentation and ShinyHub logs a warning.
+If the build log shows an instrumentor conflicts with an installed app
+dependency, adjust the instrumentor list or the app's pins before retrying.
+Preparation affects future starts and scheduled runs. Restart any already
+running replica that needs to pick up the new instrumentation. Traces reports
+replicas the controller started without it. For replicas adopted from an
+earlier controller, check the exported traces to confirm instrumentation.
 
 This applies identically to a pool replica's initial boot and to an elastic
 worker spawned on demand: both resolve the launch command through the same
@@ -618,11 +634,16 @@ have occurred. Process error spans record the exception type and a generic
 status, without exception messages or stack traces.
 
 Supported commands explicitly invoke `python` or `python3` with a script,
-`-m module`, or `-c code`, directly or through `uv run`. Common uv run options
-and basic interpreter flags are retained. Shell wrappers, explicit/venv or
-version-specific interpreter paths, uv script mode, and unsupported options
-are passed through unchanged. `[tracing] auto = false` opts both apps and
-one-shot commands out; tracing disabled leaves scheduled commands unchanged.
+`-m module`, or `-c code`, directly or through `uv run`. With auto-instrumentation
+enabled on a native host with a prepared project, compatible commands use the
+deployed dependencies without a uv sync. Schedules with custom uv options,
+such as `--locked` without `--no-sync`, `--no-dev`, or `--with`, run as declared
+without ShinyHub's overlay. The declared command may still require index
+access. Basic interpreter flags are retained. Shell
+wrappers, explicit/venv or version-specific interpreter paths, uv script
+mode, and unsupported options are passed through unchanged. `[tracing] auto
+= false` opts both apps and one-shot commands out. Disabling tracing leaves
+scheduled commands unchanged.
 
 For unsupported commands or manual instrumentation, extract the environment
 context in the job yourself. `TRACEPARENT`/`TRACESTATE` identify the current run

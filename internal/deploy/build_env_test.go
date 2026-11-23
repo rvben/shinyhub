@@ -45,7 +45,7 @@ func TestBuildEnvironment_TimesOutAsBuildFailed(t *testing.T) {
 	restoreEnsure := SetEnsureProjectForTest(func(context.Context, string, []string) error { return nil })
 	defer restoreEnsure()
 
-	err := buildEnvironment(Params{Slug: "x", BundleDir: t.TempDir()}, "python", 30*time.Millisecond)
+	err := buildEnvironment(Params{Slug: "x", BundleDir: t.TempDir()}, "python", 30*time.Millisecond, nil)
 	if err == nil {
 		t.Fatal("a build that blocks past the budget must fail")
 	}
@@ -69,7 +69,7 @@ func TestBuildEnvironment_ProjectPreparationFailsInDependencies(t *testing.T) {
 			restoreEnsure := SetEnsureProjectForTest(func(context.Context, string, []string) error { return cause })
 			defer restoreEnsure()
 			var events []deployevent.Event
-			err := buildEnvironment(Params{Slug: "x", BundleDir: t.TempDir(), Progress: func(e deployevent.Event) { events = append(events, e) }}, "python", time.Second)
+			err := buildEnvironment(Params{Slug: "x", BundleDir: t.TempDir(), Progress: func(e deployevent.Event) { events = append(events, e) }}, "python", time.Second, nil)
 			if !errors.Is(err, cause) || deployfail.Classify(err) != deployfail.BuildFailed {
 				t.Fatalf("error=%v", err)
 			}
@@ -122,7 +122,7 @@ func TestBuildEnvironment_LogsProgress(t *testing.T) {
 	restoreEnsure := SetEnsureProjectForTest(func(context.Context, string, []string) error { return nil })
 	defer restoreEnsure()
 
-	if err := buildEnvironment(Params{Slug: "x", BundleDir: t.TempDir()}, "python", time.Second); err != nil {
+	if err := buildEnvironment(Params{Slug: "x", BundleDir: t.TempDir()}, "python", time.Second, nil); err != nil {
 		t.Fatalf("build: %v", err)
 	}
 	mu.Lock()

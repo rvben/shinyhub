@@ -46,7 +46,7 @@ func TestBuildEnvironment_ResolvesAppEnvIntoSync(t *testing.T) {
 		BundleDir: t.TempDir(),
 		Manager:   managerWithEnv(t, []string{"UV_EXTRA_INDEX_URL=https://nexus.example.com/simple"}, []string{"UV_INDEX_CORP_PASSWORD=shh"}, nil),
 	}
-	if err := buildEnvironment(p, "python", time.Second); err != nil {
+	if err := buildEnvironment(p, "python", time.Second, nil); err != nil {
 		t.Fatalf("buildEnvironment: %v", err)
 	}
 	want := []string{"UV_EXTRA_INDEX_URL=https://nexus.example.com/simple", "UV_INDEX_CORP_PASSWORD=shh"}
@@ -73,7 +73,7 @@ func TestBuildEnvironment_NoManagerAndResolverError(t *testing.T) {
 	defer restore()
 	defer SetEnsureProjectForTest(func(context.Context, string, []string) error { return nil })()
 
-	if err := buildEnvironment(Params{Slug: "x", BundleDir: t.TempDir()}, "python", time.Second); err != nil {
+	if err := buildEnvironment(Params{Slug: "x", BundleDir: t.TempDir()}, "python", time.Second, nil); err != nil {
 		t.Fatalf("nil-Manager build: %v", err)
 	}
 	if calls != 1 || captured != nil {
@@ -81,7 +81,7 @@ func TestBuildEnvironment_NoManagerAndResolverError(t *testing.T) {
 	}
 
 	p := Params{Slug: "x", BundleDir: t.TempDir(), Manager: managerWithEnv(t, nil, nil, fmt.Errorf("decrypt failed"))}
-	if err := buildEnvironment(p, "python", time.Second); err == nil {
+	if err := buildEnvironment(p, "python", time.Second, nil); err == nil {
 		t.Error("resolver error must fail the build closed")
 	}
 }
@@ -168,7 +168,7 @@ func TestCandidateBundleEnvReachesBuildAndHooksWithoutChangingFallback(t *testin
 	}
 	defer func() { hookRunner = original }()
 	p := Params{Slug: "demo", BundleDir: bundle, Manager: manager}
-	if err := buildEnvironment(p, "python", time.Second); err != nil {
+	if err := buildEnvironment(p, "python", time.Second, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, _, err := runManifestPostDeployHooks(p, true); err == nil {

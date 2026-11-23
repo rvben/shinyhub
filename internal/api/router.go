@@ -163,6 +163,9 @@ type Server struct {
 	// stopped. Defaults to deploy.ResumeReplica; overridable in tests.
 	resumeReplica func(deploy.Params, int) (*deploy.Result, error)
 
+	pythonInstrumentationBuilds sync.Map // deployment ID -> active preparation
+	preparePythonOverlay        func(context.Context, deploy.Params, func(func() error) error) error
+
 	// deployLocksMu guards the deployLocks map. Each slug gets its own
 	// sync.Mutex which serializes deploy/restart/rollback/stop/delete
 	// operations for that app: a deploy in flight blocks a concurrent
@@ -258,6 +261,7 @@ func New(cfg *config.Config, store *db.Store, manager *process.Manager, prx *pro
 	}
 	generationCtx, generationCancel := context.WithCancel(context.Background())
 	s := &Server{
+		preparePythonOverlay:    deploy.PrepareExistingPythonInstrumentation,
 		trustedVerifier:         trustedpublish.NewVerifier(nil),
 		cfg:                     cfg,
 		store:                   store,
@@ -1055,6 +1059,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/api/apps/{slug}/metrics/history", s.handleMetricsHistory)
 		r.Get("/api/apps/{slug}/usage", s.handleAppUsage)
 		r.Get("/api/apps/{slug}/traces", s.handleTraces)
+		r.With(rateLimitByUser(s.actionLimiter)).Post("/api/apps/{slug}/traces/instrumentation", s.handlePreparePythonInstrumentation)
 		r.Get("/api/apps/{slug}/members", s.handleGetMembers)
 		r.Patch("/api/apps/{slug}/access", s.handleSetAppAccess)
 		r.Post("/api/apps/{slug}/owner", s.handleTransferAppOwnership)

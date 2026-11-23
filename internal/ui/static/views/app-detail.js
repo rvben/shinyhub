@@ -1571,5 +1571,6 @@ export function refreshFleetSurfaces(doc, app, state) {
 
 // Keep the diagnostic viewer lifecycle scoped to the current app panel.
 function renderTraces(panel, app, ctx) {
-  return createTracesViewer({ panel, app, api: ctx.api, onUnauthorized: ctx.onUnauthorized });
+  return createTracesViewer({ panel, app, api: ctx.api, onUnauthorized: ctx.onUnauthorized,
+    canPrepareInstrumentation: ctx.canManageApp(ctx.state.user, app) });
 }

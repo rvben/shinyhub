@@ -94,7 +94,7 @@ func startBuilds(t *testing.T, n int, budget time.Duration, progress func(deploy
 		dir := t.TempDir()
 		go func() {
 			defer wg.Done()
-			errs[i] = buildEnvironment(Params{Slug: fmt.Sprintf("app-%d", i), BundleDir: dir, Progress: progress}, "python", budget)
+			errs[i] = buildEnvironment(Params{Slug: fmt.Sprintf("app-%d", i), BundleDir: dir, Progress: progress}, "python", budget, nil)
 		}()
 	}
 	return func() []error { wg.Wait(); return errs }
@@ -183,7 +183,7 @@ func TestBuildEnvironment_BuildBudgetStartsWhenTheGateOpens(t *testing.T) {
 
 	firstDone := make(chan error, 1)
 	go func() {
-		firstDone <- buildEnvironment(Params{Slug: "first", BundleDir: t.TempDir()}, "python", time.Minute)
+		firstDone <- buildEnvironment(Params{Slug: "first", BundleDir: t.TempDir()}, "python", time.Minute, nil)
 	}()
 	waitFor(t, "the first build to hold the slot", func() bool { return held.entered.Load() == 1 })
 
@@ -191,7 +191,7 @@ func TestBuildEnvironment_BuildBudgetStartsWhenTheGateOpens(t *testing.T) {
 	var log eventLog
 	secondDone := make(chan error, 1)
 	go func() {
-		secondDone <- buildEnvironment(Params{Slug: "second", BundleDir: t.TempDir() + "/second", Progress: log.record}, "python", budget)
+		secondDone <- buildEnvironment(Params{Slug: "second", BundleDir: t.TempDir() + "/second", Progress: log.record}, "python", budget, nil)
 	}()
 	waitFor(t, "the second build to queue", func() bool { return activeBuildGate.Load().waiting() == 1 })
 	time.Sleep(3 * budget)

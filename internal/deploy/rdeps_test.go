@@ -61,7 +61,7 @@ func TestBuildEnvironment_RWithoutLockfileFailsInDependencyPhase(t *testing.T) {
 	defer SetRShinyInstalledForTest(false)()
 
 	sink, events := collectEvents()
-	err := buildEnvironment(Params{Slug: "x", BundleDir: dir, Progress: sink}, "r", time.Second)
+	err := buildEnvironment(Params{Slug: "x", BundleDir: dir, Progress: sink}, "r", time.Second, nil)
 	if err == nil {
 		t.Fatal("an R bundle with no renv.lock must fail the dependency phase, not report success")
 	}
@@ -115,7 +115,7 @@ func TestBuildEnvironment_RWithLockfileStillBuilds(t *testing.T) {
 	defer SetRShinyInstalledForTest(false)()
 
 	sink, events := collectEvents()
-	if err := buildEnvironment(Params{Slug: "x", BundleDir: dir, Progress: sink}, "r", time.Second); err != nil {
+	if err := buildEnvironment(Params{Slug: "x", BundleDir: dir, Progress: sink}, "r", time.Second, nil); err != nil {
 		t.Fatalf("a bundle with renv.lock must build: %v", err)
 	}
 	if !restored {
@@ -149,7 +149,7 @@ func TestBuildEnvironment_RWithoutLockfileBuildsWhenTheHostHasShiny(t *testing.T
 	defer SetRShinyInstalledForTest(true)()
 
 	sink, events := collectEvents()
-	if err := buildEnvironment(Params{Slug: "x", BundleDir: dir, Progress: sink}, "r", time.Second); err != nil {
+	if err := buildEnvironment(Params{Slug: "x", BundleDir: dir, Progress: sink}, "r", time.Second, nil); err != nil {
 		t.Fatalf("a host carrying shiny must keep deploying lockfile-free bundles: %v", err)
 	}
 	for _, e := range events() {
@@ -330,7 +330,7 @@ framework = "plumber"
 		func(context.Context, string, []string) error { restored = true; return nil },
 	)
 	defer restore()
-	if err := buildEnvironment(Params{Slug: "api", BundleDir: dir}, "r", time.Second); err != nil {
+	if err := buildEnvironment(Params{Slug: "api", BundleDir: dir}, "r", time.Second, nil); err != nil {
 		t.Fatalf("Plumber must not require Shiny: %v", err)
 	}
 	if !restored {

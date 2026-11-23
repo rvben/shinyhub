@@ -91,7 +91,7 @@ func TestBuildEnvironment_LogsRequirementsIndex(t *testing.T) {
 			"-f https://mirror.example/wheels\n-f https://w:${PYPI_TOKEN}@wheels.example/links\n--no-index\nsix\n")
 	p := Params{Slug: "demo", BundleDir: dir,
 		Manager: managerWithEnv(t, nil, []string{"PYPI_TOKEN=s3cret"}, nil)}
-	if err := buildEnvironment(p, "python", time.Second); err != nil {
+	if err := buildEnvironment(p, "python", time.Second, nil); err != nil {
 		t.Fatalf("buildEnvironment: %v", err)
 	}
 	mu.Lock()
@@ -217,7 +217,7 @@ func TestIndexDiagnostics_MaskExpandedSecrets(t *testing.T) {
 		)()
 		defer SetEnsureProjectForTest(func(context.Context, string, []string) error { return nil })()
 		p := Params{Slug: "demo", BundleDir: dir, Manager: managerWithEnv(t, nil, appEnv, nil)}
-		if err := buildEnvironment(p, "python", time.Second); err != nil {
+		if err := buildEnvironment(p, "python", time.Second, nil); err != nil {
 			t.Fatalf("buildEnvironment: %v", err)
 		}
 		mu.Lock()

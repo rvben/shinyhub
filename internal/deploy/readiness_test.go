@@ -60,7 +60,7 @@ func TestBootReplicaHonorsReadinessContract(t *testing.T) {
 			mgr := process.NewManager(t.TempDir(), &readinessRuntime{endpoint: backend.URL, done: make(chan struct{})})
 			p := Params{Slug: "guarded", BundleDir: bundle, Manager: mgr, Proxy: proxy.New()}
 			p.Proxy.SetPoolSize("guarded", 1)
-			_, err := bootReplicaAttempt(p, 0, "", "", []string{"/bin/true"}, false, nil, 250*time.Millisecond)
+			_, _, err := bootReplicaAttempt(p, 0, "", "", []string{"/bin/true"}, false, nil, 250*time.Millisecond)
 			if status == http.StatusNoContent && err != nil {
 				t.Fatalf("declared readiness rejected: %v", err)
 			}

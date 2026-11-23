@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **tracing**: prepare automatic Python instrumentation at deploy time for native project apps so starts and schedules can run during package-index outages.
+
+### Changed
+
+- **tracing**: prepare missing instrumentation for current native Python deployments in the background on startup. App managers can retry from the Traces tab, including after rollback. Compatible schedules reuse deployed dependencies without syncing. Schedules that use custom uv options to sync or select different dependencies run as declared.
+
 ## [0.25.7](https://github.com/rvben/shinyhub/compare/v0.25.6...v0.25.7) - 2026-11-23
 
 ### Fixed

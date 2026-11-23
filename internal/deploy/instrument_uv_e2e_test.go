@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -80,15 +82,14 @@ func TestInstrumentedProjectModeLaunch_LoadsInstrumentation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	syncCtx, cancelSync := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancelSync()
-	if err := pythonSyncFn(syncCtx, dir, nil); err != nil {
-		t.Fatalf("preparing the app's .venv: %v", err)
+	manager := process.NewManager(dir, process.NewNativeRuntime())
+	manager.SetAutoInstrumentAppsDefault(true)
+	if _, err := Run(Params{Slug: "demo", BundleDir: dir, Manager: manager, PrepareOnly: true}); err != nil {
+		t.Fatalf("preparing the deployment: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".venv", "bin", "shiny")); err != nil {
 		t.Fatalf("the .venv must carry its own shiny console script for this test to mean anything: %v", err)
 	}
-
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -96,9 +97,24 @@ func TestInstrumentedProjectModeLaunch_LoadsInstrumentation(t *testing.T) {
 	port := l.Addr().(*net.TCPAddr).Port
 	_ = l.Close()
 
-	argv := buildCommand(dir, port, 1, "127.0.0.1", instrumentOverlay(true, nil), true)
+	opts := LaunchOptions{
+		Port: port, BindHost: "127.0.0.1", CommandHostDeps: true, AutoInstrumentDefault: true,
+	}
+	plan, err := ResolveLaunch(dir, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	argv := plan.Command
 	if !useProjectMode(dir, true) || !strings.Contains(strings.Join(argv, " "), "--no-sync") {
 		t.Fatalf("launch is not the on-host project-mode command: %v", argv)
+	}
+	if !plan.Instrumented || !strings.Contains(strings.Join(argv, " "), "--offline") {
+		t.Fatal("launch does not use the prepared instrumentation environment")
+	}
+	opts.AutoInstrumentExtraPackages = []string{"a-different-instrumentation-package"}
+	fallback, err := ResolveLaunch(dir, opts)
+	if err != nil || fallback.Instrumented || strings.Contains(strings.Join(fallback.Command, " "), "--with") {
+		t.Fatalf("missing overlay should use the app environment: %+v, %v", fallback, err)
 	}
 	runCtx, cancelRun := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancelRun()
@@ -108,7 +124,16 @@ func TestInstrumentedProjectModeLaunch_LoadsInstrumentation(t *testing.T) {
 	// than leave the server running after the test.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	var indexRequests atomic.Int64
+	index := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		indexRequests.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(index.Close)
 	cmd.Env = process.WithBuildInterpreterPolicy(append(os.Environ(),
+		"UV_CACHE_DIR="+t.TempDir(),
+		"UV_DEFAULT_INDEX="+index.URL+"/simple/",
+		"UV_INDEX=", "UV_INDEX_URL=", "UV_EXTRA_INDEX_URL=", "UV_FIND_LINKS=",
 		"OTEL_SERVICE_NAME=demo",
 		"OTEL_TRACES_EXPORTER=console",
 		"OTEL_METRICS_EXPORTER=none",
@@ -120,8 +145,9 @@ func TestInstrumentedProjectModeLaunch_LoadsInstrumentation(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start %v: %v", argv, err)
 	}
-	exited := make(chan error, 1)
-	go func() { exited <- cmd.Wait() }()
+	exited := make(chan struct{})
+	var exitErr error
+	go func() { exitErr = cmd.Wait(); close(exited) }()
 	t.Cleanup(func() {
 		cancelRun()
 		<-exited
@@ -145,8 +171,8 @@ func TestInstrumentedProjectModeLaunch_LoadsInstrumentation(t *testing.T) {
 			t.Fatalf("instrumented app never logged a 200 for %s:\n%s", url, out.String())
 		}
 		select {
-		case err := <-exited:
-			t.Fatalf("instrumented app exited before serving (%v):\n%s", err, out.String())
+		case <-exited:
+			t.Fatalf("instrumented app exited before serving (%v):\n%s", exitErr, out.String())
 		case <-time.After(250 * time.Millisecond):
 		}
 		request()
@@ -165,5 +191,8 @@ func TestInstrumentedProjectModeLaunch_LoadsInstrumentation(t *testing.T) {
 			t.Fatalf("the app served a request but exported no span:\n%s", out.String())
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+	if n := indexRequests.Load(); n != 0 {
+		t.Fatalf("launch made %d package-index requests during the outage", n)
 	}
 }

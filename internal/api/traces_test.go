@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -12,8 +14,76 @@ import (
 	"github.com/rvben/shinyhub/internal/config"
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/dbtest"
+	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/tracing"
 )
+
+func TestTracesPythonInstrumentationUsesServingDeploymentAndManagePermission(t *testing.T) {
+	store := dbtest.New(t)
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Auth:    config.AuthConfig{Secret: "test-secret"},
+		Storage: config.StorageConfig{AppsDir: dir, AppDataDir: t.TempDir()},
+		Tracing: config.TracingConfig{Enabled: true},
+	}
+	mgr := process.NewManager(dir, process.NewNativeRuntime())
+	mgr.SetAutoInstrumentAppsDefault(true)
+	srv := api.New(cfg, store, mgr, nil)
+	owner := seedTracesApp(t, store, "demo", "owner")
+	viewer, viewerID := seedUserAndJWT(t, store, "viewer", "developer")
+	if err := store.GrantAppAccess("demo", viewerID); err != nil {
+		t.Fatal(err)
+	}
+	app, err := store.GetAppBySlug("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle := filepath.Join(dir, "deployed")
+	if err := os.MkdirAll(filepath.Join(bundle, ".venv", "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, mode := range map[string]os.FileMode{"pyproject.toml": 0o644, "uv.lock": 0o644, ".venv/bin/python": 0o755} {
+		if err := os.WriteFile(filepath.Join(bundle, name), nil, mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.CreateDeployment(db.CreateDeploymentParams{AppID: app.ID, Version: "v1", BundleDir: bundle}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateDeployment(db.CreateDeploymentParams{AppID: app.ID, Version: "v2", BundleDir: t.TempDir(), Status: db.DeploymentFailed}); err != nil {
+		t.Fatal(err)
+	}
+	const traces = "/api/apps/demo/traces"
+	readState := func() string {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodGet, traces, nil, viewer))
+		var body struct {
+			State string `json:"python_instrumentation"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&body); err != nil || rec.Code != http.StatusOK {
+			t.Fatalf("get traces: status %d, decode %v", rec.Code, err)
+		}
+		return body.State
+	}
+	if state := readState(); state != "not_prepared" {
+		t.Fatalf("expected status of serving deployment, got %q", state)
+	}
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodPost, traces+"/instrumentation", nil, viewer))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("viewer preparation returned %d: %s", rec.Code, rec.Body.String())
+	}
+	cfg.Tracing.Enabled = false
+	if state := readState(); state != "" {
+		t.Fatalf("tracing disabled but preparation status is %q", state)
+	}
+	rec = httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodPost, traces+"/instrumentation", nil, owner))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("preparation with tracing disabled returned %d: %s", rec.Code, rec.Body.String())
+	}
+}
 
 // newTracesTestServer builds a server with a tracing buffer wired in. The
 // returned config can be mutated by the caller before issuing requests so each

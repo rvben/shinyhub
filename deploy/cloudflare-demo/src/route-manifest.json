@@ -365,6 +365,10 @@
       "path": "/api/apps/{slug}/traces"
     },
     {
+      "method": "POST",
+      "path": "/api/apps/{slug}/traces/instrumentation"
+    },
+    {
       "method": "GET",
       "path": "/api/apps/{slug}/usage"
     },

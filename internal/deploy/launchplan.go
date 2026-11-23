@@ -161,11 +161,13 @@ func resolveInferred(bundleDir, bindHost string, m *Manifest, opts LaunchOptions
 			auto = *m.Tracing.Auto
 		}
 		overlay := instrumentOverlay(auto, opts.AutoInstrumentExtraPackages)
-		plan.Instrumented = len(overlay) > 0
+		python := resolvePythonInstrumentation(bundleDir, overlay, opts.CommandHostDeps)
+		prefix, instrumented := python.modulePrefix(bundleDir, opts.CommandHostDeps)
+		plan.Instrumented = instrumented
 		if m != nil && m.App.Framework == "fastapi" {
-			plan.Command = buildFastAPICommand(bundleDir, opts.Port, bindHost, opts.AppPath, overlay, opts.CommandHostDeps, opts.Reload)
+			plan.Command = fastAPICommand(prefix, opts.Port, bindHost, opts.AppPath, opts.Reload)
 		} else {
-			plan.Command = withPythonReload(buildCommandFn(bundleDir, opts.Port, opts.Workers, bindHost, overlay, opts.CommandHostDeps), opts.Reload)
+			plan.Command = withPythonReload(buildCommandFn(prefix, opts.Port, bindHost, instrumented), opts.Reload)
 		}
 	case "r":
 		if opts.PrepHostDeps {
@@ -214,9 +216,8 @@ func defaultReadinessPath(m *Manifest) string {
 	return "/"
 }
 
-func buildFastAPICommand(bundleDir string, port int, bindHost, appPath string, overlay []string, hostDeps, reload bool) []string {
-	base := pythonCommandPrefix(bundleDir, overlay, hostDeps)
-	cmd := append(base, "uvicorn", "app:app", "--host", bindHost, "--port", fmt.Sprint(port))
+func fastAPICommand(prefix []string, port int, bindHost, appPath string, reload bool) []string {
+	cmd := append(prefix, "uvicorn", "app:app", "--host", bindHost, "--port", fmt.Sprint(port))
 	if appPath != "" {
 		cmd = append(cmd, "--root-path", appPath)
 	}

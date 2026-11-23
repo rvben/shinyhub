@@ -132,7 +132,7 @@ func TestBuildEnvironment_LogsIndexConfiguration(t *testing.T) {
 
 	p := Params{Slug: "demo", BundleDir: t.TempDir(),
 		Manager: managerWithEnv(t, []string{"UV_EXTRA_INDEX_URL=https://nexus.example.com/simple"}, nil, nil)}
-	if err := buildEnvironment(p, "python", time.Second); err != nil {
+	if err := buildEnvironment(p, "python", time.Second, nil); err != nil {
 		t.Fatalf("buildEnvironment: %v", err)
 	}
 	mu.Lock()
@@ -145,7 +145,7 @@ func TestBuildEnvironment_LogsIndexConfiguration(t *testing.T) {
 	mu.Lock()
 	msgs = nil
 	mu.Unlock()
-	if err := buildEnvironment(Params{Slug: "plain", BundleDir: t.TempDir()}, "python", time.Second); err != nil {
+	if err := buildEnvironment(Params{Slug: "plain", BundleDir: t.TempDir()}, "python", time.Second, nil); err != nil {
 		t.Fatalf("buildEnvironment: %v", err)
 	}
 	mu.Lock()

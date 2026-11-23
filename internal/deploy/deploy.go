@@ -26,7 +26,6 @@ import (
 	"github.com/rvben/shinyhub/internal/deployevent"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/proxy"
-	"github.com/rvben/shinyhub/internal/pythontrace"
 	"github.com/rvben/shinyhub/internal/sandbox"
 	"github.com/rvben/shinyhub/internal/tracing"
 	"go.opentelemetry.io/otel/attribute"
@@ -100,6 +99,10 @@ const sandboxBuildLevel = sandbox.LevelStandard
 // platform (this repo's darwin dev machines, and any future non-Linux CI
 // leg) rather than failing outright.
 func sandboxedCommand(dir string, argv []string) (wrapped, extraEnv, writePaths []string, err error) {
+	return sandboxedCommandFor(dir, argv, buildConfinement)
+}
+
+func sandboxedCommandFor(dir string, argv []string, confinement func(string) (sandbox.Spec, []string)) (wrapped, extraEnv, writePaths []string, err error) {
 	if process.HostUserIsolationEnabled() {
 		return argv, nil, nil, nil
 	}
@@ -121,7 +124,7 @@ func sandboxedCommand(dir string, argv []string) (wrapped, extraEnv, writePaths 
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("resolve command %q: %w", argv[0], err)
 	}
-	spec, confEnv := buildConfinement(absDir)
+	spec, confEnv := confinement(absDir)
 	enc, err := spec.Encode()
 	if err != nil {
 		return nil, nil, nil, err
@@ -226,7 +229,11 @@ func resolveBuildExecutable(name, workDir string) (string, error) {
 // sandboxedCommand documents, and returns its combined stdout+stderr. It is
 // the shared plumbing behind sandboxedPythonSync and sandboxedRSync.
 func runSandboxedBuildStep(ctx context.Context, dir string, argv []string, appEnv []string) ([]byte, error) {
-	wrapped, extraEnv, writePaths, err := sandboxedCommand(dir, argv)
+	return runSandboxedBuildStepWith(ctx, dir, argv, appEnv, buildConfinement)
+}
+
+func runSandboxedBuildStepWith(ctx context.Context, dir string, argv []string, appEnv []string, confinement func(string) (sandbox.Spec, []string)) ([]byte, error) {
+	wrapped, extraEnv, writePaths, err := sandboxedCommandFor(dir, argv, confinement)
 	if err != nil {
 		return nil, err
 	}
@@ -380,7 +387,7 @@ func instrumentOverlay(auto bool, extra []string) []string {
 
 // buildCommandFn is a package-level indirection so tests can observe the
 // auto-instrument decision and substitute runnable commands.
-var buildCommandFn = buildCommand
+var buildCommandFn = buildShinyCommand
 
 // AllocatePort returns an unused TCP port in the 20000–60000 range.
 //
@@ -768,7 +775,7 @@ func resolveBuildTimeout(m *Manifest) time.Duration {
 // renv restore: error prefix that deployfail.Classify keys on, so a build failure
 // (including project preparation or a timeout) is reported build_failed before
 // any candidate replicas are started.
-func buildEnvironment(p Params, appType string, buildTimeout time.Duration) (err error) {
+func buildEnvironment(p Params, appType string, buildTimeout time.Duration, overlay []string) (err error) {
 	buildTool := "uv sync"
 	if appType == "r" {
 		buildTool = "renv::restore"
@@ -868,6 +875,10 @@ func buildEnvironment(p Params, appType string, buildTimeout time.Duration) (err
 		if err := pythonSyncFn(ctx, p.BundleDir, appEnv); err != nil {
 			p.report(deployevent.Phase("dependencies", deployevent.StatusFailed, "Python dependency build failed"))
 			return fmt.Errorf("uv sync: %w", err)
+		}
+		if err := preparePythonOverlay(ctx, p.BundleDir, overlay, appEnv); err != nil {
+			slog.Warn("deploy: Python instrumentation environment unavailable", "slug", p.Slug, "err", err)
+			p.report(deployevent.Phase("dependencies", deployevent.StatusWarning, "Python auto-instrumentation unavailable"))
 		}
 	case "r":
 		if err := requireRDependencies(ctx, p.BundleDir); err != nil {
@@ -1234,7 +1245,11 @@ func resolveBundleCommand(p Params, m *Manifest, hostDeps bool) (baseCmd []strin
 				}
 			}
 			if hostDeps && build {
-				if berr := buildEnvironment(p, appType, resolveBuildTimeout(m)); berr != nil {
+				var overlay []string
+				if appType == "python" && resolveAutoInstrument(p, m) {
+					overlay = instrumentOverlay(true, p.Manager.AutoInstrumentExtraPackages())
+				}
+				if berr := buildEnvironment(p, appType, resolveBuildTimeout(m), overlay); berr != nil {
 					if fatal {
 						return nil, "", berr
 					}
@@ -1666,17 +1681,18 @@ func planPoolWorkers(p Params, asn []process.TierAssignment) map[int]string {
 func bootReplica(p Params, idx int, tier, targetWorker string, baseCmd []string, appType string, autoInstrument bool, hc func(string, time.Duration, http.RoundTripper) error, timeout time.Duration) (res Result, err error) {
 	p, end := p.startPhase("deploy.replica", attribute.Int("shinyhub.replica", idx))
 	defer func() { end(err) }()
-	res, err = bootReplicaAttempt(p, idx, tier, targetWorker, baseCmd, autoInstrument, hc, timeout)
+	var attemptedInstrumentation bool
+	res, attemptedInstrumentation, err = bootReplicaAttempt(p, idx, tier, targetWorker, baseCmd, autoInstrument, hc, timeout)
 	// A launch cancelled by a concurrent stop is not a failed launch: the stop
 	// asked for the replica to be gone, so relaunching it would undo the stop.
-	if err != nil && autoInstrument && baseCmd == nil && appType == "python" && !errors.Is(err, process.ErrStartCancelled) {
+	if err != nil && attemptedInstrumentation && baseCmd == nil && appType == "python" && !errors.Is(err, process.ErrStartCancelled) {
 		// The instrumented launch failed; retry with the uninstrumented fallback.
 		// bootReplicaAttempt calls ResolveLaunch with AutoInstrumentDefault:false,
 		// re-deriving the uninstrumented command through the shared seam.
 		slog.Warn("deploy: instrumented launch failed; retrying without auto-instrumentation",
 			"slug", p.Slug, "index", idx, "err", err)
 		p.annotate(attribute.Bool("shinyhub.deploy.instrumented_fallback", true))
-		res, err = bootReplicaAttempt(p, idx, tier, targetWorker, baseCmd, false, hc, timeout)
+		res, _, err = bootReplicaAttempt(p, idx, tier, targetWorker, baseCmd, false, hc, timeout)
 	}
 	return res, err
 }
@@ -1689,7 +1705,7 @@ func bootReplica(p Params, idx int, tier, targetWorker string, baseCmd []string,
 // the OTEL overlay is applied to inferred Python commands.
 // targetWorker pins the replica to a pre-planned worker (empty means the runtime
 // self-places, e.g. a single-replica watchdog restart or a worker-agnostic tier).
-func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []string, instrument bool, hc func(string, time.Duration, http.RoundTripper) error, timeout time.Duration) (Result, error) {
+func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []string, instrument bool, hc func(string, time.Duration, http.RoundTripper) error, timeout time.Duration) (Result, bool, error) {
 	port := AllocatePort()
 
 	bindHost := "127.0.0.1"
@@ -1721,7 +1737,7 @@ func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []
 		HonorManifestTracing:        false,
 	})
 	if err != nil {
-		return Result{}, fmt.Errorf("resolve launch: %w", err)
+		return Result{}, false, fmt.Errorf("resolve launch: %w", err)
 	}
 	cmd := plan.Command
 
@@ -1733,28 +1749,29 @@ func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []
 
 	_, endStart := p.startPhase("deploy.replica.start")
 	info, err := p.Manager.Start(process.StartParams{
-		Slug:                   p.Slug,
-		AppID:                  p.AppID,
-		Index:                  idx,
-		Tier:                   tier,
-		Dir:                    p.BundleDir,
-		Command:                cmd,
-		Port:                   port,
-		Env:                    env,
-		MemoryLimitMB:          p.MemoryLimitMB,
-		CPUQuotaPercent:        p.CPUQuotaPercent,
-		AppVersion:             p.AppVersion,
-		DeploymentID:           p.DeploymentID,
-		GenerationScoped:       p.GenerationScoped && !p.GroupedHandoff,
-		ContentDigest:          p.ContentDigest,
-		TargetWorker:           targetWorker,
-		MaxSessions:            p.MaxSessionsPerReplica,
-		LaunchReservationHeld:  p.LaunchReservationHeld,
-		GuardUntilAcknowledged: p.GuardUntilAcknowledged,
+		Slug:                         p.Slug,
+		AppID:                        p.AppID,
+		Index:                        idx,
+		Tier:                         tier,
+		Dir:                          p.BundleDir,
+		Command:                      cmd,
+		Port:                         port,
+		Env:                          env,
+		MemoryLimitMB:                p.MemoryLimitMB,
+		CPUQuotaPercent:              p.CPUQuotaPercent,
+		AppVersion:                   p.AppVersion,
+		DeploymentID:                 p.DeploymentID,
+		GenerationScoped:             p.GenerationScoped && !p.GroupedHandoff,
+		ContentDigest:                p.ContentDigest,
+		TargetWorker:                 targetWorker,
+		MaxSessions:                  p.MaxSessionsPerReplica,
+		LaunchReservationHeld:        p.LaunchReservationHeld,
+		GuardUntilAcknowledged:       p.GuardUntilAcknowledged,
+		PythonInstrumentationMissing: plan.AppType == "python" && !plan.Instrumented,
 	})
 	endStart(err)
 	if err != nil {
-		return Result{}, fmt.Errorf("start: %w", err)
+		return Result{}, plan.Instrumented, fmt.Errorf("start: %w", err)
 	}
 	startedResult := Result{
 		Index: idx, PID: info.PID, Port: port, EndpointURL: info.EndpointURL,
@@ -1766,7 +1783,7 @@ func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []
 			if stopErr != nil {
 				slog.Warn("deploy: confirmed stop after start-persistence failure", "slug", p.Slug, "index", idx, "err", stopErr)
 			}
-			return Result{}, stoppedReplicaStartError(fmt.Errorf("record started replica: %w", err), stopErr)
+			return Result{}, plan.Instrumented, stoppedReplicaStartError(fmt.Errorf("record started replica: %w", err), stopErr)
 		}
 	}
 	if err := acknowledgeDeployReplica(p, idx); err != nil {
@@ -1774,7 +1791,7 @@ func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []
 		if stopErr != nil {
 			slog.Warn("deploy: confirmed stop after start-acknowledgement failure", "slug", p.Slug, "index", idx, "err", stopErr)
 		}
-		return Result{}, stoppedReplicaStartError(fmt.Errorf("acknowledge started replica: %w", err), stopErr)
+		return Result{}, plan.Instrumented, stoppedReplicaStartError(fmt.Errorf("acknowledge started replica: %w", err), stopErr)
 	}
 	finishStartupRSSObservation := observeStartupRSSForDeploy(p, idx)
 	startupRSSObservationFinished := false
@@ -1816,7 +1833,7 @@ func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []
 		if serr != nil {
 			slog.Warn("deploy: stop replica after failed health check", "slug", p.Slug, "index", idx, "err", serr)
 		}
-		return Result{}, stoppedReplicaStartError(fmt.Errorf("health: %w", healthErr), serr)
+		return Result{}, plan.Instrumented, stoppedReplicaStartError(fmt.Errorf("health: %w", healthErr), serr)
 	}
 	startedResult.StartupPeakRSSBytes = startupPeakRSSBytes
 
@@ -1835,9 +1852,9 @@ func bootReplicaAttempt(p Params, idx int, tier, targetWorker string, baseCmd []
 		if serr != nil {
 			slog.Warn("deploy: stop replica after failed proxy register", "slug", p.Slug, "index", idx, "err", serr)
 		}
-		return Result{}, stoppedReplicaStartError(fmt.Errorf("register: %w", registerErr), serr)
+		return Result{}, plan.Instrumented, stoppedReplicaStartError(fmt.Errorf("register: %w", registerErr), serr)
 	}
-	return startedResult, nil
+	return startedResult, plan.Instrumented, nil
 }
 
 func acknowledgeDeployReplica(p Params, index int) error {
@@ -2262,22 +2279,12 @@ func useProjectMode(bundleDir string, hostDeps bool) bool {
 // the existing off-host contract (the requirements path below behaves the same).
 //
 // Otherwise we pass --with-requirements so uv installs deps into an ephemeral
-// environment. When overlay is non-empty, its packages are layered in via
-// --with and the entrypoint is wrapped with opentelemetry-instrument; the app's
-// own environment is never modified. bindHost has the same meaning as in
-// BuildRCommand. hostDeps gates project mode for a synthesized project (see
-// useProjectMode).
-func buildCommand(bundleDir string, port, workers int, bindHost string, overlay []string, hostDeps bool) []string {
-	return append(pythonCommandPrefix(bundleDir, overlay, hostDeps),
-		"shiny", "run", "app.py", "--host", bindHost, "--port", fmt.Sprintf("%d", port))
-}
-
-func pythonCommandPrefix(bundleDir string, overlay []string, hostDeps bool) []string {
-	base := pythonEnvironmentPrefix(bundleDir, overlay, hostDeps)
-	if len(overlay) > 0 {
-		base = append(base, pythontrace.ModulePrefix()...)
-	}
-	return base
+// environment. Instrumented starts use the prepared overlay on the native
+// host and uv's --with overlay when dependencies are resolved at launch.
+// bindHost has the same meaning as in BuildRCommand. hostDeps gates project
+// mode for a synthesized project (see useProjectMode).
+func buildShinyCommand(prefix []string, port int, bindHost string, _ bool) []string {
+	return append(prefix, "shiny", "run", "app.py", "--host", bindHost, "--port", fmt.Sprintf("%d", port))
 }
 
 func pythonEnvironmentPrefix(bundleDir string, overlay []string, hostDeps bool) []string {

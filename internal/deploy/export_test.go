@@ -56,7 +56,7 @@ func SetEnsureProjectForTest(fn func(context.Context, string, []string) error) (
 // SetBuildCommandForTest swaps the package's python launch-command builder so
 // tests can observe the auto-instrument overlay and substitute runnable
 // commands. Returns a restore func — pair with defer. Test use only.
-func SetBuildCommandForTest(f func(bundleDir string, port, workers int, bindHost string, overlay []string, hostDeps bool) []string) (restore func()) {
+func SetBuildCommandForTest(f func(prefix []string, port int, bindHost string, instrumented bool) []string) (restore func()) {
 	orig := buildCommandFn
 	buildCommandFn = f
 	return func() { buildCommandFn = orig }
@@ -73,4 +73,15 @@ func SetHookRunnerForTest(fn HookRunnerFunc) (restore func()) {
 	orig := hookRunner
 	hookRunner = fn
 	return func() { hookRunner = orig }
+}
+
+// The production launch plan resolves the environment before appending argv.
+func buildCommand(bundleDir string, port, _ int, bindHost string, overlay []string, hostDeps bool) []string {
+	prefix, instrumented := resolvePythonInstrumentation(bundleDir, overlay, hostDeps).modulePrefix(bundleDir, hostDeps)
+	return buildShinyCommand(prefix, port, bindHost, instrumented)
+}
+
+func buildFastAPICommand(bundleDir string, port int, bindHost, appPath string, overlay []string, hostDeps, reload bool) []string {
+	prefix, _ := resolvePythonInstrumentation(bundleDir, overlay, hostDeps).modulePrefix(bundleDir, hostDeps)
+	return fastAPICommand(prefix, port, bindHost, appPath, reload)
 }

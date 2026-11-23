@@ -96,6 +96,55 @@ function detailFields(section) {
     [item.querySelector('dt').textContent, item.querySelector('dd').textContent]));
 }
 
+test('app managers can retry preparation and a stale trace response cannot undo success', async t => {
+  const stale = deferred();
+  const prepared = deferred();
+  let reads = 0;
+  let attempts = 0;
+  const h = viewer(t, (path, options) => {
+    if (options.method === 'POST') {
+      assert.equal(path, '/api/apps/demo/traces/instrumentation');
+      assert.ok(options.signal);
+      return ++attempts === 1 ? Promise.resolve({ ok: false, status: 500 }) : prepared.promise;
+    }
+    assert.equal(options.cache, 'no-store');
+    return ++reads === 1 ? Promise.resolve(response([], { python_instrumentation: 'not_prepared' })) : stale.promise;
+  }, { canPrepareInstrumentation: true });
+  await settle();
+  const notice = h.find('#traces-instrumentation');
+  const button = notice.querySelector('button');
+  assert.equal(button.hidden, false);
+  button.click();
+  await settle();
+  assert.match(notice.textContent, /Could not prepare/);
+  button.click();
+  assert.equal(button.disabled, true);
+  assert.match(notice.textContent, /Preparing Python/);
+  h.find('#traces-refresh').click();
+  prepared.resolve({ ok: true, status: 204 });
+  await settle();
+  stale.resolve(response([], { python_instrumentation: 'not_prepared' }));
+  await settle();
+  assert.match(notice.textContent, /ready for new starts and scheduled runs/);
+  assert.equal(button.hidden, true);
+});
+
+test('trace viewers can see preparation status without a repair control', async t => {
+  const h = viewer(t, async () => response([], { python_instrumentation: 'not_prepared' }));
+  await settle();
+  const notice = h.find('#traces-instrumentation');
+  assert.match(notice.textContent, /needs preparation/);
+  assert.equal(notice.querySelector('button').hidden, true);
+});
+
+test('prepared instrumentation reports replicas that still need a restart', async t => {
+  const h = viewer(t, async () => response([], {
+    python_instrumentation: 'ready', python_replicas_without_instrumentation: 2,
+  }));
+  await settle();
+  assert.match(h.find('#traces-instrumentation').textContent, /2 running or suspended replicas started without it. Restart to apply/);
+});
+
 test('request selection composes case-insensitive search and failure filtering without mutating API order', () => {
   const healthy = span({ path: '/DATA', status: 404, duration_ms: 7000 });
   const failed = span({ path: '/data', status: 200, error: 'socket reset', duration_ms: 20 });

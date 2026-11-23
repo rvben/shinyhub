@@ -380,6 +380,7 @@ func (r *ownerRuntime) run(octx context.Context, epoch int64) {
 		slog.Info("worker-down monitor started", "timeout", workerTimeout, "interval", monitorInterval, "retention", workerRetention)
 	}
 	startLoop(func() { watcher.Start(octx) })
+	startLoop(func() { srv.ReconcilePythonInstrumentation(octx) })
 	if !isClustered(cfg) {
 		startLoop(func() { activationCoordinator.Start(octx) })
 		slog.Info("schedule activation coordinator started", "concurrency", 1)

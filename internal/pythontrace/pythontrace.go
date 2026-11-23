@@ -20,6 +20,65 @@ func ModulePrefix() []string {
 	return []string{"opentelemetry-instrument", "python", "-c", Bootstrap, "app-module"}
 }
 
+// WrapPrepared uses the host project's no-sync prefix for commands that
+// select its default environment. Other commands are left as declared.
+func WrapPrepared(argv, projectPrefix, instrumenter []string) (command []string, instrumented, eligible bool) {
+	if len(argv) == 0 {
+		return argv, false, false
+	}
+	prefix := append(slices.Clone(projectPrefix), "--offline")
+	python := argv
+	if filepath.Base(argv[0]) == "uv" {
+		if len(argv) < 3 || argv[1] != "run" {
+			return argv, false, false
+		}
+		prefix[0] = argv[0]
+		var locked, frozen, noSync bool
+		python = argv[2:]
+		for len(python) > 0 && strings.HasPrefix(python[0], "-") {
+			flag := python[0]
+			python = python[1:]
+			if flag == "--" {
+				break
+			}
+			switch flag {
+			case "--locked":
+				locked = true
+			case "--frozen":
+				frozen = true
+			case "--no-sync":
+				noSync = true
+			case "--offline":
+			case "--quiet", "-q", "--verbose", "-v", "--no-cache", "--no-index", "--no-python-downloads":
+				prefix = append(prefix, flag)
+			default:
+				return argv, false, false
+			}
+		}
+		if locked {
+			// uv rejects --locked with --frozen. Only an explicitly
+			// no-sync command has already opted out of lock validation.
+			if !noSync || frozen {
+				return argv, false, false
+			}
+			prefix = slices.DeleteFunc(prefix, func(arg string) bool { return arg == "--frozen" })
+			prefix = append(prefix, "--locked")
+		}
+	}
+	prefix = append(prefix, "--")
+	wrapped, ok := wrapPython(python, append(prefix, instrumenter...))
+	if !ok {
+		return argv, false, false
+	}
+	if len(instrumenter) == 0 {
+		if filepath.Base(argv[0]) == "uv" {
+			return argv, false, true
+		}
+		return append(prefix, python...), false, true
+	}
+	return wrapped, true, true
+}
+
 // Wrap instruments explicit Python invocations only. UV options and interpreter
 // flags are retained. Unknown commands/options are left untouched rather than
 // guessing where application arguments start. rawPrefix is the bundle's usual
@@ -75,9 +134,17 @@ func Wrap(argv, overlay, rawPrefix []string) ([]string, bool) {
 		prefix = append(prefix, "--")
 		command = argv[i:]
 	}
+	wrapped, ok := wrapPython(command, append(prefix, "opentelemetry-instrument", "python"))
+	if !ok {
+		return argv, false
+	}
+	return wrapped, true
+}
+
+func wrapPython(command, prefix []string) ([]string, bool) {
 	if len(command) < 2 || (command[0] != "python" && command[0] != "python3") {
 		// Absolute/venv interpreters are deliberately not replaced with uv's Python.
-		return argv, false
+		return nil, false
 	}
 	flags := []string{}
 	args := command[1:]
@@ -92,12 +159,12 @@ func Wrap(argv, overlay, rawPrefix []string) ([]string, bool) {
 	}
 target:
 	if len(args) == 0 {
-		return argv, false
+		return nil, false
 	}
 	mode := "job-script"
 	if args[0] == "-m" || args[0] == "-c" {
 		if len(args) < 2 {
-			return argv, false
+			return nil, false
 		}
 		if args[0] == "-m" {
 			mode = "job-module"
@@ -106,9 +173,8 @@ target:
 		}
 		args = args[1:]
 	} else if strings.HasPrefix(args[0], "-") {
-		return argv, false
+		return nil, false
 	}
-	prefix = append(prefix, "opentelemetry-instrument", "python")
 	prefix = append(prefix, flags...)
 	prefix = append(prefix, "-c", Bootstrap, mode)
 	return append(prefix, args...), true

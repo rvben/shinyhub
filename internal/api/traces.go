@@ -5,14 +5,17 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/tracing"
 )
 
 // tracesResponse is the JSON shape returned by GET /api/apps/{slug}/traces.
 type tracesResponse struct {
-	Enabled           bool           `json:"enabled"`
-	TraceLinkTemplate string         `json:"trace_link_template,omitempty"`
-	Spans             []tracing.Span `json:"spans"`
+	Enabled                              bool           `json:"enabled"`
+	TraceLinkTemplate                    string         `json:"trace_link_template,omitempty"`
+	Spans                                []tracing.Span `json:"spans"`
+	PythonInstrumentation                string         `json:"python_instrumentation,omitempty"`
+	PythonReplicasWithoutInstrumentation int            `json:"python_replicas_without_instrumentation,omitempty"`
 }
 
 // handleTraces returns the ring buffer of recent slow/error proxy spans for
@@ -39,6 +42,21 @@ func (s *Server) handleTraces(w http.ResponseWriter, r *http.Request) {
 	resp := tracesResponse{
 		Enabled: s.cfg.Tracing.Enabled,
 		Spans:   []tracing.Span{},
+	}
+	if !filtered {
+		dep, state, err := s.pythonInstrumentationDeployment(app)
+		if err != nil {
+			state = "unavailable"
+		}
+		resp.PythonInstrumentation = state
+		if state == "ready" {
+			for _, replica := range s.manager.AllForSlug(slug) {
+				if replica != nil && replica.DeploymentID == dep.ID && replica.PythonInstrumentationMissing &&
+					(replica.Status == process.StatusRunning || replica.Status == process.StatusSuspended) {
+					resp.PythonReplicasWithoutInstrumentation++
+				}
+			}
+		}
 	}
 	if strings.TrimSpace(s.cfg.Tracing.TraceLinkTemplate) != "" {
 		resp.TraceLinkTemplate = s.cfg.Tracing.TraceLinkTemplate
