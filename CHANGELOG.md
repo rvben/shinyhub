@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.25.8](https://github.com/rvben/shinyhub/compare/v0.25.7...v0.25.8) - 2026-11-23
+
 ### Fixed
 
 - **tracing**: prepare automatic Python instrumentation at deploy time for native project apps so starts and schedules can run during package-index outages.
