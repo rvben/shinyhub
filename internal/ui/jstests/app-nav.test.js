@@ -229,6 +229,21 @@ function mount({
 
 const app = (slug, extra = {}) => ({ slug, name: slug, openable: true, ...extra });
 
+test('cached switcher requests and app links retain the app origin under a document base', async (t) => {
+  const origin = 'https://apps.example.com';
+  const m = mount({
+    url: origin + '/app/demo/',
+    html: '<html><head><base href="https://hub.example.com/"></head><body></body></html>',
+    attrs: { 'data-app-origin': origin, 'data-served-generation': 'current', 'data-version-url': VERSION_URL },
+    payload: { apps: [app('reports')], active_generation: 'current' },
+  });
+  t.after(() => m.window.close());
+  await m.open();
+  assert.equal(m.document.baseURI, 'https://hub.example.com/');
+  assert.deepEqual(m.fetches.map(({ url }) => url), [origin + VERSION_URL, origin + NAV_URL]);
+  assert.equal(m.items()[0]?.href, origin + '/app/reports/');
+});
+
 async function hiddenSwitchFixture(t, extra = {}) {
   const m = mount({
     attrs: { 'data-served-generation': 'old', 'data-version-url': VERSION_URL,

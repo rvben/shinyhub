@@ -92,7 +92,12 @@
     return;
   }
 
-  var navURL = tag.getAttribute("data-nav-url");
+  var appOrigin = tag.getAttribute("data-app-origin") || "";
+  function appURL(path) {
+    return path && appOrigin ? appOrigin + path : path;
+  }
+
+  var navURL = appURL(tag.getAttribute("data-nav-url"));
   if (!navURL) {
     return;
   }
@@ -101,8 +106,8 @@
   var homeURL = tag.getAttribute("data-home-url") || "/";
   var servedGeneration = tag.getAttribute("data-served-generation") || "";
   var autoSwitchEnabled = tag.getAttribute("data-version-switch") === "when_hidden";
-  var versionURL = tag.getAttribute("data-version-url") || "";
-  var switchURL = tag.getAttribute("data-switch-url") || "";
+  var versionURL = appURL(tag.getAttribute("data-version-url") || "");
+  var switchURL = appURL(tag.getAttribute("data-switch-url") || "");
 
   function guard(fn) {
     return function () {
@@ -2145,7 +2150,7 @@
     link.className =
       "item" + (here ? " current" : "") + (openable ? "" : " down");
     if (openable) {
-      link.href = "/app/" + encodeURIComponent(app.slug) + "/";
+      link.href = appURL("/app/" + encodeURIComponent(app.slug) + "/");
       if (!here) {
         link.addEventListener("click", guard(function (ev) {
           if (!sameTabNavigation(ev, link)) {
