@@ -19,12 +19,13 @@ import (
 	_ "embed"
 	"encoding/base64"
 	"html"
+	"strings"
 )
 
 // Script is the switcher client: the minified build of assets/nav.js, which is
 // where to read what it does and why it is safe to run inside an app this
 // server did not write. The minified sibling ships because the script is
-// inlined into every page load under /app/. It is regenerated from the source
+// sent to app pages as an inline script or a cacheable asset. It is regenerated
 // by go generate (or make ui-minify), and make ui-minify-check fails while it
 // is stale.
 //
@@ -102,6 +103,18 @@ func SnippetWithGeneration(slug, name, homeURL, generation string) string {
 // SnippetWithVersionSwitch carries the policy of the bundle that served this
 // page. Unknown policies fall back to manual switching.
 func SnippetWithVersionSwitch(slug, name, homeURL, generation, policy string) string {
+	return scriptTag(slug, name, homeURL, generation, policy) + `>` + Script + `</script>`
+}
+
+// ExternalSnippet renders the switcher on a configured HTTPS app origin.
+func ExternalSnippet(slug, name, homeURL, generation, policy, appOrigin string) string {
+	return scriptTag(slug, name, homeURL, generation, policy) +
+		` data-app-origin="` + html.EscapeString(appOrigin) + `" src="` +
+		html.EscapeString(appOrigin+assetPath) + `" integrity="` +
+		strings.Trim(CSPHash, "'") + `" async></script>`
+}
+
+func scriptTag(slug, name, homeURL, generation, policy string) string {
 	if policy != "when_hidden" {
 		policy = "manual"
 	}
@@ -116,9 +129,7 @@ func SnippetWithVersionSwitch(slug, name, homeURL, generation, policy string) st
 		` data-served-generation="` + html.EscapeString(generation) + `"` +
 		` data-version-switch="` + policy + `"` +
 		` data-version-url="` + html.EscapeString(VersionURL(slug)) + `"` +
-		` data-switch-url="` + html.EscapeString(SwitchURL(slug)) + `">` +
-		Script +
-		`</script>`
+		` data-switch-url="` + html.EscapeString(SwitchURL(slug)) + `"`
 }
 
 // SpliceIntoBody inserts snippet immediately before the document's final

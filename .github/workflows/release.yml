@@ -58,6 +58,9 @@ jobs:
       - name: Artifact budgets
         run: make check-artifact
 
+      - name: App switcher rollback asset
+        run: make check-app-nav-rollback
+
       - name: Python helper tests
         run: make test-py-bookmarks test-py-agent
 

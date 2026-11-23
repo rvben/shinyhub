@@ -1357,7 +1357,7 @@ func runServe(ctx context.Context, logger *slog.Logger, serveOpts serveOptions) 
 	prx.SetSupportSessions(cfg.Auth.SupportSessions)
 	// Give the visitor a way out of the app they opened. Without it an app page
 	// is a dead end: it fills the tab and links nowhere else in the fleet.
-	prx.SetAppNav(cfg.Server.AppNavEnabled(), appNavHomeURL(cfg))
+	prx.SetAppNavForOrigin(cfg.Server.AppNavEnabled(), appNavHomeURL(cfg), cfg.Server.AppOrigin)
 	prx.SetBrowserSessions(cfg.Auth.BrowserSessionMaxAge(), cfg.Server.BaseURL)
 	relayDir := filepath.Join(absAppDataDir, ".reload-relays")
 	relayLeases := &upgrade.RelayLeases{Dir: relayDir}

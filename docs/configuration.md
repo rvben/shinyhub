@@ -633,8 +633,18 @@ than idle: no page is rewritten, and the switcher's endpoints are disabled.
 
 When the switcher is enabled, `/app/.shinyhub/nav/<sha256>.js` serves the
 embedded switcher JavaScript, where `<sha256>` is the hex digest of the script.
-App pages continue to embed the script so visitors can use the switcher while
-upgrading or rolling back between servers with different asset support.
+On a dedicated HTTPS `server.app_origin`, eligible app documents load that
+script asynchronously from the app origin so the browser can reuse it. The
+switcher uses inline delivery on a shared origin, on ShinyHub fallback pages
+and when app-provided Content Security Policy permits inline injection.
+A later script policy added by an edge must allow the same-origin asset.
+If the edge caches app HTML, include the public scheme and host in its cache key.
+
+During upgrades and rollbacks, the new and previous servers must both serve
+the switcher digest referenced by eligible HTML. The release check verifies
+the rollback server's asset over HTTP. For the first release that uses
+cached delivery, install the preceding compatibility release before deploying
+the version that starts referencing the asset.
 
 ## Response compression
 

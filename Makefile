@@ -43,6 +43,16 @@ build:
 check-artifact:
 	./scripts/check-artifact.sh
 
+# The planned rollback release must already serve the script this build advertises.
+APP_NAV_ROLLBACK_VERSION ?= 0.25.6
+.PHONY: check-app-nav-rollback
+check-app-nav-rollback:
+ifdef APP_NAV_ROLLBACK_BIN
+	python3 scripts/check-app-nav-rollback.py "$(APP_NAV_ROLLBACK_BIN)"
+else
+	uv run --no-project --with "shinyhub==$(APP_NAV_ROLLBACK_VERSION)" python scripts/check-app-nav-rollback.py
+endif
+
 clean:
 	rm -rf bin tmp
 

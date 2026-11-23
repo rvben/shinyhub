@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -195,6 +196,74 @@ func TestMissPages_StayUncacheableWithTheSwitcher(t *testing.T) {
 			rec := serveSurface(t, i, true)
 			if got := rec.Header().Get("Cache-Control"); got != "no-store" {
 				t.Fatalf("%s page Cache-Control = %q, want no-store", s.name, got)
+			}
+		})
+	}
+}
+
+func TestAppNavCacheRespectsPagePolicy(t *testing.T) {
+	const appOrigin = "https://apps.example.com"
+	tests := []struct {
+		name   string
+		origin string
+		header string
+		value  string
+		meta   string
+		target string
+		proxy  bool
+		mode   string
+	}{
+		{name: "dedicated app origin", origin: appOrigin, mode: "external"},
+		{name: "default", mode: "inline"},
+		{name: "different host", origin: appOrigin, target: "https://alias.example.com", mode: "inline"},
+		{name: "different scheme", origin: appOrigin, target: "http://apps.example.com", mode: "inline"},
+		{name: "default TLS port", origin: appOrigin + ":443", target: appOrigin, mode: "external"},
+		{name: "trusted TLS termination", origin: appOrigin, target: "http://internal.example.com", proxy: true, mode: "external"},
+		{name: "untrusted forwarding", origin: appOrigin, target: "http://internal.example.com", mode: "inline"},
+		{name: "script policy", origin: appOrigin, header: "Content-Security-Policy", value: "script-src 'self'", mode: "inline"},
+		{name: "report-only policy", origin: appOrigin, header: "Content-Security-Policy-Report-Only", value: "script-src 'self'", mode: "inline"},
+		{name: "scripts forbidden", origin: appOrigin, header: "Content-Security-Policy", value: "script-src 'none'", mode: "absent"},
+		{name: "meta policy", origin: appOrigin, meta: `<meta http-equiv="Content-Security-Policy" content="script-src 'self'">`, mode: "absent"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/html")
+				if tt.header != "" {
+					w.Header().Set(tt.header, tt.value)
+				}
+				_, _ = w.Write([]byte("<html><head>" + tt.meta + "</head><body>App</body></html>"))
+			}))
+			t.Cleanup(backend.Close)
+			p := New()
+			if err := p.Register("demo", backend.URL); err != nil {
+				t.Fatal(err)
+			}
+			p.SetAppNavForOrigin(true, navPagesHome, tt.origin)
+			rec := httptest.NewRecorder()
+			target := tt.target
+			if target == "" {
+				target = appOrigin
+			}
+			req := pageLoadRequest(target + "/app/demo/")
+			req.Header.Set("X-Forwarded-Host", "apps.example.com")
+			req.Header.Set("X-Forwarded-Proto", "https")
+			if tt.proxy {
+				_, network, err := net.ParseCIDR("192.0.2.0/24")
+				if err != nil {
+					t.Fatal(err)
+				}
+				p.SetTrustedProxies([]*net.IPNet{network})
+				req.RemoteAddr = "192.0.2.4:12345"
+			}
+			p.ServeHTTP(rec, req)
+			body := rec.Body.String()
+			external := strings.Contains(body, `src="`+tt.origin+`/app/.shinyhub/nav/`) &&
+				strings.Contains(body, `" async></script></body>`)
+			inline := strings.Contains(body, appnav.Script)
+			tag := strings.Contains(body, appnav.ScriptID)
+			if external != (tt.mode == "external") || inline != (tt.mode == "inline") || tag != (tt.mode != "absent") {
+				t.Fatalf("switcher delivery got external=%t, inline=%t, tag=%t, want %s", external, inline, tag, tt.mode)
 			}
 		})
 	}

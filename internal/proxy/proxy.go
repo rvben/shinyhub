@@ -1359,6 +1359,8 @@ func (p *Proxy) StatusOverlayEnabled() bool {
 	return p.statusOverlay.Load()
 }
 
+type appNavCacheOriginKey struct{}
+
 // appNavSettings is the app switcher's live configuration. Stored behind one
 // pointer so both fields change atomically together.
 type appNavSettings struct {
@@ -1366,6 +1368,8 @@ type appNavSettings struct {
 	// origin's dashboard, which is a different host from the app page whenever
 	// server.app_origin is set.
 	homeURL string
+	// cacheOrigin is the HTTPS origin eligible for external script delivery.
+	cacheOrigin string
 }
 
 // SetEnvironment enables optional deployment identity for app documents.
@@ -1389,11 +1393,16 @@ func (p *Proxy) SetDashboardURL(home string) { p.dashboardURL.Store(&home) }
 // An empty homeURL leaves the link relative, which is correct only when apps
 // and the dashboard share an origin.
 func (p *Proxy) SetAppNav(enabled bool, homeURL string) {
+	p.SetAppNavForOrigin(enabled, homeURL, "")
+}
+
+// SetAppNavForOrigin sets the dedicated app origin eligible for cached delivery.
+func (p *Proxy) SetAppNavForOrigin(enabled bool, homeURL, cacheOrigin string) {
 	if !enabled {
 		p.appNav.Store(nil)
 		return
 	}
-	p.appNav.Store(&appNavSettings{homeURL: homeURL})
+	p.appNav.Store(&appNavSettings{homeURL: homeURL, cacheOrigin: cacheOrigin})
 }
 
 // AppNavEnabled reports whether the app switcher is currently being injected.
@@ -1712,6 +1721,16 @@ func (p *Proxy) serveBackend(backend *httputil.ReverseProxy, rec *statusRecorder
 				p.recordWSFailure(slug)
 			}
 		}()
+	}
+	// Capture the browser origin before the reverse proxy rewrites Host.
+	if nav := p.appNav.Load(); nav != nil && nav.cacheOrigin != "" && isPageLoad(r) {
+		host := strings.TrimPrefix(nav.cacheOrigin, "https://")
+		nets := p.trustedProxyNets()
+		requestHost := proxytrust.Host(r, nets)
+		if proxytrust.Scheme(r, nets) == "https" &&
+			strings.EqualFold(strings.TrimSuffix(host, ":443"), strings.TrimSuffix(requestHost, ":443")) {
+			r = r.WithContext(context.WithValue(r.Context(), appNavCacheOriginKey{}, nav.cacheOrigin))
+		}
 	}
 	backend.ServeHTTP(rec, r)
 }
