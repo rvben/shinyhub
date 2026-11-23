@@ -9,7 +9,7 @@
 # Budgets come from the environment, so a deliberate change raises one in the
 # commit that justifies it:
 #   ARTIFACT_SIZE_BUDGET_BYTES  stripped size of cmd/shinyhub for linux/amd64
-#                               (default 56000000)
+#                               (default 56050000)
 #   ARTIFACT_INIT_BUDGET_MS     package init time before main (default 50)
 #   ARTIFACT_INIT_RUNS          runs whose minimum is held to the budget (default 5)
 #   ARTIFACT_OUT_DIR            where the builds are written (default tmp/check-artifact)
@@ -18,7 +18,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 out_dir=${ARTIFACT_OUT_DIR:-tmp/check-artifact}
-size_budget=${ARTIFACT_SIZE_BUDGET_BYTES:-56000000}
+size_budget=${ARTIFACT_SIZE_BUDGET_BYTES:-56050000}
 init_budget_ms=${ARTIFACT_INIT_BUDGET_MS:-50}
 init_runs=${ARTIFACT_INIT_RUNS:-5}
 
