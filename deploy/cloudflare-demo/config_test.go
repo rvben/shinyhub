@@ -202,7 +202,7 @@ func TestCloudflareDemoDeploysAfterSuccessfulReleases(t *testing.T) {
 		`github.event.workflow_run.conclusion == 'success'`,
 		`context.payload.workflow_run?.head_sha`,
 		`name: Resolve deployment ref`,
-		`uses: actions/github-script@v9`,
+		`uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0`,
 		`github.rest.repos.getCommit`,
 		`ref: requestedRef`,
 		`core.setOutput("sha", commit.sha)`,
