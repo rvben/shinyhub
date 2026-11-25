@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [0.5.3](https://github.com/rvben/shinyhub/compare/shinyhub-agent-v0.5.2...shinyhub-agent-v0.5.3) - 2026-11-25
+
+### Added
+
+- Add an optional Bedrock request policy that checks the complete request
+  before sending it, including tool results, retries, and suggestion recovery.
+
+### Fixed
+
+- Omit viewer usernames and raw chat failure details from built-in telemetry.
+  Explicit usage callbacks still receive configured viewer attribution.
+- Constrain Shiny to versions with supported reactive behavior.
+
 ## [0.5.2](https://github.com/rvben/shinyhub/compare/shinyhub-agent-v0.5.1...shinyhub-agent-v0.5.2) - 2026-10-26
 
 ### Fixed
