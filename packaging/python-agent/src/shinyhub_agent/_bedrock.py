@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ._core import ToolError, ToolRegistry
+from ._errors import ProviderError
 from ._formatting import panel_instructions
 from ._runtime import (
     FINAL_INSTRUCTIONS,
@@ -36,6 +38,22 @@ logger = logging.getLogger(__name__)
 _END = object()
 
 
+_PERMANENT_PROVIDER_ERRORS = (
+    "ValidationException",
+    "AccessDeniedException",
+    "ResourceNotFoundException",
+)
+_LOGGABLE_PROVIDER_ERRORS = (
+    *_PERMANENT_PROVIDER_ERRORS,
+    "InternalServerException",
+    "ModelErrorException",
+    "ModelNotReadyException",
+    "ModelTimeoutException",
+    "ServiceUnavailableException",
+    "ThrottlingException",
+)
+
+
 @dataclass(frozen=True)
 class BedrockChat:
     """Stream an app-scoped agent through Amazon Bedrock ConverseStream."""
@@ -51,6 +69,9 @@ class BedrockChat:
     on_usage: UsageCallback | None = field(default=None, repr=False, compare=False)
 
     followups: int = field(default=0, kw_only=True)
+    request_policy: Callable[[dict[str, Any]], bool] | None = field(
+        default=None, kw_only=True, repr=False, compare=False
+    )
 
     def with_followups(self, maximum: int) -> BedrockChat:
         """Return a session-specific copy; never mutate a shared app adapter."""
@@ -74,6 +95,18 @@ class BedrockChat:
         )
         if self.on_usage is not None and not callable(self.on_usage):
             raise TypeError("on_usage must be callable")
+        if self.request_policy is not None and not callable(self.request_policy):
+            raise TypeError("request_policy must be callable")
+
+    def _check_request_policy(self, request: dict[str, Any]) -> None:
+        if self.request_policy is None:
+            return
+        try:
+            allowed = self.request_policy(deepcopy(request))
+        except Exception:
+            raise ProviderError("model_request_blocked") from None
+        if allowed is not True:
+            raise ProviderError("model_request_blocked")
 
     def _runtime(self) -> Any:
         if self.client is not None:
@@ -271,6 +304,7 @@ class BedrockChat:
                 },
             ],
         }
+        self._check_request_policy(request)
         yield {"type": "status", "text": "Writing answer"}
         async with ModelCall(
             "bedrock", self.model_id, turn.id, round_number, False, self.on_usage
@@ -364,6 +398,7 @@ class BedrockChat:
             # Final output stays buffered until a complete, tool-free answer succeeds.
             # Retrying this request reuses completed results without executing tools.
             for attempt in range(2 if final else 1):
+                self._check_request_policy(request)
                 buffered = []
                 try:
                     async with ModelCall(
@@ -391,13 +426,6 @@ class BedrockChat:
                 except Exception as error:
                     if not final:
                         raise
-                    logger.warning(
-                        "Bedrock final answer attempt %d failed (%s), turn %s: %s",
-                        attempt + 1,
-                        type(error).__name__,
-                        usage.context.get("turn_id") or turn.id,
-                        str(error)[:300].replace("\n", " ").replace("\r", " "),
-                    )
                     details = getattr(error, "response", None)
                     provider_error = (
                         details.get("Error") if isinstance(details, dict) else None
@@ -407,13 +435,15 @@ class BedrockChat:
                         if isinstance(provider_error, dict)
                         else None
                     )
+                    logger.warning(
+                        "Bedrock final answer attempt %d failed (%s), turn %s",
+                        attempt + 1,
+                        code if code in _LOGGABLE_PROVIDER_ERRORS else type(error).__name__,
+                        usage.context.get("turn_id") or turn.id,
+                    )
                     # Permanent API errors cannot recover with an identical request.
                     # Model-output failures can recover with a fresh generation.
-                    if attempt == 0 and code not in {
-                        "ValidationException",
-                        "AccessDeniedException",
-                        "ResourceNotFoundException",
-                    }:
+                    if attempt == 0 and code not in _PERMANENT_PROVIDER_ERRORS:
                         continue
                     prefix = "\n\n" if text_streamed else ""
                     yield {"type": "delta", "text": prefix + turn.fallback()}

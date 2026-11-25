@@ -12,6 +12,7 @@ class ProviderError(ToolError):
             "The assistant needs a verified user identity. "
             "Reopen the app or contact your administrator."
         ),
+        "model_request_blocked": "The assistant could not send this request.",
     }
 
     def __init__(self, code: str):

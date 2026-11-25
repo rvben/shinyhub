@@ -10,8 +10,6 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
-import httpx
-
 from ._charts import ChartRegistry
 from ._core import ToolError, ToolRegistry, _UnexpectedToolError
 from ._errors import ProviderError
@@ -427,17 +425,8 @@ class ChatSession:
                 logger.warning("Agent provider request failed: %s", error.code)
                 remember_applied_actions()
                 await emit({"type": "error", "code": error.code, "message": str(error)})
-            except (ToolError, httpx.HTTPError, ValueError, KeyError, TypeError):
-                logger.exception("Agent chat run failed")
-                remember_applied_actions()
-                await emit(
-                    {
-                        "type": "error",
-                        "message": "The assistant could not finish. Try again.",
-                    }
-                )
-            except Exception:
-                logger.exception("Unexpected agent chat failure")
+            except Exception as error:
+                logger.warning("Agent chat run failed (%s)", type(error).__name__)
                 remember_applied_actions()
                 await emit(
                     {

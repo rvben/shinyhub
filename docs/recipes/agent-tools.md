@@ -180,8 +180,8 @@ Set `on_usage(record)` on the backend for a record per provider request:
 timestamp, model, turn/call IDs, round, tokens, duration, requested tools and
 outcome. Records also appear in structured INFO logs and model-call span
 attributes when tracing is available. Use `usage_metadata={"username": ...}`
-in `register()` for optional attribution from verified identity; it is not
-sent in prompts or HTTP headers. AG-UI reports endpoint duration with unknown
+in `register()` for optional attribution in the app's usage callback. The
+built-in logs and spans omit the username. AG-UI reports endpoint duration with unknown
 token counts; model accounting belongs on its external endpoint.
 
 Browser tests can open either panel with

@@ -105,6 +105,9 @@ def test_shared_adapter_keeps_viewer_metadata_out_of_prompts_and_separate_in_rec
     assert len(logs) == 2
     assert sum(record["input_tokens"] for record in logs) == 22
     assert all(record["timestamp"].endswith("+00:00") for record in logs)
+    assert all("username" not in record for record in logs)
+    assert "viewer-one" not in caplog.text
+    assert "viewer-two" not in caplog.text
 
 
 def test_model_error_and_cancellation_still_report_observed_usage():
@@ -142,17 +145,23 @@ def test_usage_attaches_to_its_own_model_span_and_trace_failures_do_not_break_ca
             yield Span()
 
     async def run():
-        async with ModelCall(
-            "openai", "model", "turn", 1, False, records.append
-        ) as call:
-            call.tokens = {"input_tokens": 11, "output_tokens": 5}
-            call.tool_names = ("read_view",)
+        context = usage_context.set({"username": "viewer-one"})
+        try:
+            async with ModelCall(
+                "openai", "model", "turn", 1, False, records.append
+            ) as call:
+                call.tokens = {"input_tokens": 11, "output_tokens": 5}
+                call.tool_names = ("read_view",)
+        finally:
+            usage_context.reset(context)
 
     with patch.object(trace, "get_tracer", return_value=Tracer()):
         asyncio.run(run())
     assert attributes["shinyhub.agent.input_tokens"] == 11
     assert attributes["shinyhub.agent.tool_names"] == ("read_view",)
     assert attributes["shinyhub.agent.turn_id"] == "turn"
+    assert "shinyhub.agent.username" not in attributes
+    assert records[0].username == "viewer-one"
     with patch.object(
         trace, "get_tracer", side_effect=RuntimeError("collector unavailable")
     ):

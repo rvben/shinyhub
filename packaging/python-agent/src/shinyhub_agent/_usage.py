@@ -113,6 +113,7 @@ class ModelCall:
             outcome=outcome,
         )
         data = asdict(record)
+        del data["username"]
         try:
             if self.span is not None:
                 for name, value in data.items():

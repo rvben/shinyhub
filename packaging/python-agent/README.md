@@ -160,6 +160,18 @@ Choose a model ID available in the selected region. The adapter does not infer
 one because model and tool support vary by region. Bedrock requests inherit the
 AWS account's invocation logging and data policies.
 
+Set `request_policy=` on `BedrockChat` to enforce an app's outbound data
+policy. The synchronous callback receives an isolated copy of the complete
+ConverseStream request, including the prompt, history, tool schemas and any
+tool results. The adapter checks the request before each provider call,
+including follow-up recovery and adapter retries. Only `True` authorizes a
+request. Other results and exceptions block it before sending or emitting a
+provider usage record. The AWS SDK may also retry an already approved request.
+Apply field and value restrictions when constructing
+model-visible data, and use the callback to check the assembled request.
+Enforcement against app code requires a trusted provider route that owns the
+credentials and applies its own policy.
+
 The browser never receives model or endpoint credentials. OpenAI requests use
 the Responses API with streaming, bounded output, and `store: false`. AG-UI
 requests carry the current session's thread ID, recent messages, and registered
@@ -594,8 +606,9 @@ register(session=session, input=input, tools=tools, chat=chat,
 ```
 
 App slug defaults from `SHINYHUB_APP_SLUG`. `usage_metadata` may set `app` and
-`username` (up to 256 characters each). By default metadata stays in local logs,
-callbacks and tracing; it is not added to prompts or HTTP headers. With
+`username` (up to 256 characters each). Usage callbacks receive the configured
+username. If an app logs the full record in its callback, that log contains
+personal data. The built-in logs and model-call spans omit the username. With
 `ResponsesChat(send_end_user=True)` (or `OpenAIChat` with the same flag), the
 username also leaves the app in the
 Responses API JSON `user` field, as described above. Other usage metadata is

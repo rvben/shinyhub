@@ -498,9 +498,14 @@ def test_bedrock_retries_final_answer_once_with_completed_results(
 ):
     seen = []
     records = []
+    inspected = []
 
     async def approve(*_):
         raise AssertionError("Final attempts must not execute writes")
+
+    def policy(request):
+        inspected.append(request)
+        return True
 
     options = (
         {"max_tool_rounds": 1} if budget == "round" else {"max_tool_calls_per_turn": 1}
@@ -511,12 +516,14 @@ def test_bedrock_retries_final_answer_once_with_completed_results(
             [{"calls": [("read_view", {})]}, failure, {"text": "The total is 123."}],
             registry(seen),
             approve,
+            request_policy=policy,
             on_usage=records.append,
             **options,
         )
     )
     assert seen == ["read"]
     assert len(requests) == 3
+    assert inspected == requests
     assert requests[1] == requests[2]
     assert "toolConfig" not in requests[2]
     assert "123" in json.dumps(requests[2])
@@ -529,8 +536,69 @@ def test_bedrock_retries_final_answer_once_with_completed_results(
     assert expected in caplog.text
     assert records[1].turn_id in caplog.text
     if isinstance(failure, Exception):
-        assert str(failure) in caplog.text
+        assert str(failure) not in caplog.text
     assert sum(e == {"type": "status", "text": "Using app tools"} for e in events) == 1
+
+
+def test_bedrock_provider_failure_keeps_raw_details_out_of_chat_and_logs(caplog):
+    async def approve(*_):
+        raise AssertionError("unexpected approval")
+
+    events, requests = asyncio.run(
+        run_backend(
+            "bedrock",
+            [RuntimeError("restricted provider details")],
+            registry([]),
+            approve,
+            session_state={},
+        )
+    )
+    assert len(requests) == 1
+    assert events[-1]["type"] == "error"
+    assert events[-1]["message"] == "The assistant could not finish. Try again."
+    assert "restricted provider details" not in json.dumps(events)
+    assert "restricted provider details" not in caplog.text
+    assert "Agent chat run failed (RuntimeError)" in caplog.text
+
+
+def test_bedrock_preserves_transport_exceptions_for_direct_callers():
+    failure = RuntimeError("transport is unavailable")
+
+    async def approve(*_):
+        raise AssertionError("unexpected approval")
+
+    with pytest.raises(RuntimeError) as raised:
+        asyncio.run(run_backend("bedrock", [failure], registry([]), approve))
+    assert raised.value is failure
+
+
+def test_bedrock_policy_denial_on_final_retry_stops_before_provider_and_usage():
+    inspected, records = [], []
+
+    def policy(request):
+        inspected.append(request)
+        return len(inspected) < 3
+
+    async def approve(*_):
+        raise AssertionError("unexpected approval")
+
+    events, requests = asyncio.run(
+        run_backend(
+            "bedrock",
+            [{"calls": [("read_view", {})]}, RuntimeError("retryable")],
+            registry([]),
+            approve,
+            max_tool_rounds=1,
+            request_policy=policy,
+            on_usage=records.append,
+            session_state={},
+        )
+    )
+    assert len(inspected) == 3
+    assert inspected[:2] == requests
+    assert [record.outcome for record in records] == ["completed", "error"]
+    assert not any(event["type"] == "delta" for event in events)
+    assert events[-1]["code"] == "model_request_blocked"
 
 
 @pytest.mark.parametrize("earlier_text", ["", "Fetching daily values."])
@@ -636,7 +704,8 @@ def test_bedrock_final_provider_errors_retry_only_when_recoverable(code, retry, 
     warning = next(
         r.message for r in caplog.records if "final answer attempt" in r.message
     )
-    assert "ProviderError" in warning
+    assert code in warning
+    assert "provider details" not in warning
     assert len(warning) < 450
 
 
