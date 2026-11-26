@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -194,5 +195,31 @@ func TestLoginFailedError_IsTyped(t *testing.T) {
 	var hse *httpStatusError
 	if !errors.As(err, &hse) || hse.Status != 401 {
 		t.Fatalf("login failure not typed: %T %v", err, err)
+	}
+}
+
+// Every command that surfaces a failed deploy, draft preview, rollback or
+// restart builds its error with httpError, so httpError attaches the hint for
+// the failure kind the body states, and only for a 5xx.
+func TestHTTPErrorHintsFromStatedFailureKind(t *testing.T) {
+	cases := []struct {
+		name     string
+		status   int
+		body     string
+		wantHint string
+	}{
+		{"build failed", 500, `{"error":"rollback failed: boom","failure_kind":"build_failed"}`, wantBuildFailedHint},
+		{"runtime missing", 503, `{"error":"rollback failed: boom","failure_kind":"runtime_missing"}`, wantRuntimeMissingHint},
+		{"a kind a retry can clear", 500, `{"error":"rollback failed: boom","failure_kind":"crashed"}`, ""},
+		{"no stated kind", 500, `{"error":"rollback failed: boom"}`, ""},
+		{"a body that is not JSON", 502, `rollback failed: boom`, ""},
+		{"a client error", 422, `{"error":"rollback failed: boom","failure_kind":"build_failed"}`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := &http.Response{StatusCode: tc.status, Status: fmt.Sprintf("%d %s", tc.status, http.StatusText(tc.status))}
+			err := httpError("shk_test", "rollback", resp, []byte(tc.body))
+			assertDeployFailureEnvelope(t, err, tc.status, fmt.Sprintf("rollback (%s): rollback failed: boom", resp.Status), tc.wantHint)
+		})
 	}
 }

@@ -2,7 +2,9 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -146,5 +148,79 @@ func TestConsumeDeployEventsInterruptedAfterPublication(t *testing.T) {
 	_, err := consumeDeployEvents(deployEventResponse(`{"type":"phase","phase":"commit","status":"completed"}`), formatTable, io.Discard, io.Discard, true, "forecast")
 	if err == nil || !strings.Contains(err.Error(), "was published") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+// The exact hints a deploy failure carries. They are spelled out here rather
+// than taken from deployFailureHint, so a test cannot pass with the retry
+// advice reworded into something false.
+const (
+	wantBuildFailedHint    = "build_failed: the server could not install the bundle's dependencies, for the reason the message gives. A timeout or an unreachable package index can clear on a retry; a dependency conflict usually does not"
+	wantRuntimeMissingHint = "runtime_missing: an executable the app needs was not found where it runs; a retry fails the same way until it is available there"
+)
+
+// assertDeployFailureEnvelope renders err as a machine-readable failure and
+// checks the envelope keeps the server's message, kind server_error and exit
+// code 3 for a 5xx (validation and 1 for a 422), and carries exactly hint.
+func assertDeployFailureEnvelope(t *testing.T, err error, status int, message, hint string) {
+	t.Helper()
+	wantKind, wantCode := KindServerError, 3
+	if status == http.StatusUnprocessableEntity {
+		wantKind, wantCode = KindValidation, 1
+	}
+	var envelope bytes.Buffer
+	if code := reportTo(&envelope, false, formatJSON, err); code != wantCode {
+		t.Errorf("exit code = %d, want %d: the hint must not change it", code, wantCode)
+	}
+	var env errEnvelope
+	if jerr := json.Unmarshal(envelope.Bytes(), &env); jerr != nil {
+		t.Fatalf("envelope %q: %v", envelope.String(), jerr)
+	}
+	if env.Error.Kind != string(wantKind) || env.Error.ExitCode != wantCode {
+		t.Errorf("envelope kind/exit_code = %s/%d, want %s/%d", env.Error.Kind, env.Error.ExitCode, wantKind, wantCode)
+	}
+	if env.Error.Message != message {
+		t.Errorf("message = %q, want the server's message unchanged: %q", env.Error.Message, message)
+	}
+	if env.Error.Hint != hint {
+		t.Errorf("hint = %q, want %q", env.Error.Hint, hint)
+	}
+}
+
+// A deploy that fails on the server with a failure kind a retry may not clear
+// still reports server_error with exit code 3, so its envelope carries a hint
+// naming the kind and what a retry can and cannot clear. A kind a retry can
+// clear, one whose causes include a transient server error, an unclassified
+// one, and a 4xx carry no hint.
+func TestConsumeDeployEventsHintsAtFailureKindARetryMayNotClear(t *testing.T) {
+	cases := []struct {
+		name     string
+		status   int
+		kind     string
+		wantHint string
+	}{
+		{"build failed", 500, "build_failed", wantBuildFailedHint},
+		{"runtime missing", 500, "runtime_missing", wantRuntimeMissingHint},
+		{"bundle invalid includes transient read errors", 500, "bundle_invalid", ""},
+		{"hook failed can be transient", 500, "hook_failed", ""},
+		{"interpreter download can be transient", 500, "interpreter_unavailable", ""},
+		{"crashed", 500, "crashed", ""},
+		{"readiness timeout", 500, "readiness_timeout", ""},
+		{"unclassified", 500, "server_error", ""},
+		{"a kind this CLI does not know", 500, "some_future_kind", ""},
+		{"no kind from an older server", 500, "", ""},
+		{"a client error keeps its own classification", 422, "build_failed", ""},
+	}
+	for _, tc := range cases {
+		for _, format := range []outputFormat{formatTable, formatNDJSON} {
+			t.Run(tc.name+"/"+string(format), func(t *testing.T) {
+				event := fmt.Sprintf(`{"type":"error","phase":"producer_environment","message":"deploy failed: boom","status_code":%d,"failure_kind":%q}`, tc.status, tc.kind)
+				_, err := consumeDeployEvents(deployEventResponse(event), format, io.Discard, io.Discard, true)
+				if err == nil {
+					t.Fatal("expected terminal error")
+				}
+				assertDeployFailureEnvelope(t, err, tc.status, "deploy failed during producer_environment: deploy failed: boom", tc.wantHint)
+			})
+		}
 	}
 }

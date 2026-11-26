@@ -22,6 +22,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/rvben/shinyhub/internal/bundle"
+	"github.com/rvben/shinyhub/internal/deployevent"
 	slugpkg "github.com/rvben/shinyhub/internal/slug"
 )
 
@@ -1654,4 +1655,78 @@ func TestEnsureAppCoreNeverChangesAnExistingAppsProject(t *testing.T) {
 	if err := ensureAppCore(cfg, "a", "public", "analytics", io.Discard, false); err != nil {
 		t.Fatalf("ensureAppCore: %v", err)
 	}
+}
+
+// A server that answers a failed deploy with a plain JSON body instead of an
+// event stream gets the same hint, from the failure_kind the body states and
+// never from a guess at the message text, while the error keeps kind
+// server_error and exit code 3.
+func TestDeploy_NonStreamedFailureHintsFromStatedFailureKind(t *testing.T) {
+	cases := []struct {
+		name     string
+		body     string
+		message  string
+		wantHint string
+	}{
+		{"stated build_failed", `{"error":"deploy failed: boom","failure_kind":"build_failed"}`, "deploy (500 Internal Server Error): deploy failed: boom", wantBuildFailedHint},
+		{"stated runtime_missing", `{"error":"deploy failed: boom","failure_kind":"runtime_missing"}`, "deploy (500 Internal Server Error): deploy failed: boom", wantRuntimeMissingHint},
+		{"build failure text without a stated kind", `{"error":"deploy failed: uv sync: no solution found"}`, "deploy (500 Internal Server Error): deploy failed: uv sync: no solution found", ""},
+		{"stated kind this CLI does not know", `{"error":"deploy failed: uv sync: no solution found","failure_kind":"some_future_kind"}`, "deploy (500 Internal Server Error): deploy failed: uv sync: no solution found", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, dir, "app.py", "print('hi')")
+			writeFile(t, dir, "requirements.txt", "shiny\n")
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/deploy"):
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = io.WriteString(w, tc.body)
+				case strings.HasSuffix(r.URL.Path, "/logs"):
+					_, _ = w.Write([]byte("\n"))
+				default:
+					w.WriteHeader(200)
+					_, _ = w.Write([]byte(`{}`))
+				}
+			}))
+			defer srv.Close()
+			writeTestCLIConfig(t, srv.URL)
+
+			_, err := execCLI(t, "deploy", dir, "--slug", "demo")
+			if err == nil {
+				t.Fatal("expected the deploy to fail")
+			}
+			assertDeployFailureEnvelope(t, err, http.StatusInternalServerError, tc.message, tc.wantHint)
+		})
+	}
+}
+
+// A streamed deploy failure reaches the command's error envelope with the
+// hint consumeDeployEvents attached, so nothing between the stream and the
+// envelope drops it.
+func TestDeploy_StreamedFailureHintReachesTheEnvelope(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "app.py", "print('hi')")
+	writeFile(t, dir, "requirements.txt", "shiny\n")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/deploy"):
+			w.Header().Set("Content-Type", deployevent.MediaType)
+			_, _ = io.WriteString(w, `{"type":"error","phase":"producer_environment","message":"deploy failed: boom","status_code":500,"failure_kind":"build_failed"}`+"\n")
+		case strings.HasSuffix(r.URL.Path, "/logs"):
+			_, _ = w.Write([]byte("\n"))
+		default:
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	defer srv.Close()
+	writeTestCLIConfig(t, srv.URL)
+
+	_, err := execCLI(t, "deploy", dir, "--slug", "demo")
+	if err == nil {
+		t.Fatal("expected the deploy to fail")
+	}
+	assertDeployFailureEnvelope(t, err, http.StatusInternalServerError, "deploy failed during producer_environment: deploy failed: boom", wantBuildFailedHint)
 }

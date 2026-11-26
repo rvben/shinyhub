@@ -236,6 +236,42 @@ func TestCheckCandidateProducerEnvironment_MissingUV(t *testing.T) {
 	}
 }
 
+// A uv that ran and failed is a build failure even when its output quotes a
+// build tool that could not find uv for its own subprocess: the server's uv
+// launched, so the runtime is not missing.
+func TestCheckCandidateProducerEnvironment_NestedMissingUVIsABuildFailure(t *testing.T) {
+	rt := &scriptedRuntime{
+		exit:   process.ExitInfo{Code: 1},
+		output: "error: Failed to build `pkg==1.0`\n  backend: exec: \"uv\": executable file not found in $PATH\n",
+	}
+	f := newProducerCheckFixture(t, rt, documentedProducer)
+	_, err := f.check(t)
+	var envErr *jobs.ProducerEnvironmentError
+	if !errors.As(err, &envErr) || deployfail.Classify(err) != deployfail.BuildFailed {
+		t.Fatalf("err = %v kind = %q, want build_failed", err, deployfail.Classify(err))
+	}
+}
+
+// A runtime error other than a missing uv means the check itself could not
+// run, as when restoring the data entry the check kept absent fails after uv
+// succeeded. It fails the deploy as a server error, not as an environment
+// uv cannot build.
+func TestCheckCandidateProducerEnvironment_RuntimeErrorIsNotABuildFailure(t *testing.T) {
+	rt := &scriptedRuntime{err: errors.New("restore data entry: permission denied")}
+	f := newProducerCheckFixture(t, rt, documentedProducer)
+	_, err := f.check(t)
+	if err == nil || !strings.Contains(err.Error(), "restore data entry: permission denied") {
+		t.Fatalf("err = %v, want the runtime's error", err)
+	}
+	var envErr *jobs.ProducerEnvironmentError
+	if errors.As(err, &envErr) {
+		t.Errorf("err = %v reports an environment that cannot be built", err)
+	}
+	if kind := deployfail.Classify(err); kind != deployfail.ServerError {
+		t.Errorf("kind = %q, want server_error", kind)
+	}
+}
+
 // A producer whose command does not launch uv has no environment to check,
 // and one the probe cannot reproduce is reported as not checked. Neither
 // runs anything.

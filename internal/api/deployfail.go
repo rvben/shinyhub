@@ -41,8 +41,9 @@ func deployFailureMessage(err error) string {
 		return "deploy failed"
 	}
 	msg := err.Error()
+	kind := deployfail.Classify(err)
 	switch {
-	case deployfail.Classify(err) == deployfail.HookFailed:
+	case kind == deployfail.HookFailed:
 		// Checked first, and by kind rather than substring: a hook echoes the
 		// app's own command into the message, so a hook calling a binary the
 		// host lacks is indistinguishable from a missing server runtime by text
@@ -50,15 +51,18 @@ func deployFailureMessage(err error) string {
 		// that is present and working.
 		return "deploy failed: a post-deploy hook from shinyhub.toml failed - " + msg +
 			". Fix the hook command or the bundle it runs from; the app was not started."
-	case deployfail.MentionsMissingExecutable(msg, "Rscript"):
+	// The missing-runtime diagnostics are gated on the kind too: an error
+	// that states another kind, such as a uv that ran and failed, may still
+	// quote a build tool that could not find uv for its own subprocess.
+	case kind == deployfail.RuntimeMissing && deployfail.MentionsMissingExecutable(msg, "Rscript"):
 		return "deploy failed: R runtime not found on the server (Rscript is not in PATH). " +
 			"Install R, switch the app to a container runtime, or contact your administrator."
-	case deployfail.MentionsMissingExecutable(msg, "uv"),
-		deployfail.MentionsMissingExecutable(msg, "python3"),
-		deployfail.MentionsMissingExecutable(msg, "python"):
+	case kind == deployfail.RuntimeMissing && (deployfail.MentionsMissingExecutable(msg, "uv") ||
+		deployfail.MentionsMissingExecutable(msg, "python3") ||
+		deployfail.MentionsMissingExecutable(msg, "python")):
 		return "deploy failed: Python runtime not found on the server (uv/python3 is not in PATH). " +
 			"Install it, switch the app to a container runtime, or contact your administrator."
-	case deployfail.Classify(err) == deployfail.InterpreterUnavailable:
+	case kind == deployfail.InterpreterUnavailable:
 		// uv is installed but could not obtain a Python interpreter matching the
 		// app's requires-python: the managed-CPython download is blocked (no
 		// egress to GitHub's python-build-standalone releases) or no system
@@ -68,10 +72,10 @@ func deployFailureMessage(err error) string {
 		return "deploy failed: could not obtain a Python interpreter for this app. " +
 			"If this host cannot reach GitHub's python-build-standalone releases, set build.python_preference: only-system " +
 			"in the server config to use a preinstalled interpreter, or build.python_install_mirror to an internal mirror."
-	case deployfail.Classify(err) == deployfail.Crashed:
+	case kind == deployfail.Crashed:
 		return "deploy failed: the app exited during startup, before it accepted a connection. " +
 			"Check the app logs for the error it printed on the way out."
-	case deployfail.Classify(err) == deployfail.ReadinessTimeout:
+	case kind == deployfail.ReadinessTimeout:
 		// Not a crash. The process was still running when the readiness window
 		// closed, so telling the operator it crashed sends them to look for an
 		// error the log does not contain, and the log they do find says the app

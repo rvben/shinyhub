@@ -377,6 +377,35 @@ func TestDeploy_OpenRecoversWhenServerKeepsAppDown(t *testing.T) {
 	}
 }
 
+// When the start deploy --open needs fails with a failure kind a retry may not
+// clear, the hint keeps the start's own verdict instead of advising a plain
+// retry, and still says the deployment succeeded.
+func TestDeploy_OpenStartFailureKeepsItsFailureKindHint(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/apps/demo", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"app":{"slug":"demo","status":"running","access":"private","deploy_count":2}}`))
+	})
+	mux.HandleFunc("/api/apps/demo/deploy", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"slug":"demo","status":"stopped","access":"private","deploy_count":3,"kept_stopped":true}`))
+	})
+	mux.HandleFunc("/api/apps/demo/restart", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"start failed: boom","failure_kind":"runtime_missing"}`))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	writeTestCLIConfig(t, srv.URL)
+	stubBrowser(t, func(string) error { return nil })
+
+	_, _, err := execCLISplit(t, "deploy", deployTestBundleDir(t), "--slug", "demo", "--open", "-o", "json")
+	if err == nil {
+		t.Fatal("expected the start to fail")
+	}
+	assertDeployFailureEnvelope(t, err, http.StatusInternalServerError,
+		"demo deployed successfully, but could not be started for --open: start app (500 Internal Server Error): start failed: boom",
+		wantRuntimeMissingHint+". The deployment succeeded; once the start can succeed, run `shinyhub apps start demo`, then `shinyhub apps open demo`")
+}
+
 func TestDeploy_OpenPublicRouteFailureExplainsDeploySucceeded(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/apps/demo", func(w http.ResponseWriter, r *http.Request) {
