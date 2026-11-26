@@ -164,29 +164,37 @@ func (m *Manager) CheckCandidateProducerEnvironment(ctx context.Context, sched *
 		result.Checked = true
 		return result, nil
 	}
-	cause := runErr
-	if cause == nil && info.Signaled {
-		cause = errors.New("uv was killed by a signal")
-	} else if cause == nil {
-		cause = fmt.Errorf("uv exited with code %d", info.Code)
+	// Every runtime reports uv's own failure as an exit status, so an error
+	// is the runtime failing to launch uv or to clean up after it. Only a
+	// missing uv says something about the environment.
+	if runErr != nil && !deployfail.MentionsMissingExecutable(runErr.Error(), "uv") {
+		return result, fmt.Errorf("run the environment check: %w", runErr)
 	}
 	output := m.redactCheckOutput(deployment.BundleDir, plan, out.String())
+	cause, kind := runErr, deployfail.RuntimeMissing
+	if cause == nil {
+		kind = producerFailureKind(output)
+		if info.Signaled {
+			cause = errors.New("uv was killed by a signal")
+		} else {
+			cause = fmt.Errorf("uv exited with code %d", info.Code)
+		}
+	}
 	return result, &ProducerEnvironmentError{
 		Schedule: sched.Name,
 		Output:   output,
-		kind:     producerFailureKind(cause.Error() + "\n" + output),
+		kind:     kind,
 		err:      cause,
 	}
 }
 
-// producerFailureKind classifies a failed environment check. A missing uv and
-// an interpreter uv could not obtain have their own kinds, as in a deploy's
-// build; anything else is the dependency build failing.
-func producerFailureKind(msg string) deployfail.Kind {
+// producerFailureKind classifies the output of a uv that ran and failed. An
+// interpreter uv could not obtain has its own kind, as in a deploy's build;
+// anything else is the dependency build failing. A uv that could not be
+// launched at all is a missing runtime, known from the launch error alone.
+func producerFailureKind(output string) deployfail.Kind {
 	switch {
-	case deployfail.MentionsMissingExecutable(msg, "uv"):
-		return deployfail.RuntimeMissing
-	case deployfail.MentionsInterpreterProvisioningFailure(msg):
+	case deployfail.MentionsInterpreterProvisioningFailure(output):
 		return deployfail.InterpreterUnavailable
 	default:
 		return deployfail.BuildFailed

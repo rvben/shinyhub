@@ -143,3 +143,37 @@ func TestDeployFailureMessage_HookNotMisreportedAsRuntimeMissing(t *testing.T) {
 		}
 	}
 }
+
+// statedKindError is an error that states its own failure kind, as the
+// producer environment check's error does.
+type statedKindError struct {
+	msg  string
+	kind string
+}
+
+func (e statedKindError) Error() string             { return e.msg }
+func (e statedKindError) DeployFailureKind() string { return e.kind }
+
+// An error that states a kind other than runtime_missing is not reported as a
+// missing server runtime because its text quotes a missing uv: a build tool
+// that could not find uv for its own subprocess ran under a uv the server
+// launched.
+func TestDeployFailureMessage_StatedBuildFailureNotMisreportedAsRuntimeMissing(t *testing.T) {
+	err := statedKindError{
+		msg:  "deploy-triggered schedule \"refresh\" cannot build its environment: uv exited with code 1\nbackend: exec: \"uv\": executable file not found in $PATH",
+		kind: "build_failed",
+	}
+	got := deployFailureMessage(err)
+	for _, forbidden := range []string{"runtime not found", "Install it", "contact your administrator"} {
+		if strings.Contains(got, forbidden) {
+			t.Errorf("a stated build failure must not blame the server runtime; got %q", got)
+		}
+	}
+	if !strings.Contains(got, "cannot build its environment") {
+		t.Errorf("message lost the cause: %q", got)
+	}
+	// The same text with no stated kind is still read as a missing runtime.
+	if got := deployFailureMessage(errors.New(err.msg)); !strings.Contains(got, "Python runtime not found") {
+		t.Errorf("unclassified missing uv = %q, want the runtime diagnostic", got)
+	}
+}
