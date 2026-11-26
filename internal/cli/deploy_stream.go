@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/rvben/shinyhub/internal/deployevent"
+	"github.com/rvben/shinyhub/internal/deployfail"
 )
 
 func resolveDeployFormat() (outputFormat, error) {
@@ -161,7 +162,7 @@ func consumeDeployEvents(resp *http.Response, format outputFormat, out, errOut i
 			if status == http.StatusConflict && event.FailureKind == "capacity" {
 				return nil, &fleetCapacityError{msg: fmt.Sprintf("deploy deferred: %s", event.Message), retryable: event.CapacityRetryable, retryAfter: time.Duration(event.RetryAfterSeconds) * time.Second}
 			}
-			err := &httpStatusError{Status: status, msg: fmt.Sprintf("deploy failed during %s: %s", phase, event.Message)}
+			err := withDeployFailureHint(&httpStatusError{Status: status, msg: fmt.Sprintf("deploy failed during %s: %s", phase, event.Message)}, status, deployfail.Kind(event.FailureKind))
 			if format == formatNDJSON {
 				_, code := statusKind(status)
 				return nil, &ExitCodeError{Code: code, Err: err, Reported: true}

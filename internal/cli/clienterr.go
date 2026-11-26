@@ -70,8 +70,10 @@ func httpError(token, op string, resp *http.Response, body []byte) error {
 			msg:    "CLI credential was rejected - it may have expired or been revoked; run `shinyhub connect` to reconnect",
 		}
 	}
-	return &httpStatusError{
+	// A deploy, draft preview, rollback or restart that fails on the server
+	// states its failure_kind, and the kind decides whether a retry can help.
+	return withDeployFailureHint(&httpStatusError{
 		Status: resp.StatusCode,
 		msg:    fmt.Sprintf("%s (%s): %s", op, resp.Status, unwrapServerError(body, "no error body")),
-	}
+	}, resp.StatusCode, statedDeployFailureKind(body))
 }

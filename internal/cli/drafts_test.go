@@ -3,6 +3,7 @@ package cli
 import (
 	"archive/zip"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -130,4 +131,30 @@ func TestDraftPromotePassesOnlyExplicitDowntime(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A draft preview runs the deploy handler and forwards its failure body, so a
+// preview that fails with a stated failure kind carries the same hint as a
+// deploy, and keeps its kind and exit code.
+func TestDraftPreviewFailureHintsFromStatedFailureKind(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/apps/demo/drafts/draft123/preview" {
+			t.Errorf("unexpected request: %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("X-Shinyhub-Draft-Preview", "demo-draft123")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"error":"deploy failed: boom","failure_kind":"build_failed"}`)
+	}))
+	defer srv.Close()
+	t.Setenv("SHINYHUB_HOST", srv.URL)
+	t.Setenv("SHINYHUB_TOKEN", "shk_test")
+	_, _, err := execCLISplit(t, "drafts", "preview", "demo", "draft123")
+	if err == nil {
+		t.Fatal("expected the preview to fail")
+	}
+	assertDeployFailureEnvelope(t, err, http.StatusInternalServerError,
+		"preview demo-draft123 exists but did not start; retry preview once the cause is fixed: draft (500 Internal Server Error): deploy failed: boom",
+		wantBuildFailedHint)
 }

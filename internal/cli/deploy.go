@@ -535,9 +535,16 @@ func runDeploy(cmd *cobra.Command, args []string, f *deployFlags) error {
 		}
 		fmt.Fprintf(errW, "%s remained %s after deployment; starting it now...\n", slug, state)
 		if _, err := startAppIfNotRunning(cfg, slug); err != nil {
+			hint := fmt.Sprintf("the deployment succeeded; retry with `shinyhub apps start %s`, then `shinyhub apps open %s`", slug, slug)
+			// The start's own hint says whether a retry can clear its
+			// failure, so it leads.
+			var startHint hintedError
+			if errors.As(err, &startHint) && startHint.Hint() != "" {
+				hint = fmt.Sprintf("%s. The deployment succeeded; once the start can succeed, run `shinyhub apps start %s`, then `shinyhub apps open %s`", startHint.Hint(), slug, slug)
+			}
 			return &hintedMsgError{
 				msg:   fmt.Sprintf("%s deployed successfully, but could not be started for --open: %v", slug, err),
-				hint:  fmt.Sprintf("the deployment succeeded; retry with `shinyhub apps start %s`, then `shinyhub apps open %s`", slug, slug),
+				hint:  hint,
 				cause: err,
 			}
 		}

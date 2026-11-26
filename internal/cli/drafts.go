@@ -39,7 +39,7 @@ func draftRequest(cmd *cobra.Command, cfg *cliConfig, method, path string, body 
 	if resp.StatusCode >= 400 {
 		err := httpError(cfg.Token, "draft", resp, data)
 		if preview := resp.Header.Get("X-Shinyhub-Draft-Preview"); preview != "" {
-			return nil, fmt.Errorf("preview %s exists but did not start; configure its environment/data and retry preview: %w", preview, err)
+			return nil, fmt.Errorf("preview %s exists but did not start; retry preview once the cause is fixed: %w", preview, err)
 		}
 		return nil, err
 	}
