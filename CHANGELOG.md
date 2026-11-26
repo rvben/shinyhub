@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.25.9](https://github.com/rvben/shinyhub/compare/v0.25.8...v0.25.9) - 2026-11-26
+
+### Added
+
+- **deploy**: fail a deploy whose producer uv environment cannot be built, before the producer barrier ([3f0639b](https://github.com/rvben/shinyhub/commit/3f0639bd5b90dcefb9c68d83e9a809594686a6ea))
+- **agent**: enforce Bedrock request policies before inference ([d30eab4](https://github.com/rvben/shinyhub/commit/d30eab43a81307be54e0ccd26516ee97b86cb40e))
+
+### Fixed
+
+- **cli**: let apps rollback wait for the server to finish ([038e68d](https://github.com/rvben/shinyhub/commit/038e68dd65f18b6b5d7c1fdbd1bd16cd1080ddfa))
+- **process**: know every value-taking uv run option when reading a launch command ([9f5ab70](https://github.com/rvben/shinyhub/commit/9f5ab70d618d5174c9a640c92fa903e9c6c9c156))
+
 ## [0.25.8](https://github.com/rvben/shinyhub/compare/v0.25.7...v0.25.8) - 2026-11-23
 
 ### Fixed
