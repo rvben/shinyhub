@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.25.10](https://github.com/rvben/shinyhub/compare/v0.25.9...v0.25.10) - 2026-11-27
+
+### Fixed
+
+- **cli**: hint whether a retry can clear a deploy failure ([880ca2c](https://github.com/rvben/shinyhub/commit/880ca2cc17f8036f417a95778830baeeba4dd81b))
+- **deploy**: report a producer check that could not run as a server error ([ef03509](https://github.com/rvben/shinyhub/commit/ef0350924a76bfee8c05d8ca4ed51c33310fac93))
+
 ## [0.25.9](https://github.com/rvben/shinyhub/compare/v0.25.8...v0.25.9) - 2026-11-26
 
 ### Added
