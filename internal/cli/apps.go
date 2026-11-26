@@ -990,7 +990,9 @@ func runAppsRollback(cmd *cobra.Command, args []string, f *rollbackFlags) error 
 	if bodyReader != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := httpClient.Do(req)
+	// A rollback rebuilds the target's environment and runs its producers
+	// before it answers, which can take as long as a deploy.
+	resp, err := streamClient.Do(req)
 	if err != nil {
 		return err
 	}

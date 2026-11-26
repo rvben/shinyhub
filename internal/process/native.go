@@ -18,6 +18,7 @@ import (
 
 	gops "github.com/shirou/gopsutil/v4/process"
 
+	"github.com/rvben/shinyhub/internal/fsx"
 	"github.com/rvben/shinyhub/internal/sandbox"
 )
 
@@ -111,10 +112,40 @@ func RemoveSharedMountLink(dataDir, sourceSlug string) error {
 	return nil
 }
 
+// keepDataEntryAbsent returns what an environment-only launch must run when it
+// ends. The launch leaves the bundle's data entry as it found it, and a uv
+// configured to cache or build under data/ would otherwise create a real
+// directory there, where the first launch with app data needs to place the
+// persistent data link. So a data entry that was absent before the launch is
+// removed again afterwards; one that existed is left alone, and so is a
+// symlink, which is the persistent data link another launch of the bundle
+// placed meanwhile.
+func keepDataEntryAbsent(p StartParams) func() error {
+	if !p.EnvironmentOnly || p.Dir == "" {
+		return func() error { return nil }
+	}
+	entry := filepath.Join(p.Dir, "data")
+	if _, err := os.Lstat(entry); !errors.Is(err, fs.ErrNotExist) {
+		return func() error { return nil }
+	}
+	return func() error {
+		if info, err := os.Lstat(entry); err != nil || info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if err := fsx.RemoveAll(entry); err != nil {
+			return fmt.Errorf("remove the data entry the environment setup created: %w", err)
+		}
+		return nil
+	}
+}
+
 // applySharedMounts reconciles the complete desired set, including an empty
 // set. This also cleans old worker-local links on the next cold start. Native
 // read-only remains a convention; Docker enforces it with read-only binds.
 func applySharedMounts(p StartParams) error {
+	if p.EnvironmentOnly {
+		return nil
+	}
 	dataDir := p.AppDataPath
 	if dataDir == "" {
 		dataDir = filepath.Join(p.Dir, "data")
@@ -1063,6 +1094,15 @@ func (r *NativeRuntime) placeJobInCgroup(p StartParams, pid int) func() {
 // RunOnce blocks until the process exits or ctx is cancelled. On ctx cancel,
 // the process group receives SIGTERM, then SIGKILL after a 10-second grace.
 func (r *NativeRuntime) RunOnce(ctx context.Context, p StartParams, logWriter io.Writer) (ExitInfo, error) {
+	restore := keepDataEntryAbsent(p)
+	info, err := r.runOneShot(ctx, p, logWriter)
+	if restoreErr := restore(); err == nil && restoreErr != nil {
+		return ExitInfo{}, restoreErr
+	}
+	return info, err
+}
+
+func (r *NativeRuntime) runOneShot(ctx context.Context, p StartParams, logWriter io.Writer) (ExitInfo, error) {
 	if len(p.Command) == 0 {
 		return ExitInfo{}, fmt.Errorf("command must not be empty")
 	}

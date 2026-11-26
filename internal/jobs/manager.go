@@ -1811,29 +1811,19 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 		// Non-fatal — proceed with the run. The streaming endpoint will fall back gracefully.
 	}
 
-	// Build env vars, decrypting secrets. Secret values are partitioned into
-	// secretEnv so the runtime can deliver them out of band; non-secret values
-	// stay in env. Decryption fails closed (see appenv.Resolve): running the job
-	// with a ciphertext or missing secret would silently misbehave instead of
-	// surfacing a key/rotation problem, and app startup fails closed the same way.
-	envVars, err := m.store.ListAppEnvVars(app.ID)
+	// Secret values are partitioned into secretEnv so the runtime can deliver
+	// them out of band; non-secret values stay in env.
+	plan, err := m.planLaunch(sched, app, deployment)
 	if err != nil {
+		var setup *launchSetupError
+		if errors.As(err, &setup) && setup.logLine != "" {
+			fmt.Fprintln(logFile, setup.logLine)
+		}
+		slog.Error("schedule run: plan launch", "schedule", sched.ID, "run", runID, "err", err)
 		m.finishRun(sched, runID, "failed", nil, false)
 		return
 	}
-	env, secretEnv, err := appenv.Resolve(envVars, m.secretsKey)
-	if err != nil {
-		fmt.Fprintf(logFile, "shinyhub: %v\n", err)
-		slog.Error("schedule run: secret decrypt failed", "schedule", sched.ID, "run", runID, "err", err)
-		m.finishRun(sched, runID, "failed", nil, false)
-		return
-	}
-	env, secretEnv, err = appenv.WithBundle(env, secretEnv, deployment.BundleDir)
-	if err != nil {
-		fmt.Fprintf(logFile, "shinyhub: resolve bundle env: %v\n", err)
-		m.finishRun(sched, runID, "failed", nil, false)
-		return
-	}
+	env, secretEnv, jobTier, rt := plan.env, plan.secretEnv, plan.tier, plan.rt
 	if v, ok := m.runSpans.Load(runID); ok {
 		// Platform OTEL_* defaults go first so per-app values win under
 		// last-occurrence-wins.
@@ -1869,13 +1859,6 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 		})
 	}
 
-	// Parse command from JSON.
-	var cmd []string
-	if err := json.Unmarshal([]byte(sched.CommandJSON), &cmd); err != nil {
-		m.finishRun(sched, runID, "failed", nil, false)
-		return
-	}
-
 	// Build app data dir.
 	appDataPath := filepath.Join(m.appDataDir, app.Slug)
 	if err := os.MkdirAll(appDataPath, 0o750); err != nil {
@@ -1885,37 +1868,16 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 
 	bundleDir := deployment.BundleDir
 
-	// Jobs run on the lowest-indexed placement tier so they execute on the
-	// same runtime that serves replica 0 of the app. A single replica is
-	// used as the fallback count so ExpandPlacement never errors on apps
-	// with no explicit placement.
-	assignments, err := process.ExpandPlacement(app.PlacementMap(), m.tierOrder, 1, m.defaultTier)
-	if err != nil {
-		fmt.Fprintf(logFile, "shinyhub: resolve job tier: %v\n", err)
+	cmd, setupErr := m.instrumentCommand(bundleDir, plan.cmd, jobTier)
+	if setupErr != nil {
+		fmt.Fprintln(logFile, setupErr.logLine)
 		m.finishRun(sched, runID, "failed", nil, false)
 		return
 	}
-	jobTier := m.defaultTier
-	if len(assignments) > 0 {
-		jobTier = assignments[0].Tier
-	}
-	rt := m.procMgr.RuntimeForTier(jobTier)
-	if m.traceCfg.Enabled {
-		cmd, _, err = deploy.InstrumentPythonCommand(bundleDir, cmd, m.traceCfg.AutoInstrumentApps,
-			m.traceCfg.AutoInstrumentExtraPackages, m.procMgr.HostPreparesDepsFor(jobTier))
-		if err != nil {
-			fmt.Fprintln(logFile, "shinyhub: resolve job instrumentation: invalid manifest")
-			m.finishRun(sched, runID, "failed", nil, false)
-			return
-		}
-	}
 
 	if schedulePublishesData(sched, trigger) {
-		// A producer publishes behind locks that only processes inheriting the
-		// server's descriptors can honour, whatever the app's worker isolation.
-		inheritor, ok := rt.(process.LifetimeFileInheritor)
-		if !ok || !inheritor.InheritsLifetimeFiles() {
-			fmt.Fprintf(logFile, "shinyhub: data-producing schedules need a local native tier whose processes inherit the server's publication and consumer-lifetime locks; tier %q does not\n", jobTier)
+		if err := producerTierError(rt, jobTier); err != nil {
+			fmt.Fprintln(logFile, err.logLine)
 			m.finishRun(sched, runID, "failed", nil, false)
 			return
 		}
@@ -1985,6 +1947,22 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	params.Env, params.SecretEnv = tracing.MergeResourceAttributes(params.Env, params.SecretEnv)
 	params.JobSchedule = sched.Name
 
+	// A `uv run` command gets its environment built before it starts, on a
+	// runtime whose uv cache outlives a run and when the command keeps uv's
+	// cache, so a dependency that cannot be installed fails a run that has
+	// started no command and written nothing.
+	if rt.HostPreparesDeps() {
+		if probe, ok := process.UVRunEnvironmentProbe(params.Command, slices.Concat(process.SanitizedEnv(), params.Env, params.SecretEnv), bundleDir); ok && probe.NotChecked == "" && probe.OfflineCommand != nil {
+			command, status := m.buildRunEnvironment(runCtx, rt, params, probe, logFile, runID)
+			if command == nil {
+				m.finishRun(sched, runID, status, nil, false)
+				m.pruneCacheAfterRun(app)
+				return
+			}
+			params.Command = command
+		}
+	}
+
 	// Run the command.
 	var logWriter io.Writer = logFile
 	info, runErr := rt.RunOnce(runCtx, params, logWriter)
@@ -2027,8 +2005,13 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 	}
 
 	m.finishRun(sched, runID, status, exitCode, schedulePublishesData(sched, trigger))
-	// A run can pin a deployment the app has since moved past; once it ends,
-	// that activation's cache may have no user left.
+	m.pruneCacheAfterRun(app)
+}
+
+// pruneCacheAfterRun releases the result cache namespaces a finished run may
+// have been the last user of: a run can pin a deployment the app has since
+// moved past.
+func (m *Manager) pruneCacheAfterRun(app *db.App) {
 	if cacheRoot, _ := m.procMgr.AppCache(); cacheRoot != "" {
 		if removed, err := storage.PruneAppCache(cacheRoot, m.store, app.Slug, app.ID); err != nil {
 			slog.Warn("result cache: prune after schedule run failed", "slug", app.Slug, "err", err)
@@ -2036,6 +2019,158 @@ func (m *Manager) execute(ctx context.Context, sched *db.Schedule, app *db.App, 
 			slog.Info("result cache: released namespaces", "slug", app.Slug, "deployment_ids", removed)
 		}
 	}
+}
+
+// buildRunEnvironment builds the uv environment of a run's `uv run` command
+// before the command starts: from uv's cache alone first, and through the
+// package index only when the cache lacks something, so a run whose
+// environment the deploy already built does not depend on the index being
+// up. The setup runs as the command would, but with no app data, shared
+// mounts, result cache or publication locks: it starts no app code and can
+// write no data. It returns the command to start: offline once an offline
+// setup has succeeded, since uv can then serve it from the cache, and as
+// declared when only the index could build the environment and the cache
+// still cannot serve it (uv configuration can keep it from caching). A nil
+// command means none may start, and status is the run's final status.
+func (m *Manager) buildRunEnvironment(ctx context.Context, rt process.Runtime, params process.StartParams, probe process.UVRunProbe, log io.Writer, runID int64) (command []string, status string) {
+	setup := params
+	setup.AppDataPath, setup.SharedMounts, setup.LifetimeFiles = "", nil, nil
+	setup.AppCachePath, setup.AppCacheMaxMB = "", 0
+	setup.EnvironmentOnly = true
+	built := func(info process.ExitInfo, err error) bool {
+		return err == nil && !info.Signaled && info.Code == 0
+	}
+
+	// The offline attempt's output matters only when it is the last one.
+	offlineOut := &tailBuffer{limit: producerCheckOutputLimit}
+	online := !slices.Equal(probe.OfflineArgv, probe.Argv)
+	setup.Command = probe.OfflineArgv
+	var offlineLog io.Writer = log
+	if online {
+		offlineLog = offlineOut
+	}
+	info, err := rt.RunOnce(ctx, setup, offlineLog)
+	if built(info, err) {
+		return probe.OfflineCommand, ""
+	}
+	if online && ctx.Err() == nil {
+		fmt.Fprintln(log, "shinyhub: the uv cache does not hold this command's environment; building it through the package index")
+		setup.Command = probe.Argv
+		if info, err = rt.RunOnce(ctx, setup, log); built(info, err) {
+			setup.Command = probe.OfflineArgv
+			if info, err = rt.RunOnce(ctx, setup, io.Discard); built(info, err) {
+				return probe.OfflineCommand, ""
+			}
+			if ctx.Err() == nil {
+				fmt.Fprintln(log, "shinyhub: the uv cache cannot serve this command's environment offline; running the command as declared")
+				return params.Command, ""
+			}
+		}
+	} else if online {
+		_, _ = io.WriteString(log, offlineOut.String())
+	}
+	if err != nil {
+		fmt.Fprintf(log, "shinyhub: environment setup failed: %v\n", err)
+	}
+	fmt.Fprintln(log, "shinyhub: the command's uv environment could not be built, so the command was not started")
+	switch ctx.Err() {
+	case context.DeadlineExceeded:
+		return nil, "timed_out"
+	case context.Canceled:
+		return nil, m.cancelStatus(runID)
+	}
+	return nil, "failed"
+}
+
+// launchPlan is the part of a schedule run's launch that depends only on the
+// schedule, the app and the deployment: what execute and the candidate
+// producer environment check resolve the same way, so the check probes the
+// environment the run will get.
+type launchPlan struct {
+	// cmd is the schedule's command as declared, before instrumentation.
+	cmd            []string
+	env, secretEnv []string
+	tier           string
+	rt             process.Runtime
+}
+
+// launchSetupError is a launch that failed before any process started.
+// logLine is what the run log says about it, empty when it says nothing.
+type launchSetupError struct {
+	logLine string
+	err     error
+}
+
+func (e *launchSetupError) Error() string {
+	if e.logLine != "" {
+		return strings.TrimPrefix(e.logLine, "shinyhub: ")
+	}
+	return e.err.Error()
+}
+
+func (e *launchSetupError) Unwrap() error { return e.err }
+
+// planLaunch resolves the run's environment, with secrets decrypted, its
+// command and its tier. Decryption fails closed (see appenv.Resolve): running
+// the job with a ciphertext or missing secret would silently misbehave
+// instead of surfacing a key/rotation problem, and app startup fails closed
+// the same way.
+func (m *Manager) planLaunch(sched *db.Schedule, app *db.App, deployment *db.Deployment) (*launchPlan, error) {
+	envVars, err := m.store.ListAppEnvVars(app.ID)
+	if err != nil {
+		return nil, &launchSetupError{err: fmt.Errorf("list app env vars: %w", err)}
+	}
+	env, secretEnv, err := appenv.Resolve(envVars, m.secretsKey)
+	if err != nil {
+		return nil, &launchSetupError{logLine: fmt.Sprintf("shinyhub: %v", err), err: err}
+	}
+	env, secretEnv, err = appenv.WithBundle(env, secretEnv, deployment.BundleDir)
+	if err != nil {
+		return nil, &launchSetupError{logLine: fmt.Sprintf("shinyhub: resolve bundle env: %v", err), err: err}
+	}
+	var cmd []string
+	if err := json.Unmarshal([]byte(sched.CommandJSON), &cmd); err != nil {
+		return nil, &launchSetupError{err: fmt.Errorf("parse schedule command: %w", err)}
+	}
+	// Jobs run on the lowest-indexed placement tier so they execute on the
+	// same runtime that serves replica 0 of the app. A single replica is
+	// used as the fallback count so ExpandPlacement never errors on apps
+	// with no explicit placement.
+	assignments, err := process.ExpandPlacement(app.PlacementMap(), m.tierOrder, 1, m.defaultTier)
+	if err != nil {
+		return nil, &launchSetupError{logLine: fmt.Sprintf("shinyhub: resolve job tier: %v", err), err: err}
+	}
+	tier := m.defaultTier
+	if len(assignments) > 0 {
+		tier = assignments[0].Tier
+	}
+	return &launchPlan{cmd: cmd, env: env, secretEnv: secretEnv, tier: tier, rt: m.procMgr.RuntimeForTier(tier)}, nil
+}
+
+// instrumentCommand adds the platform's Python auto-instrumentation to cmd
+// when tracing is on (deploy.InstrumentPythonCommand).
+func (m *Manager) instrumentCommand(bundleDir string, cmd []string, tier string) ([]string, *launchSetupError) {
+	if !m.traceCfg.Enabled {
+		return cmd, nil
+	}
+	out, _, err := deploy.InstrumentPythonCommand(bundleDir, cmd, m.traceCfg.AutoInstrumentApps,
+		m.traceCfg.AutoInstrumentExtraPackages, m.procMgr.HostPreparesDepsFor(tier))
+	if err != nil {
+		return nil, &launchSetupError{logLine: "shinyhub: resolve job instrumentation: invalid manifest", err: err}
+	}
+	return out, nil
+}
+
+// producerTierError refuses a data-producing run on a tier whose processes
+// cannot hold the server's publication and consumer-lifetime locks: a
+// producer publishes behind locks that only processes inheriting the
+// server's descriptors can honour, whatever the app's worker isolation.
+func producerTierError(rt process.Runtime, tier string) *launchSetupError {
+	if inheritor, ok := rt.(process.LifetimeFileInheritor); ok && inheritor.InheritsLifetimeFiles() {
+		return nil
+	}
+	line := fmt.Sprintf("shinyhub: data-producing schedules need a local native tier whose processes inherit the server's publication and consumer-lifetime locks; tier %q does not", tier)
+	return &launchSetupError{logLine: line, err: errors.New(strings.TrimPrefix(line, "shinyhub: "))}
 }
 
 func (m *Manager) servingRunStillCurrent(sched *db.Schedule, app *db.App, deployment *db.Deployment, runID int64, trigger string) bool {

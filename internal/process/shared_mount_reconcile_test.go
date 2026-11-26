@@ -154,3 +154,34 @@ func TestDockerRuntimeRunOnce_SharedMountRevocation(t *testing.T) {
 		}
 	}
 }
+
+// A launch that only builds the command's environment gets no mounts, and
+// it must not read that as a revocation: the shared links the app's own
+// workers read from stay in place. The plain launch after it is the control
+// proving an empty set does revoke.
+func TestNativeEnvironmentOnlyLaunchLeavesSharedMounts(t *testing.T) {
+	rt := NewNativeRuntime()
+	bundle, source := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "marker"), []byte("source bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	p := StartParams{Dir: bundle, Slug: "consumer", Command: []string{"sh", "-c", "cat data/shared/source/marker"}, SharedMounts: []SharedMount{{SourceSlug: "source", HostPath: source}}}
+	var out bytes.Buffer
+	if info, err := rt.RunOnce(context.Background(), p, &out); err != nil || info.Code != 0 || out.String() != "source bytes" {
+		t.Fatalf("initial read: %+v, %v, %q", info, err, out.String())
+	}
+	setup := StartParams{Dir: bundle, Slug: "consumer", Command: []string{"sh", "-c", "true"}, EnvironmentOnly: true}
+	if info, err := rt.RunOnce(context.Background(), setup, &out); err != nil || info.Code != 0 {
+		t.Fatalf("environment launch: %+v, %v", info, err)
+	}
+	if content, err := os.ReadFile(filepath.Join(bundle, "data", "shared", "source", "marker")); err != nil || string(content) != "source bytes" {
+		t.Fatalf("environment launch removed the shared link: %q %v", content, err)
+	}
+	setup.EnvironmentOnly = false
+	if info, err := rt.RunOnce(context.Background(), setup, &out); err != nil || info.Code != 0 {
+		t.Fatalf("plain launch: %+v, %v", info, err)
+	}
+	if _, err := os.Lstat(filepath.Join(bundle, "data", "shared", "source")); !os.IsNotExist(err) {
+		t.Fatalf("control: plain launch with no mounts kept the link: %v", err)
+	}
+}

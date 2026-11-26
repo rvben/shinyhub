@@ -219,6 +219,12 @@ type StartParams struct {
 	// overrides; until then secret values are NOT hidden from ecs:DescribeTasks.
 	SecretEnv   []string
 	AppDataPath string // host path to per-app data dir; empty disables data-dir wiring in runtime
+	// EnvironmentOnly marks a one-shot launch that only builds the command's
+	// environment. It gets no app data and the runtime leaves the bundle's
+	// data link and shared mounts as they are: the launch must neither
+	// create nor reconcile them, since the bundle's `data` can be the live
+	// persistent data dir whose shared links consumers are using.
+	EnvironmentOnly bool
 	// AppCachePath is the host path of this activation's result cache
 	// namespace, and AppCacheMaxMB its size bound. An empty path leaves the
 	// cache unwired: the app sees no SHINYHUB_CACHE_DIR and caches in memory.

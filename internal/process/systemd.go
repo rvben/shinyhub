@@ -266,7 +266,12 @@ func (r *SystemdRuntime) RunOnce(ctx context.Context, p StartParams, out io.Writ
 	if err := applySharedMounts(p); err != nil {
 		return ExitInfo{}, err
 	}
-	return r.runOnce(ctx, p, "job", out)
+	restore := keepDataEntryAbsent(p)
+	info, err := r.runOnce(ctx, p, "job", out)
+	if restoreErr := restore(); err == nil && restoreErr != nil {
+		return ExitInfo{}, restoreErr
+	}
+	return info, err
 }
 func (r *SystemdRuntime) runOnce(ctx context.Context, p StartParams, kind string, out io.Writer) (ExitInfo, error) {
 	p.GuardUntilAcknowledged = false

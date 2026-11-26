@@ -154,7 +154,7 @@ Ordinary manifests retain their existing reconciliation semantics.
 | `env` | table of strings | Plaintext variables belonging to this deployment, available during builds, hooks, producers and worker startup. Merges over server-managed env by key; wake and rollback retain their bundle's values. At most 100 keys, uppercase POSIX names, values up to 64 KiB; `PORT` and `SHINYHUB_*` are reserved. Use server-managed secret env for credentials. |
 | `command` | array of strings | Launch-command override. See [`[app] command`](#app-command) below. |
 | `startup_timeout_seconds` | int 1..3600 | Readiness deadline for deploy, wake, scale, rollback, and `shinyhub run`; default 120 seconds. Read at boot and not stored in the database. |
-| `build_timeout_seconds` | int 30..7200 | Host-side uv/renv dependency-build deadline; default 900 seconds. Read at build time and inert for Docker runtimes. |
+| `build_timeout_seconds` | int 30..7200 | Host-side uv/renv dependency-build deadline; default 900 seconds. Read at build time and inert for Docker runtimes. Also bounds the environment check of a `uv run` deploy-triggered producer (see [Deploy-triggered data convergence](schedules.md#deploy-triggered-data-convergence)). |
 | `readiness_path` | absolute HTTP path | Path polled before a process becomes routable; default `/`. Queries and fragments are rejected. See [Readiness](#app-readiness). |
 | `readiness_status` | int 100..599 | Require this exact response status. When omitted, any 2xx or 3xx response is healthy. See [Readiness](#app-readiness). |
 | `identity_headers` | bool | Per-app identity-forwarding toggle. See [`[app] identity_headers`](#app-identity_headers) below. |
