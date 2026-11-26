@@ -1722,6 +1722,26 @@ func TestAppsRollback_WaitPolls(t *testing.T) {
 	}
 }
 
+// A rollback answers only once it has rebuilt the target's environment and
+// run its producers, so the short deadline of ordinary requests must not
+// bound it.
+func TestAppsRollback_OutlastsTheShortRequestDeadline(t *testing.T) {
+	prev := httpClient
+	httpClient = &apiClient{&http.Client{Timeout: 100 * time.Millisecond}}
+	t.Cleanup(func() { httpClient = prev })
+	setupCLITestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/apps/demo/rollback" {
+			time.Sleep(400 * time.Millisecond)
+			_, _ = w.Write([]byte(`{"status":"running","slug":"demo"}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	})
+	if _, err := execCLI(t, "apps", "rollback", "demo"); err != nil {
+		t.Fatalf("a rollback that takes longer than the short request deadline failed: %v", err)
+	}
+}
+
 func TestAppsRollback_SurfacesScheduleConvergence(t *testing.T) {
 	setupCLITestHandler(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/api/apps/demo/rollback" {
