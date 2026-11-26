@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
+	"github.com/rvben/shinyhub/internal/deployevent"
 	"github.com/rvben/shinyhub/internal/schedulespec"
 )
 
@@ -261,6 +263,13 @@ func (s *Server) convergePrestartAndFenceConsumer(
 			return nil, errors.New("deploy-triggered producer runner unavailable")
 		}
 		if !*producerBarrierEntered {
+			// The barrier is not entered only when the first plan had no
+			// producer, so none of these was checked: fail one whose
+			// environment cannot be built while the failure path still
+			// restores the previous release.
+			if _, err := s.checkCandidateProducerEnvironments(context.Background(), plan.producers, app, deployment, func(deployevent.Event) {}); err != nil {
+				return nil, err
+			}
 			if err := s.store.MarkDeploymentProducerBarrierEntered(deployment.ID); err != nil {
 				return nil, fmt.Errorf("record pre-start producer barrier: %w", err)
 			}

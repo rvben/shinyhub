@@ -207,3 +207,52 @@ func TestNativeRuntime_RunOnce_SymlinksSharedMounts(t *testing.T) {
 		t.Fatalf("expected 'ok', got %q", buf.String())
 	}
 }
+
+// An environment-only launch leaves the bundle's data entry as it found it:
+// one it created (a uv configured to cache under data/, say) is removed, so
+// the first launch with app data can still place the persistent data link.
+// An entry that existed is left alone, as is a symlink (the persistent data
+// link another launch placed meanwhile), and a launch with app data keeps what
+// it wrote, which is the control proving the command does create data/.
+func TestNativeRuntime_RunOnce_EnvironmentOnlyLeavesTheDataEntryAsFound(t *testing.T) {
+	rt := NewNativeRuntime()
+	write := []string{"sh", "-c", "mkdir -p data/uv-cache && touch data/uv-cache/x"}
+	link := []string{"sh", "-c", "mkdir -p ../live && ln -s ../live data"}
+	for _, tc := range []struct {
+		name            string
+		command         []string
+		environmentOnly bool
+		existing        bool
+		wantData        bool
+	}{
+		{"created by the setup", write, true, false, false},
+		{"existing entry", write, true, true, true},
+		{"link placed meanwhile", link, true, false, true},
+		{"launch with app data", write, false, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "bundle")
+			if err := os.Mkdir(dir, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if tc.existing {
+				if err := os.Mkdir(filepath.Join(dir, "data"), 0o750); err != nil {
+					t.Fatal(err)
+				}
+			}
+			p := StartParams{Slug: "x", Dir: dir, Command: tc.command, EnvironmentOnly: tc.environmentOnly}
+			if info, err := rt.RunOnce(context.Background(), p, &bytes.Buffer{}); err != nil || info.Code != 0 {
+				t.Fatalf("RunOnce = %+v, %v", info, err)
+			}
+			_, err := os.Lstat(filepath.Join(dir, "data"))
+			if got := err == nil; got != tc.wantData {
+				t.Fatalf("data entry present = %v, want %v (%v)", got, tc.wantData, err)
+			}
+			if tc.existing {
+				if _, err := os.Stat(filepath.Join(dir, "data", "uv-cache", "x")); err != nil {
+					t.Fatalf("existing entry lost what the launch wrote: %v", err)
+				}
+			}
+		})
+	}
+}

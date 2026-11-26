@@ -3366,6 +3366,14 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		}
 		result, err = s.deployRun(prepared)
 		if err == nil && len(prestartPlan.producers) > 0 {
+			// Fail a producer whose environment cannot be built while the
+			// failure path still restores the previous release: past the
+			// barrier its failure quarantines the app.
+			var warnings []string
+			warnings, err = s.checkCandidateProducerEnvironments(r.Context(), prestartPlan.producers, app, pendingDep, deployResponse.event)
+			manifestSummary.Warnings = append(manifestSummary.Warnings, warnings...)
+		}
+		if err == nil && len(prestartPlan.producers) > 0 {
 			// Commit the crash-recovery fence before admitting any producer. A hard
 			// process loss from this point must quarantine the app rather than boot
 			// the previous consumer against potentially replaced shared data.
@@ -4273,7 +4281,6 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "deploy-triggered producer runner unavailable")
 		return
 	}
-
 	if s.proxy != nil {
 		s.proxy.Deregister(slug)
 		s.proxy.SetGenerationActivationToken(slug, pendingDep.ID, pendingDep.ActivationToken)
@@ -4336,6 +4343,14 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
+		}
+		if err == nil && len(prestartPlan.producers) > 0 {
+			// The target's environment was built when it was deployed, but
+			// uv's cache and the package index may have moved on since; fail a
+			// producer that can no longer build it while the failure path
+			// still restores the release being rolled back from. A rollback
+			// has no event stream, and the check logs what it skipped.
+			_, err = s.checkCandidateProducerEnvironments(r.Context(), prestartPlan.producers, app, pendingDep, func(deployevent.Event) {})
 		}
 		if err == nil && len(prestartPlan.producers) > 0 && !producerBarrierEntered {
 			if markErr := s.store.MarkDeploymentProducerBarrierEntered(pendingDep.ID); markErr != nil {

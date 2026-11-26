@@ -48,6 +48,28 @@ shinyhub schedule add fetch \
 > the app itself is launched). A bare `python <script>` can fail with
 > `executable file not found` because `python` is not on `PATH`. The Docker
 > runtime runs the command inside the app image, where `python` is present.
+>
+> On the native runtime a `uv run` command gets its environment built before
+> the command starts. ShinyHub first runs the same `uv run` options with the
+> server's `true` in place of the command and `--offline`, so an environment
+> uv already cached (by the deploy's build, the deploy's producer check, or an
+> earlier run) needs no package index. Only when the cache lacks it does the
+> setup go through the index, and the log says so; the offline setup then runs
+> again to confirm the cache now serves it. The command runs with `--offline`
+> once an offline setup has succeeded. When the cache still cannot serve the
+> environment offline (a uv config that disables the cache, say), the command
+> runs as declared, and the log says so. An environment that cannot be built
+> fails the run with uv's diagnostic before the command starts, so the run
+> wrote nothing and is not treated as a possible partial data write. Code that
+> itself calls uv or pip still uses the network as usual. A command uv does
+> not launch, or a `uv run` the setup cannot reproduce exactly (see below),
+> runs as declared. So does one that needs the network at every launch: it
+> disables uv's cache (`--no-cache` or `UV_NO_CACHE`), asks uv to refresh,
+> upgrade or reinstall, or reads `--with-requirements` from a URL. Only the
+> command line counts for that: `upgrade = true` or `reinstall = true` in a uv
+> config is not read, so such a command runs offline from the cache, and one
+> that must upgrade at every run says `--upgrade` on the command. ShinyHub
+> does not retry a failed setup; the next scheduled run tries again.
 
 ### Removing or renaming manifest schedules
 
@@ -562,6 +584,50 @@ Semantics:
   `first_deploy` intentionally accepts its lifetime bootstrap publication. If a producer begins and
   the deploy later fails, ShinyHub leaves the app stopped instead of reviving an
   older consumer against data that may already have changed format.
+- **Environment check before the producer barrier.** A producer whose command is
+  `uv run` resolves its own environment when it starts, and a failure there
+  would happen past the point where the app is quarantined. So after the deploy
+  or rollback has built the candidate and before any producer runs, ShinyHub
+  builds each such producer's environment in the candidate bundle: it runs the
+  same `uv run` options with the server's `true` in place of the command, with
+  the producer's env vars and runtime and no access to app data (the bundle's
+  data link and shared mounts are left as they are). This includes a producer
+  that only becomes due while the deploy converges, because another writer
+  published in the meantime. A requirement set uv cannot resolve or install
+  fails the deploy like any failed build, with uv's own diagnostic and
+  `failure_kind` `build_failed` (`runtime_missing` when uv itself is absent). No
+  producer runs, nothing is quarantined, and the previous version serves again.
+  A deploy with producers stops the running version for its build, so it is
+  restarted, as after any failed build. This matters most when the deploy's own
+  build does not prepare the producer's dependencies: a bundle with an explicit
+  `[app] command`, an R app with a Python producer, and
+  `--with`/`--with-requirements` overlays that only the producer uses. Like a
+  run, the check first tries to build the environment offline from uv's cache,
+  so an unreachable package index does not fail a deploy or rollback whose
+  environment is already cached. The check fills the bundle's uv cache, so the
+  producer run that follows builds its environment offline from it (see "Running
+  Python on the native runtime" above). A producer that does not launch uv is
+  not checked. Nor is one that launches a uv of its own (a relative path or a
+  file in the bundle), which the check does not start, or a `uv run` the check
+  cannot reproduce exactly: `uvx`, `--script`, a script with inline dependencies
+  or its own nested project or `.python-version`, an option the check does not
+  know, a requirements include or `--find-links` named through a `${VAR}`
+  reference, or a requirements file or script that is not an ordinary file. Nor
+  is one whose environment would be built outside the bundle or from the app's
+  data, which the check does not get: a `--directory`, `--project`,
+  `UV_PROJECT_ENVIRONMENT` or (with `--active`) `VIRTUAL_ENV` outside the
+  bundle, or, under its `data/`, a Python script target, a path option (or its
+  `UV_ENV_FILE`, `UV_CACHE_DIR`, `UV_CONFIG_FILE` or `UV_FIND_LINKS` twin), a
+  local `--with` path, a requirements file it includes, a `--find-links`
+  directory or `UV_PROJECT_ENVIRONMENT` (`UV_WORKING_DIR` and `UV_PROJECT` count
+  as the options, a `file://` URL counts as its path, and a relative
+  `UV_PROJECT_ENVIRONMENT` counts from the bundle root). Server env vars a
+  launch inherits (`SHINYHUB_APP_ENV_ALLOW`) count too, below the app's own.
+  Such a producer is deployed with a warning in the deploy result saying it was
+  not checked, as is one whose resolution outlives the bundle's
+  `build_timeout_seconds`. The check runs to completion even when the deploying
+  client disconnects, like the build. `deploy-preflight` and `fleet plan` do not
+  run the check, since it needs the built candidate.
 - **Durable desired state.** Each promoted deployment records one convergence
   obligation for every persisted enabled policy, including API-created
   schedules and schedules retained when absent from a later manifest. Pending

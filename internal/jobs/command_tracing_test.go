@@ -55,8 +55,14 @@ func TestScheduledPythonCommandsHonorInstrumentationPolicy(t *testing.T) {
 				}
 				waitEnded(t, rec, 1)
 			}
-			if f.rt.calls != 1 {
-				t.Fatalf("job executed %d times", f.rt.calls)
+			// A command uv launches gets its environment built in one
+			// runtime call before the command runs in another.
+			want := 1
+			if params.Command[0] == "uv" {
+				want = 2
+			}
+			if f.rt.calls != want {
+				t.Fatalf("runtime calls = %d, want %d: the job ran more than once", f.rt.calls, want)
 			}
 		})
 	}

@@ -42,13 +42,16 @@ type manifestFakeRuntime struct {
 	producerEntered  chan struct{}
 	producerBlock    chan struct{}
 	producerErr      error
-	provider         string
-	signalFailures   map[int]error
-	signalCalls      map[int]int
-	serveTraffic     bool
-	servers          map[int]*httptest.Server
-	holdStarted      chan struct{}
-	holdRelease      chan struct{}
+	// runOnceHook, when set, answers a RunOnce whose command it claims instead
+	// of the default producer behaviour.
+	runOnceHook    func(process.StartParams, io.Writer) (claimed bool, info process.ExitInfo, err error)
+	provider       string
+	signalFailures map[int]error
+	signalCalls    map[int]int
+	serveTraffic   bool
+	servers        map[int]*httptest.Server
+	holdStarted    chan struct{}
+	holdRelease    chan struct{}
 }
 
 func newManifestFakeRuntime() *manifestFakeRuntime {
@@ -135,7 +138,15 @@ func (f *manifestFakeRuntime) Stats(_ context.Context, _ process.RunHandle) (*fl
 	return nil, 0, nil
 }
 
-func (f *manifestFakeRuntime) RunOnce(ctx context.Context, p process.StartParams, _ io.Writer) (process.ExitInfo, error) {
+func (f *manifestFakeRuntime) RunOnce(ctx context.Context, p process.StartParams, w io.Writer) (process.ExitInfo, error) {
+	f.mu.Lock()
+	hook := f.runOnceHook
+	f.mu.Unlock()
+	if hook != nil {
+		if claimed, info, err := hook(p, w); claimed {
+			return info, err
+		}
+	}
 	f.mu.Lock()
 	f.events = append(f.events, "producer:"+p.ContentDigest)
 	f.producerCommands = append(f.producerCommands, append([]string(nil), p.Command...))

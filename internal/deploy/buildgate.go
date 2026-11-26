@@ -89,3 +89,13 @@ func init() { activeBuildGate.Store(newBuildGate(0)) }
 // queued at the previous gate finish under it; only new builds see the new
 // limit.
 func SetMaxConcurrentBuilds(limit int) { activeBuildGate.Store(newBuildGate(limit)) }
+
+// AcquireBuildSlot takes a slot of the host-wide build gate for dependency
+// work outside a deploy's own build, such as resolving a producer's
+// environment before the deploy commits to it, so that work counts against
+// the same limit as the builds it competes with. It blocks while the gate is
+// full and returns the context's error if the context ends first. The
+// returned release must be called exactly once.
+func AcquireBuildSlot(ctx context.Context) (release func(), err error) {
+	return activeBuildGate.Load().acquire(ctx, buildProgressInterval, nil)
+}
