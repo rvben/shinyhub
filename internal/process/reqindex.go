@@ -441,6 +441,10 @@ var uvRunValueOptions = map[string]bool{
 	"--config-setting": true, "--no-build-isolation-package": true,
 	"--no-build-package": true, "--no-binary-package": true,
 	"--refresh-package": true, "-p": true, "--python": true,
+	"-w": true, "--no-editable-package": true, "--python-platform": true,
+	"--upgrade-group": true, "--prerelease-package": true,
+	"--exclude-newer-package": true, "--no-sources-package": true,
+	"--config-settings-package": true,
 }
 
 // uvRunHasNoIndex reports whether uv itself already receives --no-index:

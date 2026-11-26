@@ -182,6 +182,8 @@ func TestRequirementsLaunch_NoIndexReachesTheCommand(t *testing.T) {
 			[]string{"uv", "run", "--no-index", "--", "app.py", "--no-index"}},
 		{"after a run option value", []string{"uv", "run", "-p", "3.12", "--with-requirements", "requirements.txt", "--no-index", "app.py"},
 			[]string{"uv", "run", "-p", "3.12", "--with-requirements", "requirements.txt", "--no-index", "app.py"}},
+		{"after the short form of --with", []string{"uv", "run", "-w", "six", "--no-index", "app.py"},
+			[]string{"uv", "run", "-w", "six", "--no-index", "app.py"}},
 	}
 	for _, c := range cases {
 		argv, _, err := RequirementsLaunch(dir, c.argv, nil)
