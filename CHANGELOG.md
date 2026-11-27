@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.25.12](https://github.com/rvben/shinyhub/compare/v0.25.11...v0.25.12) - 2026-11-27
+
+### Fixed
+
+- **api**: hold a redeploy on a worker left without an owner after the cleanup wait ([59fd29a](https://github.com/rvben/shinyhub/commit/59fd29a7cc8098e11dfc326f5c52c560c4768c34))
+
 ## [0.25.11](https://github.com/rvben/shinyhub/compare/v0.25.10...v0.25.11) - 2026-11-27
 
 ### Fixed
