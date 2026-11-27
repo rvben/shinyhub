@@ -2650,7 +2650,9 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// process cleanup. Known generations retain independent retirement owners;
 	// grouped spawn must remain available throughout these waits.
 	if s.proxy != nil {
-		if active, err := s.store.GetActiveDeploymentGeneration(app.ID); err == nil {
+		// The serving deployment is resolved as the check under the lock
+		// resolves it, so the two judge the same version.
+		if active, err := s.store.GetServingDeployment(app.ID); err == nil {
 			rows, err := s.store.ListDeploymentReplicas(app.ID)
 			mode, policyErr := s.servingIsolation(app)
 			// Elastic workers of the serving deployment are recorded in the
@@ -2665,12 +2667,12 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 				writeInternal(w, r, "inspect generation cleanup", err)
 				return
 			}
-			if s.hasUnownedGenerationRows(r.Context(), slug, rows, active.DeploymentID, elastic) {
+			if s.hasUnownedGenerationRows(r.Context(), slug, rows, active.ID, elastic) {
 				if pending, err := s.store.HasPendingDeployment(app.ID); err != nil || pending {
 					writeError(w, http.StatusConflict, "another deployment is pending; working version preserved")
 					return
 				}
-				if err := s.waitForPreviousGeneration(r.Context(), app, active.DeploymentID, elastic); err != nil {
+				if err := s.waitForPreviousGeneration(r.Context(), app, active.ID, elastic); err != nil {
 					if !errors.Is(err, errGenerationWaitExpired) && r.Context().Err() == nil {
 						writeInternal(w, r, "inspect generation cleanup", err)
 						return
@@ -2681,6 +2683,9 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+	}
+	if s.beforeDeployLock != nil {
+		s.beforeDeployLock(slug)
 	}
 	// Serialize the mutation phase so a concurrent restart/rollback/stop on
 	// the same slug can't tear down the pool we are about to bring up.
@@ -2967,16 +2972,20 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	groupedHandoff := targetIsolation == "grouped"
 	generationHandoff := liveUpgrade
 	unsupportedReason := ""
-	cleanupPending := false
+	// The wait before the lock made this check without holding it, so a worker
+	// can have lost its owner since. It is repeated here on the same terms,
+	// whatever the app's state: a deploy that only prepares a stopped app still
+	// clears the worker ledger before it publishes.
+	cleanupPending := prevActive != nil && s.proxy != nil &&
+		s.hasUnownedGenerationRows(r.Context(), slug, durableGenerationRows, prevActive.ID, previousElastic)
 	if liveUpgrade {
 		switch {
 		case s.clustered:
 			unsupportedReason = "parallel generation handoff is not yet supported in clustered mode"
 		case s.proxy == nil || s.manager == nil:
 			unsupportedReason = "parallel generation handoff is unavailable"
-		case s.hasUnownedGenerationRows(r.Context(), slug, durableGenerationRows, prevActive.ID, previousElastic):
+		case cleanupPending:
 			unsupportedReason = "a previous generation still has pending process cleanup"
-			cleanupPending = true
 		case producerBarrierEntered || prestartPlan.deploymentRepairRequired || len(prestartPlan.producers) > 0:
 			unsupportedReason = prestartPlan.downtimeReason(manifest, slug)
 		case !supportedHandoffIsolation(currentIsolation) || !supportedHandoffIsolation(targetIsolation):
@@ -3086,7 +3095,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		inUse = s.proxy.PoolInUse(slug, idleStopFirstQuiet)
 		idleStopFirst = inUse == ""
 	}
-	mustDrain := predecessorRetiring ||
+	mustDrain := predecessorRetiring || cleanupPending ||
 		!generationHandoff && s.proxy != nil && (s.proxy.HasDrainingGeneration(slug) || s.proxy.HasRelaySessions(slug, 0))
 	if liveUpgrade && !generationHandoff && !allowDowntime && !idleStopFirst {
 		if s.metrics != nil {
@@ -3109,12 +3118,20 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if mustDrain {
-		_ = s.store.FailDeploymentWithReason(pendingDep.ID, "stop-first deploy cannot replace independently draining generations")
+		reason := "stop-first deploy cannot replace independently draining generations"
+		message := "working versions preserved: a stop-first deploy must wait for all previous generations to retire"
+		if cleanupPending {
+			// A worker left without an owner after the wait above is held
+			// back here the same way the wait holds it: retry once it stops.
+			reason = "a previous generation still has pending process cleanup"
+			message = "working version preserved: " + reason + "; retry once its processes have stopped"
+		}
+		_ = s.store.FailDeploymentWithReason(pendingDep.ID, reason)
 		// Nothing changed under the caller and a later retry succeeds, so this
 		// carries the deferral marker: without it a client reads the 409 as a
 		// revision race and tells the operator to re-plan.
 		markGenerationRetiring(w)
-		writeError(w, http.StatusConflict, "working versions preserved: a stop-first deploy must wait for all previous generations to retire")
+		writeError(w, http.StatusConflict, message)
 		return
 	}
 	if liveUpgrade && !generationHandoff && !idleStopFirst {
