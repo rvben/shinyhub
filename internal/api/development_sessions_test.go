@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -170,5 +172,76 @@ func TestDevelopmentAppCreationConflictIsAtomicAndSanitized(t *testing.T) {
 	}
 	if _, err := store.GetProject("must-not-leak"); !errors.Is(err, db.ErrProjectNotFound) {
 		t.Fatalf("project survived failed request: %v", err)
+	}
+}
+
+// An expired app whose cleanup fails keeps its tombstone for startup
+// reconciliation. The reaper must report that deferral, not a removal.
+func TestDevelopmentAppReaperReportsDeferredCleanup(t *testing.T) {
+	srv, store := newTestServer(t)
+	hash, _ := testHashPassword("pass")
+	if err := store.CreateUser(db.CreateUserParams{Username: "dev", PasswordHash: hash, Role: "developer"}); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := store.GetUserByUsername("dev")
+	token, _ := auth.IssueJWT(u.ID, u.Username, u.Role, "test-secret")
+	sessionID := "fedcba9876543210fedcba9876543210"
+	body, _ := json.Marshal(map[string]any{
+		"slug": "scratch-defer", "name": "Scratch defer", "access": "private",
+		"development_session_id": sessionID,
+		"development_target":     db.DevelopmentTargetEphemeral,
+		"expires_at":             time.Now().UTC().Add(15 * time.Minute),
+	})
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, authedRequest(t, http.MethodPost, "/api/apps", body, token))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d: %s", rec.Code, rec.Body.String())
+	}
+	app, err := store.GetAppBySlug("scratch-defer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A looping apps dir fails the bundle cleanup even as root.
+	loop := filepath.Join(t.TempDir(), "loop")
+	if err := os.Symlink(loop, loop); err != nil {
+		t.Fatal(err)
+	}
+	srv.Config().Storage.AppsDir = loop
+	if err := store.MarkEphemeralApp(app.ID, sessionID, time.Now().UTC().Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go srv.RunDevelopmentAppReaper(ctx, 5*time.Millisecond)
+	deadline := time.Now().Add(time.Second)
+	var events []db.AuditEvent
+	for time.Now().Before(deadline) {
+		events, err = store.ListAuditEvents("development_app_expired", 10, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(events) > 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	if len(events) != 1 {
+		t.Fatalf("development_app_expired events = %d, want 1", len(events))
+	}
+	got, err := store.GetAppBySlug("scratch-defer")
+	if err != nil || got.Status != "deleting" {
+		t.Fatalf("app after failed cleanup = %+v, err=%v; want the tombstone kept", got, err)
+	}
+	var detail map[string]string
+	if err := json.Unmarshal([]byte(events[0].Detail), &detail); err != nil {
+		t.Fatalf("audit detail %q: %v", events[0].Detail, err)
+	}
+	if detail["development_session_id"] != sessionID {
+		t.Errorf("audit detail session = %q, want %q", detail["development_session_id"], sessionID)
+	}
+	if !strings.Contains(detail["cleanup_deferred"], "deferred cleanup") {
+		t.Errorf("audit detail = %q, want the deferred cleanup recorded", events[0].Detail)
 	}
 }

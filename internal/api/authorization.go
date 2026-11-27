@@ -276,6 +276,33 @@ func (s *Server) jitOAuthRole() string {
 }
 
 func (s *Server) requireManageApp(w http.ResponseWriter, r *http.Request, slug string) (*db.App, bool) {
+	app, ok := s.authorizeManageApp(w, r, slug)
+	if !ok || refuseTombstonedMutation(w, r, app) {
+		return nil, false
+	}
+	return app, true
+}
+
+// refuseTombstonedMutation answers 409 and reports true when r would change an
+// app that carries the 'deleting' tombstone. Such an app accepts reads and
+// DELETEs: the app DELETE finishes the deletion, and the DELETE of a draft or
+// a sub-resource only removes what the deletion removes anyway. Anything else
+// (a stop, a restart, a deploy, an ownership change) would bring a
+// half-deleted app back or move it off the tombstone, and startup
+// reconciliation would then never complete the deletion.
+func refuseTombstonedMutation(w http.ResponseWriter, r *http.Request, app *db.App) bool {
+	if app.Status != "deleting" {
+		return false
+	}
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodDelete:
+		return false
+	}
+	writeError(w, http.StatusConflict, "app is being deleted; send DELETE again to finish the deletion")
+	return true
+}
+
+func (s *Server) authorizeManageApp(w http.ResponseWriter, r *http.Request, slug string) (*db.App, bool) {
 	if target, _ := r.Context().Value(draftPreviewKey{}).(string); target != "" && target == slug {
 		app, err := s.store.GetAppBySlug(slug)
 		if err != nil {

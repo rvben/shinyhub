@@ -4579,7 +4579,8 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 // answers 404 unless it is still the app authorized as authorizedID. The
 // slug alone does not pin identity: the app may have been deleted and
 // another created under the same slug while the request queued, and the
-// caller was never authorized to act on that one.
+// caller was never authorized to act on that one. Like requireManageApp it
+// refuses a mutation of an app the deletion has tombstoned in the meantime.
 func (s *Server) rereadAuthorizedApp(w http.ResponseWriter, r *http.Request, slug string, authorizedID int64) (*db.App, bool) {
 	app, err := s.store.GetAppBySlug(slug)
 	if err != nil && !errors.Is(err, db.ErrNotFound) {
@@ -4588,6 +4589,9 @@ func (s *Server) rereadAuthorizedApp(w http.ResponseWriter, r *http.Request, slu
 	}
 	if err != nil || app.ID != authorizedID {
 		writeError(w, http.StatusNotFound, "not found")
+		return nil, false
+	}
+	if refuseTombstonedMutation(w, r, app) {
 		return nil, false
 	}
 	return app, true
@@ -4833,11 +4837,14 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 	release := s.acquireDeployLock(slug)
 	defer release()
 
-	// app was loaded by requireManageApp before acquireDeployLock. Checking the
-	// precondition here (under the deploy lock) serializes it against in-flight
-	// deploys and restarts; the only residual race is two concurrent DELETEs on
-	// the same slug, which the deleting-tombstone and ErrNotFound guard already
-	// makes safe. The pre-lock snapshot is acceptable for this use case.
+	// requireManageApp loaded app before the deploy lock, so a deploy may have
+	// landed while this request queued. The precondition is checked against
+	// the app as it is now, or an If-Match naming the old revision would
+	// delete the new one.
+	app, ok = s.rereadAuthorizedApp(w, r, slug, app.ID)
+	if !ok {
+		return
+	}
 	if checkAppPreconditions(w, r, app) {
 		return
 	}
@@ -5186,7 +5193,7 @@ func (s *Server) handleSetAppAccess(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleTransferAppOwnership(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
 	app, u, ok := s.requireViewApp(w, r, slug)
-	if !ok {
+	if !ok || refuseTombstonedMutation(w, r, app) {
 		return
 	}
 	// A service credential's shared principal may own the app, but ownership is

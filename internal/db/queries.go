@@ -22,6 +22,11 @@ import (
 
 var ErrNotFound = errors.New("not found")
 
+// ErrAppDeleting reports a status change refused because the app carries the
+// 'deleting' tombstone. The tombstone is terminal: only removing the row ends
+// it, so startup reconciliation can always finish an interrupted deletion.
+var ErrAppDeleting = errors.New("app is being deleted")
+
 var (
 	ErrReservedUsername        = errors.New("username is reserved")
 	ErrServiceAccountCollision = errors.New("reserved deployment identity is already used by a human account")
@@ -1935,7 +1940,7 @@ type UpdateAppStatusParams struct {
 	LastError string
 }
 
-func updateAppStatusRow(exec func(string, ...any) (sql.Result, error), p UpdateAppStatusParams) error {
+func updateAppStatusRow(q Execer, p UpdateAppStatusParams) error {
 	recovery := "producer_recovery_status = ''"
 	if p.OperatorStopped && p.Status != "stopped" {
 		return fmt.Errorf("operator stop intent requires stopped status")
@@ -1957,7 +1962,10 @@ func updateAppStatusRow(exec func(string, ...any) (sql.Result, error), p UpdateA
 		query = `UPDATE apps SET status = ?, ` + recovery + `, last_error = ?, crashed_at = 0, updated_at = CURRENT_TIMESTAMP WHERE slug = ?`
 		args = []any{p.Status, p.LastError, p.Slug}
 	}
-	result, err := exec(query, args...)
+	if p.Status != "deleting" {
+		query += ` AND status <> 'deleting'`
+	}
+	result, err := q.Exec(query, args...)
 	if err != nil {
 		return fmt.Errorf("update app status: %w", err)
 	}
@@ -1966,6 +1974,21 @@ func updateAppStatusRow(exec func(string, ...any) (sql.Result, error), p UpdateA
 		return fmt.Errorf("app status rows affected: %w", err)
 	}
 	if n == 0 {
+		if p.Status == "deleting" {
+			return ErrNotFound
+		}
+		// The guarded write matched nothing: the app is either gone or
+		// tombstoned. Tell them apart, and never report a failed read as
+		// either, since a caller acts differently on each.
+		var current string
+		switch err := q.QueryRow(`SELECT status FROM apps WHERE slug = ?`, p.Slug).Scan(&current); {
+		case errors.Is(err, sql.ErrNoRows):
+			return ErrNotFound
+		case err != nil:
+			return fmt.Errorf("read app status after refused update: %w", err)
+		case current == "deleting":
+			return fmt.Errorf("set app %q %s: %w", p.Slug, p.Status, ErrAppDeleting)
+		}
 		return ErrNotFound
 	}
 	return nil
@@ -2031,7 +2054,7 @@ func updateAppStatusTx(tx writeTx, p UpdateAppStatusParams) (*appStatusTransitio
 		}
 		return nil, fmt.Errorf("read app status: %w", err)
 	}
-	if err := updateAppStatusRow(tx.Exec, p); err != nil {
+	if err := updateAppStatusRow(tx, p); err != nil {
 		return nil, err
 	}
 	if p.Reason == "" {
@@ -2042,7 +2065,7 @@ func updateAppStatusTx(tx writeTx, p UpdateAppStatusParams) (*appStatusTransitio
 
 func (s *Store) UpdateAppStatus(p UpdateAppStatusParams) error {
 	if p.Reason == "" {
-		return updateAppStatusRow(s.db.Exec, p)
+		return updateAppStatusRow(s.db, p)
 	}
 	tx, err := s.d.beginWrite(context.Background(), s.rawDB(), 0)
 	if err != nil {

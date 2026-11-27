@@ -55,22 +55,34 @@ func (s *Server) reapExpiredDevelopmentApps(ctx context.Context, now time.Time) 
 		if !ok {
 			continue
 		}
-		auditDetail, _ := json.Marshal(map[string]string{
+		fields := map[string]string{
 			"development_session_id": candidate.SessionID,
 			"expires_at":             candidate.ExpiresAt.UTC().Format(time.RFC3339Nano),
-		})
+		}
+		// A non-empty detail means deleteAppLocked tombstoned the app but could
+		// not finish its cleanup; startup reconciliation completes it. Report
+		// that rather than a removal that has not happened.
+		if detail != "" {
+			fields["cleanup_deferred"] = detail
+		}
+		auditDetail, _ := json.Marshal(fields)
 		s.store.LogAuditEvent(db.AuditEventParams{
 			Action:       "development_app_expired",
 			ResourceType: "app",
 			ResourceID:   candidate.Slug,
 			Detail:       string(auditDetail),
 		})
-		slog.Info("expired development app removed", "slug", candidate.Slug, "session", candidate.SessionID, "expires_at", candidate.ExpiresAt, "detail", detail)
+		if detail != "" {
+			slog.Warn("expired development app tombstoned; cleanup deferred to startup reconciliation", "slug", candidate.Slug, "session", candidate.SessionID, "expires_at", candidate.ExpiresAt, "detail", detail)
+			continue
+		}
+		slog.Info("expired development app removed", "slug", candidate.Slug, "session", candidate.SessionID, "expires_at", candidate.ExpiresAt)
 	}
 }
 
 // reapExpiredDevelopmentApp deletes one expired ephemeral app and reports
-// whether it did. The candidate was listed before the deploy lock was taken,
+// whether it was deleted or tombstoned; a non-empty detail names the cleanup
+// that was deferred to startup reconciliation. The candidate was listed before the deploy lock was taken,
 // so the app is read again under it: an app deleted in the meantime is
 // skipped, and so is a different app that has since taken its slug.
 func (s *Server) reapExpiredDevelopmentApp(ctx context.Context, candidate db.ExpiredEphemeralApp) (string, bool) {
