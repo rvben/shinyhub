@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Experimental generated views: with `register(..., view=AgentView(...))` and
+  `agent_view_output(id)`, the chat agent can compose up to six live tiles
+  (stat, bar, line, table) on the app page from measures and dimensions the
+  app declares. The app's query callback computes every value inside a Shiny
+  output, so tiles follow page inputs without another chat turn.
+
 ## [0.5.4](https://github.com/rvben/shinyhub/compare/shinyhub-agent-v0.5.3...shinyhub-agent-v0.5.4) - 2026-11-27
 
 ### Fixed

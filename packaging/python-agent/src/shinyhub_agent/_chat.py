@@ -17,6 +17,7 @@ from ._runtime import bounded_int
 from ._session import REQUEST_ID, VERSION
 from ._suggestions import FOLLOWUP_TOOL, clean_followups
 from ._usage import usage_context
+from ._views import AgentView, ViewRegistry
 
 logger = logging.getLogger(__name__)
 Send = Callable[[dict[str, Any]], Awaitable[None]]
@@ -47,6 +48,8 @@ class ChatSession:
         undo_timeout: float | None = None,
         followups: int = 0,
         charts: bool = False,
+        view: AgentView | None = None,
+        install_view: Callable[[Any], Awaitable[None]] | None = None,
         history_exchanges: int = 6,
         max_answer_chars: int = 8_000,
         usage_metadata: dict[str, str | None] | None = None,
@@ -85,7 +88,15 @@ class ChatSession:
         if not isinstance(charts, bool):
             raise TypeError("charts must be a bool")
         self.charts = ChartRegistry(tools) if charts else None
-        self.tools = self.charts or tools
+        if view is not None and not isinstance(view, AgentView):
+            raise TypeError("view must be an AgentView")
+        if view is not None and not callable(install_view):
+            raise TypeError("install_view must be a callable when a view is enabled")
+        # The view overlay is outermost so chart capture never sees its results.
+        self.views = (
+            ViewRegistry(self.charts or tools, view, install_view) if view else None
+        )
+        self.tools = self.views or self.charts or tools
         self.send = send
         self.nonce = secrets.token_urlsafe(18)
         self.thread_id = secrets.token_urlsafe(18)
@@ -141,7 +152,30 @@ class ChatSession:
             )
             return
         if raw.get("action") == "reset":
-            if not self.lock.locked():
+            # Every reset is answered: the browser holds the composer until then.
+            if self.lock.locked():
+                await emit(
+                    {
+                        "type": "error",
+                        "message": "Wait for the answer to finish, then start a new chat.",
+                    }
+                )
+                return
+            # Removing the view waits for the session, so hold the chat lock:
+            # a question must not start on the conversation being cleared.
+            async with self.lock:
+                if self.views:
+                    try:
+                        await self.views.reset(forget=True)
+                    except Exception:
+                        logger.exception("Agent chat reset failed")
+                        await emit(
+                            {
+                                "type": "error",
+                                "message": "New chat could not start. Try again.",
+                            }
+                        )
+                        return
                 self.history.clear()
                 if self.charts:
                     self.charts.clear()
@@ -289,8 +323,11 @@ class ChatSession:
 
         applied_actions: list[str] = []
 
+        def view_changed() -> bool:
+            return bool(self.views and self.views.changed)
+
         def remember_applied_actions() -> None:
-            if not applied_actions and not chart_context:
+            if not applied_actions and not chart_context and not view_changed():
                 return
             self.history.extend(
                 [
@@ -319,6 +356,8 @@ class ChatSession:
             self.suggestions_suppressed = False
             if self.charts:
                 self.charts.begin_turn()
+            if self.views:
+                self.views.begin_turn()
             usage_token = usage_context.set(
                 {**self.usage_metadata, "turn_id": secrets.token_urlsafe(16)}
             )
@@ -326,7 +365,7 @@ class ChatSession:
                 await emit({"type": "status", "text": "Reading your question"})
                 async for event in self.agent.run(
                     message.strip(),
-                    self.history,
+                    self._turn_history(),
                     self.tools,
                     self.approve,
                     thread_id=self.thread_id,
@@ -391,6 +430,13 @@ class ChatSession:
                 if not answer.strip() and chart_context:
                     answer = "Chart shown below."
                     await emit({"type": "delta", "text": answer})
+                if not answer.strip() and self.views and self.views.changed:
+                    answer = (
+                        "View removed from the page."
+                        if self.views.layout is None
+                        else "View updated on the page."
+                    )
+                    await emit({"type": "delta", "text": answer})
                 if not answer.strip():
                     raise ToolError("empty_answer", "The assistant returned no answer.")
                 self.history.extend(
@@ -442,6 +488,28 @@ class ChatSession:
                     if not future.done():
                         future.cancel()
                     self.pending_approval = None
+
+    def _turn_history(self) -> list[dict[str, str]]:
+        """History for one request, stating the page's current view last.
+
+        The view is read at request time and kept out of stored history: a
+        stored note would age out of bounded history, be cleared by Undo, and
+        contradict the page after a visitor's dismissal. The note leads the
+        final message so a length cut by a backend cannot drop it.
+        """
+        note = self.views.current() if self.views else ""
+        if not note:
+            return self.history
+        if not self.history:
+            return [
+                {"role": "user", "content": "What is on the page?"},
+                {"role": "assistant", "content": note},
+            ]
+        last = self.history[-1]
+        return [
+            *self.history[:-1],
+            {**last, "content": note + "\n\n" + last["content"]},
+        ]
 
     async def approve(self, name: str, arguments: dict[str, Any]) -> Any:
         tool = self.tools.get(name)

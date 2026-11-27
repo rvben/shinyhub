@@ -8,8 +8,10 @@ import shinyhub_agent
 from shiny import App, reactive, render, ui
 from shinyhub_agent import (
     AgentTool,
+    AgentView,
     ToolError,
     agent_dependency,
+    agent_view_output,
     chat_dependency,
     register,
 )
@@ -24,7 +26,37 @@ class StubAgent:
     async def run(self, message, history, tools, approve, *, thread_id):
         if message == "wait":
             await asyncio.Event().wait()
-        if "year" in message.lower():
+        if "dashboard" in message.lower():
+            # A view-only turn: the tiles are the answer, so no text follows.
+            yield {
+                "type": "tool_started",
+                "name": "build_view",
+                "description": "Build view",
+                "readOnly": True,
+            }
+            await tools.execute(
+                "build_view",
+                {
+                    "title": "Sales overview",
+                    "tiles": [
+                        {"kind": "stat", "title": "Total revenue", "measure": "revenue"},
+                        {
+                            "kind": "bar",
+                            "title": "Revenue by region",
+                            "measure": "revenue",
+                            "by": "region",
+                        },
+                        {
+                            "kind": "stat",
+                            "title": "One region",
+                            "measure": "revenue",
+                            "filters": {"region": "North"},
+                        },
+                    ],
+                },
+            )
+            yield {"type": "tool_finished", "name": "build_view", "ok": True}
+        elif "year" in message.lower():
             yield {
                 "type": "tool_started",
                 "name": "set_period",
@@ -53,7 +85,10 @@ app_ui = ui.page_fluid(
     ui.h1("Agent chat fixture"),
     ui.input_select("period", "Period", ["week", "year"]),
     ui.output_text("selected"),
+    agent_view_output("generated"),
 )
+
+REVENUE = {"week": {"North": 4, "South": 6}, "year": {"North": 200, "South": 320}}
 
 
 def server(input, output, session):
@@ -79,6 +114,15 @@ def server(input, output, session):
         period.set(result["previous_period"])
         ui.update_select("period", selected=result["previous_period"])
         return await get_period({})
+
+    def sales(measure, group_by, filters):
+        # Reading the reactive value here is what keeps the tiles live.
+        regions = REVENUE[period.get()]
+        if "region" in filters:
+            regions = {filters["region"]: regions[filters["region"]]}
+        if group_by:
+            return [{"region": name, measure: value} for name, value in regions.items()]
+        return [{measure: sum(regions.values())}]
 
     register(
         session=session,
@@ -115,6 +159,13 @@ def server(input, output, session):
             ),
         ],
         chat=StubAgent(),
+        view=AgentView(
+            output_id="generated",
+            measures={"revenue": "Revenue (EUR)"},
+            dimensions={"region": "Region"},
+            filters={"region": ["North", "South"]},
+            query=sales,
+        ),
     )
 
     @output

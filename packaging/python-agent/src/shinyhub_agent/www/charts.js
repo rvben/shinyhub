@@ -68,9 +68,14 @@
         legend: { orient: "bottom", labelColor: "#45526e", titleColor: "#16203a", labelLimit: 180 } }
     };
   }
-  function valid(chart) {
-    return chart && typeof chart.id === "string" && typeof chart.title === "string" &&
-      chart.title.length <= 160 && ["bar", "line", "area", "scatter"].includes(chart.kind) &&
+  // No model-supplied specs, expressions, links, loaders or embed options.
+  function draw(container, chart) {
+    return vendor.vegaEmbed(container, spec(chart), { actions: false, renderer: "svg", tooltip: true,
+      loader: { load: function () { return Promise.reject(new Error("External chart data is disabled")); },
+        sanitize: function () { return Promise.reject(new Error("Chart URLs are disabled")); } } });
+  }
+  function drawable(chart) {
+    return chart && ["bar", "line", "area", "scatter"].includes(chart.kind) &&
       chart.fields && typeof chart.fields === "object" && !Array.isArray(chart.fields) &&
       Object.keys(chart.fields).length <= 16 &&
       Object.values(chart.fields).every(function (type) { return ["nominal", "quantitative", "temporal"].includes(type); }) &&
@@ -78,6 +83,43 @@
       (!chart.color || Object.hasOwn(chart.fields, chart.color)) &&
       Array.isArray(chart.rows) && chart.rows.length > 0 && chart.rows.length <= 2000 &&
       JSON.stringify(chart).length <= 300000;
+  }
+  function valid(chart) {
+    return chart && typeof chart.id === "string" && typeof chart.title === "string" &&
+      chart.title.length <= 160 && drawable(chart);
+  }
+  // A bare plot for a caller that owns its own frame and lifetime. It is not
+  // counted against the conversation's retained charts.
+  function embed(container, chart) {
+    if (!drawable(chart)) return null;
+    var view, observer, disposed = false, timer, dropped = false;
+    function drop(result) { if (result && !dropped) { dropped = true; result.view.finalize(); } }
+    var ready = new Promise(function (resolve, reject) {
+      timer = setTimeout(function () { reject(new Error("Chart timed out")); }, RENDER_TIMEOUT);
+      var drawing = load().then(function () { return disposed ? null : draw(container, chart); });
+      // A draw that outlives its view or the timeout still has to be released.
+      drawing.then(function (result) { if (disposed) drop(result); }, function () {});
+      drawing.then(resolve, reject);
+    }).then(function (result) {
+      clearTimeout(timer);
+      // The view can be disposed between the draw completing and this handler.
+      if (!result || disposed) { drop(result); return false; }
+      view = result.view;
+      if (window.ResizeObserver) {
+        // The spec fixes the height, so only a width change needs a redraw.
+        var width = container.clientWidth;
+        observer = new ResizeObserver(function () {
+          if (!view || container.clientWidth === width) return;
+          width = container.clientWidth; view.resize().runAsync().catch(function () {});
+        });
+        observer.observe(container);
+      }
+      return true;
+    }, function (error) { clearTimeout(timer); disposed = true; throw error; });
+    return { ready: ready, dispose: function () {
+      disposed = true; clearTimeout(timer); if (observer) observer.disconnect();
+      if (view) { view.finalize(); view = null; }
+    } };
   }
   function create(chart) {
     if (!valid(chart) || instances.has(chart.id)) return null;
@@ -160,7 +202,6 @@
       // Restore first so the expiry message stays in the conversation, even if expanded.
       oldest[1].expire(); oldFigure.replaceWith(expired); instances.delete(oldest[0]);
     }
-    // No model-supplied specs, expressions, links, loaders or embed options.
     function render() {
       var token = ++attempt;
       retry.hidden = true; status.hidden = false; status.textContent = "Loading chart…";
@@ -174,9 +215,7 @@
       load().then(function () {
         if (disposed || token !== attempt) return;
         var renderPlot = node("div"); plot.append(renderPlot);
-        return vendor.vegaEmbed(renderPlot, spec(chart), { actions: false, renderer: "svg", tooltip: true,
-          loader: { load: function () { return Promise.reject(new Error("External chart data is disabled")); },
-            sanitize: function () { return Promise.reject(new Error("Chart URLs are disabled")); } } });
+        return draw(renderPlot, chart);
       }).then(function (result) {
         if (!result) return;
         if (disposed || token !== attempt) { result.view.finalize(); return; }
@@ -188,7 +227,7 @@
     render();
     return figure;
   }
-  window.shinyhubAgentCharts = { create: create, dispose: function (root) {
+  window.shinyhubAgentCharts = { create: create, embed: embed, dispose: function (root) {
     instances.forEach(function (instance, id) {
       if (instance.owns(root) || !instance.element.isConnected) {
         instance.dispose(); instances.delete(id);

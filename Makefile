@@ -264,7 +264,7 @@ test-py-agent-compat:
 test-py-agent: test-py-agent-sdk
 	node packaging/python-agent/tests/bridge.test.cjs
 	@if [ ! -d node_modules/jsdom ]; then npm install --no-audit --no-fund --silent; fi
-	node --test packaging/python-agent/tests/chat.test.cjs packaging/python-agent/tests/charts.test.cjs packaging/python-agent/tests/bridge-approval.test.cjs
+	node --test packaging/python-agent/tests/chat.test.cjs packaging/python-agent/tests/charts.test.cjs packaging/python-agent/tests/views.test.cjs packaging/python-agent/tests/bridge-approval.test.cjs
 
 .PHONY: test-py-runtime benchmark-python-runtime
 

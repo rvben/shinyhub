@@ -116,6 +116,10 @@ Execution revalidates the approved snapshot. Denial or timeout does not run
 the handler. Timeout emits `approval_expired` with the matching `approvalId`;
 late decisions cannot revive that approval. The chat panel's **Stop** and
 **New chat** controls send `action: "cancel"` and `action: "reset"` requests.
+Every reset is answered with its `requestId`: a `reset` event once the
+conversation is cleared, or an `error` event when an answer or Undo is still
+running or the reset failed, in which case the conversation is unchanged. The
+panel keeps the composer's draft unsent until that answer arrives.
 
 For an undoable write, `action_applied` includes a plain-text `receipt`,
 `actionId`, and `undoExpiresIn`: the remaining undo window in seconds when the
@@ -156,6 +160,37 @@ helper's own chat frame.
 `window.shinyhubAgentChat.open()` and `.close()` are idempotent public hooks.
 They return whether chat is available, work with native and fallback panels,
 and never submit questions or approve actions.
+
+## Generated view
+
+A generated view is an ordinary Shiny output, not a custom message. The output
+binding `shinyhub.agentView` binds elements with class `shinyhub-agent-view`
+and receives `{version: 1, view: null}` when there is no view, or
+`{version: 1, view: {title, tiles}}`. A payload with another version, or
+without a `tiles` array, renders nothing and hides the element.
+
+Each tile has `id`, `kind` (`stat`, `bar`, `line`, `table`), `title`, and
+`state`. A tile narrowed by its own filters also has `scope`, an array of
+`[label, value]` string pairs that clients display with the tile in every
+state:
+
+- `ok`: a stat carries `value` (a number or `null`) and `label`; a table
+  carries `columns` (labels) and `rows` (arrays in column order); a chart
+  carries `chart` with `kind`, `x`, `y`, optional `color`, `fields` (label to
+  `nominal`, `quantitative` or `temporal`), and `rows` keyed by label.
+- `empty`: no data for the current selection; no value fields are present.
+- `error`: a plain-text `message` of at most 300 characters. Unexpected
+  exceptions are logged server-side and replaced with a fixed message.
+
+A `null` value is absent data. Clients render it as `n/a`, never as zero or
+blank. Every string is rendered as text. Clients skip a redraw when the
+payload is unchanged.
+
+**Dismiss** sets the input `.shinyhub_agent_view_dismiss` with event priority;
+the value carries no meaning. The server removes the view for that session and
+the output then sends `view: null`. The input is excluded from bookmarks. The
+layout itself is set only by the chat-only `build_view` and `clear_view` tools
+on the server; no browser message can supply a layout or tile data.
 
 ## Compatibility rules
 

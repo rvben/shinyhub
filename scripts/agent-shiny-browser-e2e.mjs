@@ -84,6 +84,69 @@ try {
   await period.selectOption('week');
   await page.locator('.sh-agent-undo').waitFor({ state: 'hidden' });
 
+  // An agent-built view is an ordinary live output: it follows the page with no further chat turn.
+  const generated = page.locator('#generated'), total = generated.locator('.sh-agent-view-value');
+  assert.equal(await generated.locator('article').count(), 0, 'no view before the agent builds one');
+  await ask('Build a dashboard');
+  await page.locator('.sh-agent-assistant').filter({ hasText: 'View updated on the page.' }).waitFor();
+  await generated.locator('h2').filter({ hasText: 'Sales overview' }).waitFor();
+  await total.filter({ hasText: /^10$/ }).waitFor();
+  await generated.locator('.sh-agent-view-plot svg').waitFor();
+  // A tile the agent narrowed shows its scope next to the figure.
+  const narrowed = generated.locator('article[data-tile="tile_3"]');
+  assert.equal(await narrowed.locator('.sh-agent-view-scope').textContent(), 'Only Region: North');
+  assert.equal(await narrowed.locator('.sh-agent-view-value').textContent(), '4');
+  assert.equal(await generated.locator('.sh-agent-view-scope').count(), 1, 'unfiltered tiles carry no scope');
+  // The chart follows its container, not only the window. The drawn width is read from the
+  // SVG itself: CSS can squeeze a stale drawing into a narrower box.
+  const drawn = () => generated.locator('.sh-agent-view-plot svg').first().evaluate((svg) => Number(svg.getAttribute('width')));
+  const wide = await drawn();
+  assert.ok(wide > 320, `the chart fills its container, got ${wide}px`);
+  await generated.evaluate((el) => { el.style.width = '300px'; });
+  await page.waitForFunction(() => {
+    const svg = document.querySelector('#generated .sh-agent-view-plot svg');
+    return svg && Number(svg.getAttribute('width')) <= 300;
+  });
+  await generated.evaluate((el) => { el.style.width = ''; });
+  await page.waitForFunction((width) => {
+    const svg = document.querySelector('#generated .sh-agent-view-plot svg');
+    return svg && Math.abs(Number(svg.getAttribute('width')) - width) < 2;
+  }, wide);
+  // A chart drawn while its container is hidden (a closed tab) takes its width when revealed.
+  await generated.evaluate((el) => { el.style.display = 'none'; });
+  await period.selectOption('year');
+  await total.filter({ hasText: /^520$/ }).waitFor({ state: 'attached' });
+  await generated.locator('.sh-agent-view-plot svg').waitFor({ state: 'attached' });
+  await generated.evaluate((el) => { el.style.display = ''; });
+  await page.waitForFunction((width) => {
+    const svg = document.querySelector('#generated .sh-agent-view-plot svg');
+    return svg && Math.abs(Number(svg.getAttribute('width')) - width) < 2;
+  }, wide);
+  await period.selectOption('week');
+  await total.filter({ hasText: /^10$/ }).waitFor();
+  await generated.locator('.sh-agent-view-plot svg').waitFor();
+  const answers = await page.locator('.sh-agent-assistant').count();
+  await period.selectOption('year');
+  await total.filter({ hasText: /^520$/ }).waitFor();
+  await generated.locator('.sh-agent-view-plot svg').waitFor();
+  assert.equal(await page.locator('.sh-agent-assistant').count(), answers, 'the tiles refreshed without a chat turn');
+  // The open chat panel overlaps the right of the page; click the label itself.
+  await generated.locator('summary').click({ position: { x: 12, y: 12 } });
+  await generated.locator('tbody td').first().waitFor();
+  assert.deepEqual(await generated.locator('tbody td').allTextContents(), ['North', '200', 'South', '320']);
+  // A refresh redraws the tiles; the table the visitor opened stays open with the new rows.
+  await period.selectOption('week');
+  await total.filter({ hasText: /^10$/ }).waitFor();
+  await generated.locator('tbody td').filter({ hasText: /^4$/ }).waitFor();
+  assert.deepEqual(await generated.locator('tbody td').allTextContents(), ['North', '4', 'South', '6']);
+  await page.evaluate(() => window.shinyhubAgentChat.close());
+  await generated.getByRole('button', { name: /Dismiss/ }).click();
+  await generated.locator('article').first().waitFor({ state: 'detached' });
+  assert.equal(await generated.isHidden(), true, 'a dismissed view leaves no empty frame');
+  await page.evaluate(() => window.shinyhubAgentChat.open());
+  await period.selectOption('week');
+  await selected.filter({ hasText: 'Selected: week' }).waitFor();
+
   await ask('wait');
   await page.getByRole('button', { name: 'Stop', exact: true }).waitFor({ state: 'visible' });
   await period.selectOption('week');
@@ -95,7 +158,7 @@ try {
   assert.deepEqual(outbound, [], 'the fixture must not contact an external model');
   assert.ok(!output.includes('Traceback'), output);
   assert.ok(!output.includes('ShinyDeprecationWarning'), output);
-  console.log('PASS installed agent wheel: tool reads, approval, writes, undo, stale undo withdrawal and cancellation');
+  console.log('PASS installed agent wheel: tool reads, approval, writes, undo, stale undo withdrawal, live generated view and cancellation');
 } finally {
   if (browser) await browser.close();
   if (server.exitCode === null && !startupError) {

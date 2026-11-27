@@ -14,6 +14,7 @@ from ._core import AgentTool, ToolError, ToolRegistry
 from ._runtime import bounded_int
 from ._session import VERSION, SessionTools
 from ._suggestions import validate_starters
+from ._views import AgentView, resolve
 
 REQUEST_INPUT = ".shinyhub_agent_request"
 DISCOVER_INPUT = ".shinyhub_agent_discover"
@@ -23,6 +24,7 @@ CHAT_CAPABILITIES_MESSAGE = "shinyhub-agent-chat-capabilities"
 CHAT_EVENT_MESSAGE = "shinyhub-agent-chat-event"
 CHAT_INPUT = ".shinyhub_agent_chat_request"
 CHAT_DECISION_INPUT = ".shinyhub_agent_chat_decision"
+VIEW_DISMISS_INPUT = ".shinyhub_agent_view_dismiss"
 REGISTRATION_MARKER = "_shinyhub_agent_registration"
 logger = logging.getLogger(__name__)
 
@@ -57,10 +59,28 @@ def chat_dependency():
             for src in (
                 "charts.js",
                 "chat.js",
+                "views.js",
             )
         ],
         stylesheet={"href": "chat.css"},
     )
+
+
+def agent_view_output(id: str):
+    """Place the agent-generated view here; pass the same id to AgentView.
+
+    Put it in the static top-level UI. It stays empty until the chat agent
+    builds a view, and brings the chat panel's assets with it.
+    """
+    from htmltools import div
+
+    from ._views import OUTPUT_ID
+
+    if not isinstance(id, str) or not OUTPUT_ID.fullmatch(id):
+        raise ValueError(
+            "id must start with a letter and use letters, digits and underscores"
+        )
+    return div(chat_dependency(), id=id, class_="shinyhub-agent-view")
 
 
 def register(
@@ -73,6 +93,7 @@ def register(
     starters: Sequence[str] | None = None,
     followups: int = 0,
     charts: bool = False,
+    view: AgentView | None = None,
     approval_timeout: float = 30,
     undo_timeout: float | None = None,
     history_exchanges: int = 6,
@@ -89,6 +110,9 @@ def register(
     (None preserves defaults; an empty sequence hides them). followups enables
     up to three experimental, editable, never auto-submitted suggestions on supporting
     chat agents. charts enables experimental chat-only rendering of ChartData results.
+    view enables an experimental agent-composed page view: the chat agent
+    arranges tiles from the AgentView's declared measures and dimensions in the
+    matching agent_view_output(), and the tiles follow the page reactively.
     These settings leave existing apps unchanged by default.
 
     undo_timeout defaults to None, keeping undo until the next write or
@@ -152,7 +176,20 @@ def register(
         raise TypeError("charts must be a bool")
     if charts and chat is None:
         raise ValueError("charts requires a chat agent")
+    if view is not None and not isinstance(view, AgentView):
+        raise TypeError("view must be an AgentView")
+    if view is not None and chat is None:
+        raise ValueError("view requires a chat agent")
     registry = ToolRegistry(tools, executor=execute)
+    view_layout = reactive.value(None)
+
+    async def install_view(layout, commit):
+        async def assign():
+            view_layout.set(layout)
+            commit()
+
+        await execute(assign)
+
     dispatcher = SessionTools(registry, allow_browser_writes=allow_browser_writes)
     chat_session = (
         ChatSession(
@@ -165,6 +202,8 @@ def register(
             max_answer_chars=max_answer_chars,
             followups=followups,
             charts=charts,
+            view=view,
+            install_view=install_view if view is not None else None,
             usage_metadata={
                 "app": os.environ.get("SHINYHUB_APP_SLUG"),
                 **(usage_metadata or {}),
@@ -175,7 +214,13 @@ def register(
     )
     # These transport inputs can contain prompts and tool arguments. Shiny
     # bookmarks serialize dot-prefixed inputs unless explicitly excluded.
-    for input_id in (REQUEST_INPUT, DISCOVER_INPUT, CHAT_INPUT, CHAT_DECISION_INPUT):
+    for input_id in (
+        REQUEST_INPUT,
+        DISCOVER_INPUT,
+        CHAT_INPUT,
+        CHAT_DECISION_INPUT,
+        VIEW_DISMISS_INPUT,
+    ):
         if input_id not in session.bookmark.exclude:
             session.bookmark.exclude.append(input_id)
     setattr(session, REGISTRATION_MARKER, registry)
@@ -402,5 +447,29 @@ def register(
         @reactive.event(input[CHAT_DECISION_INPUT], ignore_none=True)
         def _chat_decision() -> None:
             chat_session.decide(input[CHAT_DECISION_INPUT]())
+
+    if view is not None:
+        from shiny.render.renderer import Renderer
+
+        class _ViewRenderer(Renderer):
+            async def transform(self, value):
+                return value
+
+        # Tiles are queried here, in a tracked context, so the view follows
+        # the page. Shiny would suspend an output it considers hidden, and the
+        # view must stay current wherever the app places it.
+        @session.output(id=view.output_id, suspend_when_hidden=False)
+        @_ViewRenderer
+        def _agent_view():
+            return resolve(
+                view,
+                view_layout(),
+                silent=(SilentException, SilentCancelOutputException),
+            )
+
+        @reactive.effect
+        @reactive.event(input[VIEW_DISMISS_INPUT], ignore_none=True)
+        def _dismiss_view() -> None:
+            launch(chat_session.views.reset)
 
     return registry
