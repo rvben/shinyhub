@@ -20,7 +20,7 @@ func TestHelperBusyForever(t *testing.T) {
 	if os.Getenv("SHINYHUB_CPU_HELPER_BUSY") != "1" {
 		t.Skip("helper process, spawned by the process-group sampling tests")
 	}
-	deadline := time.Now().Add(90 * time.Second)
+	deadline := time.Now().Add(helperLifetime)
 	for time.Now().Before(deadline) {
 	}
 }
@@ -34,7 +34,7 @@ func TestHelperIdleParentBusyChild(t *testing.T) {
 	if os.Getenv("SHINYHUB_CPU_HELPER_PARENT") != "1" {
 		t.Skip("helper process, spawned by the process-group sampling tests")
 	}
-	child := exec.Command(os.Args[0], "-test.run=^TestHelperBusyForever$", "-test.timeout=120s")
+	child := exec.Command(os.Args[0], "-test.run=^TestHelperBusyForever$", helperTimeout)
 	child.Env = append(os.Environ(), "SHINYHUB_CPU_HELPER_BUSY=1")
 	if err := child.Start(); err != nil {
 		t.Fatalf("start busy child: %v", err)
@@ -43,7 +43,7 @@ func TestHelperIdleParentBusyChild(t *testing.T) {
 		_ = child.Process.Kill()
 		_, _ = child.Process.Wait()
 	}()
-	time.Sleep(90 * time.Second)
+	time.Sleep(helperLifetime)
 }
 
 // startIdleParentBusyChild spawns the helper pair in its own process group,
@@ -53,7 +53,7 @@ func TestHelperIdleParentBusyChild(t *testing.T) {
 func startIdleParentBusyChild(t *testing.T) int {
 	t.Helper()
 
-	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperIdleParentBusyChild$", "-test.timeout=120s")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperIdleParentBusyChild$", helperTimeout)
 	cmd.Env = append(os.Environ(), "SHINYHUB_CPU_HELPER_PARENT=1")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
@@ -99,25 +99,23 @@ func countGroupMembers(t *testing.T, pgid int) int {
 	return n
 }
 
-// rootOnlyCPU measures the group leader by itself over d, which is what the
-// sampler used to report for the whole app. Every group test uses it as a
-// negative control: without it, a passing group assertion could just as well be
-// measuring a root that happened to be busy.
-func rootOnlyCPU(t *testing.T, pid int, d time.Duration) float64 {
+// groupMembers lists the PIDs in process group pgid, leader first.
+func groupMembers(t *testing.T, pgid int) []int {
 	t.Helper()
-	root, err := gops.NewProcess(int32(pid))
+	pids, err := gops.Pids()
 	if err != nil {
-		t.Fatalf("open root process %d: %v", pid, err)
+		t.Fatalf("list pids: %v", err)
 	}
-	if _, err := root.Percent(0); err != nil {
-		t.Fatalf("prime root: %v", err)
+	out := []int{pgid}
+	for _, p := range pids {
+		if int(p) == pgid {
+			continue
+		}
+		if g, err := syscall.Getpgid(int(p)); err == nil && g == pgid {
+			out = append(out, int(p))
+		}
 	}
-	time.Sleep(d)
-	pct, err := root.Percent(0)
-	if err != nil {
-		t.Fatalf("root percent: %v", err)
-	}
-	return pct
+	return out
 }
 
 // TestGopsutilSamplerCountsTheWholeProcessGroup is the regression test for what a
@@ -125,8 +123,14 @@ func rootOnlyCPU(t *testing.T, pid int, d time.Duration) float64 {
 // PID, the launcher forks the real interpreter, and sampling the launcher alone
 // reports an app burning a full core as doing nothing, with metrics_available
 // true so nothing downstream can tell the number is meaningless.
+//
+// The expected rate is the group's own CPU time over the sample window, read
+// from the kernel, so the test holds whatever share of a core the host gives
+// the child. The launcher's share of that time is the negative control: it must
+// be small, or a sampler that stops at the root would pass too.
 func TestGopsutilSamplerCountsTheWholeProcessGroup(t *testing.T) {
 	pgid := startIdleParentBusyChild(t)
+	members := groupMembers(t, pgid)
 
 	var s process.GopsutilSampler
 	handle := process.RunHandle{PID: pgid}
@@ -134,26 +138,34 @@ func TestGopsutilSamplerCountsTheWholeProcessGroup(t *testing.T) {
 	if _, err := s.Sample(handle); err != nil {
 		t.Fatalf("priming sample: %v", err)
 	}
+	primedAt := time.Now()
+	groupBefore, rootBefore := cpuTime(t, members...), cpuTime(t, pgid)
 	time.Sleep(2 * time.Second)
 
 	got, err := s.Sample(handle)
 	if err != nil {
 		t.Fatalf("sample: %v", err)
 	}
+	wall := time.Since(primedAt)
+	groupCPU, rootCPU := cpuTime(t, members...)-groupBefore, cpuTime(t, pgid)-rootBefore
 	if got.CPUPercent == nil {
 		t.Fatal("sample reported no rate, but the previous sample primed this group")
 	}
 
-	rootOnly := rootOnlyCPU(t, pgid, 1*time.Second)
-	if rootOnly > 20 {
-		t.Fatalf("negative control failed: the launcher itself read %.1f%%, so this "+
-			"test cannot show that the group total came from its child", rootOnly)
+	want := percentOf(groupCPU, wall)
+	if want < 2 {
+		t.Skipf("the host gave the busy child %.1f%% of a core, too little to tell "+
+			"the group from its launcher", want)
 	}
-
-	if *got.CPUPercent < 50 {
-		t.Errorf("group cpu = %.1f%%, want at least 50%%: this group's child spins on a "+
-			"core for the whole window while its root reads %.1f%%, so a sampler that "+
-			"stops at the root reports a busy app as idle", *got.CPUPercent, rootOnly)
+	if rootCPU*4 > groupCPU {
+		t.Fatalf("negative control failed: the launcher used %s of the group's %s, so "+
+			"this test cannot show that the group total came from its child", rootCPU, groupCPU)
+	}
+	if *got.CPUPercent < 0.6*want || *got.CPUPercent > 1.4*want+2 {
+		t.Errorf("group cpu = %.1f%%, want about %.1f%%, the rate the group's own CPU "+
+			"time gives for the window; its launcher accounts for %.1f%%, so a sampler "+
+			"that stops at the root reports a busy app as idle",
+			*got.CPUPercent, want, percentOf(rootCPU, wall))
 	}
 }
 

@@ -209,7 +209,7 @@ func (s *Server) rollGroupedActivation(ctx context.Context, app *db.App, current
 		}
 		cleaned := s.stopAndForgetCandidate(app.Slug, candidate.ID)
 		if cleaned {
-			_ = s.store.FailDeploymentWithReason(candidate.ID, err.Error())
+			s.failDeployment(candidate.ID, err.Error())
 		}
 		if restarting || !cleaned {
 			return s.activationRepairError(err)
@@ -234,7 +234,7 @@ func (s *Server) rollGroupedActivation(ctx context.Context, app *db.App, current
 		if authority.DeploymentID != candidate.ID {
 			cleaned := s.stopAndForgetCandidate(app.Slug, candidate.ID)
 			if cleaned {
-				_ = s.store.FailDeploymentWithReason(candidate.ID, err.Error())
+				s.failDeployment(candidate.ID, err.Error())
 			}
 			if restarting || !cleaned {
 				return s.activationRepairError(err)
