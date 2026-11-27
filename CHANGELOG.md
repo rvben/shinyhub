@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.25.14](https://github.com/rvben/shinyhub/compare/v0.25.13...v0.25.14) - 2026-11-27
+
+### Added
+
+- **agent**: let the chat agent compose a live view on the app page ([f8fc05c](https://github.com/rvben/shinyhub/commit/f8fc05c7f1f9eca326f9b6426fa2a466ca03bd51))
+
+### Fixed
+
+- **api**: never delete an app that took a deleted app's slug ([d9e006f](https://github.com/rvben/shinyhub/commit/d9e006fd6687bc28d06639ec8656bdc72d9d2d8e))
+- **api**: reopen scheduled jobs when an app deletion is refused ([96ae4ed](https://github.com/rvben/shinyhub/commit/96ae4ede33605e4416e2ecab814a5c05dac56bd7))
+- **api**: stop unowned ledgered workers before forgetting them ([17a58be](https://github.com/rvben/shinyhub/commit/17a58becb57adbe4e867aee082e17195127c3626))
+
 ## [0.25.13](https://github.com/rvben/shinyhub/compare/v0.25.12...v0.25.13) - 2026-11-27
 
 ### Fixed
