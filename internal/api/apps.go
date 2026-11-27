@@ -48,6 +48,18 @@ import (
 // constraint mid-PATCH after sibling fields were already committed.
 const maxStoredReplicas = 1000
 
+// failDeployment ends a pending deployment as failed with reason. The caller
+// is already answering the request, so a failed write cannot change the reply;
+// it is logged because the row then stays pending and every later deploy of
+// the app is refused as "another deployment is pending" until the next server
+// start fails it.
+func (s *Server) failDeployment(id int64, reason string) {
+	if err := s.store.FailDeploymentWithReason(id, reason); err != nil {
+		slog.Error("record deployment failure; the deployment stays pending",
+			"deployment_id", id, "reason", reason, "err", err)
+	}
+}
+
 // deferStopFirst refuses a deploy that would have to stop the working version
 // first, records the refusal on the deployment, and tells the caller what
 // permits it. inUse names the sessions that are the only thing in the way; it
@@ -59,7 +71,7 @@ func (s *Server) deferStopFirst(w http.ResponseWriter, deploymentID int64, reaso
 		reason += "; the app is in use (" + inUse + ")"
 		consent = "retry when it is not in use, or " + consent
 	}
-	_ = s.store.FailDeploymentWithReason(deploymentID, "no-downtime deployment deferred: "+reason)
+	s.failDeployment(deploymentID, "no-downtime deployment deferred: "+reason)
 	w.Header().Set("X-ShinyHub-Conflict", "generation-handoff-deferred")
 	writeError(w, http.StatusConflict, "working version preserved: "+reason+"; "+consent)
 }
@@ -2865,7 +2877,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	producerBarrierEntered := preexistingDeploymentQuarantine
 	if producerBarrierEntered {
 		if err := s.store.MarkDeploymentProducerBarrierEntered(pendingDep.ID); err != nil {
-			_ = s.store.FailDeploymentWithReason(pendingDep.ID, "compatibility quarantine could not be inherited")
+			s.failDeployment(pendingDep.ID, "compatibility quarantine could not be inherited")
 			writeInternal(w, r, "inherit compatibility quarantine", err)
 			return
 		}
@@ -2886,19 +2898,19 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if digestErr != nil || digest == "" {
-		_ = s.store.FailDeploymentWithReason(pendingDep.ID, "bundle content digest could not be established")
+		s.failDeployment(pendingDep.ID, "bundle content digest could not be established")
 		slog.Error("deploy: content digest is required before runtime mutation",
 			"slug", slug, "version", version, "err", digestErr)
 		writeError(w, http.StatusUnprocessableEntity, "bundle content digest could not be established")
 		return
 	}
 	if expected, _ := r.Context().Value(draftDigestKey{}).(string); expected != "" && digest != expected {
-		_ = s.store.FailDeploymentWithReason(pendingDep.ID, "draft bundle changed while copying")
+		s.failDeployment(pendingDep.ID, "draft bundle changed while copying")
 		writeError(w, http.StatusConflict, "draft bundle changed while copying; upload a new draft")
 		return
 	}
 	if err := s.store.SetDeploymentDigest(pendingDep.ID, digest); err != nil {
-		_ = s.store.FailDeploymentWithReason(pendingDep.ID, "bundle content digest could not be persisted")
+		s.failDeployment(pendingDep.ID, "bundle content digest could not be persisted")
 		slog.Error("deploy: content digest persistence is required before runtime mutation",
 			"slug", slug, "version", version, "err", err)
 		writeInternal(w, r, "bundle content digest could not be persisted", err)
@@ -2909,7 +2921,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 
 	prestartPlan, err := s.planPrestartSchedules(app, manifest, digest, bundleDir)
 	if err != nil {
-		_ = s.store.FailDeployment(pendingDep.ID)
+		s.failDeployment(pendingDep.ID, "")
 		writeInternal(w, r, "plan schedule convergence", err)
 		return
 	}
@@ -2925,19 +2937,19 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		defer releaseProducerGates()
 	}
 	if err := s.revalidatePrestartPlan(prestartPlan, digest); err != nil {
-		_ = s.store.FailDeployment(pendingDep.ID)
+		s.failDeployment(pendingDep.ID, "")
 		writeInternal(w, r, "revalidate schedule convergence", err)
 		return
 	}
 	if len(prestartPlan.producers) > 0 && s.jobs == nil {
-		_ = s.store.FailDeployment(pendingDep.ID)
+		s.failDeployment(pendingDep.ID, "")
 		writeError(w, http.StatusServiceUnavailable, "deploy-triggered producer runner unavailable")
 		return
 	}
 
 	currentIsolation, policyErr := s.servingIsolation(app)
 	if policyErr != nil {
-		_ = s.store.FailDeployment(pendingDep.ID)
+		s.failDeployment(pendingDep.ID, "")
 		writeInternal(w, r, "inspect serving policy", policyErr)
 		return
 	}
@@ -2947,13 +2959,13 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	}
 	activeRows, err := s.store.ListReplicas(app.ID)
 	if err != nil {
-		_ = s.store.FailDeploymentWithReason(pendingDep.ID, "current replica state could not be inspected")
+		s.failDeployment(pendingDep.ID, "current replica state could not be inspected")
 		writeInternal(w, r, "inspect current replica state", err)
 		return
 	}
 	durableGenerationRows, err := s.store.ListDeploymentReplicas(app.ID)
 	if err != nil {
-		_ = s.store.FailDeploymentWithReason(pendingDep.ID, "generation cleanup state could not be inspected")
+		s.failDeployment(pendingDep.ID, "generation cleanup state could not be inspected")
 		writeInternal(w, r, "inspect generation cleanup state", err)
 		return
 	}
@@ -3126,7 +3138,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			reason = "a previous generation still has pending process cleanup"
 			message = "working version preserved: " + reason + "; retry once its processes have stopped"
 		}
-		_ = s.store.FailDeploymentWithReason(pendingDep.ID, reason)
+		s.failDeployment(pendingDep.ID, reason)
 		// Nothing changed under the caller and a later retry succeeds, so this
 		// carries the deferral marker: without it a client reads the 409 as a
 		// revision race and tells the operator to re-plan.
@@ -3148,18 +3160,18 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		// native handoff leaves no marker.
 		if _, native := s.manager.RuntimeForTier(s.elasticSpawnTier()).(*process.NativeRuntime); groupedHandoff && !native {
 			if err := s.store.MarkElasticOrphanRisk(app.ID); err != nil {
-				_ = s.store.FailDeploymentWithReason(pendingDep.ID, "persist grouped worker lifetime fence")
+				s.failDeployment(pendingDep.ID, "persist grouped worker lifetime fence")
 				writeInternal(w, r, "persist grouped worker lifetime fence", err)
 				return
 			}
 		}
 		if err := s.recordServingIsolation(app, prevActive); err != nil {
-			_ = s.store.FailDeploymentWithReason(pendingDep.ID, err.Error())
+			s.failDeployment(pendingDep.ID, err.Error())
 			writeError(w, http.StatusConflict, "working version preserved: "+err.Error())
 			return
 		}
 		if err := s.persistDrainingGeneration(app, prevActive); err != nil {
-			_ = s.store.FailDeploymentWithReason(pendingDep.ID, "record current generation before handoff: "+err.Error())
+			s.failDeployment(pendingDep.ID, "record current generation before handoff: "+err.Error())
 			writeError(w, http.StatusConflict, "working version preserved: current generation could not be recorded safely")
 			return
 		}
@@ -3179,7 +3191,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	// runtime mutation; refused, untouched attempts above preserve it.
 	if !keepDown && app.Status == "stopped" {
 		if err := s.store.ClearAppOperatorStopIntent(app.ID); err != nil {
-			_ = s.store.FailDeployment(pendingDep.ID)
+			s.failDeployment(pendingDep.ID, "")
 			writeInternal(w, r, "record activation intent", err)
 			return
 		}
@@ -3217,7 +3229,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	if !generationHandoff {
 		if err := s.confirmAppConsumersStopped(app); err != nil {
 			const consumersReason = "existing consumers could not be confirmed stopped before data publication"
-			_ = s.store.FailDeploymentWithReason(pendingDep.ID, consumersReason)
+			s.failDeployment(pendingDep.ID, consumersReason)
 			_ = s.updateDeployStatus(r, db.UpdateAppStatusParams{PreserveRecoveryIntent: keepHibernated, Slug: slug, Status: "failed", LastError: consumersReason})
 			writeError(w, http.StatusConflict, "existing consumers could not be confirmed stopped; no producer was run")
 			return
@@ -3254,7 +3266,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			return s.applyManifestAppSettings(r, app, manifest.App)
 		}(); err != nil {
 			slog.Error("manifest [app] apply failed", "slug", slug, "err", err)
-			_ = s.store.FailDeployment(pendingDep.ID)
+			s.failDeployment(pendingDep.ID, "")
 			if producerBarrierEntered {
 				_ = s.manager.Stop(slug)
 			} else if !generationHandoff {
@@ -3296,7 +3308,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		}
 		sort.Slice(desired, func(i, j int) bool { return desired[i].Name < desired[j].Name })
 		if err := s.store.StageHandoffSettings(pendingDep.ID, &preManifestApp, app, prestartPlan.previousDeclarations, desired); err != nil {
-			_ = s.store.FailDeploymentWithReason(pendingDep.ID, err.Error())
+			s.failDeployment(pendingDep.ID, err.Error())
 			writeInternal(w, r, "stage handoff configuration", err)
 			return
 		}
@@ -3341,7 +3353,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	if groupedHandoff {
 		floor, floorErr := s.generationSlotFloor(app)
 		if floorErr != nil {
-			_ = s.store.FailDeployment(pendingDep.ID)
+			s.failDeployment(pendingDep.ID, "")
 			writeInternal(w, r, "inspect grouped slot identities", floorErr)
 			return
 		}
@@ -3537,7 +3549,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 				kind = deployfail.ServerError
 			}
 		} else {
-			_ = s.store.FailDeploymentWithReason(pendingDep.ID, reason)
+			s.failDeployment(pendingDep.ID, reason)
 			if declarationRestoreErr != nil {
 				_ = s.updateDeployStatus(r, db.UpdateAppStatusParams{PreserveRecoveryIntent: keepHibernated, Slug: slug, Status: "failed", LastError: diagnostic})
 			}
@@ -3677,7 +3689,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			pid, port := rep.PID, rep.Port
 			if err := s.store.UpsertDeploymentReplica(db.UpsertDeploymentReplicaParams{AppID: app.ID, DeploymentID: pendingDep.ID, Index: rep.Index, PID: &pid, Port: &port, Status: "running", Provider: rep.Provider, Tier: rep.Tier, EndpointURL: rep.EndpointURL, WorkerID: rep.WorkerID, DataGeneration: generation, StartupPeakRSSBytes: rep.StartupPeakRSSBytes}); err != nil {
 				s.stopAndForgetCandidate(slug, pendingDep.ID)
-				_ = s.store.FailDeploymentWithReason(pendingDep.ID, err.Error())
+				s.failDeployment(pendingDep.ID, err.Error())
 				deployResponse.fail(http.StatusInternalServerError, "candidate identity could not be recorded; working version preserved", "", "commit")
 				return
 			}
@@ -3697,7 +3709,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 				slog.Error("deploy: quarantine after replica provenance failure", "slug", slug, "err", qerr)
 			}
 		} else {
-			_ = s.store.FailDeploymentWithReason(pendingDep.ID, reason)
+			s.failDeployment(pendingDep.ID, reason)
 			failedStatus := "stopped"
 			if keepHibernated {
 				failedStatus = "failed"
@@ -3744,7 +3756,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		managerSelected := s.manager.CapturePoolSelection(slug)
 		if activateErr != nil {
 			endHandoff(activateErr)
-			_ = s.store.FailDeploymentWithReason(pendingDep.ID, "candidate failed final activation validation: "+activateErr.Error())
+			s.failDeployment(pendingDep.ID, "candidate failed final activation validation: "+activateErr.Error())
 			s.stopAndForgetCandidate(slug, pendingDep.ID)
 			if s.metrics != nil {
 				s.metrics.RecordGenerationHandoff("candidate_failure")
@@ -3777,7 +3789,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 					deployResponse.fail(http.StatusInternalServerError, "working route was preserved but runtime selection requires startup repair", "", "commit")
 					return
 				}
-				_ = s.store.FailDeploymentWithReason(pendingDep.ID, "new generation could not be published: "+promoteErr.Error())
+				s.failDeployment(pendingDep.ID, "new generation could not be published: "+promoteErr.Error())
 				s.stopAndForgetCandidate(slug, pendingDep.ID)
 				endHandoff(promoteErr)
 				s.recordDeploy("failure")
@@ -4248,7 +4260,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 	producerBarrierEntered := preexistingDeploymentQuarantine
 	if producerBarrierEntered {
 		if err := s.store.MarkDeploymentProducerBarrierEntered(pendingDep.ID); err != nil {
-			_ = s.store.FailDeploymentWithReason(pendingDep.ID, "compatibility quarantine could not be inherited")
+			s.failDeployment(pendingDep.ID, "compatibility quarantine could not be inherited")
 			writeInternal(w, r, "inherit compatibility quarantine", err)
 			return
 		}
@@ -4257,14 +4269,14 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 	pendingDep.Status = db.DeploymentPending
 	if prev.ContentDigest != "" {
 		if err := s.store.SetDeploymentDigest(pendingDep.ID, prev.ContentDigest); err != nil {
-			_ = s.store.FailDeployment(pendingDep.ID)
+			s.failDeployment(pendingDep.ID, "")
 			writeInternal(w, r, "record rollback bundle identity", err)
 			return
 		}
 	}
 	prestartPlan, err := s.planRollbackPrestartSchedules(app, prev.ID, prev.ContentDigest)
 	if err != nil {
-		_ = s.store.FailDeployment(pendingDep.ID)
+		s.failDeployment(pendingDep.ID, "")
 		if errors.Is(err, db.ErrNotFound) {
 			writeError(w, http.StatusConflict, "rollback target predates immutable schedule snapshots; redeploy that version before rolling back to it")
 		} else {
@@ -4284,17 +4296,17 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 		defer releaseProducerGates()
 	}
 	if err := s.revalidatePrestartPlan(prestartPlan, prev.ContentDigest); err != nil {
-		_ = s.store.FailDeployment(pendingDep.ID)
+		s.failDeployment(pendingDep.ID, "")
 		writeInternal(w, r, "revalidate rollback schedule convergence", err)
 		return
 	}
 	if len(prestartPlan.producers) > 0 && prev.ContentDigest == "" {
-		_ = s.store.FailDeployment(pendingDep.ID)
+		s.failDeployment(pendingDep.ID, "")
 		writeError(w, http.StatusConflict, "rollback target predates bundle provenance; redeploy that version before rolling back to it")
 		return
 	}
 	if len(prestartPlan.producers) > 0 && s.jobs == nil {
-		_ = s.store.FailDeployment(pendingDep.ID)
+		s.failDeployment(pendingDep.ID, "")
 		writeError(w, http.StatusServiceUnavailable, "deploy-triggered producer runner unavailable")
 		return
 	}
@@ -4304,7 +4316,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.confirmAppConsumersStopped(app); err != nil {
 		const consumersReason = "existing consumers could not be confirmed stopped before rollback data publication"
-		_ = s.store.FailDeploymentWithReason(pendingDep.ID, consumersReason)
+		s.failDeployment(pendingDep.ID, consumersReason)
 		_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "failed", LastError: consumersReason})
 		writeError(w, http.StatusConflict, "existing consumers could not be confirmed stopped; no rollback producer was run")
 		return
@@ -4335,7 +4347,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 	}
 	if app.Status == "stopped" {
 		if err := s.store.ClearAppOperatorStopIntent(app.ID); err != nil {
-			_ = s.store.FailDeployment(pendingDep.ID)
+			s.failDeployment(pendingDep.ID, "")
 			writeInternal(w, r, "record activation intent", err)
 			return
 		}
@@ -4432,10 +4444,10 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 			// the deployment we rolled back from would be an unsafe inverse skew.
 			_ = s.manager.Stop(slug)
 		} else if declarationRestoreErr == nil {
-			_ = s.store.FailDeployment(pendingDep.ID)
+			s.failDeployment(pendingDep.ID, "")
 			s.restorePreviousPool(r, slug, app, prevActive, diagnostic)
 		} else {
-			_ = s.store.FailDeploymentWithReason(pendingDep.ID, deployFailureMessage(err))
+			s.failDeployment(pendingDep.ID, deployFailureMessage(err))
 			_ = s.updateDeployStatus(r, db.UpdateAppStatusParams{Slug: slug, Status: "failed", LastError: diagnostic})
 			_ = s.manager.Stop(slug)
 		}
@@ -4487,7 +4499,7 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 				slog.Error("rollback: quarantine after replica provenance failure", "slug", slug, "err", qerr)
 			}
 		} else {
-			_ = s.store.FailDeploymentWithReason(pendingDep.ID, reason)
+			s.failDeployment(pendingDep.ID, reason)
 			_ = s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "stopped"})
 		}
 		writeInternal(w, r, "rollback consumer provenance could not be persisted", replicaPersistenceErr)
