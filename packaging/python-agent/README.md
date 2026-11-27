@@ -795,6 +795,109 @@ SHINYHUB_AGENT_LIVE_CHARTS=responses pytest packaging/python-agent/tests/test_ch
 The live probe checks data reads, chart creation, follow-up dataset reuse, and
 reset. Run it against the intended deployment model before rollout. AG-UI
 endpoints must themselves follow the chart tools supplied in each request.
+
+## Generated views (experimental)
+
+A generated view lets the chat agent compose a small dashboard on the app page
+in answer to a question: up to six tiles (`stat`, `bar`, `line`, `table`) built
+from measures and dimensions the app declares. It is experimental, disabled by
+default, and requires a chat agent. The agent chooses a layout; the app computes
+every value. The model never supplies data, markup, or chart specifications.
+
+```python
+from shiny import ui
+from shinyhub_agent import AgentTool, AgentView, agent_view_output, register
+
+app_ui = ui.page_fluid(
+    ui.input_select("period", "Period", ["week", "year"]),
+    agent_view_output("generated"),   # where the view appears; empty until built
+)
+
+def server(input, output, session):
+    def sales(measure, group_by, filters):
+        # Runs inside a Shiny output. Apply the viewer's permissions and the
+        # page's current scope first; tile filters may only narrow that scope.
+        rows = load_sales(viewer=session.user, period=input.period(), **filters)
+        return aggregate(rows, measure, group_by)
+
+    async def read_totals(args):
+        return {"revenue": total(load_sales(viewer=session.user, period=input.period()))}
+
+    register(session=session, input=input, chat=chat, tools=[
+        # The view returns no figures; this is how the agent reads one to quote.
+        AgentTool("get_totals", "Read revenue for the current period", {
+            "type": "object", "properties": {}, "additionalProperties": False,
+        }, read_totals),
+    ], view=AgentView(
+        output_id="generated",
+        measures={"revenue": "Revenue (EUR)", "orders": "Orders"},
+        dimensions={"region": "Region", "day": "Day"},
+        temporal=["day"],
+        filters={"channel": ["online", "retail"]},
+        query=sales,
+    ))
+```
+
+`query(measure, group_by, filters)` is synchronous and returns one dict per
+group, keyed by the `group_by` ids and the measure id: for
+`("revenue", ("region",), {})`, `[{"region": "North", "revenue": 4}, ...]`.
+A stat tile calls it with an empty `group_by` and expects one row. Return an
+empty list or `None` when there is no data, and `None` as the measure value
+when a group has no reading; the tile then shows "No data" or `n/a`, never a
+zero. Dimension values are strings, temporal ones ISO dates or timestamps, and
+measure values finite numbers. A result with more than 500 rows, duplicate
+groups, or unexpected keys fails that tile only. A chart with more than ten
+series, or with more data than the renderer accepts, asks the visitor to
+narrow the selection.
+
+Because the query runs inside a Shiny output, reactive reads in it (such as
+`input.period()` above) make the tiles follow the page. Changing a page filter
+refreshes the view without another chat turn or model call. Each tile query
+runs on every refresh, so keep it as cheap as the app's own outputs.
+
+The query callback is the security boundary. The agent picks ids and filter
+values from the declaration only, but which rows a viewer may see is decided by
+your code on every call. Declared filter values are sent to the model as part
+of the tool schema, so declare only values every viewer of the app may know.
+The schema also carries each measure and dimension id with its label, and
+marks the date dimensions, so choose labels that say what the id means.
+
+The chat-only tools `build_view` and `clear_view` are added to the chat agent's
+tool list and are never exposed through WebMCP; both names are reserved while a
+view is enabled. Building a view needs no approval, changes no app input, and
+returns no figures to the model: to state a number in its answer, the agent
+must read it with one of the app's ordinary tools. Each request tells the agent
+which layout is currently on the page (titles, ids, filters, no values), or
+that the visitor dismissed it, so it can revise the view on request. Invalid
+layouts, such as a line chart over a non-date dimension or bars over dates
+split by a series, are returned to the model as correctable tool errors.
+
+The view is labeled as built by the assistant, and the visitor can remove it
+with **Dismiss**. A tile the agent narrowed with a filter says so under its
+title ("Only Channel: online"), whatever title the agent gave it; a filter id
+that is also a dimension is shown by that dimension's label. Each chart tile offers **View data** with its source table;
+if the chart library cannot load, the table is shown instead. A refresh keeps
+open tables open and keyboard focus where it was. Values show two decimals,
+or three significant digits when that would display a nonzero reading as zero. Charts use the
+same fixed, packaged renderer as inline charts and do not count against the
+inline chart limit.
+
+Limits of this experimental version:
+
+- One view per session; a new `build_view` call replaces it.
+- Nothing is persisted. New chat, Dismiss, a page reload, and bookmark restore
+  all leave the page without a generated view.
+- `agent_view_output` and `register(view=...)` belong in the root session.
+  Shiny modules are not supported.
+- With `AGUIChat`, the view appears only if the hosted agent calls the client
+  tools supplied in each request.
+- How well a given model composes views is not covered by the package tests,
+  which use a scripted agent. Evaluate it with the intended deployment model.
+
+Verification: `make test-py-agent` covers the compiler, tile states, and the
+browser module; `make test-browser-agent-shiny-compat` drives a real Shiny
+session in Chrome, including a tile refresh caused by a page input alone.
+
 ## Releasing this package
 
 Use a vership build with independent project support. The repository root

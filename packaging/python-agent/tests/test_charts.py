@@ -337,7 +337,7 @@ def test_registration_keeps_chart_tool_out_of_browser_and_runs_reads_in_session(
 
     asyncio.run(run())
     dep = chat_dependency()
-    assert [script["src"] for script in dep.script] == ["charts.js", "chat.js"]
+    assert [script["src"] for script in dep.script] == ["charts.js", "chat.js", "views.js"]
 
 
 def test_chart_history_is_kept_if_later_answer_fails():
@@ -391,6 +391,7 @@ def test_preview_respects_existing_model_result_limit_with_unicode():
         ("20260101", "temporal"),
         ("2026-W01-1", "temporal"),
         ("2026-01-01 00:00", "temporal"),
+        ("2026-01-01T00:00:00+00:60", "temporal"),
     ],
 )
 def test_values_must_survive_browser_json_and_date_parsing(value, kind):

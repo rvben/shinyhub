@@ -75,7 +75,7 @@ def test_agent_asset_urls_use_the_installed_package_version():
     package_version = version("shinyhub-agent")
     for dependency, scripts, stylesheet in (
         ("shinyhub-agent", ("bridge.js",), "bridge.css"),
-        ("shinyhub-agent-chat", ("chat.js", "charts.js"), "chat.css"),
+        ("shinyhub-agent-chat", ("chat.js", "charts.js", "views.js"), "chat.css"),
     ):
         asset_path = f"lib/{dependency}-{package_version}"
         for script in scripts:

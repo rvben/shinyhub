@@ -38,6 +38,25 @@ test('literal labels, safe field paths, fixed specs, and duplicate event suppres
   assert.ok([...env.doc.head.querySelectorAll('script')].every(s=>s.src.startsWith('https://apps.example.test/lib/agent/vendor/')));
   api.dispose(log);assert.equal(env.finalized(),1);
 });
+test('a date tooltip names the day in the data, whatever the visitor\'s time zone',async t=>{
+  const zone=process.env.TZ;process.env.TZ='America/Los_Angeles';
+  t.after(()=>{if(zone===undefined)delete process.env.TZ;else process.env.TZ=zone;});
+  assert.equal(new Date('2026-11-27T00:00:00Z').getDate(),26,'the test runs west of UTC');
+  const env=await setup(t), api=env.window.shinyhubAgentCharts, log=env.doc.querySelector('#log');
+  log.append(api.create({id:'days',kind:'line',title:'Daily',x:'Day',y:'Revenue',source:'Authorized dataset',
+    fields:{Day:'temporal',Revenue:'quantitative'},rows:[{Day:'2026-11-27',Revenue:1},{Day:'2026-11-28T06:30:00+02:00',Revenue:2}]}));
+  await env.flush();const {spec}=env.rendered();
+  // Draw the fixed spec with the packaged libraries and read the tooltips off the marks.
+  env.window.structuredClone=structuredClone;
+  for(const name of ['vega','vega-lite'])env.window.eval(fs.readFileSync(path.join(__dirname,'../src/shinyhub_agent/www/vendor',name+'.min.js'),'utf8'));
+  const {vega,vegaLite}=env.window.shinyhubAgentChartVendor;
+  const view=new vega.View(vega.parse(vegaLite.compile({...JSON.parse(JSON.stringify(spec)),width:300}).spec),{renderer:'none'});
+  await view.runAsync();t.after(()=>view.finalize());
+  const days=new Set();(function walk(item){if(item.tooltip)days.add(item.tooltip.Day);(item.items||[]).forEach(walk);})(view.scenegraph().root);
+  assert.deepEqual([...days].sort(),['2026-11-27','2026-11-28T06:30:00+02:00']);
+  assert.deepEqual(Array.from(view.scale('x').domain(),Number),[Date.parse('2026-11-27T00:00:00Z'),Date.parse('2026-11-28T04:30:00Z')]);
+});
+
 test('reset disposes an expanded chart and its dialog',async t=>{
   const env=await setup(t), api=env.window.shinyhubAgentCharts, log=env.doc.querySelector('#log');
   log.append(api.create(chart()));await env.flush();

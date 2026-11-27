@@ -272,6 +272,68 @@ test("a new question clears the live region so identical answers can be announce
   assert.equal(announcer.textContent, "Answer: No change was made.");
 });
 
+test("a question typed while a new chat is starting stays in the composer", (t) => {
+  const { doc, send, inputs, submit } = ask(t);
+  send({ type: "delta", text: "The previous conversation." });
+  send({ type: "done" });
+  const questions = () => inputs.filter((entry) => entry.value.message).length;
+  const resets = () => inputs.filter((entry) => entry.value.action === "reset").length;
+  const input = doc.querySelector(".sh-agent-input"), before = questions();
+  doc.querySelector(".sh-agent-reset").click();
+  doc.querySelector(".sh-agent-reset").click();
+  assert.equal(resets(), 1, "one reset is requested");
+  input.value = "First question"; doc.querySelector(".sh-agent-composer").requestSubmit();
+  assert.equal(questions(), before, "nothing is sent to the thread being cleared");
+  assert.equal(input.value, "First question");
+  send({ type: "reset" });
+  assert.equal(input.value, "First question");
+  submit("First question");
+  assert.equal(questions(), before + 1);
+  assert.match(doc.querySelector(".sh-agent-user").textContent, /First question$/);
+});
+
+test("the composer holds a draft until the app answers New chat, however long that takes", (t) => {
+  const { window, doc, send, inputs, submit } = ask(t);
+  send({ type: "done" });
+  const questions = () => inputs.filter((entry) => entry.value.message).length;
+  const input = doc.querySelector(".sh-agent-input"), before = questions();
+  const trySend = () => { input.value = "First question"; doc.querySelector(".sh-agent-composer").requestSubmit(); };
+  const timeouts = [];
+  window.setTimeout = (callback) => timeouts.push(callback);
+  doc.querySelector(".sh-agent-reset").click();
+  const reset = inputs.at(-1).value.requestId;
+  timeouts.forEach((callback) => callback()); // any amount of time passes
+  trySend();
+  assert.equal(questions(), before, "a slow reset still holds the draft");
+  assert.equal(input.value, "First question");
+  send({ type: "error", requestId: "some_other_request", message: "Unrelated" });
+  trySend();
+  assert.equal(questions(), before, "only the answer to this reset releases the composer");
+  send({ type: "error", requestId: reset, message: "Wait for the answer to finish, then start a new chat." });
+  assert.equal(doc.querySelector(".sh-agent-status-text").textContent, "Wait for the answer to finish, then start a new chat.");
+  assert.match(doc.querySelector(".sh-agent-user").textContent, /Show only 2024$/, "a refused New chat keeps the transcript");
+  submit("First question");
+  assert.equal(questions(), before + 1);
+});
+
+test("New chat during a running Undo asks for nothing and leaves the composer usable", (t) => {
+  const { doc, send, inputs, submit } = ask(t);
+  send({ type: "action_applied", name: "set_year", actionId: "a1", undoExpiresIn: null });
+  send({ type: "done" });
+  const count = (pick) => inputs.filter((entry) => pick(entry.value)).length;
+  const before = count((value) => value.message);
+  doc.querySelector(".sh-agent-undo").click();
+  const undo = inputs.at(-1).value.requestId;
+  doc.querySelector(".sh-agent-reset").click();
+  assert.equal(count((value) => value.action === "reset"), 0);
+  submit("Next question");
+  assert.equal(count((value) => value.message), before + 1, "the composer is not held for a reset that was never sent");
+  send({ type: "done" });
+  send({ type: "undo_result", requestId: undo, actionId: "a1", ok: true });
+  doc.querySelector(".sh-agent-reset").click();
+  assert.equal(count((value) => value.action === "reset"), 1, "New chat works once the Undo has finished");
+});
+
 test("starting a new chat removes the previous answer from the live region", (t) => {
   const { doc, send } = ask(t);
   send({ type: "delta", text: "The previous conversation." });

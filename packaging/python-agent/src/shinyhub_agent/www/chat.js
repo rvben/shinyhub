@@ -4,6 +4,7 @@
   var VERSION = 1;
   var chatSession = null;
   var activeRequest = null;
+  var resetRequest = null;
   var activeAnswer = null;
   var answerSource = "";
   var answerFrame = null;
@@ -1070,7 +1071,9 @@
   });
   composer.addEventListener("submit", function (event) {
     event.preventDefault();
-    if (!chatSession || activeRequest || !input.value.trim()) return;
+    // A question sent while New chat is clearing the thread would be refused
+    // and then wiped with the old transcript; the draft stays in the composer.
+    if (!chatSession || activeRequest || resetRequest || !input.value.trim()) return;
     clearSuggestions();
     suggestionsSuppressed = false;
     var question = input.value.trim();
@@ -1095,10 +1098,14 @@
     }
   });
   reset.addEventListener("click", function () {
-    if (!chatSession || activeRequest) return;
+    // The app ignores New chat while an Undo is running, so none is requested.
+    if (!chatSession || activeRequest || resetRequest || undoRequests.size) return;
     clearSuggestions();
-    emit({ version: VERSION, session: chatSession,
-      requestId: crypto.randomUUID(), action: "reset" });
+    // The app answers every reset; until it does it refuses questions, so
+    // the composer keeps the draft however long that takes.
+    resetRequest = crypto.randomUUID();
+    setStatus("Starting a new chat");
+    emit({ version: VERSION, session: chatSession, requestId: resetRequest, action: "reset" });
   });
 
   function install() {
@@ -1114,6 +1121,7 @@
         if (window.shinyhubAgentCharts) window.shinyhubAgentCharts.dispose(log);
         log.replaceChildren(empty);
         finish("App session reconnected. Start a new question.");
+        resetRequest = null;
       }
       chatSession = message.session;
       updateNotice(message.notice);
@@ -1141,7 +1149,13 @@
         }
         return;
       }
+      if (resetRequest && event.requestId === resetRequest && event.type === "error") {
+        resetRequest = null;
+        setStatus(typeof event.message === "string" ? event.message : "New chat could not start.", "error");
+        return;
+      }
       if (event.type === "reset") {
+        resetRequest = null;
         clearUndo();
         clearSuggestions();
         cancelAnswerFrame();

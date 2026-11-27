@@ -18,6 +18,39 @@ CHART_TOOL = "render_chart"
 MAX_DATA_BYTES = 262_144
 MAX_DATASETS = 8
 MAX_CHARTS = 4
+TEMPORAL = re.compile(
+    r"\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:[0-5]\d)?)?"
+)
+
+
+def check_temporal(value: str) -> None:
+    try:
+        if not TEMPORAL.fullmatch(value):
+            raise ValueError("Unsupported ISO representation")
+        datetime.fromisoformat(
+            value.replace("Z", "+00:00")  # noqa: FURB162 -- Python 3.10 compatibility
+        )
+    except ValueError as error:
+        raise ValueError("Temporal values must be ISO dates or timestamps") from error
+
+
+def moment(value: str) -> datetime:
+    """The moment a valid temporal value names; zone-free values are UTC."""
+    date = datetime.fromisoformat(
+        value.replace("Z", "+00:00")  # noqa: FURB162 -- Python 3.10 compatibility
+    )
+    return (date if date.tzinfo else date.replace(tzinfo=timezone.utc)).astimezone(
+        timezone.utc
+    )
+
+
+def instant(value: str) -> datetime:
+    """The moment the renderer plots a valid temporal value at.
+
+    Precision is the browser's millisecond.
+    """
+    date = moment(value)
+    return date.replace(microsecond=(date.microsecond // 1000) * 1000)
 
 
 @dataclass(frozen=True)
@@ -75,19 +108,7 @@ class ChartData:
                         "Category and date values must be strings of at most 300 characters"
                     )
                 elif kind == "temporal":
-                    try:
-                        if not re.fullmatch(
-                            r"\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})?)?",
-                            value,
-                        ):
-                            raise ValueError("Unsupported ISO representation")
-                        datetime.fromisoformat(
-                            value.replace("Z", "+00:00")  # noqa: FURB162 -- Python 3.10 compatibility
-                        )
-                    except ValueError as error:
-                        raise ValueError(
-                            "Temporal values must be ISO dates or timestamps"
-                        ) from error
+                    check_temporal(value)
         if len(json.dumps(self.rows, allow_nan=False).encode()) > MAX_DATA_BYTES:
             raise ValueError("Chart data is too large; aggregate it first")
         object.__setattr__(self, "rows", copy.deepcopy(self.rows))
@@ -243,11 +264,7 @@ class ChartRegistry(ToolRegistry):
             for row in data.rows:
                 x = row[args["x"]]
                 if x is not None and data.fields[args["x"]] == "temporal":
-                    date = datetime.fromisoformat(x.replace("Z", "+00:00"))  # noqa: FURB162 -- Python 3.10 compatibility
-                    x = (
-                        date if date.tzinfo else date.replace(tzinfo=timezone.utc)
-                    ).astimezone(timezone.utc)
-                    x = x.replace(microsecond=(x.microsecond // 1000) * 1000)
+                    x = instant(x)
                 key = (x, row.get(args.get("color")))
                 if key in seen:
                     raise ToolError(
