@@ -149,21 +149,55 @@ def register(
     callback_idle = asyncio.Event()
     callback_idle.set()
 
+    flushes = set()
+
+    async def flush_and_release(lock):
+        try:
+            await reactive.flush()
+        finally:
+            lock.release()
+
+    def abandoned_flush_done(flush):
+        if not flush.cancelled() and flush.exception() is not None:
+            logger.error("Agent page update failed", exc_info=flush.exception())
+
+    async def execute_locked(operation):
+        lock = reactive.lock()
+        await lock.acquire()
+        flush = None
+        try:
+            with session_context(session), reactive.isolate():
+                try:
+                    return await operation()
+                finally:
+                    # A flush cancelled midway leaves the effects it was
+                    # running without their dependencies. It runs in its own
+                    # task, which releases the graph lock, so a timeout or
+                    # Stop ends this call at once and the flush still finishes.
+                    flush = asyncio.ensure_future(flush_and_release(lock))
+                    flushes.add(flush)
+                    flush.add_done_callback(flushes.discard)
+                    try:
+                        await asyncio.shield(flush)
+                    except asyncio.CancelledError:
+                        flush.add_done_callback(abandoned_flush_done)
+                        raise
+        finally:
+            if flush is None:
+                lock.release()
+
     async def execute(operation):
         # Model I/O and approval run outside the callback lock.
-        lock = callback_lock if modern_reactivity else reactive.lock()
-        async with lock:
+        if not modern_reactivity:
+            return await execute_locked(operation)
+        async with callback_lock:
             with session_context(session), reactive.isolate():
-                if modern_reactivity:
-                    callback_idle.clear()
+                callback_idle.clear()
                 try:
                     result = await operation()
                 finally:
-                    if modern_reactivity:
-                        callback_idle.set()
-                    else:
-                        await reactive.flush()
-            if modern_reactivity and undo_ready is not None:
+                    callback_idle.set()
+            if undo_ready is not None:
                 # Resolve any invalidated undo check before a new write
                 # can replace its receipt.
                 await undo_ready.wait()

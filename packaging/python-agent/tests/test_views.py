@@ -776,6 +776,53 @@ def test_tiles_recompute_when_app_state_changes_without_a_chat_request(monkeypat
     asyncio.run(run())
 
 
+@pytest.mark.skipif(not LEGACY_REACTIVITY, reason="Shiny 1.8 graph locking and flush")
+def test_a_view_tool_timeout_does_not_interrupt_the_page_update(monkeypatch):
+    async def run():
+        async def steps(message, tools, approve):
+            return
+            yield
+
+        session, chat_session, _ = registered(monkeypatch, steps, view())
+        renderer = session.outputs["generated"]
+        seen, sending = [], asyncio.Event()
+        sending.set()
+
+        async with graph_lock():
+
+            @reactive.effect(session=None)
+            async def page():
+                await sending.wait()  # the previous update is still on its way out
+                seen.append(await renderer.render())
+
+            await reactive.flush()
+        try:
+            assert seen == [{"version": 1, "view": None}]
+            sending.clear()
+            with pytest.raises(ToolError) as error:
+                await chat_session.views.execute(
+                    "build_view", layout(STAT), timeout=0.05
+                )
+            assert error.value.code == "timeout"
+            # The deadline held although the page update has not finished.
+            assert len(seen) == 1
+            assert reactive.lock().locked()
+            sending.set()
+            async with graph_lock():
+                pass
+            assert seen[-1]["view"]["tiles"][0]["state"] == "ok"
+            assert not reactive.lock().locked()
+            # The output still follows the layout after the timed-out build.
+            await chat_session.views.execute("clear_view", {})
+            assert seen[-1] == {"version": 1, "view": None}
+        finally:
+            page.destroy()
+            for fn in session.ended:
+                fn()
+
+    asyncio.run(run())
+
+
 def test_new_chat_refused_or_failed_is_answered_so_the_composer_is_released(caplog):
     async def steps(message, tools, approve):
         if message == "Build":
