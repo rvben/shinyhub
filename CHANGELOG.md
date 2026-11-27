@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.25.15](https://github.com/rvben/shinyhub/compare/v0.25.14...v0.25.15) - 2026-11-27
+
+### Fixed
+
+- **api**: report a deferred cleanup when reaping a development app ([e3eab59](https://github.com/rvben/shinyhub/commit/e3eab595450d7ff85e0adb45ed042399e24150ec))
+- **api**: check a conditional delete against the app as it is now ([0582836](https://github.com/rvben/shinyhub/commit/0582836fffc084bd967288df4cda5179b5193e84))
+- **api**: keep the deleting tombstone until the app is removed ([5ebdce4](https://github.com/rvben/shinyhub/commit/5ebdce4049ccd189e6f6d238d62a2360054a863b))
+
 ## [0.25.14](https://github.com/rvben/shinyhub/compare/v0.25.13...v0.25.14) - 2026-11-27
 
 ### Added
