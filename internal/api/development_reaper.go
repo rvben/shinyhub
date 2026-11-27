@@ -51,26 +51,8 @@ func (s *Server) reapExpiredDevelopmentApps(ctx context.Context, now time.Time) 
 		if ctx.Err() != nil {
 			return
 		}
-		release := s.acquireDeployLock(candidate.Slug)
-		app, err := s.store.GetAppBySlug(candidate.Slug)
-		if errors.Is(err, db.ErrNotFound) {
-			release()
-			continue
-		}
-		if err != nil {
-			release()
-			slog.Error("load expired development app", "slug", candidate.Slug, "err", err)
-			continue
-		}
-		if err := s.guardActivationLifecycle(app.ID, "expire "+candidate.Slug); err != nil {
-			release()
-			slog.Info("defer expired development app deletion", "slug", candidate.Slug, "reason", err)
-			continue
-		}
-		detail, err := s.deleteAppLocked(ctx, app)
-		release()
-		if err != nil {
-			slog.Error("expire development app", "slug", candidate.Slug, "err", err)
+		detail, ok := s.reapExpiredDevelopmentApp(ctx, candidate)
+		if !ok {
 			continue
 		}
 		auditDetail, _ := json.Marshal(map[string]string{
@@ -85,4 +67,31 @@ func (s *Server) reapExpiredDevelopmentApps(ctx context.Context, now time.Time) 
 		})
 		slog.Info("expired development app removed", "slug", candidate.Slug, "session", candidate.SessionID, "expires_at", candidate.ExpiresAt, "detail", detail)
 	}
+}
+
+// reapExpiredDevelopmentApp deletes one expired ephemeral app and reports
+// whether it did. The candidate was listed before the deploy lock was taken,
+// so the app is read again under it: an app deleted in the meantime is
+// skipped, and so is a different app that has since taken its slug.
+func (s *Server) reapExpiredDevelopmentApp(ctx context.Context, candidate db.ExpiredEphemeralApp) (string, bool) {
+	release := s.acquireDeployLock(candidate.Slug)
+	defer release()
+	app, err := s.store.GetAppBySlug(candidate.Slug)
+	if errors.Is(err, db.ErrNotFound) || (err == nil && app.ID != candidate.AppID) {
+		return "", false
+	}
+	if err != nil {
+		slog.Error("load expired development app", "slug", candidate.Slug, "err", err)
+		return "", false
+	}
+	if err := s.guardActivationLifecycle(app.ID, "expire "+candidate.Slug); err != nil {
+		slog.Info("defer expired development app deletion", "slug", candidate.Slug, "reason", err)
+		return "", false
+	}
+	detail, err := s.deleteAppLocked(ctx, app)
+	if err != nil {
+		slog.Error("expire development app", "slug", candidate.Slug, "err", err)
+		return "", false
+	}
+	return detail, true
 }

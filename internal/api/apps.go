@@ -4872,10 +4872,14 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 func (s *Server) deleteAppLocked(ctx context.Context, app *db.App) (string, error) {
 	slug := app.Slug
 	// The caller may have loaded app before it took the deploy lock, so read it
-	// again under the lock: an overlapping deletion may since have tombstoned it.
+	// again under the lock: an overlapping deletion may since have tombstoned
+	// it, or removed it and let another app take its slug.
 	current, err := s.store.GetAppBySlug(slug)
 	if err != nil {
 		return "", err
+	}
+	if current.ID != app.ID {
+		return "", fmt.Errorf("app %q was replaced while waiting to delete it: %w", slug, db.ErrNotFound)
 	}
 	var releaseJobFences func()
 	// Whether the app is tombstoned, by this call or an earlier attempt whose

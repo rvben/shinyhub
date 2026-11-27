@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -140,5 +141,52 @@ func TestDeleteApp_FailedDeletionFromAStaleSnapshotKeepsJobsClosed(t *testing.T)
 	if unpause, err := jm.TryPauseAppRuns(f.app.ID); err == nil {
 		unpause()
 		t.Fatal("a failed deletion holding a stale snapshot reopened job admission for a tombstoned app")
+	}
+}
+
+// replaceApp deletes the app under slug and creates another one in its place,
+// returning the original and its replacement.
+func replaceApp(t *testing.T, store *db.Store, slug string) (old, replacement *db.App) {
+	t.Helper()
+	old = seedStoppedTestApp(t, store, slug, "stopped", 0)
+	if err := store.DeleteApp(slug); err != nil {
+		t.Fatal(err)
+	}
+	replacement = seedStoppedTestApp(t, store, slug, "stopped", 0)
+	if replacement.ID == old.ID {
+		t.Fatal("the replacement reused the original's ID, so this test cannot tell them apart")
+	}
+	return old, replacement
+}
+
+// A deletion that waited for the deploy lock while its app was deleted and
+// another app created under the same slug must not delete the newcomer.
+func TestDeleteApp_LeavesAnAppThatReplacedTheSnapshotAlone(t *testing.T) {
+	s, store, _ := newManifestE2EServer(t)
+	old, replacement := replaceApp(t, store, "replaced")
+
+	release := s.acquireDeployLock("replaced")
+	_, err := s.deleteAppLocked(context.Background(), old)
+	release()
+	if !errors.Is(err, db.ErrNotFound) {
+		t.Fatalf("deleting a replaced app = %v, want ErrNotFound", err)
+	}
+	if got, err := store.GetAppBySlug("replaced"); err != nil || got.ID != replacement.ID {
+		t.Fatalf("replacement after the deletion = %+v, %v, want it kept", got, err)
+	}
+}
+
+// The reaper lists expired ephemeral apps before it takes each one's deploy
+// lock. An app deleted in that window whose slug another app has since taken
+// must not cost the newcomer its life.
+func TestReapExpiredDevelopmentApp_LeavesAnAppThatTookTheSlugAlone(t *testing.T) {
+	s, store, _ := newManifestE2EServer(t)
+	old, replacement := replaceApp(t, store, "expired-preview")
+
+	if _, ok := s.reapExpiredDevelopmentApp(context.Background(), db.ExpiredEphemeralApp{AppID: old.ID, Slug: old.Slug}); ok {
+		t.Fatal("the reaper reported deleting an app that was no longer the expired one")
+	}
+	if got, err := store.GetAppBySlug(old.Slug); err != nil || got.ID != replacement.ID {
+		t.Fatalf("replacement after the reap = %+v, %v, want it kept", got, err)
 	}
 }
