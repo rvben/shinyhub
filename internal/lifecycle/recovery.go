@@ -8,6 +8,7 @@ import (
 	"net"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -836,20 +837,7 @@ func cleanupObsoleteDeploymentGenerations(store *db.Store, mgr *process.Manager,
 		if prx != nil && prx.HasRelaySessions(app.Slug, deploymentID) {
 			continue
 		}
-		allStopped := true
-		for _, replica := range replicas {
-			id := deploymentID
-			if isolated, ok := mgr.RuntimeForTier(replica.Tier).(*process.SystemdRuntime); ok {
-				if replica.WorkerID == "" || replica.Provider != "native" || isolated.RemoveContainer(replica.WorkerID) != nil {
-					allStopped = false
-				}
-				continue
-			}
-			if !stopRecordedNativeReplica(store, app, replica.PID, replica.Provider, &id, replica.ProcessStartIdentity) {
-				allStopped = false
-			}
-		}
-		if !allStopped {
+		if len(StopGenerationWorkers(store, mgr, app, replicas)) > 0 {
 			slog.Warn("generation recovery: obsolete generation cleanup deferred",
 				"slug", app.Slug, "deployment_id", deploymentID)
 			continue
@@ -858,6 +846,78 @@ func cleanupObsoleteDeploymentGenerations(store *db.Store, mgr *process.Manager,
 			slog.Error("generation recovery: clear obsolete identities", "slug", app.Slug, "deployment_id", deploymentID, "err", err)
 		}
 	}
+}
+
+// StopGenerationWorkers stops the workers that generation-ledger rows record,
+// with confirmed semantics, and returns the rows whose stop it could not
+// confirm. It is the step every caller must take before it deletes ledger
+// rows: a row is the only durable record of a worker the manager may not own,
+// so deleting it while the worker runs leaves that process unreachable to
+// recovery and the watcher.
+//
+// A worker the server forked itself is a recorded native process group,
+// whatever runtime its tier maps to now: it is signalled only after its start
+// identity or bundle working directory proves the PID is still the recorded
+// worker. A row on a systemd tier is stopped through its unit, and a row of a
+// remote provider is confirmed without a signal, since those runtimes recover
+// their workers from their own inventory.
+//
+// Forked workers are stopped concurrently, so they cost at most one
+// escalation (about two recordedNativeStopGrace) however many remain. Every
+// other row is stopped in turn: the native broker serializes unit stops and
+// starts each request's deadline before it queues, so concurrent unit stops
+// would spend their budget waiting for one another.
+func StopGenerationWorkers(store nativeReplicaStopper, mgr *process.Manager, app *db.App, rows []*db.DeploymentReplica) []*db.DeploymentReplica {
+	stopped := make([]bool, len(rows))
+	var wg sync.WaitGroup
+	var others []int
+	for i, row := range rows {
+		if !forkedWorkerRow(row) {
+			others = append(others, i)
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			stopped[i] = stopGenerationWorker(store, mgr, app, row)
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for _, i := range others {
+			stopped[i] = stopGenerationWorker(store, mgr, app, rows[i])
+		}
+	}()
+	wg.Wait()
+	var unconfirmed []*db.DeploymentReplica
+	for i, row := range rows {
+		if !stopped[i] {
+			unconfirmed = append(unconfirmed, row)
+		}
+	}
+	return unconfirmed
+}
+
+func stopGenerationWorker(store nativeReplicaStopper, mgr *process.Manager, app *db.App, row *db.DeploymentReplica) bool {
+	id := row.DeploymentID
+	if forkedWorkerRow(row) {
+		return forkedWorkerGone(*row.PID) || stopRecordedNativeReplica(store, app, row.PID, row.Provider, &id, row.ProcessStartIdentity)
+	}
+	if isolated, ok := mgr.RuntimeForTier(row.Tier).(*process.SystemdRuntime); ok {
+		return row.WorkerID != "" && row.Provider == "native" && isolated.RemoveContainer(row.WorkerID) == nil
+	}
+	return stopRecordedNativeReplica(store, app, row.PID, row.Provider, &id, row.ProcessStartIdentity)
+}
+
+// forkedWorkerRow reports whether row records a worker the server forked
+// itself. NativeRuntime records such a worker's PID as its WorkerID (rows
+// from older servers carry none), while a systemd unit worker records its
+// unit name, so the WorkerID tells the two apart even after the row's tier
+// has been remapped to another runtime.
+func forkedWorkerRow(row *db.DeploymentReplica) bool {
+	return row.PID != nil && *row.PID > 1 && (row.Provider == "" || row.Provider == "native") &&
+		(row.WorkerID == "" || row.WorkerID == strconv.Itoa(*row.PID))
 }
 
 // nativeReplicaStopper is the minimal read stopRecordedNativeReplica needs:
@@ -907,6 +967,20 @@ func recordedNativeGroupGone(pid int) bool {
 	return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) && errors.Is(syscall.Kill(-pid, 0), syscall.ESRCH)
 }
 
+// forkedWorkerGone reports whether a PID recorded for a worker the server
+// forked itself (see forkedWorkerRow) no longer names that worker or
+// its group. Such a worker runs as the server's own user, so EPERM from
+// kill(…, 0) proves the number now belongs to someone else, as ESRCH proves
+// it belongs to nobody. A worker that a systemd unit runs under its own uid
+// also answers EPERM, which is why the rule is limited to forkedWorkerRow
+// rows. It assumes the server keeps its uid across restarts: a server
+// restarted under another user reads its predecessor's surviving workers as
+// gone.
+func forkedWorkerGone(pid int) bool {
+	gone := func(err error) bool { return errors.Is(err, syscall.ESRCH) || errors.Is(err, syscall.EPERM) }
+	return gone(syscall.Kill(pid, 0)) && gone(syscall.Kill(-pid, 0))
+}
+
 // stepRecordedNativeStop advances a confirmed stop of a recorded native
 // process group by at most one signal and one bounded wait. It sends SIGTERM
 // if none was sent yet, SIGKILL once the TERM grace has elapsed, and nothing
@@ -915,6 +989,12 @@ func recordedNativeGroupGone(pid int) bool {
 // than recordedNativeStopProbeFloor) for the process and its group to exit.
 func stepRecordedNativeStop(store nativeReplicaStopper, app *db.App, pid *int, provider string, deploymentID *int64, progress *nativeStopProgress, budget time.Duration, expectedStart ...int64) nativeStopResult {
 	if pid == nil || *pid <= 0 || (provider != "" && provider != "native") {
+		return nativeStopConfirmed
+	}
+	// A worker is never init, and kill(-1, sig) would signal every process
+	// this user may signal, so a recorded PID of 1 is never signalled. It
+	// cannot name a worker's process group, which proves no such group is left.
+	if *pid == 1 {
 		return nativeStopConfirmed
 	}
 	if recordedNativeGroupGone(*pid) {

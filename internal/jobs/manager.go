@@ -136,7 +136,7 @@ type Manager struct {
 	active             map[int64]context.CancelFunc // in-flight run cancels, keyed by run ID
 	activeApps         map[int64]int64              // run ID -> app ID for app-scoped deletion drains
 	pausedApps         map[int64]int                // temporary app mount-mutation admission fences
-	blockedApps        map[int64]bool               // permanently closes admissions for an app being deleted
+	blockedApps        map[int64]bool               // closes admissions for an app being deleted, until UnblockApp
 	appActive          map[int64]int                // active/queued runs per app
 	appDrained         map[int64]chan struct{}      // closed when an app's active count reaches zero
 
@@ -440,9 +440,10 @@ func (m *Manager) unregisterActive(runID int64) {
 	m.mu.Unlock()
 }
 
-// BlockAndDrainApp permanently closes admissions for an app being deleted,
-// cancels its queued/running work, and waits for durable terminalization. A
-// recreated slug receives a different app ID and is unaffected.
+// BlockAndDrainApp closes admissions for an app being deleted, cancels its
+// queued/running work, and waits for durable terminalization. Admissions stay
+// closed until UnblockApp; a recreated slug receives a different app ID and is
+// unaffected.
 func (m *Manager) BlockAndDrainApp(ctx context.Context, appID int64) error {
 	m.mu.Lock()
 	m.blockedApps[appID] = true
@@ -467,6 +468,15 @@ func (m *Manager) BlockAndDrainApp(ctx context.Context, appID int64) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// UnblockApp reopens the admissions BlockAndDrainApp closed, for a deletion
+// that stopped before it committed to removing the app. Work the block
+// cancelled stays cancelled; the app's schedules admit their next runs.
+func (m *Manager) UnblockApp(appID int64) {
+	m.mu.Lock()
+	delete(m.blockedApps, appID)
+	m.mu.Unlock()
 }
 
 // ErrAppRunsActive means a mount change must wait for queued/running jobs (or

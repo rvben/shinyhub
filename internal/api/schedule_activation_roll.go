@@ -13,6 +13,7 @@ import (
 	"github.com/rvben/shinyhub/internal/db"
 	"github.com/rvben/shinyhub/internal/deploy"
 	"github.com/rvben/shinyhub/internal/jobs"
+	"github.com/rvben/shinyhub/internal/lifecycle"
 	"github.com/rvben/shinyhub/internal/process"
 	"github.com/rvben/shinyhub/internal/schedulespec"
 )
@@ -941,20 +942,41 @@ func (s *Server) confirmAppConsumersStopped(app *db.App) error {
 		}
 	}
 	// Generation identities are a crash-recovery ledger, not capacity cache.
-	// Clear them only after Manager.StopConfirmed has physically confirmed every
-	// active, staged, and draining pool for the slug is gone.
+	// Manager.StopConfirmed has stopped every pool the manager owns, but a row
+	// can name a worker it never owned (one left by an earlier server process),
+	// and the row is the only record of that worker. So each row's worker is
+	// stopped, identity-checked, before its deployment's rows are cleared, and a
+	// deployment with any unconfirmed row keeps all of them for a later retry.
 	generationRows, err := s.store.ListDeploymentReplicas(app.ID)
 	if err != nil {
 		return fmt.Errorf("list durable generation identities: %w", err)
 	}
+	unconfirmed := lifecycle.StopGenerationWorkers(s.store, s.manager, app, generationRows)
+	held := make(map[int64]struct{}, len(unconfirmed))
+	for _, row := range unconfirmed {
+		held[row.DeploymentID] = struct{}{}
+	}
 	seen := make(map[int64]struct{})
 	for _, row := range generationRows {
-		seen[row.DeploymentID] = struct{}{}
-	}
-	for deploymentID := range seen {
-		if err := s.store.DeleteDeploymentReplicas(deploymentID); err != nil {
-			return fmt.Errorf("clear stopped generation %d identities: %w", deploymentID, err)
+		if _, ok := held[row.DeploymentID]; ok {
+			continue
 		}
+		if _, ok := seen[row.DeploymentID]; ok {
+			continue
+		}
+		seen[row.DeploymentID] = struct{}{}
+		if err := s.store.DeleteDeploymentReplicas(row.DeploymentID); err != nil {
+			return fmt.Errorf("clear stopped generation %d identities: %w", row.DeploymentID, err)
+		}
+	}
+	if len(unconfirmed) > 0 {
+		row := unconfirmed[0]
+		worker := row.WorkerID
+		if worker == "" && row.PID != nil {
+			worker = fmt.Sprintf("pid %d", *row.PID)
+		}
+		return fmt.Errorf("%d recorded worker(s) this server does not run could not be confirmed stopped, first %s of deployment %d: %w",
+			len(unconfirmed), worker, row.DeploymentID, process.ErrStopUnconfirmed)
 	}
 	return nil
 }
