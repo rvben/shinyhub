@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.25.13](https://github.com/rvben/shinyhub/compare/v0.25.12...v0.25.13) - 2026-11-27
+
+### Fixed
+
+- **api**: log a deployment failure that could not be recorded ([d99cb58](https://github.com/rvben/shinyhub/commit/d99cb58cde65b0bdebeb93a5fbcd76582b54822b))
+- **agent**: support Shiny 1.9 and version browser assets ([2c55a35](https://github.com/rvben/shinyhub/commit/2c55a35bdb547f628c7cb4cbf027bc5cf25e82a9))
+
 ## [0.25.12](https://github.com/rvben/shinyhub/compare/v0.25.11...v0.25.12) - 2026-11-27
 
 ### Fixed
