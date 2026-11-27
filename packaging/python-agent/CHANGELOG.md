@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.5.4](https://github.com/rvben/shinyhub/compare/shinyhub-agent-v0.5.3...shinyhub-agent-v0.5.4) - 2026-11-27
+
+### Fixed
+
+- **agent**: support Shiny 1.9 and version browser assets ([2c55a35](https://github.com/rvben/shinyhub/commit/2c55a35bdb547f628c7cb4cbf027bc5cf25e82a9))
+
 ## [0.5.3](https://github.com/rvben/shinyhub/compare/shinyhub-agent-v0.5.2...shinyhub-agent-v0.5.3) - 2026-11-25
 
 ### Added
