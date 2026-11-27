@@ -3180,7 +3180,10 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			// Fixed replicas retain their legacy projection on failure. Grouped
 			// workers have no such projection, so keep their active identities.
 			if drainingRowsStaged && !previousGrouped {
-				_ = s.store.DeleteDeploymentReplicas(prevActive.ID)
+				if err := s.store.DeleteDeploymentReplicas(prevActive.ID); err != nil {
+					slog.Warn("deploy: staged generation ledger copy could not be cleared; the next confirmed stop clears it",
+						"slug", slug, "deployment_id", prevActive.ID, "err", err)
+				}
 			}
 		}()
 		if activeGeneration, activeErr := s.store.GetActiveDeploymentGeneration(app.ID); activeErr == nil {
