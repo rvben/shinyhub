@@ -140,8 +140,11 @@ func TestDevResourceMonitorSamplesRealChildGroupAndStops(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The loop ends as soon as the child appears, so the deadline only matters on
+	// a loaded host, where the fork and each Children call (a pgrep on macOS) can
+	// together take seconds.
 	var children []*gops.Process
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for len(children) == 0 && time.Now().Before(deadline) {
 		children, _ = root.Children()
 		if len(children) == 0 {
