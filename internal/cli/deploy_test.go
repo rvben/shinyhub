@@ -851,6 +851,43 @@ func TestDeploy_FailurePrintsLogTail(t *testing.T) {
 	}
 }
 
+// The logs endpoint's "no log available" 404 means the server found the app
+// but holds no log for replica 0, as after a first deploy whose build failed
+// before the app ever ran. Both log-tail printers say so plainly. Any other
+// 404, such as the one for an app the caller may not see or one from a proxy,
+// says nothing about the log and keeps the fetch warning.
+func TestPrintLogTail_NoLogIsNotAFetchFailure(t *testing.T) {
+	cases := []struct {
+		name, contentType, body, want string
+	}{
+		{"no log available", "application/json", `{"error":"no log available"}`, "no log tail available for demo (replica 0)\n"},
+		{"app not visible", "application/json", `{"error":"not found"}`, "warning: could not fetch logs: 404 Not Found\n"},
+		{"handler message followed by other text", "text/plain", `{"error":"no log available"} upstream error`, "warning: could not fetch logs: 404 Not Found\n"},
+		{"proxy page", "text/html", `<html><body>404 Not Found</body></html>`, "warning: could not fetch logs: 404 Not Found\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", tc.contentType)
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			cfg := &cliConfig{Host: srv.URL, Token: "tok"}
+			for name, print := range map[string]func(io.Writer){
+				"printLogTail":               func(w io.Writer) { printLogTail(cfg, "demo", w) },
+				"printLogTailForObservation": func(w io.Writer) { printLogTailForObservation(cfg, "demo", w, appHealthObservation{}) },
+			} {
+				var buf bytes.Buffer
+				print(&buf)
+				if got := buf.String(); got != tc.want {
+					t.Errorf("%s wrote %q, want %q", name, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
 // TestPrintLogTail_WarnsOnLogsEndpointFailure verifies that printLogTail
 // writes a warning line when the logs endpoint returns a non-2xx status,
 // so the user sees actionable output instead of silence.
@@ -1435,6 +1472,61 @@ func TestDeploy_DeployRun_ReportedAndWaited(t *testing.T) {
 	}
 	if runPolls == 0 {
 		t.Errorf("--wait-for-warm did not poll the run endpoint")
+	}
+}
+
+// A restart that rebuilds a deployment never prepared before quotes uv's
+// output in its failure, which can run well past a few KiB. The whole error
+// body has to reach httpError, or the JSON does not decode and both the
+// server's message and the hint for its stated failure kind are lost.
+func TestRestartAppAfterWarm_LongFailureKeepsMessageAndHint(t *testing.T) {
+	message := "deploy failed during dependencies: uv sync: exit status 1\n" + strings.Repeat("  ╰─▶ Because a depends on b and b conflicts with c, the requirements are unsatisfiable.\n", 120)
+	if len(message) <= 8<<10 {
+		t.Fatalf("message is %d bytes; the test needs one past 8 KiB", len(message))
+	}
+	body, err := json.Marshal(map[string]string{"error": message, "failure_kind": "build_failed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/apps/warmapp", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"app":{"status":"running"}}`))
+	})
+	mux.HandleFunc("/api/apps/warmapp/restart", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write(body)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	_, err = restartAppAfterWarm(&cliConfig{Host: srv.URL, Token: "shk_test"}, "warmapp", io.Discard)
+	if err == nil {
+		t.Fatal("restart failure was not reported")
+	}
+	assertDeployFailureEnvelope(t, err, http.StatusInternalServerError,
+		"restart after warm (500 Internal Server Error): "+message, wantBuildFailedHint)
+}
+
+// An error body past the read bound is cut off rather than buffered whole.
+func TestRestartAppAfterWarm_BoundsTheErrorBody(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/apps/warmapp", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"app":{"status":"running"}}`))
+	})
+	mux.HandleFunc("/api/apps/warmapp/restart", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write(bytes.Repeat([]byte("x"), 4<<20))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	_, err := restartAppAfterWarm(&cliConfig{Host: srv.URL, Token: "shk_test"}, "warmapp", io.Discard)
+	if err == nil {
+		t.Fatal("restart failure was not reported")
+	}
+	if n := strings.Count(err.Error(), "x"); n < 4<<10 || n > 1<<20 {
+		t.Errorf("error kept %d bytes of the body, want more than 4 KiB and at most 1 MiB", n)
 	}
 }
 

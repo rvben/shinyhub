@@ -952,9 +952,39 @@ func fetchLogTail(cfg *cliConfig, slug string, n int) ([]string, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if resp.StatusCode == http.StatusNotFound {
+			var body struct {
+				Error string `json:"error"`
+			}
+			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			if json.Unmarshal(raw, &body) == nil && body.Error == noLogAvailable {
+				return nil, errNoAppLog
+			}
+		}
 		return nil, fmt.Errorf("%s", resp.Status)
 	}
 	return parsePlainLines(resp.Body, n), nil
+}
+
+// noLogAvailable is the logs endpoint's error when it found the app but had
+// no log to serve for the replica. Its other 404s, such as an app the caller
+// may not see, say nothing about the log.
+const noLogAvailable = "no log available"
+
+// errNoAppLog reports that the logs endpoint found the app but had no log to
+// serve for replica 0, as after a first deploy that failed before the app ever
+// ran. The endpoint answered, so this is not a failure to fetch the log. It
+// says nothing about logs kept elsewhere, such as an external provider's.
+var errNoAppLog = errors.New("no app log")
+
+// printLogTailError writes why no log tail follows: a plain note when the
+// server has no log, a warning when the log could not be fetched.
+func printLogTailError(w io.Writer, slug string, err error) {
+	if errors.Is(err, errNoAppLog) {
+		fmt.Fprintf(w, "no log tail available for %s (replica 0)\n", slug)
+		return
+	}
+	fmt.Fprintf(w, "warning: could not fetch logs: %s\n", err)
 }
 
 // printLogTail fetches the last logTailLines lines of the app log and writes
@@ -964,7 +994,7 @@ func fetchLogTail(cfg *cliConfig, slug string, n int) ([]string, error) {
 func printLogTail(cfg *cliConfig, slug string, w io.Writer) {
 	lines, err := fetchLogTail(cfg, slug, logTailLines)
 	if err != nil {
-		fmt.Fprintf(w, "warning: could not fetch logs: %s\n", err)
+		printLogTailError(w, slug, err)
 		return
 	}
 	writeLogTail(slug, w, lines, "")
@@ -976,7 +1006,7 @@ func printLogTail(cfg *cliConfig, slug string, w io.Writer) {
 func printLogTailForObservation(cfg *cliConfig, slug string, w io.Writer, observation appHealthObservation) {
 	lines, err := fetchLogTail(cfg, slug, logTailLines)
 	if err != nil {
-		fmt.Fprintf(w, "warning: could not fetch logs: %s\n", err)
+		printLogTailError(w, slug, err)
 		return
 	}
 	label := ""

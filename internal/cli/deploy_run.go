@@ -876,10 +876,17 @@ func restartAppAfterWarm(cfg *cliConfig, slug string, out io.Writer) (bool, erro
 		return false, fmt.Errorf("restart after warm: %w", err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// A restart that rebuilds the environment quotes uv's output, which
+		// can run far past a few KiB. The bound only guards memory: a body cut
+		// off at it no longer decodes, so it is reported as raw text without
+		// its failure kind.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return false, httpError(cfg.Token, "restart after warm", resp, body)
 	}
+	// Reading the small success body lets the client reuse the connection
+	// for the health checks that follow.
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 	fmt.Fprintf(out, "%s: restarted after bundle data convergence\n", slug)
 	return true, nil
 }
