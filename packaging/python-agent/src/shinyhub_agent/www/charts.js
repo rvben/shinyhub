@@ -31,8 +31,13 @@
     // Rename columns: Vega treats dots and brackets as field-path syntax.
     var names = Object.keys(chart.fields), keys = new Map(names.map(function (name, i) { return [name, "f" + i]; }));
     function field(name) { return { field: keys.get(name), type: chart.fields[name], title: name }; }
+    // A date in a tooltip is the text the data holds: formatted as a time it
+    // would follow the visitor's zone and could name another day than the axis.
+    function written(name) {
+      return chart.fields[name] === "temporal" ? { field: keys.get(name) + "w", type: "nominal", title: name } : field(name);
+    }
     var encoding = { x: field(chart.x), y: Object.assign(field(chart.y), { stack: null }),
-      tooltip: names.map(field) };
+      tooltip: names.map(written) };
     if (chart.color) {
       encoding.color = Object.assign(field(chart.color), { scale: { scheme: "tableau10" } });
       if (chart.kind === "bar") encoding.xOffset = field(chart.color);
@@ -54,6 +59,7 @@
         var result = {}; names.forEach(function (name) {
           var value = row[name];
           // Interpret zone-free ISO values as UTC, consistently across browsers.
+          if (chart.fields[name] === "temporal") result[keys.get(name) + "w"] = value;
           if (value != null && chart.fields[name] === "temporal") value = Date.parse(
             value.length === 10 ? value + "T00:00:00Z" : /(?:Z|[+-]\d{2}:\d{2})$/.test(value) ? value : value + "Z");
           result[keys.get(name)] = value;
