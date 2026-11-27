@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.25.11](https://github.com/rvben/shinyhub/compare/v0.25.10...v0.25.11) - 2026-11-27
+
+### Fixed
+
+- **cli**: report a missing app log instead of a fetch failure ([95066de](https://github.com/rvben/shinyhub/commit/95066de6a452eae9861496a2bc3db9c89104471b))
+- **cli**: keep the failure kind of a long warm-restart error ([5ea8cd7](https://github.com/rvben/shinyhub/commit/5ea8cd7aba0e1447e93bede320b6db8a16e47678))
+
 ## [0.25.10](https://github.com/rvben/shinyhub/compare/v0.25.9...v0.25.10) - 2026-11-27
 
 ### Fixed
