@@ -4837,11 +4837,14 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 	release := s.acquireDeployLock(slug)
 	defer release()
 
-	// app was loaded by requireManageApp before acquireDeployLock. Checking the
-	// precondition here (under the deploy lock) serializes it against in-flight
-	// deploys and restarts; the only residual race is two concurrent DELETEs on
-	// the same slug, which the deleting-tombstone and ErrNotFound guard already
-	// makes safe. The pre-lock snapshot is acceptable for this use case.
+	// requireManageApp loaded app before the deploy lock, so a deploy may have
+	// landed while this request queued. The precondition is checked against
+	// the app as it is now, or an If-Match naming the old revision would
+	// delete the new one.
+	app, ok = s.rereadAuthorizedApp(w, r, slug, app.ID)
+	if !ok {
+		return
+	}
 	if checkAppPreconditions(w, r, app) {
 		return
 	}
