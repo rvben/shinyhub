@@ -4,8 +4,9 @@ description: "Give a Python Shiny app a session-scoped assistant and WebMCP tool
 
 # Agent tools in Python Shiny
 
-`shinyhub-agent` is available as a regular `0.2.0` release. Its API is still
-below `1.0`; pin the package and review migration notes before upgrading.
+For Shiny 1.9 or later, use `shinyhub-agent` 0.5.4 or newer. The agent also
+supports Shiny 1.8. Pin the resolved agent version in your app and review the
+changelog before upgrading while the API is below `1.0`.
 Browser WebMCP availability depends on the browser. Review agent results and
 keep a manual way to complete consequential actions.
 
@@ -18,7 +19,7 @@ Install the [published `shinyhub-agent` package](https://pypi.org/project/shinyh
 in a Python Shiny app:
 
 ```text
-shinyhub-agent==0.2.0
+shinyhub-agent>=0.5.4,<0.6
 ```
 
 The repository contains a [runnable example](https://github.com/rvben/shinyhub/tree/main/examples/agent-shiny-demo)
@@ -78,9 +79,12 @@ limits request volume and payload size, and returns safe errors. A write is
 reported as applied only after its handler returns. For sensitive tools, check
 the viewer's authorization in the handler as well.
 
-Registered callbacks run with the viewer's session context, isolated reactive
-reads and the reactive graph lock; pending work is flushed afterwards. The
-example needs no explicit `session=`, `reactive.isolate()` or manual flush.
+Registered callbacks run one at a time per viewer session, with the session
+context and isolated reactive reads. The example needs no explicit `session=`,
+`reactive.isolate()` or manual flush. On Shiny 1.9 and later, Shiny schedules
+dependent effects and outputs, which can run during an `await` or after the
+callback returns. Shiny 1.8 callbacks hold the graph lock and flush before
+returning.
 Keep handlers short. Input updates are client messages, so return normalized
 server-owned state as above rather than reading `input.period()` immediately
 after updating it. Use the same normalization for manual changes and tools.

@@ -31,9 +31,11 @@ def agent_dependency():
     """Add to the UI to expose tools to supported browser agents."""
     from htmltools import HTMLDependency
 
+    from . import __version__
+
     return HTMLDependency(
         "shinyhub-agent",
-        "0.4.1",
+        __version__,
         source={"package": "shinyhub_agent", "subdir": "www"},
         script={"src": "bridge.js", "defer": "defer"},
         stylesheet={"href": "bridge.css"},
@@ -44,9 +46,11 @@ def chat_dependency():
     """Add the built-in chat panel to the UI when registering a chat agent."""
     from htmltools import HTMLDependency
 
+    from . import __version__
+
     return HTMLDependency(
         "shinyhub-agent-chat",
-        "0.4.1",
+        __version__,
         source={"package": "shinyhub_agent", "subdir": "www"},
         script=[
             {"src": src, "defer": "defer"}
@@ -91,12 +95,12 @@ def register(
     chat/session reset. Set finite seconds (at least 1) to limit the window.
     Tools may supply a synchronous undo_valid callback: reactive reads are
     tracked and a False result permanently withdraws that action's chat Undo.
-    Tool and undo callbacks hold the reactive lock. Inputs changed with
-    ui.update_*() cannot reflect the browser update until the callback returns;
-    report the normalized values sent instead of waiting for an input echo.
+    Tool and undo callbacks are serialized. Shiny schedules reactive work
+    caused by their changes. Report the normalized values sent by ui.update_*()
+    without waiting for a browser input echo.
     """
     from shiny import reactive
-    from shiny.session import session_context
+    from shiny.session import Session, session_context
     from shiny.types import SilentCancelOutputException, SilentException
 
     starters = validate_starters(starters)
@@ -115,14 +119,31 @@ def register(
     if str(session.ns(namespace_probe)) != namespace_probe:
         raise ValueError("Register agent tools from the top-level server session")
 
+    # Shiny 1.9 schedules changes from background tasks and has no graph lock.
+    modern_reactivity = hasattr(Session, "run_once_when_idle")
+    callback_lock = asyncio.Lock()
+    callback_idle = asyncio.Event()
+    callback_idle.set()
+
     async def execute(operation):
-        # Only app callbacks hold the graph lock; model I/O and approval do not.
-        async with reactive.lock():
+        # Model I/O and approval run outside the callback lock.
+        lock = callback_lock if modern_reactivity else reactive.lock()
+        async with lock:
             with session_context(session), reactive.isolate():
+                if modern_reactivity:
+                    callback_idle.clear()
                 try:
-                    return await operation()
+                    result = await operation()
                 finally:
-                    await reactive.flush()
+                    if modern_reactivity:
+                        callback_idle.set()
+                    else:
+                        await reactive.flush()
+            if modern_reactivity and undo_ready is not None:
+                # Resolve any invalidated undo check before a new write
+                # can replace its receipt.
+                await undo_ready.wait()
+            return result
 
     bounded_int("followups", followups, 0, 3)
     if followups and chat is None:
@@ -161,83 +182,112 @@ def register(
     tasks: set[asyncio.Task[Any]] = set()
     undo_updates: set[asyncio.Task[Any]] = set()
     undo_monitor = None
+    undo_ready: asyncio.Event | None = None
     ended = False
 
     def stop_undo_monitor():
-        nonlocal undo_monitor
+        nonlocal undo_monitor, undo_ready
         if undo_monitor is not None:
             undo_monitor.destroy()
             undo_monitor = None
+        if undo_ready is not None:
+            undo_ready.set()
+            undo_ready = None
 
-    async def watch_undo():
-        nonlocal undo_monitor
-        # Chat callbacks run outside the graph lock. Install and first-run the
-        # monitor under that lock, without taking the chat lock from an effect.
-        async with reactive.lock():
-            stop_undo_monitor()
-            if ended or chat_session is None:
-                return
-            action = chat_session.last_action
-            tool = registry.get(action[1]) if action is not None else None
-            if action is None or tool is None or tool.undo_valid is None:
-                return
+    def install_undo_monitor():
+        nonlocal undo_monitor, undo_ready
+        stop_undo_monitor()
+        if ended or chat_session is None:
+            return
+        action = chat_session.last_action
+        tool = registry.get(action[1]) if action is not None else None
+        if action is None or tool is None or tool.undo_valid is None:
+            return
 
-            # Manage this effect ourselves: registering a fresh session.on_ended
-            # callback for every receipt would retain all previous monitors.
-            @reactive.effect(session=None)
-            async def monitor():
-                if chat_session.last_action is not action:
+        # Manage this effect ourselves: registering a fresh session.on_ended
+        # callback for every receipt would retain all previous monitors.
+        async def check_undo():
+            if modern_reactivity:
+                # A yielding callback may still be updating several values.
+                await callback_idle.wait()
+            if undo_ready is not ready:
+                return
+            if chat_session.last_action is not action:
+                stop_undo_monitor()
+                return
+            if chat_session.undo_timeout is not None:
+                remaining = chat_session.undo_timeout - (time.monotonic() - action[4])
+                if remaining <= 0:
+                    chat_session.last_action = None
                     stop_undo_monitor()
                     return
-                if chat_session.undo_timeout is not None:
-                    remaining = chat_session.undo_timeout - (time.monotonic() - action[4])
-                    if remaining <= 0:
-                        chat_session.last_action = None
-                        stop_undo_monitor()
-                        return
-                    # Dispose even when the app is idle. Destroying the effect
-                    # also cancels this context's timer.
-                    # Some event loops wake timers slightly early. A small
-                    # margin avoids rechecking app state just before expiry.
-                    reactive.invalidate_later(remaining + 0.05, session=None)
-                message = "Undo no longer available"
-                try:
-                    # Unlike tool execution, this must NOT be isolated: reads
-                    # subscribe the monitor to the app's reactive dependencies.
-                    with session_context(session):
-                        valid = tool.undo_valid(
-                            copy.deepcopy(action[2]), copy.deepcopy(action[3])
-                        )
-                    if inspect.iscoroutine(valid):
-                        valid.close()
-                    if not isinstance(valid, bool):
-                        raise TypeError("undo_valid must return a bool")
-                    if valid:
-                        return
-                except (SilentException, SilentCancelOutputException):
-                    pass  # Unset inputs and req() withdraw quietly.
-                except ToolError as error:
-                    logger.info("Agent undo validity check rejected: %s", error.code)
-                    message = str(error)
-                except Exception:
-                    logger.exception("Agent undo validity check failed")
-                # A withdrawal is permanent, even if the view later changes back.
-                # There is no await between checking the action and consuming it.
-                chat_session.last_action = None
-                stop_undo_monitor()
-                await session.send_custom_message(
-                    CHAT_EVENT_MESSAGE,
-                    {
-                        "version": VERSION,
-                        "session": chat_session.nonce,
-                        "type": "undo_withdrawn",
-                        "actionId": action[0],
-                        "message": message,
-                    },
-                )
+                # Dispose even when the app is idle. Destroying the effect
+                # also cancels this context's timer.
+                # Some event loops wake timers slightly early. A small
+                # margin avoids rechecking app state just before expiry.
+                reactive.invalidate_later(remaining + 0.05, session=None)
+            message = "Undo no longer available"
+            try:
+                # Unlike tool execution, this must NOT be isolated: reads
+                # subscribe the monitor to the app's reactive dependencies.
+                with session_context(session):
+                    valid = tool.undo_valid(
+                        copy.deepcopy(action[2]), copy.deepcopy(action[3])
+                    )
+                if inspect.iscoroutine(valid):
+                    valid.close()
+                if not isinstance(valid, bool):
+                    raise TypeError("undo_valid must return a bool")
+                if valid:
+                    return
+            except (SilentException, SilentCancelOutputException):
+                pass  # Unset inputs and req() withdraw quietly.
+            except ToolError as error:
+                logger.info("Agent undo validity check rejected: %s", error.code)
+                message = str(error)
+            except Exception:
+                logger.exception("Agent undo validity check failed")
+            # A withdrawal is permanent, even if the view later changes back.
+            # There is no await between checking the action and consuming it.
+            chat_session.last_action = None
+            stop_undo_monitor()
+            await session.send_custom_message(
+                CHAT_EVENT_MESSAGE,
+                {
+                    "version": VERSION,
+                    "session": chat_session.nonce,
+                    "type": "undo_withdrawn",
+                    "actionId": action[0],
+                    "message": message,
+                },
+            )
 
-            undo_monitor = monitor
-            await reactive.flush()
+        ready = asyncio.Event()
+        undo_ready = ready
+
+        @reactive.effect(session=None)
+        async def monitor():
+            try:
+                await check_undo()
+            finally:
+                ready.set()
+
+        if modern_reactivity:
+            monitor.on_invalidate(ready.clear)
+        undo_monitor = monitor
+        return ready
+
+    async def watch_undo():
+        if modern_reactivity:
+            # Wait for this monitor's first check without waiting for effects
+            # from unrelated sessions to finish.
+            ready = install_undo_monitor()
+            if ready is not None:
+                await ready.wait()
+        else:
+            async with reactive.lock():
+                if install_undo_monitor() is not None:
+                    await reactive.flush()
 
     def launch(operation):
         async def run():

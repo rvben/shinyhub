@@ -1,12 +1,23 @@
 import asyncio
 import json
+from contextlib import nullcontext
+from importlib.metadata import version
 from types import SimpleNamespace
 
 import httpx
 import pytest
+from htmltools import HTMLDocument
 from shiny import Inputs, reactive, ui
 from shiny._namespaces import Root
-from shinyhub_agent import AgentTool, OpenAIChat, register
+from shiny.session import Session as ShinySession
+from shinyhub_agent import (
+    AgentTool,
+    OpenAIChat,
+    ToolError,
+    agent_dependency,
+    chat_dependency,
+    register,
+)
 from shinyhub_agent._shiny import (
     CHAT_CAPABILITIES_MESSAGE,
     CHAT_EVENT_MESSAGE,
@@ -17,6 +28,19 @@ from shinyhub_agent._shiny import (
 )
 
 SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
+LEGACY_REACTIVITY = not hasattr(ShinySession, "run_once_when_idle")
+
+
+def reset_graph_lock(monkeypatch):
+    if LEGACY_REACTIVITY:
+        # Shiny 1.8 has a process-global lock bound to the current test loop.
+        from shiny.reactive._core import _reactive_environment
+
+        monkeypatch.setattr(_reactive_environment, "_lock", None)
+
+
+def graph_lock():
+    return reactive.lock() if LEGACY_REACTIVITY else nullcontext()
 
 
 class Session:
@@ -43,6 +67,20 @@ class Session:
 
     async def send_custom_message(self, name, message):
         self.messages.append((name, message))
+
+
+def test_agent_asset_urls_use_the_installed_package_version():
+    page = HTMLDocument(ui.page_fluid(agent_dependency(), chat_dependency()))
+    html = page.render(lib_prefix="lib")["html"]
+    package_version = version("shinyhub-agent")
+    for dependency, scripts, stylesheet in (
+        ("shinyhub-agent", ("bridge.js",), "bridge.css"),
+        ("shinyhub-agent-chat", ("chat.js", "charts.js"), "chat.css"),
+    ):
+        asset_path = f"lib/{dependency}-{package_version}"
+        for script in scripts:
+            assert f'src="{asset_path}/{script}"' in html
+        assert f'href="{asset_path}/{stylesheet}"' in html
 
 
 @pytest.mark.parametrize("chat", [None, object()])
@@ -79,10 +117,7 @@ def test_agent_payloads_are_excluded_from_native_bookmarks(chat):
 def test_registered_callbacks_read_update_flush_and_undo_without_app_plumbing(
     monkeypatch,
 ):
-    # Shiny's graph lock is process-global; each asyncio.run below uses a fresh loop.
-    from shiny.reactive._core import _reactive_environment
-
-    monkeypatch.setattr(_reactive_environment, "_lock", None)
+    reset_graph_lock(monkeypatch)
 
     async def run():
         session = Session()
@@ -95,18 +130,18 @@ def test_registered_callbacks_read_update_flush_and_undo_without_app_plumbing(
             observed.append(state.get())
 
         def validate(args):
-            assert reactive.lock().locked()
+            assert not LEGACY_REACTIVITY or reactive.lock().locked()
             assert inputs.period() == "week"
 
         async def write(args):
-            assert reactive.lock().locked()
+            assert not LEGACY_REACTIVITY or reactive.lock().locked()
             previous = state.get()
             ui.update_select("period", selected="year")
             state.set("year")
             return {"period": state.get(), "previous": previous}
 
         async def undo(args, result):
-            assert reactive.lock().locked()
+            assert not LEGACY_REACTIVITY or reactive.lock().locked()
             ui.update_select("period", selected=result["previous"])
             state.set(result["previous"])
             return {"period": state.get()}
@@ -129,14 +164,18 @@ def test_registered_callbacks_read_update_flush_and_undo_without_app_plumbing(
         )
         result = await tools.execute("write_view", {})
         assert result == {"period": "year", "previous": "week"}
+        if not LEGACY_REACTIVITY:
+            await reactive.flush()
         assert observed[-1] == "year"
         await tools.undo("write_view", {}, result)
+        if not LEGACY_REACTIVITY:
+            await reactive.flush()
         assert observed[-1] == "week"
         assert [update[1]["value"] for update in session.updates] == [
             ["year"],
             ["week"],
         ]
-        assert not reactive.lock().locked()
+        assert not LEGACY_REACTIVITY or not reactive.lock().locked()
         output.destroy()
         for fn in session.ended:
             fn()
@@ -147,9 +186,7 @@ def test_registered_callbacks_read_update_flush_and_undo_without_app_plumbing(
 @pytest.mark.parametrize("undo_timeout", [1.5, 3600, None, "default"])
 def test_session_end_cancels_model_work_without_holding_reactive_lock(monkeypatch, undo_timeout):
     from shinyhub_agent import _shiny
-    from shiny.reactive._core import _reactive_environment
-
-    monkeypatch.setattr(_reactive_environment, "_lock", None)
+    reset_graph_lock(monkeypatch)
     chat_sessions = []
     original = _shiny.ChatSession
 
@@ -171,7 +208,7 @@ def test_session_end_cancels_model_work_without_holding_reactive_lock(monkeypatc
 
         class Agent:
             async def run(self, *args, **kwargs):
-                assert not reactive.lock().locked()
+                assert not LEGACY_REACTIVITY or not reactive.lock().locked()
                 started.set()
                 try:
                     await asyncio.Event().wait()
@@ -205,7 +242,7 @@ def test_session_end_cancels_model_work_without_holding_reactive_lock(monkeypatc
         )
         await reactive.flush()
         await asyncio.wait_for(started.wait(), 1)
-        assert not reactive.lock().locked()
+        assert not LEGACY_REACTIVITY or not reactive.lock().locked()
         for fn in session.ended:
             fn()
         await asyncio.wait_for(cancelled.wait(), 1)
@@ -264,9 +301,7 @@ def test_notice_validation_precedes_registration(notice, error):
 
 
 def test_registered_notice_never_reaches_model_payload_or_usage(monkeypatch):
-    from shiny.reactive._core import _reactive_environment
-
-    monkeypatch.setattr(_reactive_environment, "_lock", None)
+    reset_graph_lock(monkeypatch)
     requests, records = [], []
     notice = "NOTICE_ONLY: Check important figures against the charts."
 
@@ -344,3 +379,82 @@ def test_registered_notice_never_reaches_model_payload_or_usage(monkeypatch):
     assert all(
         record.input_tokens == 11 and record.output_tokens == 5 for record in records
     )
+
+
+@pytest.mark.skipif(
+    LEGACY_REACTIVITY,
+    reason="Shiny 1.9+ schedules asynchronous effects independently",
+)
+def test_tool_completes_while_unrelated_reactive_effect_is_suspended():
+    async def run():
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        @reactive.effect(session=None)
+        async def unrelated_effect():
+            started.set()
+            await release.wait()
+
+        session = Session()
+        tools = register(
+            session=session,
+            input=Inputs({}),
+            tools=[AgentTool("read_view", "Read view", SCHEMA, read_view)],
+        )
+        try:
+            await asyncio.wait_for(started.wait(), 1)
+            assert await tools.execute("read_view", {}, timeout=0.5) == {}
+            assert not release.is_set()
+        finally:
+            release.set()
+            await reactive.flush()
+            unrelated_effect.destroy()
+            for fn in session.ended:
+                fn()
+
+    asyncio.run(run())
+
+
+@pytest.mark.skipif(LEGACY_REACTIVITY, reason="Shiny 1.9+ uses session-local locking")
+def test_tool_callbacks_serialize_per_session_and_release_on_cancel():
+    async def run():
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def slow_read(_):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        first_session = Session()
+        other_session = Session()
+        read = AgentTool("read_view", "Read view", SCHEMA, read_view)
+        first = register(
+            session=first_session,
+            input=Inputs({}),
+            tools=[AgentTool("slow_read", "Read slowly", SCHEMA, slow_read), read],
+        )
+        other = register(session=other_session, input=Inputs({}), tools=[read])
+        task = asyncio.create_task(first.execute("slow_read", {}))
+        try:
+            await asyncio.wait_for(started.wait(), 1)
+            assert await other.execute("read_view", {}, timeout=0.5) == {}
+            with pytest.raises(ToolError, match="took too long"):
+                await first.execute("read_view", {}, timeout=0.1)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert cancelled.is_set()
+            assert await first.execute("read_view", {}, timeout=0.5) == {}
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            for session in (first_session, other_session):
+                for fn in session.ended:
+                    fn()
+            await reactive.flush()
+
+    asyncio.run(run())

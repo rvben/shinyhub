@@ -9,10 +9,12 @@ from shinyhub_agent import AgentTool, register
 from shinyhub_agent._shiny import CAPABILITIES_MESSAGE, REQUEST_INPUT, RESULT_MESSAGE
 
 
+from test_shiny import reset_graph_lock
+
+
 @pytest.mark.parametrize("allow_writes", [False, True])
 def test_registered_browser_write_policy_is_enforced_in_shiny_session(monkeypatch, allow_writes):
-    from shiny.reactive._core import _reactive_environment
-    monkeypatch.setattr(_reactive_environment, "_lock", None)
+    reset_graph_lock(monkeypatch)
     effects = []
     effect = reactive.effect
 

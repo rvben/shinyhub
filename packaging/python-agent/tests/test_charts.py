@@ -268,27 +268,26 @@ def test_registration_keeps_chart_tool_out_of_browser_and_runs_reads_in_session(
     monkeypatch,
 ):
     from shiny import Inputs, reactive
-    from shiny.reactive._core import _reactive_environment
     from shinyhub_agent import chat_dependency, register
     from shinyhub_agent._shiny import (
         CHAT_CAPABILITIES_MESSAGE,
         CHAT_EVENT_MESSAGE,
         CHAT_INPUT,
     )
-    from test_shiny import Session
+    from test_shiny import LEGACY_REACTIVITY, Session, reset_graph_lock
 
-    monkeypatch.setattr(_reactive_environment, "_lock", None)
+    reset_graph_lock(monkeypatch)
 
     async def run():
         session, request, completed = Session(), reactive.Value(None), asyncio.Event()
 
         async def read(_):
-            assert reactive.lock().locked()
+            assert not LEGACY_REACTIVITY or reactive.lock().locked()
             return data()
 
         class Agent:
             async def run(self, message, history, tools, approve, *, thread_id):
-                assert not reactive.lock().locked()
+                assert not LEGACY_REACTIVITY or not reactive.lock().locked()
                 dataset = (await tools.execute("sales", {}))["dataset_id"]
                 await tools.execute("render_chart", args(dataset))
                 yield {"type": "delta", "text": "Here is the chart."}
@@ -332,7 +331,7 @@ def test_registration_keeps_chart_tool_out_of_browser_and_runs_reads_in_session(
             k == CHAT_EVENT_MESSAGE and v["type"] == "chart"
             for k, v in session.messages
         )
-        assert not reactive.lock().locked()
+        assert not LEGACY_REACTIVITY or not reactive.lock().locked()
         for fn in session.ended:
             fn()
 

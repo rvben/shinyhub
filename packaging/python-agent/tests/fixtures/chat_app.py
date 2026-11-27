@@ -1,7 +1,10 @@
 """Local-only browser integration fixture; no external model calls."""
 
 import asyncio
+from importlib.metadata import distribution
+from pathlib import Path
 
+import shinyhub_agent
 from shiny import App, reactive, render, ui
 from shinyhub_agent import (
     AgentTool,
@@ -10,6 +13,11 @@ from shinyhub_agent import (
     chat_dependency,
     register,
 )
+
+
+installed_module = distribution("shinyhub-agent").locate_file("shinyhub_agent/__init__.py")
+if Path(shinyhub_agent.__file__).resolve() != Path(installed_module).resolve():
+    raise RuntimeError("The browser fixture requires an installed shinyhub-agent wheel")
 
 
 class StubAgent:
@@ -103,6 +111,7 @@ def server(input, output, session):
                 describe=lambda args: f"Reporting period = {args['period']}",
                 receipt=lambda _args, result: f"View set to {result['period']}",
                 undo=undo_period,
+                undo_valid=lambda _args, result: period.get() == result["period"],
             ),
         ],
         chat=StubAgent(),

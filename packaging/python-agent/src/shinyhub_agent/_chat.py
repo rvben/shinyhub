@@ -377,8 +377,8 @@ class ChatSession:
                                 )
                     if event.get("type") == "action_applied":
                         # A send can be cancelled after delivering the receipt.
-                        # Always schedule monitoring, without delaying Stop on
-                        # a contended graph lock when the send was cancelled.
+                        # Schedule monitoring even when the send is cancelled,
+                        # without making Stop wait for the first check.
                         try:
                             await emit(event)
                         finally:

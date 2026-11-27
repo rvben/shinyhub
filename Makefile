@@ -8,6 +8,8 @@ RACE_TIMEOUT ?= 20m
 PYTHON_VERSION ?= 3.14+gil
 ENTRA_OIDC_PYTHON ?= python3.14
 BOOKMARKS_SHINY ?= shiny>=1.8,<2
+AGENT_SHINY ?= shiny>=1.8.0
+AGENT_WHEEL_DIR ?=
 BOOKMARKS_BROWSERS ?= --browser chromium
 BOOKMARKS_BROWSER_ENV = uv run --python '$(PYTHON_VERSION)' --with-editable . --with pytest --with pytest-asyncio --with pytest-playwright --with pytest-timeout --with '$(BOOKMARKS_SHINY)' --no-project
 
@@ -247,10 +249,19 @@ test-py-bookmarks-browser:
 	@command -v uv >/dev/null 2>&1 || { echo "uv not found (needed for the Python bookmark browser tests)"; exit 1; }
 	cd packaging/python-bookmarks && $(BOOKMARKS_BROWSER_ENV) python -m pytest browser-tests/ -q --timeout=120 --timeout-method=thread $(BOOKMARKS_BROWSERS)
 
-# test-py-agent validates the session-bound adapter and browser protocol.
-test-py-agent:
+.PHONY: test-py-agent-sdk test-py-agent-compat
+
+test-py-agent-sdk:
 	@command -v uv >/dev/null 2>&1 || { echo "uv not found (needed for the Python agent helper tests)"; exit 1; }
-	cd packaging/python-agent && PYTHONPATH=src uv run --python '$(PYTHON_VERSION)' --with pytest --with . --no-project python -m pytest tests/ -q
+	cd packaging/python-agent && PYTHONPATH=src uv run --python '$(PYTHON_VERSION)' --with pytest --with . --with '$(AGENT_SHINY)' --no-project python -m pytest tests/ -q
+
+# Exercise both reactive scheduler versions with the real Shiny package.
+test-py-agent-compat:
+	$(MAKE) test-py-agent-sdk AGENT_SHINY='shiny==1.8.0'
+	$(MAKE) test-py-agent-sdk AGENT_SHINY='shiny==1.9.0'
+
+# test-py-agent validates the session-bound adapter and browser protocol.
+test-py-agent: test-py-agent-sdk
 	node packaging/python-agent/tests/bridge.test.cjs
 	@if [ ! -d node_modules/jsdom ]; then npm install --no-audit --no-fund --silent; fi
 	node --test packaging/python-agent/tests/chat.test.cjs packaging/python-agent/tests/charts.test.cjs packaging/python-agent/tests/bridge-approval.test.cjs
@@ -394,14 +405,31 @@ test-browser-agent-chat-e2e:
 	@if [ ! -d loadtest/render/driver/node_modules/playwright ]; then cd loadtest/render/driver && npm install --no-audit --no-fund --silent; fi
 	SHINYHUB_E2E_BROWSER_CHANNEL="$${SHINYHUB_E2E_BROWSER_CHANNEL:-chrome}" node scripts/agent-chat-browser-e2e.mjs
 
-.PHONY: test-browser-agent-chat-e2e test-browser-agent-shiny-e2e
+.PHONY: test-browser-agent-chat-e2e test-browser-agent-shiny-e2e test-browser-agent-shiny-compat
 
-# Real Python Shiny session: reads, approvals, updates, undo and cancellation.
-# SHINYHUB_AGENT_TEST_PYTHON can select an environment with shinyhub-agent deps.
-test-browser-agent-shiny-e2e:
+# Run the browser flow against the same wheel on both reactive schedulers.
+# Set AGENT_WHEEL_DIR to reuse a directory containing one release wheel.
+test-browser-agent-shiny-compat: AGENT_BROWSER_SHINY = 'shiny==1.8.0' 'shiny==1.9.0'
+test-browser-agent-shiny-e2e: AGENT_BROWSER_SHINY = '$(AGENT_SHINY)'
+test-browser-agent-shiny-e2e test-browser-agent-shiny-compat:
 	@command -v uv >/dev/null 2>&1 || { echo "uv is required"; exit 1; }
-	@if [ ! -d loadtest/render/driver/node_modules/playwright ]; then cd loadtest/render/driver && npm install --no-audit --no-fund --silent; fi
-	uv run --python '$(PYTHON_VERSION)' --with ./packaging/python-agent --no-project node scripts/agent-shiny-browser-e2e.mjs
+	@if [ ! -d loadtest/render/driver/node_modules/playwright ]; then npm --prefix loadtest/render/driver ci --ignore-scripts --no-audit --no-fund; fi
+	@set -eu; \
+	wheel_dir='$(AGENT_WHEEL_DIR)'; \
+	if [ -z "$$wheel_dir" ]; then \
+		wheel_dir=$$(mktemp -d); \
+		trap 'rm -rf "$$wheel_dir"' EXIT; \
+		uv build --no-sources --out-dir "$$wheel_dir" packaging/python-agent; \
+	fi; \
+	set -- "$$wheel_dir"/*.whl; \
+	if [ "$$#" -ne 1 ] || [ ! -f "$$1" ]; then \
+		echo "Expected one wheel in $$wheel_dir" >&2; exit 1; \
+	fi; \
+	for shiny in $(AGENT_BROWSER_SHINY); do \
+		echo "Browser-testing $$(basename "$$1") with $$shiny"; \
+		SHINYHUB_AGENT_TEST_PYTHON=python3 uv run --isolated --no-project --python '$(PYTHON_VERSION)' \
+			--with "$$1" --with "$$shiny" node scripts/agent-shiny-browser-e2e.mjs; \
+	done
 
 # Real Python Shiny lifecycle contract in a disposable, extension-free Chromium.
 # Requires uv and system Python; uses the render driver's locked Playwright.

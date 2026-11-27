@@ -182,9 +182,16 @@ jobs:
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
       - name: Python SDKs
         run: make test-py-identity test-py-bookmarks test-py-agent
+      - name: Agent reactive scheduler compatibility
+        if: matrix.python == '3.12'
+        run: make test-py-agent-compat
       - name: Python tracing, launcher and native app
         run: make test-py-runtime
-      - name: Real agent session
+      - name: Real agent sessions on Shiny 1.8 and 1.9
+        if: matrix.python == '3.12'
+        run: make test-browser-agent-shiny-compat
+      - name: Real agent session on the latest Shiny
+        if: matrix.python != '3.12'
         run: make test-browser-agent-shiny-e2e
       - name: Real native deployment and browser lifecycle
         run: make test-browser-lifecycle-e2e

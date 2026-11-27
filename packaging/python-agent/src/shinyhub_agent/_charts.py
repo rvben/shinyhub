@@ -147,7 +147,7 @@ class ChartRegistry(ToolRegistry):
         if name == CHART_TOOL:
             return await super().execute(name, arguments, timeout=timeout)
         # The base registry validates permissions, arguments and results, and
-        # executes the app callback under its existing Shiny reactive lock.
+        # runs the app callback in the viewer's Shiny session.
         result = await self.base.execute(
             name, arguments, timeout=timeout, _chart_data=True
         )

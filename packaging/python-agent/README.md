@@ -1,12 +1,12 @@
 # ShinyHub agent tools for Python Shiny
 
-`0.4.1` is a regular release of the session-scoped Python helper. The API is
-still below `1.0`; pin the package and review migration notes before upgrading.
+Install `shinyhub-agent` from PyPI and pin the resolved version in your app.
+Review the changelog before upgrading while the API is below `1.0`.
 Browser WebMCP availability depends on the browser. The app remains responsible
 for tool permissions and for checking consequential results.
 
-The session adapter supports Shiny 1.8. Shiny 1.9 changes reactive locking and
-execution semantics and is excluded until the adapter supports that model.
+The session adapter requires Shiny 1.8 or later. Shiny 1.9 support starts
+with `shinyhub-agent` 0.5.4.
 
 This helper lets an app declare a small, typed set of tools for the **current
 viewer session**. The app owns all data access and state changes. ShinyHub does
@@ -204,8 +204,10 @@ def undo_still_valid(args, result):
 
 Pass `undo_valid=undo_still_valid` alongside the tool's `undo` handler.
 The callback runs after the chat receipt is sent, and again whenever a Shiny
-input, reactive value or calculation it reads is invalidated. It runs under
-the reactive lock in the viewer's session, with dependency tracking enabled.
+input, reactive value or calculation it reads is invalidated. It runs in the
+viewer's session with dependency tracking enabled. Read the server-owned state
+updated by the tool or a reactive calculation derived from it. On Shiny 1.9
+and later, separate effects may still be running when this check runs.
 Returning `False` permanently consumes that undo and removes its button;
 changing the view back does not revive it. A `ToolError` withdraws it with the
 safe message, while an unexpected exception or a non-boolean return withdraws
@@ -507,18 +509,20 @@ their buttons. Ask again to propose a fresh action.
 ## Shiny state and write results
 
 Registered handlers, validators, descriptions and undo callbacks run in the
-viewer session, with reactive reads isolated and the reactive graph locked.
-Pending reactive work is flushed before callbacks complete. They can read
-`input.x()` or a reactive calculation, call `ui.update_*()` without `session=`,
-and set reactive values without a manual `reactive.flush()`. Model requests and
-approval waits do not hold the lock. Session end cancels outstanding tasks.
-Keep callbacks short: the graph lock is shared across sessions in the process.
-Do not wait inside a callback for browser input updates or unrelated slow I/O.
+viewer session with reactive reads isolated. They can read `input.x()` or a
+reactive calculation, call `ui.update_*()` without `session=`, and set reactive
+values without a manual `reactive.flush()`. Model requests and approval waits
+run independently of tool callbacks. Session end cancels outstanding requests.
 
-`ui.update_*()` sends a client update; it does not synchronously change
-`input.x()`. The incoming input echo needs the same reactive lock and cannot
-be processed until the callback returns. Report the normalized values you
-sent rather than polling for the echo, including in undo results and baselines.
+On Shiny 1.9 and later, tool callbacks in the same viewer session run one at a
+time. Shiny schedules dependent effects and outputs, which can run during an
+`await` or after the callback returns. Keep state reads and writes that must
+happen together in a section without an `await`. On Shiny 1.8, callbacks hold
+Shiny's process-wide graph lock and flush pending work before returning.
+
+`ui.update_*()` sends a client update. Read the updated `input.x()` only after
+the browser echoes the value. Report the normalized values you sent in tool
+and undo results, and keep callbacks short.
 Return normalized, server-owned view state, as `selected_period`
 does above. Route manual input changes through the same normalization function,
 including clamping dates and clearing incompatible filters. Use that state for
@@ -565,7 +569,7 @@ and budgets increase token use.
 Fixed bounds: 32 tools; 8192 UTF-8 bytes per schema or argument object; 32768
 UTF-8 bytes per tool or undo result; 500 characters per tool description;
 300 per confirmation; 140 per receipt; 1,000 per panel notice. Tool execution, preflight and undo have
-an 8-second timeout including waiting for the reactive lock. Streams allow
+an 8-second timeout including waiting to run. Streams allow
 64 KiB per event and 1 MiB per response. Chat questions are capped at 2000
 characters, 10 per minute and 40 per session; reset does not reset those budgets.
 Browser dispatch allows 20 requests per minute, with write preflight and
@@ -642,10 +646,11 @@ or approves changes. The toolbar's own controls require separate toolbar tests.
 From the repository root, `make test-py-agent` runs the Python and browser unit
 tests. `make test-browser-agent-chat-e2e` checks native and fallback panels at
 desktop and mobile sizes, including keyboard access, accessibility and plain
-text argument rendering. `make test-browser-agent-shiny-e2e` exercises a real
-Shiny session with a local stub agent: approval, updates, output recomputation,
-undo and cancellation. These browser checks require Chrome and make no model
-provider requests.
+text argument rendering. `make test-browser-agent-shiny-e2e` builds and installs
+the wheel, then exercises approval, updates, output recomputation, undo and
+cancellation in a real Shiny session. `make test-browser-agent-shiny-compat`
+runs that flow with the same wheel on Shiny 1.8.0 and 1.9.0. These checks use
+Chrome by default and make no model provider requests.
 
 ## Operational requirements
 
