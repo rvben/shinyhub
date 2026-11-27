@@ -851,6 +851,43 @@ func TestDeploy_FailurePrintsLogTail(t *testing.T) {
 	}
 }
 
+// The logs endpoint's "no log available" 404 means the server found the app
+// but holds no log for replica 0, as after a first deploy whose build failed
+// before the app ever ran. Both log-tail printers say so plainly. Any other
+// 404, such as the one for an app the caller may not see or one from a proxy,
+// says nothing about the log and keeps the fetch warning.
+func TestPrintLogTail_NoLogIsNotAFetchFailure(t *testing.T) {
+	cases := []struct {
+		name, contentType, body, want string
+	}{
+		{"no log available", "application/json", `{"error":"no log available"}`, "no log tail available for demo (replica 0)\n"},
+		{"app not visible", "application/json", `{"error":"not found"}`, "warning: could not fetch logs: 404 Not Found\n"},
+		{"handler message followed by other text", "text/plain", `{"error":"no log available"} upstream error`, "warning: could not fetch logs: 404 Not Found\n"},
+		{"proxy page", "text/html", `<html><body>404 Not Found</body></html>`, "warning: could not fetch logs: 404 Not Found\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", tc.contentType)
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			cfg := &cliConfig{Host: srv.URL, Token: "tok"}
+			for name, print := range map[string]func(io.Writer){
+				"printLogTail":               func(w io.Writer) { printLogTail(cfg, "demo", w) },
+				"printLogTailForObservation": func(w io.Writer) { printLogTailForObservation(cfg, "demo", w, appHealthObservation{}) },
+			} {
+				var buf bytes.Buffer
+				print(&buf)
+				if got := buf.String(); got != tc.want {
+					t.Errorf("%s wrote %q, want %q", name, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
 // TestPrintLogTail_WarnsOnLogsEndpointFailure verifies that printLogTail
 // writes a warning line when the logs endpoint returns a non-2xx status,
 // so the user sees actionable output instead of silence.

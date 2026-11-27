@@ -124,6 +124,15 @@ func TestHandleLogs_NoLogFile(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("expected 404 when no log file exists, got %d", rec.Code)
 	}
+	// The CLI tells this answer apart from the 404 for an app the caller may
+	// not see by its message (noLogAvailable in internal/cli/deploy.go), so the
+	// message is part of the contract.
+	var body struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body.Error != "no log available" {
+		t.Errorf("body = %q, want error %q", rec.Body.String(), "no log available")
+	}
 }
 
 func TestHandleLogSources_MergesLiveRowsAndRetainedScaledDownLogs(t *testing.T) {
