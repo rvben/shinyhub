@@ -150,9 +150,13 @@ type Server struct {
 	// beforeIdleDeregister runs after a stop-first deploy was admitted because
 	// the app was not in use and before the route is removed; nil in production.
 	beforeIdleDeregister func(slug string)
-	availableMemoryMB    func() (int, error)
-	availableCPUCores    func() (float64, error)
-	cpuQuotaReader       *admission.CgroupReader
+	// beforeDeployLock runs after a deploy passed the wait for an earlier
+	// version's cleanup and before it takes the app operation lock; nil in
+	// production.
+	beforeDeployLock  func(slug string)
+	availableMemoryMB func() (int, error)
+	availableCPUCores func() (float64, error)
+	cpuQuotaReader    *admission.CgroupReader
 	// deployReplica boots a single replica at one index, used by the autoscale
 	// scale-up primitive to grow a pool by one without cycling the whole pool.
 	// Defaults to deploy.RunReplica; overridable in tests.

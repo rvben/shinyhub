@@ -336,3 +336,185 @@ func TestDeploy_PerSessionRedeployAsksTheTierAboutAWorkerItDoesNotOwn(t *testing
 		t.Fatal("the tier was asked about a worker without a deadline, so a tier that does not answer would hold the deploy")
 	}
 }
+
+// The wait for an earlier version's cleanup runs before the app operation
+// lock, so a worker can be left without an owner after the wait and before the
+// lock. The check under the lock must refuse it the same way: as a wait the
+// caller retries later, whether or not the caller consented to downtime, and
+// never by replacing the version that worker belongs to.
+func TestDeploy_AWorkerLeftWithoutAnOwnerUnderTheLockHoldsTheRedeploy(t *testing.T) {
+	for _, consent := range []bool{true, false} {
+		name := "without consent"
+		if consent {
+			name = "with consent to downtime"
+		}
+		t.Run(name, func(t *testing.T) {
+			srv, store, token, manager, _, _ := buildManifestE2EServer(t, config.RuntimeConfig{})
+			defer srv.Close()
+			app := createGenerationTestApp(t, store, "per-session-locked", 2, 16)
+			if rec := deployIsolationManifest(t, srv, token, app.Slug, "per_session", "print('v1')"); rec.Code != http.StatusOK {
+				t.Fatalf("first deploy: %d %s", rec.Code, rec.Body.String())
+			}
+			serving, err := store.GetServingDeployment(app.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			manager.RegisterRuntime("host", process.NewNativeRuntime())
+			orphan := exec.Command("sleep", "60")
+			if err := orphan.Start(); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = orphan.Process.Kill(); _ = orphan.Wait() })
+			pid := orphan.Process.Pid
+			started, err := process.NativeProcessStartIdentity(pid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reached := false
+			srv.beforeDeployLock = func(string) {
+				reached = true
+				if err := store.UpsertDeploymentReplica(db.UpsertDeploymentReplicaParams{
+					AppID: app.ID, DeploymentID: serving.ID, Index: 7, PID: &pid, Status: "running",
+					Provider: "native", Tier: "host", ProcessStartIdentity: started,
+				}); err != nil {
+					t.Error(err)
+				}
+			}
+
+			body, contentType := buildMultiFileBundleUpload(t, map[string]string{"app.py": "print('v2')", "shinyhub.toml": crossIsolationManifest("per_session")})
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			defer cancel()
+			req := httptest.NewRequest(http.MethodPost, "/api/apps/"+app.Slug+"/deploy", body).WithContext(ctx)
+			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("Content-Type", contentType)
+			if consent {
+				req.Header.Set("X-ShinyHub-Allow-Downtime", "1")
+			}
+			rec := httptest.NewRecorder()
+			srv.Router().ServeHTTP(rec, req)
+
+			if !reached {
+				t.Fatal("the deploy never reached the app operation lock, so the window was not exercised")
+			}
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("redeploy over a worker that lost its owner before the lock: %d %s, want it refused", rec.Code, rec.Body.String())
+			}
+			if got := rec.Header().Get("X-ShinyHub-Conflict-Remedy"); got != "wait" {
+				t.Fatalf("X-ShinyHub-Conflict-Remedy = %q, want the refusal marked as one a later retry clears", got)
+			}
+			if strings.Contains(rec.Body.String(), "allow-downtime") {
+				t.Fatalf("refusal %q advises consent to downtime, which does not clear an unstopped worker", rec.Body.String())
+			}
+			if now, err := store.GetServingDeployment(app.ID); err != nil || now.ID != serving.ID {
+				t.Fatalf("serving deployment after the refusal = %+v err=%v, want it unchanged", now, err)
+			}
+			if pending, err := store.HasPendingDeployment(app.ID); err != nil || pending {
+				t.Fatalf("pending deployment after the refusal = %v err=%v, want it closed", pending, err)
+			}
+			rows, err := store.ListDeploymentReplicas(app.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rows) != 1 || rows[0].PID == nil || *rows[0].PID != pid {
+				t.Fatalf("ledger after the refusal = %+v, want the live worker still recorded", rows)
+			}
+		})
+	}
+}
+
+// orphanedServingRows probes a worker on a native tier or on a tier that
+// answers for its workers by identity, and does not fence any other tier. That
+// is safe only because no other tier gets a ledger row for an elastic worker:
+// an elastic spawn records one only where the runtime starts the worker
+// guarded and passes it the lifetime files. A container runtime that gains
+// both would record rows the fence never probes, so it must gain a probe too.
+func TestOrphanFence_ContainerWorkersAreNotRecordedInTheLedger(t *testing.T) {
+	var docker process.Runtime = &process.DockerRuntime{}
+	recorded, ok := docker.(interface {
+		process.GuardedStartCapable
+		process.LifetimeFileInheritor
+	})
+	if ok && recorded.SupportsGuardedStart() && recorded.InheritsLifetimeFiles() {
+		if _, probed := docker.(workerStopProber); !probed {
+			t.Fatal("container workers are now recorded in the ledger, but the orphan fence cannot ask the container runtime whether one is stopped")
+		}
+	}
+}
+
+// A deploy of a stopped app only prepares the new version, but it still clears
+// the worker ledger before it publishes. A worker left without an owner after
+// the wait for earlier cleanup must hold that deploy back as the wait would
+// have, not lose its row while it runs.
+func TestDeploy_AStoppedAppKeepsTheRowOfAWorkerLeftWithoutAnOwner(t *testing.T) {
+	srv, store, token, manager, _, _ := buildManifestE2EServer(t, config.RuntimeConfig{})
+	defer srv.Close()
+	app := createGenerationTestApp(t, store, "per-session-stopped", 2, 16)
+	if rec := deployIsolationManifest(t, srv, token, app.Slug, "per_session", "print('v1')"); rec.Code != http.StatusOK {
+		t.Fatalf("first deploy: %d %s", rec.Code, rec.Body.String())
+	}
+	stop := httptest.NewRequest(http.MethodPost, "/api/apps/"+app.Slug+"/stop", nil)
+	stop.Header.Set("Authorization", "Bearer "+token)
+	stopped := httptest.NewRecorder()
+	srv.Router().ServeHTTP(stopped, stop)
+	if stopped.Code != http.StatusOK {
+		t.Fatalf("stop: %d %s", stopped.Code, stopped.Body.String())
+	}
+	serving, err := store.GetServingDeployment(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.RegisterRuntime("host", process.NewNativeRuntime())
+	orphan := exec.Command("sleep", "60")
+	if err := orphan.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = orphan.Process.Kill(); _ = orphan.Wait() })
+	pid := orphan.Process.Pid
+	started, err := process.NativeProcessStartIdentity(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reached := false
+	srv.beforeDeployLock = func(string) {
+		reached = true
+		if err := store.UpsertDeploymentReplica(db.UpsertDeploymentReplicaParams{
+			AppID: app.ID, DeploymentID: serving.ID, Index: 7, PID: &pid, Status: "running",
+			Provider: "native", Tier: "host", ProcessStartIdentity: started,
+		}); err != nil {
+			t.Error(err)
+		}
+	}
+	body, contentType := buildMultiFileBundleUpload(t, map[string]string{"app.py": "print('v2')", "shinyhub.toml": crossIsolationManifest("per_session")})
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	req := httptest.NewRequest(http.MethodPost, "/api/apps/"+app.Slug+"/deploy", body).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", contentType)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if !reached {
+		t.Fatal("the deploy never reached the app operation lock, so the window was not exercised")
+	}
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("deploy of a stopped app over a worker that lost its owner before the lock: %d %s, want it refused", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-ShinyHub-Conflict-Remedy"); got != "wait" {
+		t.Fatalf("X-ShinyHub-Conflict-Remedy = %q, want the refusal marked as one a later retry clears", got)
+	}
+	if now, err := store.GetServingDeployment(app.ID); err != nil || now.ID != serving.ID {
+		t.Fatalf("serving deployment after the refusal = %+v err=%v, want it unchanged", now, err)
+	}
+	if pending, err := store.HasPendingDeployment(app.ID); err != nil || pending {
+		t.Fatalf("pending deployment after the refusal = %v err=%v, want it closed", pending, err)
+	}
+	if now, err := store.GetAppBySlug(app.Slug); err != nil || now.Status != "stopped" {
+		t.Fatalf("app after the refusal = %+v err=%v, want it still stopped", now, err)
+	}
+	rows, err := store.ListDeploymentReplicas(app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].PID == nil || *rows[0].PID != pid {
+		t.Fatalf("ledger after the deploy = %+v, want the live worker still recorded", rows)
+	}
+}
