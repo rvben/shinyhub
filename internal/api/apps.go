@@ -4871,10 +4871,25 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 // lock and must have checked activation lifecycle safety.
 func (s *Server) deleteAppLocked(ctx context.Context, app *db.App) (string, error) {
 	slug := app.Slug
+	// The caller may have loaded app before it took the deploy lock, so read it
+	// again under the lock: an overlapping deletion may since have tombstoned it.
+	current, err := s.store.GetAppBySlug(slug)
+	if err != nil {
+		return "", err
+	}
 	var releaseJobFences func()
+	// Whether the app is tombstoned, by this call or an earlier attempt whose
+	// cleanup failed. Until then a failed deletion leaves the app in place, so
+	// it must get its scheduled jobs back and keep their locks.
+	tombstoned := current.Status == "deleting"
 	if s.jobs != nil {
 		drainCtx, cancelDrain := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancelDrain()
+		defer func() {
+			if !tombstoned {
+				s.jobs.UnblockApp(app.ID)
+			}
+		}()
 		if err := s.jobs.BlockAndDrainApp(drainCtx, app.ID); err != nil {
 			return "", fmt.Errorf("drain schedules for app deletion: %w", err)
 		}
@@ -4892,8 +4907,14 @@ func (s *Server) deleteAppLocked(ctx context.Context, app *db.App) (string, erro
 		// lifetime does not grow those maps without bound. Deferred so ForgetApp
 		// runs only after AcquirePublicationRecoveryFences' release below (defers
 		// are LIFO): forgetting the app's publication gate while this deletion
-		// still holds it would just recreate the entry being forgotten.
+		// still holds it would just recreate the entry being forgotten. Only a
+		// tombstoned app is forgotten: an app a failed deletion leaves in place
+		// gets its admission back, and a run still holding one of these locks
+		// must keep excluding the runs admitted after it.
 		defer func() {
+			if !tombstoned {
+				return
+			}
 			for _, sc := range scheduleRows {
 				s.jobs.ForgetSchedule(sc.ID)
 			}
@@ -4918,6 +4939,7 @@ func (s *Server) deleteAppLocked(ctx context.Context, app *db.App) (string, erro
 	if err := s.store.UpdateAppStatus(db.UpdateAppStatusParams{Slug: slug, Status: "deleting"}); err != nil {
 		return "", err
 	}
+	tombstoned = true
 	if s.proxy != nil {
 		s.proxy.ForgetRejects(slug)
 	}
