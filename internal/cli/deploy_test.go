@@ -1438,6 +1438,61 @@ func TestDeploy_DeployRun_ReportedAndWaited(t *testing.T) {
 	}
 }
 
+// A restart that rebuilds a deployment never prepared before quotes uv's
+// output in its failure, which can run well past a few KiB. The whole error
+// body has to reach httpError, or the JSON does not decode and both the
+// server's message and the hint for its stated failure kind are lost.
+func TestRestartAppAfterWarm_LongFailureKeepsMessageAndHint(t *testing.T) {
+	message := "deploy failed during dependencies: uv sync: exit status 1\n" + strings.Repeat("  ╰─▶ Because a depends on b and b conflicts with c, the requirements are unsatisfiable.\n", 120)
+	if len(message) <= 8<<10 {
+		t.Fatalf("message is %d bytes; the test needs one past 8 KiB", len(message))
+	}
+	body, err := json.Marshal(map[string]string{"error": message, "failure_kind": "build_failed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/apps/warmapp", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"app":{"status":"running"}}`))
+	})
+	mux.HandleFunc("/api/apps/warmapp/restart", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write(body)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	_, err = restartAppAfterWarm(&cliConfig{Host: srv.URL, Token: "shk_test"}, "warmapp", io.Discard)
+	if err == nil {
+		t.Fatal("restart failure was not reported")
+	}
+	assertDeployFailureEnvelope(t, err, http.StatusInternalServerError,
+		"restart after warm (500 Internal Server Error): "+message, wantBuildFailedHint)
+}
+
+// An error body past the read bound is cut off rather than buffered whole.
+func TestRestartAppAfterWarm_BoundsTheErrorBody(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/apps/warmapp", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"app":{"status":"running"}}`))
+	})
+	mux.HandleFunc("/api/apps/warmapp/restart", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write(bytes.Repeat([]byte("x"), 4<<20))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	_, err := restartAppAfterWarm(&cliConfig{Host: srv.URL, Token: "shk_test"}, "warmapp", io.Discard)
+	if err == nil {
+		t.Fatal("restart failure was not reported")
+	}
+	if n := strings.Count(err.Error(), "x"); n < 4<<10 || n > 1<<20 {
+		t.Errorf("error kept %d bytes of the body, want more than 4 KiB and at most 1 MiB", n)
+	}
+}
+
 func TestDeploy_RestartAfterWarm_WaitsThenRestarts(t *testing.T) {
 	var runPolls, restartHits int
 	mux := http.NewServeMux()
