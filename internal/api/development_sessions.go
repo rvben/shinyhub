@@ -67,7 +67,9 @@ func (s *Server) registerDevelopmentSession(r *http.Request, appID int64, expire
 
 func (s *Server) handleEndDevelopmentSession(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
-	app, ok := s.requireManageApp(w, r, slug)
+	// Ending a session only closes its lease, so it is accepted on a tombstoned
+	// app too: a CLI exiting while its app is being deleted still ends cleanly.
+	app, ok := s.authorizeManageApp(w, r, slug)
 	if !ok {
 		return
 	}

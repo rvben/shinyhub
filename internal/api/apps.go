@@ -4579,7 +4579,8 @@ func (s *Server) handleRollbackApp(w http.ResponseWriter, r *http.Request) {
 // answers 404 unless it is still the app authorized as authorizedID. The
 // slug alone does not pin identity: the app may have been deleted and
 // another created under the same slug while the request queued, and the
-// caller was never authorized to act on that one.
+// caller was never authorized to act on that one. Like requireManageApp it
+// refuses a mutation of an app the deletion has tombstoned in the meantime.
 func (s *Server) rereadAuthorizedApp(w http.ResponseWriter, r *http.Request, slug string, authorizedID int64) (*db.App, bool) {
 	app, err := s.store.GetAppBySlug(slug)
 	if err != nil && !errors.Is(err, db.ErrNotFound) {
@@ -4588,6 +4589,9 @@ func (s *Server) rereadAuthorizedApp(w http.ResponseWriter, r *http.Request, slu
 	}
 	if err != nil || app.ID != authorizedID {
 		writeError(w, http.StatusNotFound, "not found")
+		return nil, false
+	}
+	if refuseTombstonedMutation(w, r, app) {
 		return nil, false
 	}
 	return app, true
@@ -5186,7 +5190,7 @@ func (s *Server) handleSetAppAccess(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleTransferAppOwnership(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
 	app, u, ok := s.requireViewApp(w, r, slug)
-	if !ok {
+	if !ok || refuseTombstonedMutation(w, r, app) {
 		return
 	}
 	// A service credential's shared principal may own the app, but ownership is
