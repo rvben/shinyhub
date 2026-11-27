@@ -391,6 +391,7 @@ def test_preview_respects_existing_model_result_limit_with_unicode():
         ("20260101", "temporal"),
         ("2026-W01-1", "temporal"),
         ("2026-01-01 00:00", "temporal"),
+        ("2026-01-01T00:00:00+00:60", "temporal"),
     ],
 )
 def test_values_must_survive_browser_json_and_date_parsing(value, kind):

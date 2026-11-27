@@ -381,6 +381,11 @@ def test_a_failing_query_is_an_error_state_distinct_from_no_data(caplog):
                 {"month": "2026-01-01T01:00:00+01:00", "revenue": 2},
             ],
         ),
+        (
+            {k: v for k, v in LINE.items() if k != "series"},
+            # Python reads this offset as one hour; the browser cannot parse it.
+            [{"month": "2026-01-01T00:00:00+00:60", "revenue": 1}],
+        ),
         (BAR, [{"region": str(i), "revenue": i} for i in range(501)]),
     ],
 )
