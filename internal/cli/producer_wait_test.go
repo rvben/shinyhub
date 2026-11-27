@@ -300,24 +300,31 @@ func TestRefreshCompatibilityWait(t *testing.T) {
 	}
 }
 
+// A permanent transport error is reported at once rather than retried until
+// the deadline. The deadline is generous so a slow host (a TLS handshake can
+// take seconds under load) cannot turn the error into a timeout; whether the
+// wait retried is read from the wait itself, not from the clock.
 func TestProducerWaitRejectsPermanentTransportErrors(t *testing.T) {
-	for _, host := range []string{"bad-scheme://example.invalid", "http://[broken"} {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	check := func(t *testing.T, host string) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
 		res := applyResult{}
-		start := time.Now()
-		err := waitForAppCompatibilityClear(ctx, &cliConfig{Host: host}, "demo", &res, io.Discard)
-		cancel()
-		if err == nil || res.failureKind != failureWarmStateUnavailable || time.Since(start) > 500*time.Millisecond {
-			t.Fatalf("host=%s kind=%s elapsed=%s err=%v", host, res.failureKind, time.Since(start), err)
+		waited, err := waitForAppCompatibilityClearObserved(ctx, &cliConfig{Host: host}, "demo", &res, io.Discard)
+		if err == nil || waited || res.failureKind != failureWarmStateUnavailable {
+			t.Fatalf("host=%s waited=%v kind=%s err=%v", host, waited, res.failureKind, err)
 		}
 	}
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, `{}`) }))
-	defer srv.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	res := applyResult{}
-	err := waitForAppCompatibilityClear(ctx, &cliConfig{Host: srv.URL}, "demo", &res, io.Discard)
-	if err == nil || res.failureKind != failureWarmStateUnavailable {
-		t.Fatalf("certificate error retried: kind=%s err=%v", res.failureKind, err)
+	for _, host := range []string{"bad-scheme://example.invalid", "http://[broken"} {
+		check(t, host)
 	}
+	// The certificate is one the client does not trust, so the handshake fails
+	// before any request is served. A request that gets through means the case
+	// is testing something other than a certificate error.
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("request reached the server despite its untrusted certificate")
+		io.WriteString(w, `{}`)
+	}))
+	defer srv.Close()
+	check(t, srv.URL)
 }
